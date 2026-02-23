@@ -409,4 +409,74 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                   <SkipBack className="h-5 w-5" />
                 </Button>
                 <Button size="icon" onClick={handlePlayPause}>
-        
+                  {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
+                </Button>
+                <Button variant="ghost" size="icon">
+                  <SkipForward className="h-5 w-5" />
+                </Button>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button variant="ghost" size="icon" onClick={toggleMute}>
+                  {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+                </Button>
+                <Slider
+                  value={[isMuted ? 0 : volume]}
+                  max={100}
+                  step={1}
+                  onValueChange={handleVolumeChange}
+                  className="w-24"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Panel */}
+        <div className="w-96 border-l border-border/50 bg-card/50 backdrop-blur-md flex flex-col">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-1 flex-col overflow-hidden">
+            <TabsList className="grid w-full grid-cols-4 rounded-none border-b border-border/50">
+              <TabsTrigger value="voices">Voices</TabsTrigger>
+              <TabsTrigger value="transcript">Script</TabsTrigger>
+              <TabsTrigger value="timeline">Timeline</TabsTrigger>
+              <TabsTrigger value="result">Result</TabsTrigger>
+            </TabsList>
+            <ScrollArea className="flex-1">
+              <TabsContent value="voices" className="m-0 p-4">
+                <VoiceSelector
+                  detectedVoices={detectedVoices}
+                  targetLanguage={targetLanguage}
+                  onVoiceChange={handleVoiceChange}
+                  isAnalyzing={isAnalyzing}
+                />
+              </TabsContent>
+              <TabsContent value="transcript" className="m-0 p-4">
+                <TranscriptEditor
+                  currentTime={currentTime}
+                  targetLanguage={targetLanguage}
+                />
+              </TabsContent>
+              <TabsContent value="timeline" className="m-0 p-4">
+                <TimelineEditor
+                  detectedVoices={detectedVoices}
+                  currentTime={currentTime}
+                  duration={duration}
+                />
+              </TabsContent>
+              <TabsContent value="result" className="m-0 p-4">
+                <DubbedVideoResult
+                  originalVideo={video}
+                  targetLanguage={targetLanguage}
+                  detectedVoices={detectedVoices}
+                  dubbingProgress={dubbingProgress}
+                  isDubbing={isDubbing}
+                  onRegenerate={handleRegenerate}
+                  onClose={onClose}
+                />
+              </TabsContent>
+            </ScrollArea>
+          </Tabs>
+        </div>
+      </div>
+    </div>
+  )
+}
