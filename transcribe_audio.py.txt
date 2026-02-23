@@ -1,0 +1,50 @@
+transcribe_audio.py
+
+PS C:\Users\james\dubverse-backend> & C:/Users/james/dubverse-backend/venv/Scripts/Activate.ps1
+(venv) PS C:\Users\james\dubverse-backend> & C:/Users/james/dubverse-backend/venv/Scripts/python.exe c:/Users/james/dubverse-backend/app/pipeline/transcribe_audio.py
+Traceback (most recent call last):
+  File "c:\Users\james\dubverse-backend\app\pipeline\transcribe_audio.py", line 6, in <module>
+    import whisper
+  File "C:\Users\james\dubverse-backend\venv\Lib\site-packages\whisper.py", line 69, in <module>
+    libc = ctypes.CDLL(libc_name)
+  File "C:\Python313\Lib\ctypes\__init__.py", line 380, in __init__
+    if '/' in name or '\\' in name:
+       ^^^^^^^^^^^
+TypeError: argument of type 'NoneType' is not iterable
+(venv) PS C:\Users\james\dubverse-backend> python -c "from app.pipeline.extract_audio import extract_audio; from app.pipeline.diarize_audio import diarize_audio; from app.pipeline.transcribe_audio import transcribe_audio; extract = extract_audio('data/audio/test.wav'); print('extract:', extract['status']); diarize = diarize_audio(extract); print('diarize:', diarize['status']); transcribe = transcribe_audio(extract); print('transcribe:', transcribe['status'])"
+C:\Users\james\dubverse-backend\venv\Lib\site-packages\pyannote\audio\core\io.py:47: UserWarning: 
+torchcodec is not installed correctly so built-in audio decoding will fail. Solutions are:
+* use audio preloaded in-memory as a {'waveform': (channel, time) torch.Tensor, 'sample_rate': int} dictionary;
+* fix torchcodec installation. Error message was:
+
+Could not load libtorchcodec. Likely causes:
+          1. FFmpeg is not properly installed in your environment. We support
+             versions 4, 5, 6 and 7.
+          2. The PyTorch version (2.8.0+cpu) is not compatible with
+             this version of TorchCodec. Refer to the version compatibility
+             table:
+             https://github.com/pytorch/torchcodec?tab=readme-ov-file#installing-torchcodec.
+          3. Another runtime dependency; see exceptions below.
+        The following exceptions were raised as we tried to load libtorchcodec:
+
+[start of libtorchcodec loading traceback]
+FFmpeg version 7: Could not find module 'C:\Users\james\dubverse-backend\venv\Lib\site-packages\torchcodec\libtorchcodec_core7.dll' (or one of its dependencies). Try using the full path with constructor syntax.
+FFmpeg version 6: Could not find module 'C:\Users\james\dubverse-backend\venv\Lib\site-packages\torchcodec\libtorchcodec_core6.dll' (or one of its dependencies). Try using the full path with constructor syntax.
+FFmpeg version 5: Could not find module 'C:\Users\james\dubverse-backend\venv\Lib\site-packages\torchcodec\libtorchcodec_core5.dll' (or one of its dependencies). Try using the full path with constructor syntax.
+FFmpeg version 4: Could not find module 'C:\Users\james\dubverse-backend\venv\Lib\site-packages\torchcodec\libtorchcodec_core4.dll' (or one of its dependencies). Try using the full path with constructor syntax.
+[end of libtorchcodec loading traceback].
+  warnings.warn(
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    from app.pipeline.extract_audio import extract_audio; from app.pipeline.diarize_audio import diarize_audio; from app.pipeline.transcribe_audio import transcribe_audio; extract = extract_audio('data/audio/test.wav'); print('extract:', extract['status']); diarize = diarize_audio(extract); print('diarize:', diarize['status']); transcribe = transcribe_audio(extract); print('transcribe:', transcribe['status'])
+                                                                          
+                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\james\dubverse-backend\app\pipeline\transcribe_audio.py", line 6, in <module>
+    import whisper
+  File "C:\Users\james\dubverse-backend\venv\Lib\site-packages\whisper.py", line 69, in <module>
+    libc = ctypes.CDLL(libc_name)
+  File "C:\Python313\Lib\ctypes\__init__.py", line 380, in __init__       
+    if '/' in name or '\\' in name:
+       ^^^^^^^^^^^
+TypeError: argument of type 'NoneType' is not iterable
+(venv) PS C:\Users\james\dubverse-backend> 

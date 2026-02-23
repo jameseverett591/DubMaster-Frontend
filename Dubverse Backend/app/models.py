@@ -1,0 +1,127 @@
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+from pydantic import BaseModel, Field
+from enum import Enum
+
+
+class JobStatus(str, Enum):
+    PENDING = "pending"
+    UPLOADING = "uploading"
+    PROCESSING = "processing"
+    CHUNKING = "chunking"
+    EXTRACTING_AUDIO = "extracting_audio"
+    DIARIZING = "diarizing"
+    TRANSCRIBING = "transcribing"
+    READY_FOR_VOICE_SELECTION = "ready_for_voice_selection"
+    TRANSLATING = "translating"
+    SYNTHESIZING = "synthesizing"
+    LIP_SYNCING = "lip_syncing"
+    REASSEMBLING = "reassembling"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class VideoChunk(BaseModel):
+    chunk_id: str
+    sequence: int
+    start_time: float
+    end_time: float
+    duration: float
+    chunk_path: str
+    audio_path: Optional[str] = None
+    status: JobStatus = JobStatus.PENDING
+
+
+class TranscriptSegment(BaseModel):
+    text: str
+    start: float
+    end: float
+    speaker: str = "speaker-1"
+
+
+class Transcript(BaseModel):
+    language: str = "en"
+    duration: float = 0.0
+    text: str = ""
+    segments: List[TranscriptSegment] = []
+    speaker_profiles: Optional[Dict[str, Dict[str, float]]] = None
+
+
+class Job(BaseModel):
+    job_id: str
+    status: JobStatus
+    progress: int = Field(ge=0, le=100, default=0)
+    current_stage: Optional[str] = None
+    
+    video_filename: str
+    video_path: str
+    video_duration: Optional[float] = None
+    video_size: int
+    expected_speakers: int = 3
+    
+    chunks: List[VideoChunk] = []
+    total_chunks: int = 0
+    processed_chunks: int = 0
+    
+    transcript: Optional[Transcript] = None
+    speaker_genders: Optional[Dict[str, str]] = None   # e.g. {"speaker-1": "male", "speaker-2": "female"}
+
+    dubbed_video_url: Optional[str] = None
+    tts_engine: Optional[str] = None
+    segment_tts_engines: Optional[List[Optional[str]]] = None
+
+    error_message: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: Optional[datetime] = None
+
+
+class UploadResponse(BaseModel):
+    job_id: str
+    status: str
+    message: str
+    video_filename: str
+    video_size: int
+
+
+class StatusResponse(BaseModel):
+    job_id: str
+    status: JobStatus
+    progress: int
+    current_stage: Optional[str]
+    video_filename: str
+    video_duration: Optional[float]
+    total_chunks: int
+    processed_chunks: int
+    chunks: List[VideoChunk]
+    dubbed_video_url: Optional[str] = None
+    tts_engine: Optional[str] = None
+    segment_tts_engines: Optional[List[Optional[str]]] = None
+    error_message: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChunkManifest(BaseModel):
+    job_id: str
+    total_chunks: int
+    total_duration: float
+    chunks: List[VideoChunk]
+
+
+class DubRequest(BaseModel):
+    job_id: str
+    target_language: str
+    transcript: List[TranscriptSegment]
+    voice_mapping: Dict[str, str]
+    voice_settings: Optional[Dict[str, Dict[str, float]]] = None
+    source_language: Optional[str] = None
+
+
+class DubResponse(BaseModel):
+    job_id: str
+    status: str
+    dubbed_video_url: Optional[str] = None
+    tts_engine: Optional[str] = None
+    message: str

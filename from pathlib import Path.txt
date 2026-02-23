@@ -1,0 +1,88 @@
+from pathlib import Path
+import json
+from typing import Dict, Any
+
+import torch
+import whisper
+
+
+def summarize_transcript(result: dict) -> dict:
+    """
+    Reduce Whisper output to a clean, stable schema
+    that downstream pipeline steps can rely on.
+    """
+    return {
+        "language": result.get("language"),
+        "duration": result.get("duration"),
+        "text": result.get("text"),
+        "segments": [
+            {
+                "start": seg["start"],
+                "end": seg["end"],
+                "text": seg["text"],
+            }
+            for seg in result.get("segments", [])
+        ],
+    }
+
+
+def transcribe_audio(
+    extract_result: Dict[str, Any],
+    model_size: str = "base",
+) -> Dict[str, Any]:
+    """
+    Transcribe decoded audio using Whisper.
+
+    Input:
+        extract_result from extract_audio()
+
+    Output:
+        Structured result dict (never raises on decode failure)
+    """
+
+    # ---------- Respect extract/decode boundary ----------
+    if extract_result.get("status") != "ok":
+        return {
+            "status": "skipped",
+            "reason": "audio_not_available",
+            "upstream_status": extract_result.get("status"),
+            "diagnostics": extract_result.get("diagnostics"),
+        }
+
+    audio: torch.Tensor = extract_result["audio"]
+    sample_rate: int = extract_result["sample_rate"]
+
+    try:
+        model = whisper.load_model(model_size)
+
+        # Whisper expects numpy or torch audio in float32
+        result = model.transcribe(
+            audio,
+            fp16=False,
+            verbose=False,
+        )
+
+        transcript = summarize_transcript(result)
+
+        # ---------- Persist transcript (optional side effect) ----------
+        output_dir = Path("data/transcripts")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        output_path = output_dir / "transcript.json"
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(transcript, f, indent=2, ensure_ascii=False)
+
+        return {
+            "status": "ok",
+            "transcript": transcript,
+            "output_path": str(output_path),
+        }
+
+    except Exception as e:
+        # Transcription failure is NON-FATAL
+        return {
+            "status": "skipped",
+            "reason": "transcription_failed",
+            "error_message": str(e),
+        }
+

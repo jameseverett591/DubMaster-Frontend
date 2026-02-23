@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+Dubverse Backend/venv*/
+Dubverse Backend/data/
+
+# Build outputs
+dist/
+build/
+*.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Sensitive files (auto-detected)
+ffmpeg-2026-01-14-git-6c878f8b82-full_build
+ffmpeg-2026-01-14-git-6c878f8b82-full_build(1)
+ffmpeg-8.0.1-essentials_build
+ffmpeg-8.0.1-essentials_build(2)

@@ -1,0 +1,38 @@
+PROJECT: DubVerse
+
+ROLE EXPECTATION:
+Verdant is acting as a senior backend engineer providing implementation guidance only.
+No ownership, no architectural authority, no training rights are granted.
+
+MODULE UNDER REVIEW:
+Audio diarization and decoding reliability
+
+CURRENT PIPELINE (HIGH LEVEL):
+1. Video uploaded to API
+2. Audio extracted using FFmpeg
+3. Audio passed to pyannote.audio for diarization
+4. Speaker segments forwarded downstream
+
+OBSERVED ISSUES:
+- torchcodec warning when not installed
+- Audio decoding fails in some environments
+- Diarization crashes instead of degrading gracefully
+- Failure stops the entire dubbing job
+
+CONSTRAINTS:
+- Windows and Linux support
+- FFmpeg may or may not be present
+- torchcodec cannot be required
+- System must fail gracefully
+
+GOALS:
+- Robust audio decoding abstraction
+- Fallback paths if decoding fails
+- Clear error reporting
+- Non-fatal failures where possible
+
+REQUESTED OUTPUT:
+1. Diagnosis of likely failure points
+2. Recommended fallback strategy
+3. Reference implementation or pseudocode
+4. Risks and tradeoffs

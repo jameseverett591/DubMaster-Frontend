@@ -1,0 +1,112 @@
+# ============================================
+# DUBVERSE BACKEND REQUIREMENTS
+# Python 3.11
+# ============================================
+
+# ============================================
+# WEB FRAMEWORK
+# ============================================
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# ============================================
+# AUDIO/VIDEO PROCESSING
+# ============================================
+# FFmpeg wrapper
+ffmpeg-python>=0.2.0
+
+# Audio processing
+librosa>=0.10.0
+soundfile>=0.12.1
+pydub>=0.25.1
+
+# ============================================
+# AI/ML MODELS
+# ============================================
+# PyTorch (CPU version - change to GPU if needed)
+torch>=2.1.0
+torchaudio>=2.1.0
+
+# Speaker Diarization
+pyannote.audio>=3.1.0
+
+# Audio Source Separation (vocals / accompaniment split)
+demucs>=4.0.0
+
+# Speech Recognition
+openai-whisper>=20231117
+faster-whisper>=0.10.0
+
+# ============================================
+# TEXT-TO-SPEECH
+# ============================================
+# ElevenLabs (primary TTS)
+elevenlabs>=0.2.0
+
+# Edge TTS (fallback)
+edge-tts>=6.1.0
+
+# ============================================
+# TRANSLATION
+# ============================================
+# DeepL API
+deepl>=1.17.0
+
+# Google Translate (backup)
+deep-translator>=1.11.4
+
+# ============================================
+# UTILITIES
+# ============================================
+# HTTP requests
+requests>=2.31.0
+httpx>=0.25.0
+
+# File handling
+aiofiles>=23.2.1
+python-magic>=0.4.27
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Logging
+loguru>=0.7.2
+
+# Date/time
+python-dateutil>=2.8.2
+
+# Progress bars
+tqdm>=4.66.0
+
+# ============================================
+# OPTIONAL: MONITORING & DEBUGGING
+# ============================================
+# Error tracking (uncomment if using Sentry)
+# sentry-sdk[fastapi]>=1.40.0
+
+# Prometheus metrics (uncomment if needed)
+# prometheus-client>=0.19.0
+
+# ============================================
+# DEVELOPMENT DEPENDENCIES (Optional)
+# ============================================
+# Testing
+# pytest>=7.4.0
+# pytest-asyncio>=0.21.0
+# httpx>=0.25.0  # for testing FastAPI
+
+# Code quality
+# black>=23.0.0
+# flake8>=6.1.0
+# mypy>=1.7.0
+
+# ============================================
+# NOTES
+# ============================================
+# For GPU support, replace torch lines with:
+# torch>=2.1.0+cu118
+# torchaudio>=2.1.0+cu118
+# --extra-index-url https://download.pytorch.org/whl/cu118

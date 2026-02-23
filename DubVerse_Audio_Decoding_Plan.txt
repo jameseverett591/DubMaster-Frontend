@@ -1,0 +1,51 @@
+PROJECT: DubVerse
+
+ROLE EXPECTATION:
+Verdant is acting as a senior backend engineer providing implementation guidance only.
+No ownership, no architectural authority, and no training rights are granted.
+
+MODULE UNDER REVIEW:
+Audio decoding abstraction and validation
+
+BACKGROUND:
+DubVerse performs video dubbing. Downstream steps (diarization, transcription, voice synthesis)
+assume valid decoded PCM audio. Current failures originate in inconsistent audio decoding,
+environment differences, and silent FFmpeg failures.
+
+CURRENT STATE:
+- Audio is extracted using FFmpeg
+- torchcodec warnings appear in some environments
+- Decoding may succeed but produce empty, malformed, or NaN audio
+- Failures propagate and crash the job instead of degrading gracefully
+
+DESIGN GOAL:
+Introduce a single, explicit audio decoding abstraction that:
+- Produces validated PCM audio OR a clean failure result
+- Never crashes the job
+- Clearly reports failure reasons
+- Is reusable across diarization and transcription
+
+REQUIREMENTS:
+- Primary decoder: FFmpeg (if available)
+- Optional decoders must be capability-detected (no hard dependency)
+- Validation must include:
+  - duration > 0
+  - expected sample rate (or resampled)
+  - no NaNs / invalid values
+- Decoding failure must be non-fatal
+
+EXPECTED INTERFACE (CONCEPTUAL):
+decode_audio(input_path) -> result object
+
+Result object must include:
+- ok: true/false
+- audio: tensor or None
+- sample_rate: int or None
+- decoder_used: string or None
+- error_code: string or None
+- error_message: string or None
+- diagnostics: structured metadata for logging
+
+DOWNSTREAM CONTRACT:
+- Downstream modules must accept:
+  - o
