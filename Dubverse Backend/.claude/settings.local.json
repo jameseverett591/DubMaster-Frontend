@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(cmd /c \"dir \"\"C:\\\\DEV\\\\Dubverse\\\\Dubverse Backend\\\\app\\\\services\"\"\")",
+      "Bash(cmd /c \"dir /b \"\"C:\\\\DEV\\\\Dubverse\\\\Dubverse Backend\\\\app\\\\services\"\"\")"
+    ]
+  }
+}

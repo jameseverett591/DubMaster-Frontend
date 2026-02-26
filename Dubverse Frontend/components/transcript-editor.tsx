@@ -1,14 +1,17 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 import { Edit2, Check, X, Copy, RefreshCw } from "lucide-react"
+import type { TranscriptSegment } from "@/lib/api-client"
 
 interface TranscriptEditorProps {
   currentTime: number
   targetLanguage: string
+  segments?: TranscriptSegment[]
+  speakerGenders?: Record<string, string>
 }
 
 type TranscriptLine = {
@@ -69,10 +72,43 @@ const SAMPLE_TRANSCRIPT: TranscriptLine[] = [
   },
 ]
 
-export function TranscriptEditor({ currentTime, targetLanguage }: TranscriptEditorProps) {
-  const [transcript, setTranscript] = useState<TranscriptLine[]>(SAMPLE_TRANSCRIPT)
+function segmentsToLines(
+  segments: TranscriptSegment[],
+  speakerGenders?: Record<string, string>
+): TranscriptLine[] {
+  return segments.map((seg, i) => {
+    const gender = speakerGenders?.[seg.speaker]
+    const speakerType: TranscriptLine["speakerType"] =
+      gender === "female" ? "female" : gender === "child" ? "child" : "male"
+    const label = seg.speaker
+      .replace("speaker-", "Speaker ")
+      .replace("speaker_", "Speaker ")
+      .replace(/\b\w/g, (c) => c.toUpperCase())
+    return {
+      id: String(i),
+      startTime: seg.start,
+      endTime: seg.end,
+      originalText: seg.text,
+      translatedText: seg.text, // editable — user can adjust before dubbing
+      speaker: label,
+      speakerType,
+    }
+  })
+}
+
+export function TranscriptEditor({ currentTime, targetLanguage, segments, speakerGenders }: TranscriptEditorProps) {
+  const [transcript, setTranscript] = useState<TranscriptLine[]>(
+    segments ? segmentsToLines(segments, speakerGenders) : SAMPLE_TRANSCRIPT
+  )
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editText, setEditText] = useState("")
+
+  // Update transcript if real segments arrive after mount
+  useEffect(() => {
+    if (segments && segments.length > 0) {
+      setTranscript(segmentsToLines(segments, speakerGenders))
+    }
+  }, [segments, speakerGenders])
 
   const handleEdit = (line: TranscriptLine) => {
     setEditingId(line.id)

@@ -12,17 +12,20 @@ from app.utils.language import normalize_language_code, LANGUAGE_NAMES
 # Glossary: maps source terms to their correct English translations.
 # These are protected from machine translation via placeholder tokens.
 GLOSSARY: Dict[str, str] = {
-    # Character names
+    # Character names (including common Whisper mishearings)
     "叶问": "Ip Man",
     "葉問": "Ip Man",
+    "熱吻": "Ip Man",        # Whisper mishearing of 葉問
     "叶师傅": "Master Ip",
     "葉師傅": "Master Ip",
-    "金山找": "Jin Shanzhao",
+    "金師傅": "Master Jin",
+    "金师傅": "Master Jin",
     "金山找": "Jin Shanzhao",
     "三浦": "Miura",
     "武痴林": "Lam",
     "李钊": "Li Zhao",
     # Martial arts terms
+    "榮春": "Wing Chun",      # Whisper mishearing of 詠春
     "永春": "Wing Chun",
     "詠春": "Wing Chun",
     "咏春拳": "Wing Chun",
@@ -39,6 +42,18 @@ GLOSSARY: Dict[str, str] = {
     "師傅": "master",
     "师父": "master",
     "師父": "master",
+    # Idiomatic expressions
+    "不用說了": "That's enough",
+    "不用说了": "That's enough",
+    "小心你的嘴": "Mind your language",
+    "小心你的嘴巴": "Mind your language",
+    "看人家的": "It's up to you",
+    "看人家": "It's up to you",
+    # Full phrase overrides (must appear before shorter substrings)
+    "怎麼樣 金師傅": "Master Jin, are you alright?",
+    "怎么样 金师傅": "Master Jin, are you alright?",
+    "怎麼樣金師傅": "Master Jin, are you alright?",
+    "怎么样金师傅": "Master Jin, are you alright?",
 }
 
 
@@ -55,7 +70,9 @@ class TranslationService:
         replacements: List[Tuple[str, str]] = []
         for i, (src_term, tgt_term) in enumerate(self._glossary_sorted):
             if src_term in text:
-                placeholder = f"__GLO{i:03d}__"
+                # Use CAPITALIZED token that translation engines won't mangle.
+                # Double-underscores get stripped by DeepL.
+                placeholder = f"XGLO{i:03d}X"
                 text = text.replace(src_term, placeholder)
                 replacements.append((placeholder, tgt_term))
         return text, replacements
@@ -63,7 +80,9 @@ class TranslationService:
     def _apply_glossary_post(self, text: str, replacements: List[Tuple[str, str]]) -> str:
         """Replace placeholder tokens with correct target-language terms after translation."""
         for placeholder, tgt_term in replacements:
+            # Also try lowercase variant in case the engine lowercased it
             text = text.replace(placeholder, tgt_term)
+            text = text.replace(placeholder.lower(), tgt_term)
         return text
     
     async def translate_segments(
@@ -106,10 +125,74 @@ class TranslationService:
                 return result
             logger.warning(
                 f"[TRANSLATE] DeepL batch change rate too low ({change_ratio:.0%}) — "
-                "falling back to deep_translator"
+                "falling back"
             )
 
+        # Google Cloud Translation API (paid, high quality)
+        if self.google_api_key:
+            result = await self._translate_segments_google_cloud(segments, source_norm, target_norm)
+            if result is not None:
+                return result
+
+        # Last resort: free Google Translate via deep_translator (scraping)
         return await self._translate_segments_batch(segments, source_norm, target_norm)
+
+    def _deepl_batch_sync(
+        self,
+        protected: List[str],
+        source_language: str,
+        target_language: str,
+    ) -> Optional[List[Dict]]:
+        """
+        Synchronous DeepL HTTP call (run inside asyncio.to_thread).
+        Returns the parsed translations list or None on failure.
+        """
+        import httpx
+
+        deepl_target = target_language.upper()
+        if deepl_target == "EN":
+            deepl_target = "EN-US"
+        elif deepl_target == "PT":
+            deepl_target = "PT-BR"
+
+        form_pairs: List[Tuple[str, str]] = [("text", t) for t in protected]
+        form_pairs.append(("target_lang", deepl_target))
+        # Omit source_lang for auto-detection; DeepL rejects "AUTO"
+        if source_language.lower() not in ("auto", ""):
+            form_pairs.append(("source_lang", source_language.upper()))
+
+        headers = {
+            "Authorization": f"DeepL-Auth-Key {self.deepl_api_key}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+
+        src_display = source_language.upper() if source_language.lower() != "auto" else "AUTO-DETECT"
+        logger.info(
+            f"[TRANSLATE] DeepL batch: {len(protected)} segments, "
+            f"{src_display} -> {deepl_target}"
+        )
+
+        # Manually encode to handle repeated 'text' keys that httpx
+        # fails to serialize from a list of tuples.
+        from urllib.parse import urlencode
+        body = urlencode(form_pairs)
+
+        response = httpx.post(
+            "https://api-free.deepl.com/v2/translate",
+            content=body.encode("utf-8"),
+            headers=headers,
+            timeout=30.0,
+        )
+
+        if response.status_code != 200:
+            logger.warning(
+                f"[TRANSLATE] DeepL batch failed: {response.status_code} {response.text[:200]}"
+            )
+            return None
+
+        translations = response.json().get("translations", [])
+        logger.info(f"[TRANSLATE] DeepL returned {len(translations)} translations")
+        return translations
 
     async def _translate_segments_deepl_batch(
         self,
@@ -130,47 +213,26 @@ class TranslationService:
             protected.append(p)
             replacements_per_seg.append(r)
 
+        # Build glossary-only fallback so error paths match the change_ratio
+        # baseline and correctly fall through to deep_translator.
+        def _glossary_fallback() -> List[Dict]:
+            result = []
+            for i, seg in enumerate(segments):
+                glossed = self._apply_glossary_post(protected[i], replacements_per_seg[i])
+                result.append({**seg, "original_text": seg.get("text", ""), "text": glossed})
+            return result
+
         try:
-            import httpx
-
-            deepl_target = target_language.upper()
-            if deepl_target == "EN":
-                deepl_target = "EN-US"
-            elif deepl_target == "PT":
-                deepl_target = "PT-BR"
-
-            # DeepL multi-text batch: pass multiple ("text", value) tuples
-            data: List[Tuple[str, str]] = [("text", t) for t in protected]
-            data.append(("target_lang", deepl_target))
-            data.append(("source_lang", source_language.upper()))
-
-            headers = {"Authorization": f"DeepL-Auth-Key {self.deepl_api_key}"}
-
-            logger.info(
-                f"[TRANSLATE] DeepL batch: {len(protected)} segments, "
-                f"{source_language.upper()} -> {deepl_target}"
+            translations = await asyncio.to_thread(
+                self._deepl_batch_sync, protected, source_language, target_language
             )
 
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://api-free.deepl.com/v2/translate",
-                    data=data,
-                    headers=headers,
-                    timeout=30.0,
-                )
-
-            if response.status_code != 200:
-                logger.warning(
-                    f"[TRANSLATE] DeepL batch failed: {response.status_code} {response.text[:200]}"
-                )
-                return [{**seg, "original_text": seg.get("text", ""), "text": seg.get("text", "")} for seg in segments]
-
-            translations = response.json().get("translations", [])
-            logger.info(f"[TRANSLATE] DeepL returned {len(translations)} translations")
+            if translations is None:
+                return _glossary_fallback()
 
         except Exception as e:
             logger.error(f"[TRANSLATE] DeepL batch error: {e}")
-            return [{**seg, "original_text": seg.get("text", ""), "text": seg.get("text", "")} for seg in segments]
+            return _glossary_fallback()
 
         result: List[Dict] = []
         for i, seg in enumerate(segments):
@@ -179,6 +241,88 @@ class TranslationService:
             result.append({**seg, "original_text": seg.get("text", ""), "text": final})
 
         return result
+
+    async def _translate_segments_google_cloud(
+        self,
+        segments: List[Dict],
+        source_language: str,
+        target_language: str,
+    ) -> Optional[List[Dict]]:
+        """
+        Translate via the official Google Cloud Translation API v2 (paid).
+        Supports multiple 'q' values in one request for batch translation.
+        Returns None on failure so the caller can fall through to the next engine.
+        """
+        texts = [seg.get("text", "") for seg in segments]
+
+        protected: List[str] = []
+        replacements_per_seg: List[List[Tuple[str, str]]] = []
+        for t in texts:
+            p, r = self._apply_glossary_pre(t)
+            protected.append(p)
+            replacements_per_seg.append(r)
+
+        try:
+            import httpx
+
+            src = source_language
+            if src == "zh":
+                src = "zh-TW"
+
+            payload = {
+                "q": protected,
+                "target": target_language,
+                "format": "text",
+            }
+            # Only set source if not auto-detect
+            if src.lower() not in ("auto", ""):
+                payload["source"] = src
+
+            logger.info(
+                f"[TRANSLATE] Google Cloud API batch: {len(protected)} segments, "
+                f"{src if src.lower() != 'auto' else 'AUTO-DETECT'} -> {target_language}"
+            )
+
+            response = await asyncio.to_thread(
+                lambda: httpx.post(
+                    "https://translation.googleapis.com/language/translate/v2",
+                    params={"key": self.google_api_key},
+                    json=payload,
+                    timeout=30.0,
+                )
+            )
+
+            if response.status_code != 200:
+                logger.warning(
+                    f"[TRANSLATE] Google Cloud API failed: {response.status_code} "
+                    f"{response.text[:200]}"
+                )
+                return None
+
+            data = response.json()
+            translations = data.get("data", {}).get("translations", [])
+            logger.info(f"[TRANSLATE] Google Cloud API returned {len(translations)} translations")
+
+            changed = 0
+            result: List[Dict] = []
+            for i, seg in enumerate(segments):
+                raw = (
+                    translations[i]["translatedText"]
+                    if i < len(translations)
+                    else protected[i]
+                )
+                final = self._apply_glossary_post(raw, replacements_per_seg[i])
+                if raw.strip() != protected[i].strip():
+                    changed += 1
+                result.append({**seg, "original_text": seg.get("text", ""), "text": final})
+
+            ratio = changed / max(1, len(segments))
+            logger.info(f"[TRANSLATE] Google Cloud API: {changed}/{len(segments)} changed ({ratio:.0%})")
+            return result
+
+        except Exception as e:
+            logger.error(f"[TRANSLATE] Google Cloud API error: {e}")
+            return None
 
     async def _translate_segments_batch(
         self,
@@ -297,10 +441,11 @@ class TranslationService:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     "https://api-free.deepl.com/v2/translate",
+                    headers={"Authorization": f"DeepL-Auth-Key {self.deepl_api_key}"},
                     data={
-                        "auth_key": self.deepl_api_key,
                         "text": text,
                         "target_lang": deepl_target,
+                        **({"source_lang": source_language.upper()} if source_language.lower() not in ("auto", "") else {}),
                     },
                     timeout=30.0
                 )

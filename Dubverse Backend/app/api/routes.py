@@ -119,6 +119,19 @@ async def _rehydrate_job(job_id: str):
         job = await job_manager.get_job(job_id)
         if job and transcript.duration:
             job.video_duration = transcript.duration
+
+        # Restore dubbed video URL if a dubbed file exists on disk
+        dubbed_dir = os.path.join(settings.DUBBED_DIR, job_id)
+        if os.path.isdir(dubbed_dir):
+            import glob as _glob
+            dubbed_files = _glob.glob(os.path.join(dubbed_dir, "dubbed_*.mp4"))
+            if dubbed_files:
+                # Extract language from filename: dubbed_en.mp4 -> en
+                fname = os.path.basename(dubbed_files[0])
+                lang = fname.replace("dubbed_", "").replace(".mp4", "")
+                dubbed_url = f"/api/download/{job_id}/{lang}"
+                await job_manager.update_job_dubbing_result(job_id, dubbed_url)
+                logger.info(f"Rehydrated dubbed video URL for {job_id}: {dubbed_url}")
     else:
         await job_manager.update_job_status(
             job_id,
@@ -548,6 +561,7 @@ async def get_job_status(job_id: str):
         dubbed_video_url=job.dubbed_video_url,
         tts_engine=job.tts_engine,
         segment_tts_engines=job.segment_tts_engines,
+        speaker_genders=job.speaker_genders,
         error_message=job.error_message,
         created_at=job.created_at,
         updated_at=job.updated_at

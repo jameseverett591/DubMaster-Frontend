@@ -65,15 +65,28 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
         # VAD filter removes background noise / crowd cheers so they are not
         # mistaken for speech.  condition_on_previous_text=False reduces
         # hallucinations in noisy audio.  beam_size=5 improves accuracy.
+        # VAD threshold controls how aggressively non-speech is filtered.
+        # 0.20 is a good balance for action content with dialogue.
+        # Set VAD_THRESHOLD=0 to disable VAD entirely (not recommended —
+        # degrades transcription quality in noisy audio).
+        vad_threshold = float(os.getenv("VAD_THRESHOLD", "0.20"))
+        use_vad = vad_threshold > 0
+
+        transcribe_kwargs = dict(
+            beam_size=5,
+            condition_on_previous_text=False,
+        )
+        if use_vad:
+            transcribe_kwargs["vad_filter"] = True
+            transcribe_kwargs["vad_parameters"] = dict(
+                threshold=vad_threshold,
+                min_silence_duration_ms=200,
+                speech_pad_ms=500,
+            )
+
         segments_gen, info = model.transcribe(
             waveform,
-            beam_size=5,
-            vad_filter=True,
-            vad_parameters=dict(
-                min_silence_duration_ms=300,
-                speech_pad_ms=400,
-            ),
-            condition_on_previous_text=False,
+            **transcribe_kwargs,
         )
 
         # Convert generator to list to avoid exhaustion
@@ -88,6 +101,28 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
             }
             for seg in segments
         ]
+
+        # ---------- Filter hallucinations ----------
+        # Without VAD, Whisper may "hear" words in pure noise/SFX.
+        # Remove segments that are likely hallucinations:
+        # 1. Segments with only whitespace or punctuation
+        # 2. Segments that are exact duplicates of the previous segment
+        # 3. Single-character segments (often noise artifacts)
+        filtered = []
+        import re as _re
+        for seg in raw_segments:
+            text = seg["text"].strip()
+            # Skip empty or pure punctuation
+            if not text or _re.fullmatch(r'[\s\p{P}]*', text):
+                continue
+            # Skip exact duplicate of previous segment text
+            if filtered and text == filtered[-1]["text"].strip():
+                continue
+            # Skip very short text that is just a single character
+            if len(text) <= 1:
+                continue
+            filtered.append(seg)
+        raw_segments = filtered
 
         # ---------- Fix Whisper timestamp bleed ----------
         # faster-whisper sometimes assigns the next segment's start as the

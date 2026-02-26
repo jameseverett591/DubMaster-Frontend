@@ -98,6 +98,7 @@ class StatusResponse(BaseModel):
     dubbed_video_url: Optional[str] = None
     tts_engine: Optional[str] = None
     segment_tts_engines: Optional[List[Optional[str]]] = None
+    speaker_genders: Optional[Dict[str, str]] = None
     error_message: Optional[str]
     created_at: datetime
     updated_at: datetime

@@ -6,15 +6,39 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Slider } from "@/components/ui/slider"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { ArrowLeft, Play, Pause, Volume2, VolumeX, SkipBack, SkipForward, Maximize2, Download, Settings2, AudioWaveform as Waveform, User, Baby, Mic2, Languages, Sparkles, RefreshCw, CheckCircle2 } from "lucide-react"
+import {
+  ArrowLeft,
+  Play,
+  Pause,
+  Volume2,
+  VolumeX,
+  SkipBack,
+  SkipForward,
+  Maximize2,
+  Download,
+  Settings2,
+  AudioWaveform as Waveform,
+  User,
+  Baby,
+  Mic2,
+  Languages,
+  Sparkles,
+  RefreshCw,
+  CheckCircle2,
+  AlertCircle,
+} from "lucide-react"
 import type { VideoSource, DetectedVoice } from "@/components/dashboard"
 import { VoiceSelector } from "@/components/voice-selector"
 import { TranscriptEditor } from "@/components/transcript-editor"
 import { TimelineEditor } from "@/components/timeline-editor"
 import { DubbedVideoResult } from "@/components/dubbed-video-result"
-import { useJobStatus } from "@/hooks/use-job-status"
-import { getStatusMessage } from "@/lib/api-client"
-import { useToast } from "@/hooks/use-toast"
+import {
+  apiClient,
+  isTerminalStatus,
+  type Transcript,
+  type Voice,
+  type JobStatus,
+} from "@/lib/api-client"
 
 interface DubbingWorkspaceProps {
   video: VideoSource
@@ -22,6 +46,7 @@ interface DubbingWorkspaceProps {
 }
 
 const LANGUAGES = [
+  { code: "en", name: "English", flag: "🇺🇸" },
   { code: "es", name: "Spanish", flag: "🇪🇸" },
   { code: "fr", name: "French", flag: "🇫🇷" },
   { code: "de", name: "German", flag: "🇩🇪" },
@@ -36,46 +61,71 @@ const LANGUAGES = [
   { code: "nl", name: "Dutch", flag: "🇳🇱" },
 ]
 
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function buildDetectedVoices(
+  transcript: Transcript,
+  speakerGenders?: Record<string, string> | null
+): DetectedVoice[] {
+  const map: Record<string, { start: number; end: number }[]> = {}
+  for (const seg of transcript.segments) {
+    if (!map[seg.speaker]) map[seg.speaker] = []
+    map[seg.speaker].push({ start: seg.start, end: seg.end })
+  }
+
+  return Object.entries(map).map(([speakerId, timeRanges]) => {
+    const gender = speakerGenders?.[speakerId]
+    const type: DetectedVoice["type"] =
+      gender === "female" ? "female" : gender === "child" ? "child" : "male"
+    const label =
+      speakerId.charAt(0).toUpperCase() +
+      speakerId.slice(1).replace(/-/g, " ").replace(/_/g, " ")
+    const defaultVoice = type === "female" ? "female-1" : type === "child" ? "child-1" : "male-1"
+    return {
+      id: speakerId,
+      type,
+      characterName: `${label} (${type})`,
+      timeRanges,
+      selectedVoice: defaultVoice,
+    }
+  })
+}
+
+// ── Component ──────────────────────────────────────────────────────────────
+
 export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
-  const { toast } = useToast()
-  const [targetLanguage, setTargetLanguage] = useState("es")
+  const [targetLanguage, setTargetLanguage] = useState("en")
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [volume, setVolume] = useState(80)
   const [isMuted, setIsMuted] = useState(false)
   const [isAnalyzing, setIsAnalyzing] = useState(true)
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null)
   const [detectedVoices, setDetectedVoices] = useState<DetectedVoice[]>([])
+  const [transcript, setTranscript] = useState<Transcript | null>(null)
+  const [speakerGenders, setSpeakerGenders] = useState<Record<string, string> | null>(null)
+  const [availableVoices, setAvailableVoices] = useState<Voice[]>([])
   const [isDubbing, setIsDubbing] = useState(false)
   const [dubbingProgress, setDubbingProgress] = useState(0)
+  const [dubbingError, setDubbingError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState("voices")
   const [dubbingComplete, setDubbingComplete] = useState(false)
+  const [dubbedVideoUrl, setDubbedVideoUrl] = useState<string | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
 
-  const { status: jobStatus, loading: jobLoading, error: jobError } = useJobStatus({
-    jobId: video.id,
-    pollInterval: 2000,
-    onComplete: (finalStatus) => {
-      toast({
-        title: "Processing Complete",
-        description: `Video processed successfully with ${finalStatus.chunks?.length || 0} chunks`,
-      })
-      setIsAnalyzing(false)
-    },
-    onError: (errorMessage) => {
-      toast({
-        title: "Processing Failed",
-        description: errorMessage,
-        variant: "destructive",
-      })
-      setIsAnalyzing(false)
-    }
-  })
-
-  // Update analyzing state based on backend status
+  // ── Load voices from backend ──────────────────────────────────────────────
   useEffect(() => {
-    if (jobStatus) {
-      if (jobStatus.status === 'completed') {
+    apiClient.getVoices().then(setAvailableVoices).catch(() => {
+      // Non-fatal — fall back to hardcoded options in VoiceSelector
+    })
+  }, [])
+
+  // ── Analyse video: fetch transcript (or simulate if no jobId) ─────────────
+  useEffect(() => {
+    if (!video.jobId) {
+      // No backend job (e.g. YouTube/library) — use 3s simulation
+      const timer = setTimeout(() => {
         setIsAnalyzing(false)
         setDetectedVoices([
           {
@@ -107,14 +157,65 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
             selectedVoice: "child-1",
           },
         ])
-      } else if (jobStatus.status === 'processing' || jobStatus.status === 'pending') {
-        setIsAnalyzing(true)
-      } else if (jobStatus.status === 'failed') {
+      }, 3000)
+      return () => clearTimeout(timer)
+    }
+
+    // Real backend job — poll until completed, then fetch transcript
+    let cancelled = false
+
+    const applyCompletedJob = async (status: JobStatus) => {
+      if (cancelled) return
+      setSpeakerGenders(status.speaker_genders ?? null)
+      try {
+        const t = await apiClient.getTranscript(video.jobId!)
+        if (cancelled) return
+        setTranscript(t)
+        setDetectedVoices(buildDetectedVoices(t, status.speaker_genders))
         setIsAnalyzing(false)
+      } catch {
+        if (!cancelled) {
+          setAnalyzeError("Transcript not available. Try re-uploading the video.")
+          setIsAnalyzing(false)
+        }
       }
     }
-  }, [jobStatus])
 
+    const poll = async () => {
+      try {
+        const status = await apiClient.getJobStatus(video.jobId!)
+        if (cancelled) return
+
+        if (status.status === "completed") {
+          await applyCompletedJob(status)
+          return
+        }
+
+        if (status.status === "failed") {
+          if (!cancelled) {
+            setAnalyzeError(status.error_message || "Processing failed on the server.")
+            setIsAnalyzing(false)
+          }
+          return
+        }
+
+        if (!isTerminalStatus(status.status)) {
+          setTimeout(poll, 2000)
+        }
+      } catch {
+        if (!cancelled) setTimeout(poll, 4000)
+      }
+    }
+
+    // Check immediately — if already done we won't wait unnecessarily
+    poll()
+
+    return () => {
+      cancelled = true
+    }
+  }, [video.jobId])
+
+  // ── Video player handlers ─────────────────────────────────────────────────
   const handlePlayPause = () => {
     if (videoRef.current) {
       if (isPlaying) {
@@ -127,15 +228,11 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
   }
 
   const handleTimeUpdate = () => {
-    if (videoRef.current) {
-      setCurrentTime(videoRef.current.currentTime)
-    }
+    if (videoRef.current) setCurrentTime(videoRef.current.currentTime)
   }
 
   const handleLoadedMetadata = () => {
-    if (videoRef.current) {
-      setDuration(videoRef.current.duration)
-    }
+    if (videoRef.current) setDuration(videoRef.current.duration)
   }
 
   const handleSeek = (value: number[]) => {
@@ -147,14 +244,8 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
 
   const handleVolumeChange = (value: number[]) => {
     setVolume(value[0])
-    if (videoRef.current) {
-      videoRef.current.volume = value[0] / 100
-    }
-    if (value[0] === 0) {
-      setIsMuted(true)
-    } else {
-      setIsMuted(false)
-    }
+    if (videoRef.current) videoRef.current.volume = value[0] / 100
+    setIsMuted(value[0] === 0)
   }
 
   const toggleMute = () => {
@@ -183,79 +274,139 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
     setDetectedVoices((prev) => prev.map((v) => (v.id === voiceId ? { ...v, selectedVoice: newVoice } : v)))
   }
 
-  const handleStartDubbing = () => {
-    setIsDubbing(true)
-    setDubbingProgress(0)
-    setDubbingComplete(false)
-    setActiveTab("result")
+  // ── Dubbing ───────────────────────────────────────────────────────────────
+  const progressRef = useRef(0)
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-    // Simulate dubbing progress
-    let progress = 0
-    const interval = setInterval(() => {
-      progress += Math.random() * 5
-      if (progress >= 100) {
-        progress = 100
-        clearInterval(interval)
+  const simulateDubbing = () => {
+    if (intervalRef.current) clearInterval(intervalRef.current)
+    progressRef.current = 0
+    const targetSequence = [12, 25, 35, 55, 70, 88, 95, 100]
+    let targetIdx = 0
+    intervalRef.current = setInterval(() => {
+      const target = targetSequence[targetIdx]
+      progressRef.current = Math.min(progressRef.current + 1 + Math.random() * 4, target)
+      if (progressRef.current >= target) {
+        progressRef.current = target
+        targetIdx++
+      }
+      const newProgress = Math.round(progressRef.current * 10) / 10
+      setDubbingProgress(newProgress)
+      if (newProgress >= 100) {
+        if (intervalRef.current) clearInterval(intervalRef.current)
+        intervalRef.current = null
+        setDubbingProgress(100)
         setIsDubbing(false)
         setDubbingComplete(true)
       }
-      setDubbingProgress(progress)
-    }, 500)
+    }, 350)
+  }
+
+  const pollDubbingStatus = (jobId: string) => {
+    let cancelled = false
+    const poll = async () => {
+      if (cancelled) return
+      try {
+        const status = await apiClient.getJobStatus(jobId)
+        if (cancelled) return
+        setDubbingProgress(status.progress)
+
+        if (status.status === "completed") {
+          setDubbingProgress(100)
+          setIsDubbing(false)
+          setDubbingComplete(true)
+          if (status.dubbed_video_url) {
+            const fullUrl = status.dubbed_video_url.startsWith("http")
+              ? status.dubbed_video_url
+              : `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}${status.dubbed_video_url}`
+            setDubbedVideoUrl(fullUrl)
+          }
+          return
+        }
+
+        if (status.status === "failed") {
+          setIsDubbing(false)
+          setDubbingError(status.error_message || "Dubbing failed on the server.")
+          return
+        }
+
+        if (!isTerminalStatus(status.status)) setTimeout(poll, 2000)
+      } catch {
+        if (!cancelled) setTimeout(poll, 4000)
+      }
+    }
+    setTimeout(poll, 2000)
+    // Return cleanup so callers can cancel if needed
+    return () => { cancelled = true }
+  }
+
+  const handleStartDubbing = async () => {
+    if (intervalRef.current) clearInterval(intervalRef.current)
+
+    setIsDubbing(true)
+    setDubbingProgress(0)
+    setDubbingComplete(false)
+    setDubbingError(null)
+    setDubbedVideoUrl(null)
+    setActiveTab("result")
+
+    if (!video.jobId) {
+      // No real backend job — run simulation
+      simulateDubbing()
+      return
+    }
+
+    try {
+      // Build voice mapping: speaker_id → voice_id
+      // If a selected voice looks like a fallback ID (male-1 etc.), we omit it
+      // and let the backend auto-assign by gender detection.
+      const voiceMapping: Record<string, string> = {}
+      for (const v of detectedVoices) {
+        const isFallback = /^(male|female|child)-\d+$/.test(v.selectedVoice)
+        if (!isFallback) {
+          voiceMapping[v.id] = v.selectedVoice
+        }
+      }
+
+      // Use the (possibly user-edited) transcript segments if available
+      const transcriptSegments = transcript
+        ? transcript.segments
+        : detectedVoices.flatMap((v) =>
+            v.timeRanges.map((r) => ({
+              text: "",
+              start: r.start,
+              end: r.end,
+              speaker: v.id,
+            }))
+          )
+
+      await apiClient.startDubbing({
+        job_id: video.jobId,
+        target_language: targetLanguage,
+        transcript: transcriptSegments,
+        voice_mapping: voiceMapping,
+      })
+
+      pollDubbingStatus(video.jobId)
+    } catch (err) {
+      setIsDubbing(false)
+      setDubbingError(err instanceof Error ? err.message : "Failed to start dubbing.")
+    }
   }
 
   const handleRegenerate = () => {
     handleStartDubbing()
   }
 
+  useEffect(() => {
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current)
+    }
+  }, [])
+
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="flex h-[calc(100vh-4rem)] flex-col bg-transparent relative">
-      {/* Backend Status Loading State */}
-      {jobLoading && !jobStatus && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
-          <div className="text-center">
-            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full mx-auto mb-4" />
-            <p className="text-foreground">Connecting to backend...</p>
-          </div>
-        </div>
-      )}
-
-      {/* Backend Status Error State */}
-      {jobError && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
-          <div className="text-center max-w-md p-8">
-            <div className="text-destructive text-4xl mb-4">⚠</div>
-            <h3 className="text-xl font-semibold text-foreground mb-2">Connection Error</h3>
-            <p className="text-muted-foreground mb-6">{jobError}</p>
-            <Button onClick={onClose}>Back to Dashboard</Button>
-          </div>
-        </div>
-      )}
-
-      {/* Backend Processing Status Overlay */}
-      {jobStatus && (jobStatus.status === 'pending' || jobStatus.status === 'processing') && (
-        <div className="absolute top-16 right-4 z-40 bg-card border border-border rounded-lg p-4 shadow-lg max-w-sm">
-          <div className="flex items-center gap-3 mb-2">
-            <div className="animate-spin h-4 w-4 border-2 border-primary border-t-transparent rounded-full" />
-            <span className="font-medium text-foreground">{getStatusMessage(jobStatus.status)}</span>
-          </div>
-          <p className="text-sm text-muted-foreground mb-3">{jobStatus.current_step}</p>
-          <div className="space-y-1">
-            <div className="w-full bg-secondary rounded-full h-2">
-              <div
-                className="bg-primary h-2 rounded-full transition-all duration-300"
-                style={{ width: `${jobStatus.progress}%` }}
-              />
-            </div>
-            <p className="text-xs text-right text-muted-foreground">{jobStatus.progress}%</p>
-          </div>
-          {jobStatus.chunks && jobStatus.chunks.length > 0 && (
-            <p className="text-xs text-muted-foreground mt-2">
-              {jobStatus.chunks.length} chunks processed
-            </p>
-          )}
-        </div>
-      )}
-
       {/* Top Bar */}
       <div className="flex items-center justify-between border-b border-border/50 bg-background/50 backdrop-blur-md px-4 py-3">
         <div className="flex items-center gap-4">
@@ -310,7 +461,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
               </>
             )}
           </Button>
-          <Button variant="secondary" className="gap-2" disabled={!dubbingComplete}>
+          <Button variant="secondary" className="gap-2" disabled={!dubbingComplete || !dubbedVideoUrl}>
             <Download className="h-4 w-4" />
             Export
           </Button>
@@ -339,24 +490,13 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                     <Waveform className="h-16 w-16 animate-pulse text-primary" />
                   </div>
                   <div className="text-center">
-                    <p className="text-lg font-medium">
-                      {jobStatus ? getStatusMessage(jobStatus.status) : 'Analyzing Audio'}
-                    </p>
+                    <p className="text-lg font-medium">Analyzing Audio</p>
                     <p className="text-sm text-gray-400">
-                      {jobStatus?.current_step || 'Detecting voices and identifying speakers...'}
+                      {video.jobId
+                        ? "Waiting for transcription to complete…"
+                        : "Detecting voices and identifying speakers..."}
                     </p>
                   </div>
-                  {jobStatus && (
-                    <div className="w-64">
-                      <div className="w-full bg-secondary rounded-full h-2 mb-2">
-                        <div
-                          className="bg-primary h-2 rounded-full transition-all duration-300"
-                          style={{ width: `${jobStatus.progress}%` }}
-                        />
-                      </div>
-                      <p className="text-xs text-center text-gray-400">{jobStatus.progress}% complete</p>
-                    </div>
-                  )}
                   <div className="flex items-center gap-6 text-sm">
                     <div className="flex items-center gap-2">
                       <User className="h-4 w-4 text-blue-400" />
@@ -375,7 +515,14 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
               </div>
             )}
 
-            {/* Fullscreen button */}
+            {/* Analysis error */}
+            {analyzeError && !isAnalyzing && (
+              <div className="absolute inset-x-4 bottom-24 flex items-center gap-2 rounded-lg bg-destructive/90 p-3 text-sm text-white">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                {analyzeError}
+              </div>
+            )}
+
             <Button
               variant="ghost"
               size="icon"
@@ -387,7 +534,6 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
 
           {/* Video Controls */}
           <div className="border-t border-border/50 bg-card/50 backdrop-blur-md p-4">
-            {/* Progress Bar */}
             <div className="mb-4">
               <Slider
                 value={[currentTime]}
@@ -402,7 +548,6 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
               </div>
             </div>
 
-            {/* Control Buttons */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Button variant="ghost" size="icon">
@@ -415,65 +560,103 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                   <SkipForward className="h-5 w-5" />
                 </Button>
               </div>
-              <div className="flex items-center gap-2">
+
+              <div className="flex items-center gap-3">
                 <Button variant="ghost" size="icon" onClick={toggleMute}>
-                  {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+                  {isMuted ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
                 </Button>
-                <Slider
-                  value={[isMuted ? 0 : volume]}
-                  max={100}
-                  step={1}
-                  onValueChange={handleVolumeChange}
-                  className="w-24"
-                />
+                <div className="w-24">
+                  <Slider value={[isMuted ? 0 : volume]} max={100} step={1} onValueChange={handleVolumeChange} />
+                </div>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Right Panel */}
-        <div className="w-96 border-l border-border/50 bg-card/50 backdrop-blur-md flex flex-col">
-          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-1 flex-col overflow-hidden">
-            <TabsList className="grid w-full grid-cols-4 rounded-none border-b border-border/50">
-              <TabsTrigger value="voices">Voices</TabsTrigger>
-              <TabsTrigger value="transcript">Script</TabsTrigger>
-              <TabsTrigger value="timeline">Timeline</TabsTrigger>
-              <TabsTrigger value="result">Result</TabsTrigger>
+        {/* Sidebar Panel */}
+        <div className="w-96 border-l border-border/50 bg-card/50 backdrop-blur-md">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex h-full flex-col">
+            <TabsList className="mx-4 mt-4 grid grid-cols-4">
+              <TabsTrigger value="voices" className="gap-1.5">
+                <Mic2 className="h-4 w-4" />
+                Voices
+              </TabsTrigger>
+              <TabsTrigger value="transcript" className="gap-1.5">
+                <Waveform className="h-4 w-4" />
+                Script
+              </TabsTrigger>
+              <TabsTrigger value="timeline" className="gap-1.5">
+                <Settings2 className="h-4 w-4" />
+                Timeline
+              </TabsTrigger>
+              <TabsTrigger value="result" className="gap-1.5 relative">
+                <CheckCircle2 className="h-4 w-4" />
+                Result
+                {dubbingComplete && <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-green-500" />}
+              </TabsTrigger>
             </TabsList>
-            <ScrollArea className="flex-1">
-              <TabsContent value="voices" className="m-0 p-4">
+
+            <TabsContent value="voices" className="flex-1 overflow-hidden">
+              <ScrollArea className="h-full p-4">
                 <VoiceSelector
                   detectedVoices={detectedVoices}
                   targetLanguage={targetLanguage}
                   onVoiceChange={handleVoiceChange}
                   isAnalyzing={isAnalyzing}
+                  availableVoices={availableVoices}
                 />
-              </TabsContent>
-              <TabsContent value="transcript" className="m-0 p-4">
+              </ScrollArea>
+            </TabsContent>
+
+            <TabsContent value="transcript" className="flex-1 overflow-hidden">
+              <ScrollArea className="h-full p-4">
                 <TranscriptEditor
                   currentTime={currentTime}
                   targetLanguage={targetLanguage}
+                  segments={transcript?.segments}
+                  speakerGenders={speakerGenders ?? undefined}
                 />
-              </TabsContent>
-              <TabsContent value="timeline" className="m-0 p-4">
-                <TimelineEditor
-                  detectedVoices={detectedVoices}
-                  currentTime={currentTime}
-                  duration={duration}
-                />
-              </TabsContent>
-              <TabsContent value="result" className="m-0 p-4">
-                <DubbedVideoResult
-                  originalVideo={video}
-                  targetLanguage={targetLanguage}
-                  detectedVoices={detectedVoices}
-                  dubbingProgress={dubbingProgress}
-                  isDubbing={isDubbing}
-                  onRegenerate={handleRegenerate}
-                  onClose={onClose}
-                />
-              </TabsContent>
-            </ScrollArea>
+              </ScrollArea>
+            </TabsContent>
+
+            <TabsContent value="timeline" className="flex-1 overflow-hidden">
+              <ScrollArea className="h-full p-4">
+                <TimelineEditor detectedVoices={detectedVoices} currentTime={currentTime} duration={duration} />
+              </ScrollArea>
+            </TabsContent>
+
+            <TabsContent value="result" className="flex-1 overflow-hidden">
+              <ScrollArea className="h-full p-4">
+                {isDubbing || dubbingComplete ? (
+                  <DubbedVideoResult
+                    originalVideo={video}
+                    targetLanguage={targetLanguage}
+                    detectedVoices={detectedVoices}
+                    dubbingProgress={dubbingProgress}
+                    isDubbing={isDubbing}
+                    dubbedVideoUrl={dubbedVideoUrl ?? undefined}
+                    dubbingError={dubbingError ?? undefined}
+                    onRegenerate={handleRegenerate}
+                    onClose={onClose}
+                  />
+                ) : (
+                  <div className="flex h-full flex-col items-center justify-center text-center p-8">
+                    <div className="rounded-full bg-muted p-4 mb-4">
+                      <Sparkles className="h-8 w-8 text-muted-foreground" />
+                    </div>
+                    <h3 className="font-semibold text-foreground">No Dubbed Video Yet</h3>
+                    <p className="mt-2 text-sm text-muted-foreground max-w-xs">
+                      Select your target language, configure voice settings, then click "Generate Dub" to create your
+                      dubbed video.
+                    </p>
+                    <Button className="mt-6 gap-2" onClick={handleStartDubbing} disabled={isAnalyzing}>
+                      <Sparkles className="h-4 w-4" />
+                      Generate Dub Now
+                    </Button>
+                  </div>
+                )}
+              </ScrollArea>
+            </TabsContent>
           </Tabs>
         </div>
       </div>

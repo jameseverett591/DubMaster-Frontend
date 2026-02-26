@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useRef, useEffect } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -19,7 +19,7 @@ import {
   Languages,
   Mic2,
   Clock,
-  HardDrive,
+  AlertCircle,
 } from "lucide-react"
 import type { VideoSource, DetectedVoice } from "@/components/dashboard"
 
@@ -29,11 +29,14 @@ interface DubbedVideoResultProps {
   detectedVoices: DetectedVoice[]
   dubbingProgress: number
   isDubbing: boolean
+  dubbedVideoUrl?: string
+  dubbingError?: string
   onRegenerate: () => void
   onClose: () => void
 }
 
 const LANGUAGE_NAMES: Record<string, string> = {
+  en: "English",
   es: "Spanish",
   fr: "French",
   de: "German",
@@ -54,22 +57,74 @@ export function DubbedVideoResult({
   detectedVoices,
   dubbingProgress,
   isDubbing,
+  dubbedVideoUrl,
+  dubbingError,
   onRegenerate,
   onClose,
 }: DubbedVideoResultProps) {
+  const videoRef = useRef<HTMLVideoElement>(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [volume, setVolume] = useState(80)
   const [isMuted, setIsMuted] = useState(false)
-  const [currentTime, setCurrentTime] = useState(0)
   const [showOriginal, setShowOriginal] = useState(false)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [duration, setDuration] = useState(0)
 
-  const isComplete = dubbingProgress >= 100 && !isDubbing
+  const isComplete = !isDubbing && dubbingProgress >= 100
+
+  const videoSrc = showOriginal ? originalVideo.url : (dubbedVideoUrl ?? originalVideo.url)
+
+  // Sync play/pause state with video element
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    if (isPlaying) {
+      v.play().catch(() => setIsPlaying(false))
+    } else {
+      v.pause()
+    }
+  }, [isPlaying])
+
+  // Sync volume and mute state
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    v.volume = volume / 100
+    v.muted = isMuted
+  }, [volume, isMuted])
+
+  // Update timestamp as video plays
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    const onTime = () => setCurrentTime(v.currentTime)
+    const onMeta = () => setDuration(v.duration)
+    v.addEventListener("timeupdate", onTime)
+    v.addEventListener("loadedmetadata", onMeta)
+    return () => {
+      v.removeEventListener("timeupdate", onTime)
+      v.removeEventListener("loadedmetadata", onMeta)
+    }
+  }, [videoSrc])
+
+  // Pause when switching between original/dubbed
+  useEffect(() => {
+    setIsPlaying(false)
+  }, [showOriginal])
+
+  const formatTime = (s: number) => {
+    const m = Math.floor(s / 60)
+    const sec = Math.floor(s % 60)
+    return `${m}:${sec.toString().padStart(2, "0")}`
+  }
 
   const handleDownload = () => {
-    // Simulate download - in real app would trigger actual file download
+    const url = dubbedVideoUrl ?? originalVideo.url
     const link = document.createElement("a")
-    link.href = originalVideo.url || "#"
+    link.href = url
     link.download = `${originalVideo.title}_dubbed_${targetLanguage}.mp4`
+    link.target = "_blank"
+    link.rel = "noopener noreferrer"
     link.click()
   }
 
@@ -81,13 +136,24 @@ export function DubbedVideoResult({
           text: "Check out this dubbed video!",
           url: window.location.href,
         })
-      } catch (err) {
-        console.log("Share cancelled")
+      } catch {
+        // User cancelled share
       }
     }
   }
 
-  if (isDubbing || dubbingProgress < 100) {
+  // ── In-progress view ──────────────────────────────────────────────────────
+  if (!isComplete) {
+    const currentStage =
+      dubbingProgress <= 12 ? "Extracting original audio..." :
+      dubbingProgress <= 25 ? "Analyzing speech patterns..." :
+      dubbingProgress <= 35 ? "Translating speaker tracks..." :
+      dubbingProgress <= 55 ? "Generating AI voice-overs..." :
+      dubbingProgress <= 70 ? "Voice synthesis in progress..." :
+      dubbingProgress <= 88 ? "Syncing audio with video..." :
+      dubbingProgress <= 95 ? "Rendering final output..." :
+      "Finalizing..."
+
     return (
       <Card className="border-primary/20 bg-primary/5">
         <CardHeader>
@@ -95,9 +161,16 @@ export function DubbedVideoResult({
             <RefreshCw className="h-5 w-5 animate-spin text-primary" />
             Generating Dubbed Video
           </CardTitle>
-          <CardDescription>AI is processing your video and generating voice-overs...</CardDescription>
+          <CardDescription>{currentStage}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
+          {dubbingError && (
+            <div className="flex items-center gap-2 rounded-lg bg-destructive/10 p-3 text-sm text-destructive">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              {dubbingError}
+            </div>
+          )}
+
           <div>
             <div className="mb-2 flex items-center justify-between text-sm">
               <span className="text-muted-foreground">Overall Progress</span>
@@ -113,7 +186,7 @@ export function DubbedVideoResult({
                 Voice Synthesis
               </div>
               <p className="mt-1 font-medium text-foreground">
-                {dubbingProgress < 30 ? "Preparing..." : dubbingProgress < 70 ? "In Progress" : "Finalizing"}
+                {dubbingProgress < 35 ? "Preparing..." : dubbingProgress < 70 ? "In Progress" : "Finalizing"}
               </p>
             </div>
             <div className="rounded-lg border border-border bg-card p-4">
@@ -128,46 +201,29 @@ export function DubbedVideoResult({
           <div className="rounded-lg bg-muted/50 p-4">
             <h4 className="text-sm font-medium text-foreground">Processing Steps:</h4>
             <ul className="mt-2 space-y-2 text-sm">
-              <li className="flex items-center gap-2">
-                <CheckCircle2
-                  className={`h-4 w-4 ${dubbingProgress > 10 ? "text-green-500" : "text-muted-foreground"}`}
-                />
-                <span className={dubbingProgress > 10 ? "text-foreground" : "text-muted-foreground"}>
-                  Extracting original audio
-                </span>
-              </li>
-              <li className="flex items-center gap-2">
-                <CheckCircle2
-                  className={`h-4 w-4 ${dubbingProgress > 30 ? "text-green-500" : "text-muted-foreground"}`}
-                />
-                <span className={dubbingProgress > 30 ? "text-foreground" : "text-muted-foreground"}>
-                  Translating {detectedVoices.length} speaker tracks
-                </span>
-              </li>
-              <li className="flex items-center gap-2">
-                <CheckCircle2
-                  className={`h-4 w-4 ${dubbingProgress > 60 ? "text-green-500" : "text-muted-foreground"}`}
-                />
-                <span className={dubbingProgress > 60 ? "text-foreground" : "text-muted-foreground"}>
-                  Generating AI voice-overs
-                </span>
-              </li>
-              <li className="flex items-center gap-2">
-                <CheckCircle2
-                  className={`h-4 w-4 ${dubbingProgress > 85 ? "text-green-500" : "text-muted-foreground"}`}
-                />
-                <span className={dubbingProgress > 85 ? "text-foreground" : "text-muted-foreground"}>
-                  Syncing audio with video
-                </span>
-              </li>
-              <li className="flex items-center gap-2">
-                <CheckCircle2
-                  className={`h-4 w-4 ${dubbingProgress >= 100 ? "text-green-500" : "text-muted-foreground"}`}
-                />
-                <span className={dubbingProgress >= 100 ? "text-foreground" : "text-muted-foreground"}>
-                  Final rendering
-                </span>
-              </li>
+              {[
+                { label: "Extracting original audio", threshold: 12 },
+                { label: `Translating ${detectedVoices.length} speaker tracks`, threshold: 35 },
+                { label: "Generating AI voice-overs", threshold: 70 },
+                { label: "Syncing audio with video", threshold: 88 },
+                { label: "Final rendering", threshold: 100 },
+              ].map(({ label, threshold }, i, arr) => {
+                const prevThreshold = arr[i - 1]?.threshold ?? 0
+                const done = dubbingProgress > threshold
+                const active = dubbingProgress > prevThreshold && dubbingProgress <= threshold
+                return (
+                  <li key={label} className="flex items-center gap-2">
+                    {done ? (
+                      <CheckCircle2 className="h-4 w-4 text-green-500" />
+                    ) : active ? (
+                      <RefreshCw className="h-4 w-4 animate-spin text-primary" />
+                    ) : (
+                      <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
+                    )}
+                    <span className={done || active ? "text-foreground" : "text-muted-foreground"}>{label}</span>
+                  </li>
+                )
+              })}
             </ul>
           </div>
         </CardContent>
@@ -175,6 +231,7 @@ export function DubbedVideoResult({
     )
   }
 
+  // ── Completed view ────────────────────────────────────────────────────────
   return (
     <Card className="border-green-500/20 bg-green-500/5">
       <CardHeader>
@@ -193,9 +250,12 @@ export function DubbedVideoResult({
         {/* Video Preview */}
         <div className="relative overflow-hidden rounded-lg bg-black">
           <video
-            src={originalVideo.url}
+            ref={videoRef}
+            src={videoSrc}
             poster={originalVideo.thumbnail}
             className="aspect-video w-full object-contain"
+            onEnded={() => setIsPlaying(false)}
+            onClick={() => setIsPlaying(!isPlaying)}
           />
           <div className="absolute inset-0 flex items-center justify-center bg-black/30">
             <Button size="lg" className="h-16 w-16 rounded-full" onClick={() => setIsPlaying(!isPlaying)}>
@@ -221,6 +281,11 @@ export function DubbedVideoResult({
             >
               Original
             </Button>
+          </div>
+
+          {/* Timestamp */}
+          <div className="absolute bottom-4 left-4 rounded-lg bg-black/70 px-3 py-1.5 font-mono text-sm text-white">
+            {formatTime(currentTime)} / {formatTime(duration)}
           </div>
 
           {/* Volume Control */}
@@ -249,7 +314,7 @@ export function DubbedVideoResult({
         </div>
 
         {/* Video Info */}
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-2 gap-4">
           <div className="rounded-lg border border-border bg-card p-3 text-center">
             <Clock className="mx-auto h-5 w-5 text-muted-foreground" />
             <p className="mt-1 text-xs text-muted-foreground">Duration</p>
@@ -259,11 +324,6 @@ export function DubbedVideoResult({
             <Mic2 className="mx-auto h-5 w-5 text-muted-foreground" />
             <p className="mt-1 text-xs text-muted-foreground">Voices</p>
             <p className="font-medium text-foreground">{detectedVoices.length} speakers</p>
-          </div>
-          <div className="rounded-lg border border-border bg-card p-3 text-center">
-            <HardDrive className="mx-auto h-5 w-5 text-muted-foreground" />
-            <p className="mt-1 text-xs text-muted-foreground">File Size</p>
-            <p className="font-medium text-foreground">~245 MB</p>
           </div>
         </div>
 
@@ -284,7 +344,7 @@ export function DubbedVideoResult({
 
         {/* Action Buttons */}
         <div className="flex gap-3">
-          <Button className="flex-1 gap-2" onClick={handleDownload}>
+          <Button className="flex-1 gap-2" onClick={handleDownload} disabled={!dubbedVideoUrl}>
             <Download className="h-4 w-4" />
             Download Video
           </Button>
@@ -302,21 +362,17 @@ export function DubbedVideoResult({
         <div className="rounded-lg bg-muted/50 p-4">
           <h4 className="text-sm font-medium text-foreground">Export Formats</h4>
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" className="gap-1.5 text-xs bg-transparent">
+            <Button variant="outline" size="sm" className="gap-1.5 text-xs bg-transparent" onClick={handleDownload} disabled={!dubbedVideoUrl}>
               <FileVideo className="h-3 w-3" />
               MP4 (H.264)
             </Button>
-            <Button variant="outline" size="sm" className="gap-1.5 text-xs bg-transparent">
+            <Button variant="outline" size="sm" className="gap-1.5 text-xs bg-transparent" disabled>
               <FileVideo className="h-3 w-3" />
               WebM (VP9)
             </Button>
-            <Button variant="outline" size="sm" className="gap-1.5 text-xs bg-transparent">
+            <Button variant="outline" size="sm" className="gap-1.5 text-xs bg-transparent" disabled>
               <FileVideo className="h-3 w-3" />
               MOV (ProRes)
-            </Button>
-            <Button variant="outline" size="sm" className="gap-1.5 text-xs bg-transparent">
-              <Volume2 className="h-3 w-3" />
-              Audio Only (MP3)
             </Button>
           </div>
         </div>

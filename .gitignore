@@ -7,6 +7,7 @@ Dubverse Backend/venv*/
 Dubverse Backend/data/
 
 # Build outputs
+.next/
 dist/
 build/
 *.log

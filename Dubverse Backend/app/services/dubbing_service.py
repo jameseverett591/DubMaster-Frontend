@@ -294,7 +294,11 @@ class DubbingService:
                     tts_engines.append(result.get("engine", "unknown"))
                     segment_engines[i] = result.get("engine", "unknown")
                     if next_start is not None:
-                        target_duration = max(0.2, min(end_time, next_start) - start_time)
+                        # Allow TTS to overflow into the silence gap after the
+                        # original segment ends, up to 50ms before the next
+                        # segment starts.  This prevents mid-word cutoff when
+                        # the translated text is longer than the source.
+                        target_duration = max(0.2, next_start - start_time - 0.05)
                     else:
                         target_duration = max(0.2, end_time - start_time)
                     use_time_stretch = os.getenv("DUBBING_TIME_STRETCH", "0") == "1"
@@ -596,16 +600,17 @@ class DubbingService:
             for i, seg in enumerate(segments_sorted):
                 inputs.extend(["-i", seg["path"]])
 
-            # Delay each segment to its correct position
+            # Single N-input amix: silent base + all delayed segments
+            n_inputs = 1 + len(segments_sorted)  # base + segments
+
+            # Delay each segment to its correct position.
+            # Boost each by n_inputs to compensate for amix dividing by N.
             for i, seg in enumerate(segments_sorted):
                 input_idx = i + 1
                 delay_ms = int(seg["start"] * 1000)
                 filter_parts.append(
-                    f"[{input_idx}]adelay={delay_ms}|{delay_ms},apad=whole_dur={total_duration}[delayed{i}]"
+                    f"[{input_idx}]adelay={delay_ms}|{delay_ms},apad=whole_dur={total_duration},volume={n_inputs}[delayed{i}]"
                 )
-
-            # Single N-input amix: silent base + all delayed segments
-            n_inputs = 1 + len(segments_sorted)  # base + segments
             delayed_labels = "".join(f"[delayed{i}]" for i in range(len(segments_sorted)))
             filter_parts.append(
                 f"[0]{delayed_labels}amix=inputs={n_inputs}:duration=first:normalize=0[mixout]"
@@ -727,7 +732,7 @@ class DubbingService:
             boost_cmd = [
                 "ffmpeg", "-y",
                 "-i", audio_path,
-                "-filter:a", "loudnorm=I=-18:TP=-2:LRA=11",
+                "-filter:a", "loudnorm=I=-14:TP=-1.5:LRA=11",
                 "-ar", "44100",
                 "-ac", "2",
                 audio_path + ".normalized.wav"
@@ -768,7 +773,7 @@ class DubbingService:
                     "-filter_complex",
                     (
                         f"[1:a]volume={accompaniment_level}[bgm];"
-                        f"[2:a]volume=1.0[speech];"
+                        f"[2:a]volume=1.5[speech];"
                         f"[bgm][speech]amix=inputs=2:duration=shortest:normalize=0[aout]"
                     ),
                     "-map", "0:v:0",
@@ -782,7 +787,7 @@ class DubbingService:
             elif _video_has_audio(video_path):
                 # Legacy fallback: blend the whole original audio (speech + music) at
                 # a low level so background music is audible but speech bleed is quiet.
-                original_level = float(os.getenv("ORIGINAL_AUDIO_LEVEL", "0.12"))
+                original_level = float(os.getenv("ORIGINAL_AUDIO_LEVEL", "0.08"))
                 original_mode = os.getenv("ORIGINAL_AUDIO_MODE", "music_only")
                 if original_mode == "music_only":
                     original_filter = f"[0:a]pan=stereo|c0=c0-c1|c1=c1-c0,volume={original_level}[a0]"
@@ -797,7 +802,7 @@ class DubbingService:
                     "-i", video_path,
                     "-i", audio_to_use,
                     "-filter_complex",
-                    f"{original_filter};[1:a]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=shortest:normalize=0[aout]",
+                    f"{original_filter};[1:a]volume=1.5[a1];[a0][a1]amix=inputs=2:duration=shortest:normalize=0[aout]",
                     "-map", "0:v:0",
                     "-map", "[aout]",
                     "-c:v", "copy",
