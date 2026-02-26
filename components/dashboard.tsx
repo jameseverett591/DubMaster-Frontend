@@ -18,6 +18,7 @@ export type VideoSource = {
   thumbnail: string
   duration: string
   source: "upload" | "youtube" | "public-domain"
+  jobId?: string
 }
 
 export type DetectedVoice = {
