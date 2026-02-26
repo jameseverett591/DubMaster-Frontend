@@ -1,0 +1,93 @@
+services:
+  # ============================================
+  # BACKEND SERVICE (FastAPI + Python 3.11)
+  # ============================================
+  backend:
+    build:
+      context: "./Dubverse Backend"
+      dockerfile: Dockerfile
+    container_name: dubverse-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount source code for hot reload
+      - "./Dubverse Backend/app:/app/app:ro"
+      # Mount data directories (read-write)
+      - "./Dubverse Backend/data:/app/data"
+      - "./Dubverse Backend/uploads:/app/uploads"
+      - "./Dubverse Backend/outputs:/app/outputs"
+    env_file:
+      - .env
+    environment:
+      # Only set vars NOT in .env here. All API keys and app settings
+      # come from .env via env_file above. Do NOT duplicate them here
+      # with ${VAR} syntax — that pulls from the host system env and
+      # silently overrides the .env values.
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - dubverse-network
+
+  # ============================================
+  # FRONTEND SERVICE (Next.js)
+  # ============================================
+  frontend:
+    build:
+      context: "./Dubverse Frontend"
+      dockerfile: Dockerfile
+      target: development
+      args:
+        - NODE_ENV=development
+    container_name: dubverse-frontend
+    ports:
+      - "3001:3001"
+    volumes:
+      # Mount source code for hot reload (no :ro — Turbopack needs write access for cache)
+      - "./Dubverse Frontend/components:/app/components"
+      - "./Dubverse Frontend/app:/app/app"
+      - "./Dubverse Frontend/hooks:/app/hooks"
+      - "./Dubverse Frontend/lib:/app/lib"
+      - "./Dubverse Frontend/styles:/app/styles"
+      - "./Dubverse Frontend/public:/app/public"
+      # Exclude node_modules from mount
+      - /app/node_modules
+      - /app/.next
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - WATCHPACK_POLLING=true
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - dubverse-network
+
+  # ============================================
+  # MONITORING SERVICE (Optional but Recommended)
+  # ============================================
+  # Uncomment to add Prometheus + Grafana monitoring
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   container_name: dubverse-prometheus
+  #   ports:
+  #     - "9090:9090"
+  #   volumes:
+  #     - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+  #     - prometheus-data:/prometheus
+  #   networks:
+  #     - dubverse-network
+
+networks:
+  dubverse-network:
+    driver: bridge
+
+# Optional: Persistent volumes for development
+volumes:
+  prometheus-data:
