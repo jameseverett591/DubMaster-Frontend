@@ -29,7 +29,9 @@
       "Bash(curl -s \"http://localhost:8000/api/status/9ee2a059-9f6a-40bc-a7fa-71fdc188064a\" 2>/dev/null | python -m json.tool 2>/dev/null)",
       "Bash(sleep 90 && curl -s \"http://localhost:8000/api/status/585cc06e-dd31-46e7-b827-fa30f476efa8\" 2>/dev/null | python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(f'Status: {d[\\\\\"status\\\\\"]}, Progress: {d[\\\\\"progress\\\\\"]}%'\\)\" 2>/dev/null)",
       "Bash(curl -s \"http://localhost:8000/api/status/585cc06e-dd31-46e7-b827-fa30f476efa8\" 2>/dev/null | python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(f'Status: {d[\\\\\"status\\\\\"]}, Progress: {d[\\\\\"progress\\\\\"]}%'\\)\" 2>/dev/null)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(git commit:*)",
+      "Bash(git add:*)"
     ]
   }
 }
