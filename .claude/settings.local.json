@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx next build)",
+      "Bash(docker build:*)",
+      "Bash(docker run:*)",
+      "Bash(docker ps:*)",
+      "Bash(docker stop:*)",
+      "Bash(docker rm:*)",
+      "Bash(docker-compose:*)",
+      "Bash(docker compose build:*)",
+      "Bash(docker compose:*)",
+      "Bash(curl:*)",
+      "Bash(docker volume prune:*)",
+      "Bash(docker exec:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(python3:*)",
+      "Bash(docker restart:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(cd \"C:\\\\DEV\\\\Dubverse\\\\Dubverse Backend\" && venv311/Scripts/python -c \"\nimport httpx, asyncio\n\nasync def test\\(\\):\n    data = [\n        \\('text', 'kung fu'\\),\n        \\('text', 'Wing Chun'\\),\n        \\('target_lang', 'EN-US'\\),\n        \\('source_lang', 'ZH'\\),\n    ]\n    headers = {'Authorization': 'DeepL-Auth-Key 2147f3a7-0e29-4f61-84c0-d3cbdd41f4cb:fx'}\n    async with httpx.AsyncClient\\(\\) as c:\n        r = await c.post\\('https://api-free.deepl.com/v2/translate', data=data, headers=headers, timeout=15\\)\n        print\\('status:', r.status_code\\)\n        print\\('body:', r.text[:400]\\)\n\nasyncio.run\\(test\\(\\)\\)\n\" 2>&121222)",
+      "Bash(ffprobe:)",
+      "Bash(git:)",
+      "Bash(head:*)",
+      "Bash(grep:*)",
+      "Bash(curl -s http://localhost:8000/api/status/a6804d15-c74a-4154-a8ae-29cbffa7918d | python -m json.tool 2>/dev/null)",
+      "Bash(curl -s http://localhost:8000/api/status/d60c87fa-8ffe-491c-8d28-b2f2151852bf | python -m json.tool 2>/dev/null)",
+      "Bash(ffprobe:*)",
+      "Bash(curl -s \"http://localhost:8000/api/status/9ee2a059-9f6a-40bc-a7fa-71fdc188064a\" 2>/dev/null | python -m json.tool 2>/dev/null)",
+      "Bash(sleep 90 && curl -s \"http://localhost:8000/api/status/585cc06e-dd31-46e7-b827-fa30f476efa8\" 2>/dev/null | python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(f'Status: {d[\\\\\"status\\\\\"]}, Progress: {d[\\\\\"progress\\\\\"]}%'\\)\" 2>/dev/null)",
+      "Bash(curl -s \"http://localhost:8000/api/status/585cc06e-dd31-46e7-b827-fa30f476efa8\" 2>/dev/null | python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(f'Status: {d[\\\\\"status\\\\\"]}, Progress: {d[\\\\\"progress\\\\\"]}%'\\)\" 2>/dev/null)",
+      "Bash(python:*)"
+    ]
+  }
+}

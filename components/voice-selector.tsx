@@ -9,15 +9,18 @@ import { Slider } from "@/components/ui/slider"
 import { Label } from "@/components/ui/label"
 import { User, Baby, Play, Volume2, Square, Loader2 } from "lucide-react"
 import type { DetectedVoice } from "@/components/dashboard"
+import type { Voice } from "@/lib/api-client"
 
 interface VoiceSelectorProps {
   detectedVoices: DetectedVoice[]
   targetLanguage: string
   onVoiceChange: (voiceId: string, newVoice: string) => void
   isAnalyzing: boolean
+  availableVoices?: Voice[]
 }
 
-const VOICE_OPTIONS = {
+// Fallback hardcoded options used when the API hasn't returned voices yet
+const FALLBACK_VOICE_OPTIONS = {
   male: [
     { id: "male-1", name: "Marcus", description: "Deep, authoritative", age: "Adult" },
     { id: "male-2", name: "David", description: "Warm, friendly", age: "Adult" },
@@ -44,12 +47,48 @@ const SAMPLE_TEXTS = {
   child: "Hey! I'm a kid's voice. I sound fun and playful for your videos!",
 }
 
-export function VoiceSelector({ detectedVoices, targetLanguage, onVoiceChange, isAnalyzing }: VoiceSelectorProps) {
+type VoiceOption = { id: string; name: string; description: string; age: string }
+type GroupedOptions = { male: VoiceOption[]; female: VoiceOption[]; child: VoiceOption[] }
+
+function groupApiVoices(voices: Voice[]): GroupedOptions {
+  const grouped: GroupedOptions = { male: [], female: [], child: [] }
+  for (const v of voices) {
+    const gender = (v.labels.gender ?? "").toLowerCase()
+    const age = v.labels.age ?? "Adult"
+    const desc = v.description || v.labels.description || `${gender || "neutral"} voice`
+    const option: VoiceOption = { id: v.voice_id, name: v.name, description: desc, age }
+    if (gender === "female") {
+      grouped.female.push(option)
+    } else if (gender === "child" || age.toLowerCase().includes("child")) {
+      grouped.child.push(option)
+    } else {
+      grouped.male.push(option)
+    }
+  }
+  // Fall back to hardcoded for any empty bucket
+  if (grouped.male.length === 0) grouped.male = FALLBACK_VOICE_OPTIONS.male
+  if (grouped.female.length === 0) grouped.female = FALLBACK_VOICE_OPTIONS.female
+  if (grouped.child.length === 0) grouped.child = FALLBACK_VOICE_OPTIONS.child
+  return grouped
+}
+
+export function VoiceSelector({
+  detectedVoices,
+  targetLanguage,
+  onVoiceChange,
+  isAnalyzing,
+  availableVoices,
+}: VoiceSelectorProps) {
   const [expandedVoice, setExpandedVoice] = useState<string | null>(null)
   const [voiceSettings, setVoiceSettings] = useState<Record<string, { pitch: number; speed: number }>>({})
   const [playingVoice, setPlayingVoice] = useState<string | null>(null)
   const [isLoadingSample, setIsLoadingSample] = useState<string | null>(null)
   const speechSynthRef = useRef<SpeechSynthesisUtterance | null>(null)
+
+  const voiceOptions: GroupedOptions =
+    availableVoices && availableVoices.length > 0
+      ? groupApiVoices(availableVoices)
+      : FALLBACK_VOICE_OPTIONS
 
   const getVoiceIcon = (type: DetectedVoice["type"]) => {
     switch (type) {
@@ -84,7 +123,6 @@ export function VoiceSelector({ detectedVoices, targetLanguage, onVoiceChange, i
   }
 
   const playVoiceSample = (voice: DetectedVoice, isPreview = false) => {
-    // Stop any currently playing audio
     if (speechSynthRef.current) {
       window.speechSynthesis.cancel()
     }
@@ -102,11 +140,9 @@ export function VoiceSelector({ detectedVoices, targetLanguage, onVoiceChange, i
         : SAMPLE_TEXTS[voice.type],
     )
 
-    // Get available voices and try to match gender
     const voices = window.speechSynthesis.getVoices()
     const settings = voiceSettings[voice.id] || { pitch: 50, speed: 50 }
 
-    // Find a voice that matches the type
     const selectedSynthVoice = voices.find((v) => {
       if (voice.type === "female")
         return (
@@ -126,11 +162,9 @@ export function VoiceSelector({ detectedVoices, targetLanguage, onVoiceChange, i
       utterance.voice = selectedSynthVoice
     }
 
-    // Apply pitch and speed settings (converted from 0-100 to appropriate ranges)
-    utterance.pitch = 0.5 + (settings.pitch / 100) * 1.5 // Range: 0.5 - 2
-    utterance.rate = 0.5 + (settings.speed / 100) * 1.5 // Range: 0.5 - 2
+    utterance.pitch = 0.5 + (settings.pitch / 100) * 1.5
+    utterance.rate = 0.5 + (settings.speed / 100) * 1.5
 
-    // Adjust for child voice
     if (voice.type === "child") {
       utterance.pitch = Math.min(utterance.pitch * 1.3, 2)
       utterance.rate = utterance.rate * 1.1
@@ -152,12 +186,6 @@ export function VoiceSelector({ detectedVoices, targetLanguage, onVoiceChange, i
 
     speechSynthRef.current = utterance
     window.speechSynthesis.speak(utterance)
-  }
-
-  const stopSample = () => {
-    window.speechSynthesis.cancel()
-    setPlayingVoice(null)
-    setIsLoadingSample(null)
   }
 
   if (isAnalyzing) {
@@ -255,7 +283,7 @@ export function VoiceSelector({ detectedVoices, targetLanguage, onVoiceChange, i
                       <SelectValue placeholder="Select a voice" />
                     </SelectTrigger>
                     <SelectContent>
-                      {VOICE_OPTIONS[voice.type].map((option) => (
+                      {voiceOptions[voice.type].map((option) => (
                         <SelectItem key={option.id} value={option.id}>
                           <div className="flex items-center gap-2">
                             <span className="font-medium">{option.name}</span>

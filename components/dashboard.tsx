@@ -31,8 +31,8 @@ export type DetectedVoice = {
 // Background images for each tab
 const tabBackgrounds: Record<string, string> = {
   upload: "/backgrounds/marvel-stormy.jpg",
-  youtube: "/backgrounds/kungfu-action.jpg",
-  library: "/backgrounds/marvel-theater.jpg",
+  youtube: "/backgrounds/ipman-kungfu.jpg",
+  library: "/backgrounds/streaming-library.jpg",
   collaborate: "/backgrounds/anime-motion-teal.jpg",
   projects: "/backgrounds/anime-dark-collage.jpg",
 }
@@ -75,32 +75,49 @@ export function Dashboard() {
           <DubbingWorkspace video={selectedVideo} onClose={handleCloseWorkspace} />
         ) : (
           <main className="container mx-auto px-4 py-8">
-            <div className="mb-8">
-              <h1 className="text-3xl font-bold text-foreground">DubVerse Studio</h1>
-              <p className="mt-2 text-muted-foreground">
-                AI-powered video dubbing with intelligent voice detection and multi-language support
-              </p>
+            <div className="mb-8 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div>
+                <h1 className="text-3xl font-bold text-foreground">DubVerse Studio</h1>
+                <p className="mt-2 text-muted-foreground">
+                  AI-powered video dubbing with intelligent voice detection and multi-language support
+                </p>
+              </div>
+              <h2 
+                className="text-xl font-bold italic text-right leading-tight"
+                style={{ 
+                  background: "linear-gradient(180deg, #fce38a 0%, #d4a843 25%, #f9e77f 45%, #c5952a 60%, #f0d060 75%, #a67c2e 100%)",
+                  WebkitBackgroundClip: "text",
+                  WebkitTextFillColor: "transparent",
+                  backgroundClip: "text",
+                  filter: "drop-shadow(0 2px 6px rgba(0,0,0,0.8))",
+                }}
+              >
+                Watch Award Winning Movies<br />In Your Own Language
+              </h2>
             </div>
 
-            <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-              <TabsList className="mb-8 grid w-full grid-cols-5 lg:w-auto lg:inline-flex bg-background/50 backdrop-blur-md">
-                <TabsTrigger value="upload" className="gap-2">
+            <Tabs value={activeTab} onValueChange={(value) => {
+              console.log("[v0] Tab changed to:", value)
+              setActiveTab(value)
+            }} className="w-full">
+              <TabsList className="mb-8 grid w-full grid-cols-5 lg:w-auto lg:inline-flex bg-background/50 backdrop-blur-md pointer-events-auto">
+                <TabsTrigger value="upload" className="gap-2 cursor-pointer" onClick={() => console.log("[v0] Upload clicked")}>
                   <Upload className="h-4 w-4" />
                   <span className="hidden sm:inline">Upload</span>
                 </TabsTrigger>
-                <TabsTrigger value="youtube" className="gap-2">
+                <TabsTrigger value="youtube" className="gap-2 cursor-pointer" onClick={() => console.log("[v0] YouTube clicked")}>
                   <Youtube className="h-4 w-4" />
                   <span className="hidden sm:inline">YouTube</span>
                 </TabsTrigger>
-                <TabsTrigger value="library" className="gap-2">
+                <TabsTrigger value="library" className="gap-2 cursor-pointer" onClick={() => console.log("[v0] Library clicked")}>
                   <Film className="h-4 w-4" />
                   <span className="hidden sm:inline">Library</span>
                 </TabsTrigger>
-                <TabsTrigger value="collaborate" className="gap-2">
+                <TabsTrigger value="collaborate" className="gap-2 cursor-pointer" onClick={() => console.log("[v0] Collaborate clicked")}>
                   <Users className="h-4 w-4" />
                   <span className="hidden sm:inline">Collaborate</span>
                 </TabsTrigger>
-                <TabsTrigger value="projects" className="gap-2">
+                <TabsTrigger value="projects" className="gap-2 cursor-pointer" onClick={() => console.log("[v0] Projects clicked")}>
                   <Mic2 className="h-4 w-4" />
                   <span className="hidden sm:inline">Projects</span>
                 </TabsTrigger>
