@@ -70,6 +70,7 @@ class Job(BaseModel):
     dubbed_video_url: Optional[str] = None
     tts_engine: Optional[str] = None
     segment_tts_engines: Optional[List[Optional[str]]] = None
+    dubbing_engine: Optional[str] = None  # "dubmaster" or "vozo"
 
     error_message: Optional[str] = None
     created_at: datetime
@@ -118,6 +119,8 @@ class DubRequest(BaseModel):
     voice_mapping: Dict[str, str]
     voice_settings: Optional[Dict[str, Dict[str, float]]] = None
     source_language: Optional[str] = None
+    dubbing_engine: Optional[str] = None  # "dubmaster" (default) or "vozo"
+    vozo_user_prompt: Optional[str] = None  # translation guidance for Vozo
 
 
 class DubResponse(BaseModel):
@@ -125,4 +128,5 @@ class DubResponse(BaseModel):
     status: str
     dubbed_video_url: Optional[str] = None
     tts_engine: Optional[str] = None
+    dubbing_engine: Optional[str] = None
     message: str

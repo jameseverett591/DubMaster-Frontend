@@ -9,6 +9,13 @@ services:
     container_name: dubverse-backend
     ports:
       - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     volumes:
       # Mount source code for hot reload
       - "./Dubverse Backend/app:/app/app:ro"
@@ -16,6 +23,8 @@ services:
       - "./Dubverse Backend/data:/app/data"
       - "./Dubverse Backend/uploads:/app/uploads"
       - "./Dubverse Backend/outputs:/app/outputs"
+      # Persist HuggingFace/torch model cache across recreates
+      - hf-cache:/root/.cache
     env_file:
       - .env
     environment:
@@ -55,6 +64,11 @@ services:
       - "./Dubverse Frontend/lib:/app/lib"
       - "./Dubverse Frontend/styles:/app/styles"
       - "./Dubverse Frontend/public:/app/public"
+      - "./Dubverse Frontend/messages:/app/messages"
+      - "./Dubverse Frontend/postcss.config.mjs:/app/postcss.config.mjs"
+      - "./Dubverse Frontend/.env.local:/app/.env.local:ro"
+      - "./Dubverse Frontend/middleware.ts:/app/middleware.ts"
+      - "./Dubverse Frontend/i18n.ts:/app/i18n.ts"
       # Exclude node_modules from mount
       - /app/node_modules
       - /app/.next
@@ -65,6 +79,9 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     restart: unless-stopped
     networks:
       - dubverse-network
@@ -91,3 +108,4 @@ networks:
 # Optional: Persistent volumes for development
 volumes:
   prometheus-data:
+  hf-cache:

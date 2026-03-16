@@ -33,8 +33,14 @@ def _get_model(model_name: str):
 
     try:
         logger.info(f"[SEPARATE] Loading demucs model '{model_name}'...")
+        import torch
         model = get_model(model_name)
         model.eval()
+        if torch.cuda.is_available():
+            model = model.cuda()
+            logger.info("[SEPARATE] Demucs running on CUDA GPU")
+        else:
+            logger.info("[SEPARATE] Demucs running on CPU")
         _MODEL = model
         _MODEL_NAME = model_name
         logger.info(
@@ -117,6 +123,23 @@ def separate_audio(video_path: str, job_id: str | None = None) -> Dict[str, Any]
     accompaniment_path = str(output_dir / f"{prefix}_accompaniment.wav")
     vocals_path = str(output_dir / f"{prefix}_vocals.wav")
 
+    # Cache check: if both outputs already exist, return them directly.
+    # Avoids re-running 8-12 min Demucs when re-dubbing the same video.
+    if os.path.exists(accompaniment_path) and os.path.exists(vocals_path):
+        acc_size = os.path.getsize(accompaniment_path)
+        voc_size = os.path.getsize(vocals_path)
+        if acc_size > 1000 and voc_size > 1000:
+            logger.info(
+                f"[SEPARATE] Using cached separation for {prefix} "
+                f"(accompaniment={acc_size // 1024}KB, vocals={voc_size // 1024}KB)"
+            )
+            return {
+                "status": "ok",
+                "accompaniment_path": accompaniment_path,
+                "vocals_path": vocals_path,
+                "model": model_name,
+            }
+
     raw_audio_path: str | None = None
 
     try:
@@ -190,10 +213,11 @@ def separate_audio(video_path: str, job_id: str | None = None) -> Dict[str, Any]
         from demucs.apply import apply_model
 
         logger.info(f"[SEPARATE] Running '{model_name}' separation on {duration:.1f}s of audio...")
+        _device = "cuda" if torch.cuda.is_available() else "cpu"
         with torch.inference_mode():
             sources = apply_model(
                 model,
-                waveform.unsqueeze(0),   # [1, channels, samples] — batch of 1
+                waveform.unsqueeze(0).to(_device),
                 progress=False,
                 num_workers=0,
             )
@@ -215,6 +239,13 @@ def separate_audio(video_path: str, job_id: str | None = None) -> Dict[str, Any]
         # Clamp to avoid clipping artifacts from stem summation
         accompaniment = accompaniment.clamp(-1.0, 1.0)
         vocals = vocals.clamp(-1.0, 1.0)
+
+        acc_dur = accompaniment.shape[-1] / model.samplerate
+        voc_dur = vocals.shape[-1] / model.samplerate
+        logger.info(
+            f"[SEPARATE] Output durations: accompaniment={acc_dur:.2f}s, "
+            f"vocals={voc_dur:.2f}s (input was {duration:.2f}s)"
+        )
 
         # --- 5. Save outputs ---
         # Again use soundfile directly to avoid the torchcodec DLL issue.

@@ -7,19 +7,15 @@ from typing import Dict, Any, List
 logger = logging.getLogger(__name__)
 
 _PIPELINE = None
-_PIPELINE_JOB_ID = None
 
 
 def _get_pipeline(job_id: str | None = None):
     """
     Lazily load the pyannote diarization pipeline.
+    Cached globally — the pipeline is stateless and reusable across jobs.
     Never crashes the pipeline.
     """
-    global _PIPELINE, _PIPELINE_JOB_ID
-
-    if job_id and _PIPELINE_JOB_ID != job_id:
-        _PIPELINE = None
-        _PIPELINE_JOB_ID = job_id
+    global _PIPELINE
 
     if _PIPELINE is not None:
         return _PIPELINE
@@ -43,6 +39,12 @@ def _get_pipeline(job_id: str | None = None):
             "pyannote/speaker-diarization-3.1",
             token=token,
         )
+        import torch
+        if torch.cuda.is_available():
+            _PIPELINE = _PIPELINE.to(torch.device("cuda"))
+            logger.info("[DIARIZE] Pipeline moved to CUDA GPU")
+        else:
+            logger.info("[DIARIZE] Pipeline running on CPU")
         logger.info("[DIARIZE] Pipeline loaded successfully")
     except Exception as e:
         logger.error(f"[DIARIZE] Failed to load pipeline: {e}")
@@ -105,8 +107,25 @@ def diarize_audio(extract_result: Dict[str, Any], job_id: str | None = None) -> 
         # of collapsing similar-sounding speakers.
         min_speakers = int(os.getenv("DIARIZATION_MIN_SPEAKERS", "2"))
         max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "4"))
+
+        # Ensure audio is float32 mono [1, samples] as pyannote expects
+        import torch
+        waveform = audio
+        if waveform.dtype != torch.float32:
+            waveform = waveform.float()
+        if waveform.dim() == 1:
+            waveform = waveform.unsqueeze(0)  # [1, samples]
+        elif waveform.dim() == 2 and waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)  # stereo -> mono
+
+        logger.info(
+            f"[DIARIZE] Waveform: shape={list(waveform.shape)}, "
+            f"dtype={waveform.dtype}, sample_rate={sample_rate}, "
+            f"min_speakers={min_speakers}, max_speakers={max_speakers}"
+        )
+
         pipeline_kwargs: dict = {
-            "waveform": audio.unsqueeze(0),  # pyannote expects [channels, samples]
+            "waveform": waveform,
             "sample_rate": sample_rate,
         }
         logger.info(f"[DIARIZE] Speaker constraints: min={min_speakers}, max={max_speakers}")
@@ -154,10 +173,14 @@ def diarize_audio(extract_result: Dict[str, Any], job_id: str | None = None) -> 
         }
 
     except Exception as e:
-        # Diarization failure is NON-FATAL
-        logger.error(f"[DIARIZE] Diarization failed: {type(e).__name__}: {e}", exc_info=True)
+        # Diarization failure is NON-FATAL — log the full traceback so we
+        # can diagnose the root cause (torchcodec missing, HF token scope, etc.)
+        logger.error(
+            f"[DIARIZE] Diarization failed: {type(e).__name__}: {e}",
+            exc_info=True,
+        )
         return {
             "status": "skipped",
             "reason": "diarization_failed",
-            "error_message": str(e),
+            "error_message": f"{type(e).__name__}: {e}",
         }

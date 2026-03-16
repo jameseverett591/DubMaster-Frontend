@@ -18,13 +18,16 @@ class TranscriptionService:
     def _get_model(self):
         if self._model is None:
             try:
+                import torch
                 from faster_whisper import WhisperModel
+                _device = "cuda" if torch.cuda.is_available() else "cpu"
+                _compute = "float16" if _device == "cuda" else "int8"
                 self._model = WhisperModel(
                     self.model_size,
-                    device="cpu",
-                    compute_type="int8",
+                    device=_device,
+                    compute_type=_compute,
                 )
-                logger.info(f"Loaded Whisper model: {self.model_size}")
+                logger.info(f"Loaded Whisper model: {self.model_size} on {_device}")
             except Exception as e:
                 logger.error(f"Failed to load Whisper model: {e}")
                 raise

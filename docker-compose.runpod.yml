@@ -1,0 +1,78 @@
+# ============================================
+# DUBVERSE — RunPod / Cloud GPU Deployment
+# Usage:
+#   docker-compose -f docker-compose.runpod.yml up -d
+#
+# Prerequisites on RunPod pod:
+#   - Template: RunPod PyTorch 2.1 (has CUDA + nvidia-container-toolkit)
+#   - Persistent volume mounted at /workspace
+#   - All .env values set as RunPod environment variables
+# ============================================
+
+services:
+  backend:
+    image: dubmaster/dubverse-backend:gpu
+    container_name: dubverse-backend
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      # Persistent volume — survives pod restarts
+      - /workspace/dubverse/data:/app/data
+      - /workspace/dubverse/uploads:/app/uploads
+      - /workspace/dubverse/outputs:/app/outputs
+      # HuggingFace + torch model cache — avoids re-downloading on restart
+      - /workspace/hf-cache:/root/.cache
+    environment:
+      - PYTHONUNBUFFERED=1
+      # All API keys loaded from RunPod pod environment variables
+      - FISH_AUDIO_API_KEY=${FISH_AUDIO_API_KEY}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - TTS_PROVIDER=${TTS_PROVIDER}
+      - DEEPL_API_KEY=${DEEPL_API_KEY}
+      - GOOGLE_TRANSLATE_API_KEY=${GOOGLE_TRANSLATE_API_KEY}
+      - HUGGING_FACE_TOKEN=${HUGGING_FACE_TOKEN}
+      - HF_TOKEN=${HF_TOKEN}
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
+      - AZURE_OPENAI_KEY=${AZURE_OPENAI_KEY}
+      - AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - WHISPER_MODEL=medium
+      - WHISPER_LANGUAGE=yue
+      - AUDIO_SEPARATION_ENABLED=1
+      - AUDIO_SEPARATION_MODEL=htdemucs
+      - ACCOMPANIMENT_LEVEL=0.85
+      - DIARIZATION_MIN_SPEAKERS=3
+      - DIARIZATION_MAX_SPEAKERS=3
+      - DIARIZATION_TIMEOUT_SEC=300
+      - F0_FEMALE_THRESHOLD=185
+      - F0_CHILD_THRESHOLD=260
+      - VAD_TWO_PASS=1
+      - VAD_GAP_THRESHOLD=3.0
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  frontend:
+    image: dubmaster/dubverse-frontend:latest
+    container_name: dubverse-frontend
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

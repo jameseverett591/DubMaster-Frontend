@@ -11,7 +11,11 @@ logger = logging.getLogger(__name__)
 class JobManager:
     def __init__(self):
         self._jobs: Dict[str, Job] = {}
+        self._deleted_ids: set[str] = set()
         self._lock = asyncio.Lock()
+
+    def is_deleted(self, job_id: str) -> bool:
+        return job_id in self._deleted_ids
     
     async def create_job(
         self,
@@ -119,11 +123,13 @@ class JobManager:
 
     async def delete_job(self, job_id: str) -> bool:
         async with self._lock:
+            self._deleted_ids.add(job_id)
             if job_id in self._jobs:
                 del self._jobs[job_id]
                 logger.info(f"Deleted job {job_id}")
                 return True
-            return False
+            logger.info(f"Marked job {job_id} as deleted (was not in memory)")
+            return True
     
     async def list_jobs(self) -> list[Job]:
         async with self._lock:

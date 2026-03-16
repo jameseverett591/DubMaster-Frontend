@@ -1,0 +1,70 @@
+# ============================================
+# DUBVERSE BACKEND REQUIREMENTS — GPU
+# CUDA 11.8 build of PyTorch
+# ============================================
+
+# ============================================
+# WEB FRAMEWORK
+# ============================================
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# ============================================
+# AUDIO/VIDEO PROCESSING
+# ============================================
+ffmpeg-python>=0.2.0
+librosa>=0.10.0
+soundfile>=0.12.1
+pydub>=0.25.1
+
+# ============================================
+# AI/ML MODELS — GPU (CUDA 11.8)
+# ============================================
+# PyTorch GPU build — must install before other ML packages
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.1.0+cu118
+torchaudio==2.1.0+cu118
+
+# Speaker Diarization
+pyannote.audio>=3.1.0
+
+# Audio Source Separation
+demucs>=4.0.0
+
+# Speech Recognition
+faster-whisper>=0.10.0
+
+# ============================================
+# TEXT-TO-SPEECH
+# ============================================
+elevenlabs>=0.2.0
+fish-audio-sdk>=1.0.0
+edge-tts>=6.1.0
+
+# ============================================
+# TRANSLATION
+# ============================================
+deepl>=1.17.0
+deep-translator>=1.11.4
+
+# ============================================
+# UTILITIES
+# ============================================
+requests>=2.31.0
+httpx>=0.25.0
+aiofiles>=23.2.1
+python-magic>=0.4.27
+python-dotenv>=1.0.0
+loguru>=0.7.2
+python-dateutil>=2.8.2
+tqdm>=4.66.0
+
+# ============================================
+# QUALITY ANALYSIS
+# ============================================
+azure-cognitiveservices-speech>=1.37.0
+openai>=1.12.0
+opencv-python-headless>=4.8.0

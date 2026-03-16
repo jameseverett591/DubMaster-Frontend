@@ -35,7 +35,7 @@ VOICE_MAP = {
 }
 
 LANGUAGE_MODELS = {
-    "en": "eleven_turbo_v2_5",
+    "en": "eleven_multilingual_v2",
     "es": "eleven_multilingual_v2",
     "fr": "eleven_multilingual_v2",
     "de": "eleven_multilingual_v2",
@@ -67,12 +67,12 @@ EDGE_VOICES: Dict[str, Dict[str, List[str]]] = {
     "en": {
         "male": ["en-US-GuyNeural", "en-US-ChristopherNeural", "en-GB-RyanNeural"],
         "female": ["en-US-JennyNeural", "en-US-AriaNeural", "en-GB-SoniaNeural"],
-        "child": ["en-US-JennyNeural", "en-US-AriaNeural"],
+        "child": ["en-US-AnaNeural", "en-US-JennyNeural"],
     },
     "es": {
         "male": ["es-ES-AlvaroNeural", "es-MX-JorgeNeural"],
         "female": ["es-ES-ElviraNeural", "es-MX-DaliaNeural"],
-        "child": ["es-ES-ElviraNeural", "es-MX-DaliaNeural"],
+        "child": ["es-MX-DaliaNeural", "es-ES-ElviraNeural"],
     },
     "fr": {
         "male": ["fr-FR-HenriNeural", "fr-CA-AntoineNeural"],
@@ -82,12 +82,12 @@ EDGE_VOICES: Dict[str, Dict[str, List[str]]] = {
     "de": {
         "male": ["de-DE-ConradNeural", "de-DE-KillianNeural"],
         "female": ["de-DE-KatjaNeural", "de-DE-AmalaNeural"],
-        "child": ["de-DE-KatjaNeural", "de-DE-AmalaNeural"],
+        "child": ["de-DE-AmalaNeural", "de-DE-KatjaNeural"],
     },
     "it": {
         "male": ["it-IT-DiegoNeural"],
         "female": ["it-IT-ElsaNeural", "it-IT-IsabellaNeural"],
-        "child": ["it-IT-ElsaNeural", "it-IT-IsabellaNeural"],
+        "child": ["it-IT-IsabellaNeural", "it-IT-ElsaNeural"],
     },
     "pt": {
         "male": ["pt-BR-AntonioNeural"],
@@ -210,7 +210,10 @@ class ElevenLabsTTS:
     ) -> Optional[Dict[str, str]]:
         logger.info(f"TTS Request: voice_id={voice_id}, model={model_id}, language={language}, text={text[:50]}...")
 
-        edge_primary = os.getenv("EDGE_TTS_PRIMARY", "1") == "1"
+        # Default to ElevenLabs when API key is available, Edge TTS otherwise.
+        # Override with EDGE_TTS_PRIMARY=1 to force Edge TTS even with a key.
+        default_edge = "0" if self.enabled else "1"
+        edge_primary = os.getenv("EDGE_TTS_PRIMARY", default_edge) == "1"
         if edge_primary and self.edge_tts_available:
             gender = await self._resolve_voice_gender(voice_id)
             fallback_path = await self._fallback_tts(text, output_path, language, voice_id, gender)
@@ -301,8 +304,10 @@ class ElevenLabsTTS:
 
             language = normalize_language_code(language)
             edge_voice = self._get_edge_voice(language, gender, voice_id)
-            rate = "+8%" if gender == "child" else None
-            pitch = "+20Hz" if gender == "child" else None
+            # Slightly slower rate for more natural delivery (Edge TTS
+            # defaults are fast and robotic).  Children get a faster rate.
+            rate = "+15%" if gender == "child" else "-5%"
+            pitch = "+50Hz" if gender == "child" else None
 
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             kwargs = {}
@@ -377,8 +382,8 @@ class ElevenLabsTTS:
 
     def _get_edge_voice(self, language: str, gender: str, voice_id: str) -> str:
         """Pick a distinct edge-tts voice based on language and speaker gender."""
-        pools = EDGE_VOICES.get(language, EDGE_VOICES["en"]) 
-        gender_key = gender if gender in pools else ("female" if gender == "child" else "male")
+        pools = EDGE_VOICES.get(language, EDGE_VOICES["en"])
+        gender_key = gender if gender in pools else "male"
         voices = pools.get(gender_key) or pools.get("female") or pools.get("male")
         idx = _voice_index(voice_id)
         return voices[idx % len(voices)]

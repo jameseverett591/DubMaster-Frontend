@@ -2,9 +2,11 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
 import uuid
 import os
+import json as _json
 from pathlib import Path
 import logging
 import asyncio
+import torchaudio
 
 from app.models import (
     UploadResponse,
@@ -28,6 +30,8 @@ from app.services.dubbing_service import dubbing_service
 from app.services.lipsync_service import lipsync_service
 from app.services.transcription_service import transcription_service
 from app.services.elevenlabs_tts import elevenlabs_tts
+from app.services.fish_audio_tts import fish_audio_tts
+from app.services.vozo_service import vozo_service, VOZO_STATUS_MAP, POLL_INTERVAL_SEC, MAX_POLL_ATTEMPTS
 from app.utils.language import normalize_language_code
 
 logger = logging.getLogger(__name__)
@@ -92,6 +96,9 @@ async def _rehydrate_job(job_id: str):
     existing = await job_manager.get_job(job_id)
     if existing:
         return existing
+
+    if job_manager.is_deleted(job_id):
+        return None
 
     video_info = _find_uploaded_video(job_id)
     if not video_info:
@@ -203,15 +210,22 @@ def _smooth_speaker_assignments(segments):
         return segments
 
     # Pass 1: fix single short flips between matching neighbors.
+    # Only reassign very short segments (<0.4s) with minimal text —
+    # longer segments (even if short in duration) likely represent real
+    # speaker turns in fast-paced dialogue.
     for i in range(1, len(segments) - 1):
         seg = segments[i]
         prev_seg = segments[i - 1]
         next_seg = segments[i + 1]
         dur = max(0.0, (seg.end or 0) - (seg.start or 0))
-        if dur <= 0.8 and prev_seg.speaker == next_seg.speaker:
+        text_len = len((seg.text or "").strip())
+        # Only smooth truly tiny segments with very short text
+        if dur <= 0.4 and text_len < 4 and prev_seg.speaker == next_seg.speaker:
             seg.speaker = prev_seg.speaker
 
     # Pass 2: merge very short rare speakers into nearest neighbor.
+    # Only merge speakers with very low total duration (<1.0s) to avoid
+    # collapsing legitimate minor characters.
     counts = {}
     durations = {}
     for seg in segments:
@@ -219,7 +233,7 @@ def _smooth_speaker_assignments(segments):
         durations[seg.speaker] = durations.get(seg.speaker, 0.0) + max(0.0, seg.end - seg.start)
 
     for i, seg in enumerate(segments):
-        if counts.get(seg.speaker, 0) <= 1 and durations.get(seg.speaker, 0.0) < 2.0:
+        if counts.get(seg.speaker, 0) <= 1 and durations.get(seg.speaker, 0.0) < 1.0:
             if i > 0:
                 seg.speaker = segments[i - 1].speaker
             elif i + 1 < len(segments):
@@ -268,13 +282,14 @@ def _estimate_speakers_from_segments(raw_segments) -> int:
 
 async def _run_diarization_with_heartbeat(job_id: str, extract_result: dict, timeout_sec: int) -> dict:
     """
-    Run diarization in a worker thread while pulsing progress (86-89) so
-    the UI doesn't appear frozen during long diarization passes.
+    Run diarization in a worker thread while reporting smooth progress
+    (86→89%) based on elapsed time vs expected duration.
     """
     loop = asyncio.get_running_loop()
     start_time = loop.time()
-    pulse_progress = [86, 87, 88, 89]
-    pulse_index = 0
+    # Estimate expected duration: ~2x video length on CPU, cap at timeout
+    video_duration = extract_result.get("duration", 120)
+    expected_sec = min(video_duration * 2, timeout_sec * 0.9)
 
     diarization_task = asyncio.create_task(
         asyncio.to_thread(diarize_audio, extract_result, job_id)
@@ -296,13 +311,16 @@ async def _run_diarization_with_heartbeat(job_id: str, extract_result: dict, tim
             )
             return {"status": "skipped", "reason": "diarization_timeout"}
 
+        # Smooth progress: 86 → 89 based on elapsed/expected, never exceeds 89
+        fraction = min(elapsed / max(expected_sec, 1), 1.0)
+        progress = 86 + int(fraction * 3)
+
         await job_manager.update_job_status(
             job_id,
             JobStatus.DIARIZING,
-            progress=pulse_progress[pulse_index % len(pulse_progress)],
+            progress=progress,
             current_stage="Identifying speakers",
         )
-        pulse_index += 1
         await asyncio.sleep(5)
 
 async def process_video_pipeline(job_id: str, video_path: str):
@@ -367,11 +385,63 @@ async def process_video_pipeline(job_id: str, video_path: str):
         await job_manager.update_job_status(
             job_id,
             JobStatus.TRANSCRIBING,
-            progress=60,
-            current_stage="Transcribing audio with Whisper"
+            progress=55,
+            current_stage="Separating speech from background noise"
         )
-        
-        transcribe_result = await asyncio.to_thread(transcribe_audio, extract_result, job_id)
+
+        # Run Demucs vocal separation before Whisper so transcription uses
+        # clean isolated speech instead of the raw mix (fight SFX, music, crowd).
+        from app.pipeline.separate_audio import separate_audio
+        separation_result = await asyncio.to_thread(separate_audio, video_path, job_id)
+
+        transcribe_input = extract_result
+        if separation_result.get("status") == "ok":
+            vocals_path = separation_result.get("vocals_path")
+            logger.info(f"Job {job_id}: using separated vocals for transcription: {vocals_path}")
+            # Load the clean vocals WAV into the same format as extract_result
+            try:
+                import soundfile as sf
+                import numpy as np
+                import torch
+                vocals_data, vocals_sr = sf.read(vocals_path, always_2d=True)
+                vocals_waveform = torch.from_numpy(vocals_data.T).float()  # [channels, samples]
+                # Resample to 16kHz mono for Whisper if needed
+                if vocals_sr != 16000:
+                    vocals_waveform = torchaudio.functional.resample(vocals_waveform, vocals_sr, 16000)
+                    vocals_sr = 16000
+                if vocals_waveform.shape[0] > 1:
+                    vocals_waveform = vocals_waveform.mean(dim=0, keepdim=True)
+                transcribe_input = {
+                    "status": "ok",
+                    "audio": vocals_waveform,
+                    "sample_rate": vocals_sr,
+                }
+            except Exception as voc_err:
+                logger.warning(f"Job {job_id}: failed to load vocals for transcription, using raw audio: {voc_err}")
+        else:
+            logger.info(f"Job {job_id}: separation skipped ({separation_result.get('reason')}), transcribing raw audio")
+
+        await job_manager.update_job_status(
+            job_id,
+            JobStatus.TRANSCRIBING,
+            progress=60,
+            current_stage="Transcribing audio"
+        )
+
+        # Use the multi-engine Cantonese pipeline for CJK languages,
+        # fall back to Whisper-only for other languages.
+        whisper_language = os.getenv("WHISPER_LANGUAGE", "").strip()
+        _CJK_LANGS = {"zh", "yue", "ja", "ko", "cmn"}
+        vocals_path = separation_result.get("vocals_path") if separation_result.get("status") == "ok" else None
+
+        if whisper_language in _CJK_LANGS:
+            from app.pipeline.transcribe_cantonese import transcribe_cantonese
+            logger.info(f"Job {job_id}: using multi-engine Cantonese ASR pipeline (lang={whisper_language})")
+            transcribe_result = await asyncio.to_thread(
+                transcribe_cantonese, transcribe_input, vocals_path, job_id
+            )
+        else:
+            transcribe_result = await asyncio.to_thread(transcribe_audio, transcribe_input, job_id)
         
         if transcribe_result["status"] == "ok":
             import json
@@ -393,10 +463,17 @@ async def process_video_pipeline(job_id: str, video_path: str):
                 )
 
                 diarization_segments = []
-                diarization_timeout_sec = int(os.getenv("DIARIZATION_TIMEOUT_SEC", "120"))
+                diarization_timeout_sec = int(os.getenv("DIARIZATION_TIMEOUT_SEC", "600"))
+                # Use separated vocals for diarization when available —
+                # the original mix has fight SFX / music that confuse pyannote.
+                diarize_input = transcribe_input if transcribe_input is not extract_result else extract_result
+                logger.info(
+                    f"Job {job_id}: diarization using "
+                    f"{'separated vocals' if diarize_input is not extract_result else 'original audio'}"
+                )
                 diarization_result = await _run_diarization_with_heartbeat(
                     job_id,
-                    extract_result,
+                    diarize_input,
                     diarization_timeout_sec,
                 )
                 if diarization_result.get("status") == "ok":
@@ -449,7 +526,14 @@ async def process_video_pipeline(job_id: str, video_path: str):
                 await job_manager.update_job_transcript(job_id, transcript)
                 logger.info(f"Job {job_id}: Transcription complete with {len(segments)} segments")
         else:
-            logger.warning(f"Transcription skipped: {transcribe_result.get('reason')}")
+            err_msg = transcribe_result.get('error_message', 'unknown error')
+            logger.error(f"Transcription failed for job {job_id}: {transcribe_result.get('reason')} — {err_msg}")
+            await job_manager.update_job_status(
+                job_id,
+                JobStatus.FAILED,
+                error_message=f"Transcription failed: {err_msg}"
+            )
+            return
 
         await job_manager.update_job_status(
             job_id,
@@ -647,27 +731,64 @@ async def get_transcript(job_id: str):
 
 
 @router.delete("/job/{job_id}")
+@router.delete("/jobs/{job_id}")
 async def delete_job(job_id: str):
-    job = await _get_or_rehydrate_job(job_id)
-    
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
+    # Mark as deleted FIRST to prevent rehydration race
+    await job_manager.delete_job(job_id)
+
+    # Clean up all disk artifacts (uploads, chunks, processed, output)
     storage.delete_job_files(job_id)
-    
-    deleted = await job_manager.delete_job(job_id)
-    
-    if deleted:
-        return {"message": f"Job {job_id} deleted successfully"}
-    else:
-        raise HTTPException(status_code=500, detail="Failed to delete job")
+
+    # Also clean dubbed and separated files which StorageManager doesn't cover
+    import shutil
+    dubbed_dir = os.path.join(settings.DUBBED_DIR, job_id)
+    if os.path.isdir(dubbed_dir):
+        shutil.rmtree(dubbed_dir, ignore_errors=True)
+        logger.info(f"Deleted dubbed directory: {dubbed_dir}")
+
+    separated_pattern = os.path.join("data/separated", f"{job_id}_*")
+    import glob as _glob
+    for sep_file in _glob.glob(separated_pattern):
+        try:
+            os.remove(sep_file)
+            logger.info(f"Deleted separated file: {sep_file}")
+        except OSError:
+            pass
+
+    return {"message": f"Job {job_id} deleted successfully"}
 
 
 @router.get("/jobs")
 async def list_all_jobs():
+    # Rehydrate only the most recent jobs from disk (by folder mtime), skip old stale ones
+    uploads_dir = settings.UPLOAD_DIR
+    if os.path.isdir(uploads_dir):
+        entries = []
+        for entry in os.scandir(uploads_dir):
+            if entry.is_dir():
+                try:
+                    entries.append((entry.stat().st_mtime, entry.name))
+                except OSError:
+                    pass
+        # Only rehydrate the 10 most recently modified job folders
+        entries.sort(reverse=True)
+        for _, job_id in entries[:10]:
+            existing = await job_manager.get_job(job_id)
+            if not existing:
+                await _rehydrate_job(job_id)
+
     jobs = await job_manager.list_jobs()
+    # Sort by most recently updated, newest first
+    jobs.sort(key=lambda j: j.updated_at or j.created_at, reverse=True)
+    # Filter out stale rehydrated jobs that have no transcript (processing/50%)
+    # keeping only completed, failed, or actively running jobs
+    filtered = [
+        j for j in jobs
+        if j.status != "processing" or j.progress != 50 or
+           (j.updated_at and j.created_at and j.updated_at != j.created_at)
+    ]
     return {
-        "total": len(jobs),
+        "total": len(filtered),
         "jobs": [
             {
                 "job_id": job.job_id,
@@ -677,7 +798,7 @@ async def list_all_jobs():
                 "created_at": job.created_at,
                 "updated_at": job.updated_at
             }
-            for job in jobs
+            for job in filtered
         ]
     }
 
@@ -690,6 +811,112 @@ async def cleanup_old_files():
     except Exception as e:
         logger.error(f"Cleanup failed: {e}")
         raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
+
+
+async def process_vozo_pipeline(
+    job_id: str,
+    video_path: str,
+    target_lang: str,
+    source_lang: str,
+    user_prompt: str | None = None,
+):
+    """Delegate the entire dubbing pipeline to Vozo AI."""
+    try:
+        video_url = f"{vozo_service.public_base_url}/api/media/{job_id}/video"
+
+        await job_manager.update_job_status(
+            job_id, JobStatus.PROCESSING, progress=5,
+            current_stage="Submitting to Vozo AI",
+        )
+
+        vozo_task_id = await vozo_service.start_dub(
+            job_id=job_id,
+            video_url=video_url,
+            source_language=source_lang,
+            target_language=target_lang,
+            user_prompt=user_prompt,
+        )
+
+        if not vozo_task_id:
+            await job_manager.update_job_status(
+                job_id, JobStatus.FAILED,
+                error_message="Failed to submit job to Vozo AI. Check API key and PUBLIC_BASE_URL.",
+            )
+            return
+
+        # Poll loop
+        for attempt in range(1, MAX_POLL_ATTEMPTS + 1):
+            await asyncio.sleep(POLL_INTERVAL_SEC)
+
+            data = await vozo_service.poll_dub_status(vozo_task_id)
+            vozo_status = data.get("status", "unknown")
+
+            mapped = VOZO_STATUS_MAP.get(vozo_status)
+            if mapped:
+                our_status, progress, stage_msg = mapped
+                if our_status not in ("completed", "failed"):
+                    await job_manager.update_job_status(
+                        job_id, JobStatus(our_status),
+                        progress=progress, current_stage=stage_msg,
+                    )
+
+            if vozo_status == "done":
+                video_result_url = data.get("video_url")
+                if not video_result_url:
+                    await job_manager.update_job_status(
+                        job_id, JobStatus.FAILED,
+                        error_message="Vozo completed but returned no video URL",
+                    )
+                    return
+
+                output_dir = os.path.join(settings.DUBBED_DIR, job_id)
+                os.makedirs(output_dir, exist_ok=True)
+                output_path = os.path.join(output_dir, f"dubbed_{target_lang}.mp4")
+
+                success = await vozo_service.download_result(video_result_url, output_path)
+                if not success:
+                    await job_manager.update_job_status(
+                        job_id, JobStatus.FAILED,
+                        error_message="Failed to download dubbed video from Vozo",
+                    )
+                    return
+
+                # Download subtitles if available
+                subtitle_url = data.get("subtitle_url")
+                if subtitle_url:
+                    srt_path = os.path.join(output_dir, f"subtitles_{target_lang}.srt")
+                    await vozo_service.download_result(subtitle_url, srt_path)
+
+                dubbed_url = f"/api/download/{job_id}/{target_lang}"
+                await job_manager.update_job_dubbing_result(
+                    job_id, dubbed_url, tts_engine="vozo",
+                )
+                await job_manager.update_job_status(
+                    job_id, JobStatus.COMPLETED, progress=100,
+                    current_stage="Vozo dubbing complete",
+                )
+                logger.info(f"Job {job_id}: Vozo dubbing completed successfully")
+                return
+
+            elif vozo_status == "failed":
+                error_detail = data.get("message", "Vozo reported failure")
+                await job_manager.update_job_status(
+                    job_id, JobStatus.FAILED,
+                    error_message=f"Vozo dubbing failed: {error_detail}",
+                )
+                return
+
+        # Timed out
+        await job_manager.update_job_status(
+            job_id, JobStatus.FAILED,
+            error_message=f"Vozo dubbing timed out after {MAX_POLL_ATTEMPTS * POLL_INTERVAL_SEC}s",
+        )
+
+    except Exception as e:
+        logger.error(f"Error in Vozo pipeline for job {job_id}: {e}")
+        await job_manager.update_job_status(
+            job_id, JobStatus.FAILED, error_message=str(e),
+        )
 
 
 async def process_dubbing_pipeline(
@@ -834,7 +1061,43 @@ async def dub_video(request: DubRequest, background_tasks: BackgroundTasks):
             f"target={request.target_language} -> {target_lang}"
         )
 
-    # Reset dubbing-related fields before starting
+    # Determine dubbing engine
+    engine = (request.dubbing_engine or "dubmaster").lower().strip()
+
+    if engine == "vozo":
+        if not vozo_service.enabled:
+            raise HTTPException(
+                status_code=400,
+                detail="Vozo AI is not available. Set VOZO_API_KEY, VOZO_ENABLED=true, and PUBLIC_BASE_URL in .env",
+            )
+
+        job.dubbing_engine = "vozo"
+        await job_manager.update_job_status(
+            request.job_id, JobStatus.PROCESSING, progress=5,
+            current_stage="Starting Vozo AI pipeline",
+        )
+
+        background_tasks.add_task(
+            process_vozo_pipeline,
+            job_id=request.job_id,
+            video_path=job.video_path,
+            target_lang=target_lang,
+            source_lang=source_lang,
+            user_prompt=request.vozo_user_prompt,
+        )
+
+        return DubResponse(
+            job_id=request.job_id,
+            status="processing",
+            dubbed_video_url=None,
+            tts_engine=None,
+            dubbing_engine="vozo",
+            message="Vozo AI dubbing started, poll /api/status for progress",
+        )
+
+    # === DubMaster pipeline (default) ===
+    job.dubbing_engine = "dubmaster"
+
     await job_manager.update_job_status(
         request.job_id,
         JobStatus.PROCESSING,
@@ -859,6 +1122,7 @@ async def dub_video(request: DubRequest, background_tasks: BackgroundTasks):
         status="processing",
         dubbed_video_url=None,
         tts_engine=None,
+        dubbing_engine="dubmaster",
         message="Dubbing started, poll /api/status for progress"
     )
 
@@ -909,10 +1173,86 @@ async def serve_job_audio(job_id: str, filename: str):
     return FileResponse(audio_path, media_type=media_types.get(ext, "audio/mpeg"))
 
 
+@router.get("/dubbing-engines")
+async def get_dubbing_engines():
+    """Return available dubbing engines and their status."""
+    return {
+        "engines": {
+            "dubmaster": {
+                "available": True,
+                "description": "Local pipeline: Whisper + Demucs + ElevenLabs/Fish Audio",
+                "features": ["voice_selection", "emotion_control", "segment_editing"],
+            },
+            "vozo": {
+                "available": vozo_service.enabled,
+                "description": "Vozo AI cloud pipeline (full-service dubbing)",
+                "features": ["auto_voice_matching", "auto_translation", "lip_sync"],
+                "requires_public_url": True,
+                "public_url_set": bool(settings.PUBLIC_BASE_URL),
+            },
+        },
+    }
+
+
+@router.get("/tts-provider")
+async def get_tts_provider():
+    """Return the currently active TTS provider and availability info."""
+    provider = os.getenv("TTS_PROVIDER", settings.TTS_PROVIDER).lower().strip()
+    return {
+        "active": provider,
+        "providers": {
+            "elevenlabs": {"available": bool(settings.ELEVENLABS_API_KEY)},
+            "fish-audio": {
+                "available": fish_audio_tts.enabled,
+                "voice_cloning": fish_audio_tts.enabled,
+            },
+        },
+    }
+
+
+@router.post("/tts-provider")
+async def set_tts_provider(body: dict):
+    """Switch the active TTS provider at runtime.
+
+    Accepts ``{"provider": "fish-audio"}`` or ``{"provider": "elevenlabs"}``.
+    Sets the ``TTS_PROVIDER`` env var for the current process (persists until
+    container restart).  Returns the updated provider state.
+    """
+    requested = (body.get("provider") or "").lower().strip()
+    valid = {"elevenlabs", "fish-audio"}
+    if requested not in valid:
+        raise HTTPException(status_code=400, detail=f"Invalid provider. Choose from: {', '.join(sorted(valid))}")
+
+    if requested == "fish-audio" and not fish_audio_tts.enabled:
+        raise HTTPException(status_code=400, detail="Fish Audio API key not configured. Set FISH_AUDIO_API_KEY in .env")
+
+    os.environ["TTS_PROVIDER"] = requested
+    logger.info(f"[TTS] Provider switched to: {requested}")
+
+    return {
+        "active": requested,
+        "providers": {
+            "elevenlabs": {"available": bool(settings.ELEVENLABS_API_KEY)},
+            "fish-audio": {
+                "available": fish_audio_tts.enabled,
+                "voice_cloning": fish_audio_tts.enabled,
+            },
+        },
+    }
+
+
 @router.get("/voices")
 async def get_available_voices():
     try:
-        voices = await elevenlabs_tts.get_voices()
+        provider = os.getenv("TTS_PROVIDER", settings.TTS_PROVIDER).lower().strip()
+
+        if provider == "fish-audio" and fish_audio_tts.enabled:
+            voices = await fish_audio_tts.get_voices()
+            source = "fish-audio"
+        else:
+            voices = await elevenlabs_tts.get_voices()
+            source = "elevenlabs"
+
         formatted_voices = []
         for voice in voices:
             voice_id = voice.get("voice_id")
@@ -924,7 +1264,7 @@ async def get_available_voices():
                 "preview_url": f"/api/voice-preview/{voice_id}",
                 "description": voice.get("description", ""),
             })
-        return {"voices": formatted_voices}
+        return {"voices": formatted_voices, "provider": source}
     except Exception as e:
         logger.error(f"Failed to fetch voices: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch voices")
@@ -932,46 +1272,50 @@ async def get_available_voices():
 
 @router.get("/voice-preview/{voice_id}")
 async def get_voice_preview(voice_id: str):
-    """Generate and serve a voice preview sample using ElevenLabs TTS"""
+    """Generate and serve a voice preview sample using the active TTS provider."""
     preview_dir = Path("data/voice_previews")
     preview_dir.mkdir(parents=True, exist_ok=True)
-    
+
     preview_path = preview_dir / f"{voice_id}.mp3"
-    
+
     if preview_path.exists():
         return FileResponse(
             str(preview_path),
             media_type="audio/mpeg",
             filename=f"{voice_id}_preview.mp3"
         )
-    
-    voices = await elevenlabs_tts.get_voices()
+
+    provider = os.getenv("TTS_PROVIDER", settings.TTS_PROVIDER).lower().strip()
+    if provider == "fish-audio" and fish_audio_tts.enabled:
+        tts = fish_audio_tts
+    else:
+        tts = elevenlabs_tts
+
+    voices = await tts.get_voices()
     voice_info = next((v for v in voices if v.get("voice_id") == voice_id), None)
-    
+
     if not voice_info:
         raise HTTPException(status_code=404, detail="Voice not found")
-    
+
     voice_name = voice_info.get("name", "This voice")
     gender = voice_info.get("labels", {}).get("gender", "")
     accent = voice_info.get("labels", {}).get("accent", "")
-    
+
     preview_text = f"Hello, I'm {voice_name}. "
     if gender and accent:
         preview_text += f"I'm a {gender} voice with a {accent} accent. "
     preview_text += "I can help bring your videos to life with natural, expressive dubbing."
-    
-    result = await elevenlabs_tts.text_to_speech(
+
+    result = await tts.text_to_speech(
         text=preview_text,
         voice_id=voice_id,
         output_path=str(preview_path),
-        model_id="eleven_multilingual_v2",
         stability=0.3,
         similarity_boost=0.9,
         style=0.5,
-        use_speaker_boost=True,
         language="en",
     )
-    
+
     if result and preview_path.exists():
         return FileResponse(
             str(preview_path),
@@ -980,3 +1324,83 @@ async def get_voice_preview(voice_id: str):
         )
     else:
         raise HTTPException(status_code=500, detail="Failed to generate voice preview")
+
+
+# ---------------------------------------------------------------------------
+# Quality Analysis endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/analyze/{job_id}/{language}")
+async def trigger_analysis(job_id: str, language: str, background_tasks: BackgroundTasks):
+    """Trigger post-dub quality analysis. Returns 202 immediately."""
+    job = await _get_or_rehydrate_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    lang_norm = language.lower().strip()
+    dubbed_dir = Path(settings.DUBBED_DIR) / job_id
+    dubbed_video = dubbed_dir / f"dubbed_{lang_norm}.mp4"
+    if not dubbed_video.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No dubbed video found for language '{lang_norm}'"
+        )
+
+    # Check if already running
+    sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
+    if sentinel.exists():
+        return JSONResponse(
+            status_code=202,
+            content={"status": "running", "message": "Analysis already in progress"}
+        )
+
+    from app.pipeline.analyze_dub import analyze_dub
+
+    background_tasks.add_task(
+        asyncio.to_thread,
+        analyze_dub,
+        job_id,
+        lang_norm,
+        job.video_path,
+    )
+    logger.info(f"Job {job_id}: quality analysis triggered for {lang_norm}")
+
+    return JSONResponse(
+        status_code=202,
+        content={"status": "started", "message": "Quality analysis started"}
+    )
+
+
+@router.get("/analysis/{job_id}/{language}")
+async def get_analysis(job_id: str, language: str):
+    """Get quality analysis results. 202 if running, 200 if complete, 404 if not triggered."""
+    lang_norm = language.lower().strip()
+    dubbed_dir = Path(settings.DUBBED_DIR) / job_id
+
+    # Check sentinel first — but also detect stale sentinels (result file
+    # already exists means the analysis finished but sentinel wasn't cleaned up).
+    sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
+    result_file = dubbed_dir / f"analysis_{lang_norm}.json"
+    if sentinel.exists():
+        if result_file.exists():
+            # Stale sentinel — analysis completed but cleanup didn't fire.
+            try:
+                sentinel.unlink(missing_ok=True)
+            except Exception:
+                pass
+        else:
+            return JSONResponse(
+                status_code=202,
+                content={"status": "running", "message": "Analysis in progress"}
+            )
+
+    if not result_file.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Analysis not found. Trigger with POST /api/analyze/{job_id}/{language}"
+        )
+
+    with open(result_file, "r", encoding="utf-8") as f:
+        analysis = _json.load(f)
+
+    return {"status": "complete", "analysis": analysis}

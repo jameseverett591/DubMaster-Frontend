@@ -1,15 +1,19 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { VideoUpload } from "@/components/video-upload"
 import { YouTubeIntegration } from "@/components/youtube-integration"
 import { PublicDomainLibrary } from "@/components/public-domain-library"
 import { CreatorCollaboration } from "@/components/creator-collaboration"
+import { StudioModeSelector } from "@/components/studio-mode-selector"
 import { DubbingWorkspace } from "@/components/dubbing-workspace"
+import { AdvancedDubbingEditor } from "@/components/advanced-dubbing-editor"
 import { Header } from "@/components/header"
-import { Upload, Youtube, Film, Users, Mic2 } from "lucide-react"
+import { Upload, Youtube, Film, Clapperboard, Mic2, AlertTriangle } from "lucide-react"
 import { RecentProjects } from "@/components/recent-projects"
+import { BonusMinutesDialog } from "@/components/bonus-minutes-dialog"
+import { createClient } from "@/lib/supabase/client"
 
 export type VideoSource = {
   id: string
@@ -29,11 +33,14 @@ export type DetectedVoice = {
   selectedVoice: string
 }
 
+export type EditorMode = "automatic" | "professional"
+
 // Background images for each tab
 const tabBackgrounds: Record<string, string> = {
   upload: "/backgrounds/marvel-stormy.jpg",
   youtube: "/backgrounds/ipman-kungfu.jpg",
   library: "/backgrounds/streaming-library.jpg",
+  studio: "/backgrounds/anime-motion-teal.jpg",
   collaborate: "/backgrounds/anime-motion-teal.jpg",
   projects: "/backgrounds/anime-dark-collage.jpg",
 }
@@ -42,6 +49,81 @@ export function Dashboard() {
   const [activeTab, setActiveTab] = useState("upload")
   const [selectedVideo, setSelectedVideo] = useState<VideoSource | null>(null)
   const [isWorkspaceOpen, setIsWorkspaceOpen] = useState(false)
+  const [editorMode, setEditorMode] = useState<EditorMode>("automatic")
+
+  // Usage tracking state
+  const [planType, setPlanType] = useState<string>("premium")
+  const [planLimit, setPlanLimit] = useState<number>(90)
+  const [minutesUsed, setMinutesUsed] = useState<number>(0)
+  const [bonusBalance, setBonusBalance] = useState<number>(0)
+  const [bonusDialogOpen, setBonusDialogOpen] = useState(false)
+  const [loadingUsage, setLoadingUsage] = useState(true)
+
+  const supabase = createClient()
+
+  // Fetch usage data on component mount
+  useEffect(() => {
+    async function fetchUsageData() {
+      setLoadingUsage(true)
+      try {
+        const { data: { user } } = await supabase.auth.getUser()
+        if (!user) return
+
+        // Fetch subscription info
+        const { data: subData } = await supabase
+          .from("subscriptions")
+          .select("plan_type")
+          .eq("user_id", user.id)
+          .in("status", ["active", "trialing"])
+          .limit(1)
+          .single()
+
+        // Fetch current month usage
+        const { data: usageData } = await supabase
+          .from("usage")
+          .select("minutes_used")
+          .eq("user_id", user.id)
+          .order("month", { ascending: false })
+          .limit(1)
+          .single()
+
+        // Fetch bonus minutes (use maybeSingle to avoid error if no record exists)
+        const { data: bonusData } = await supabase
+          .from("bonus_minutes")
+          .select("balance")
+          .eq("user_id", user.id)
+          .maybeSingle()
+
+        // Set plan limits
+        const PLAN_LIMITS: Record<string, number> = {
+          basic: 45,
+          premium: 90,
+          professional: -1, // unlimited
+        }
+
+        const plan = subData?.plan_type || "basic"
+        const limit = PLAN_LIMITS[plan] || 45
+        const used = usageData?.minutes_used || 0
+        const bonus = bonusData?.balance || 0
+
+        setPlanType(plan)
+        setPlanLimit(limit)
+        setMinutesUsed(used)
+        setBonusBalance(bonus)
+      } catch (error) {
+        console.error("Failed to fetch usage data:", error)
+        // Set defaults on error to prevent blank UI
+        setPlanType("basic")
+        setPlanLimit(45)
+        setMinutesUsed(0)
+        setBonusBalance(0)
+      } finally {
+        setLoadingUsage(false)
+      }
+    }
+
+    fetchUsageData()
+  }, [])
 
   const handleVideoSelect = (video: VideoSource) => {
     setSelectedVideo(video)
@@ -53,96 +135,332 @@ export function Dashboard() {
     setSelectedVideo(null)
   }
 
+  const handleEditorModeChange = (mode: EditorMode) => {
+    setEditorMode(mode)
+  }
+
+  const handleOpenEditor = () => {
+    const demoVideo: VideoSource = {
+      id: "demo-video",
+      title: "Ip Man (2010) - Demo Scene",
+      url: "/demo-video.mp4",
+      thumbnail: "/backgrounds/ipman-kungfu.jpg",
+      duration: "4:22",
+      source: "public-domain"
+    }
+    setSelectedVideo(demoVideo)
+    setIsWorkspaceOpen(true)
+  }
+
   const currentBackground = tabBackgrounds[activeTab] || tabBackgrounds.upload
 
   return (
-    <div className="min-h-screen bg-background relative">
-      {/* Background Image - Full Coverage, Changes per Tab */}
-      <div 
-        className="fixed inset-0 z-0 opacity-60 transition-all duration-700"
-        style={{
-          backgroundImage: `url('${currentBackground}')`,
-          backgroundSize: "cover",
-          backgroundPosition: "center",
-          backgroundAttachment: "fixed"
-        }}
-      />
-      <div className="fixed inset-0 z-0 bg-background/30" />
-      
+    <div className="min-h-screen bg-[#020817] relative overflow-hidden">
+      {/* Very dark background */}
+      <div className="fixed inset-0 z-0 bg-[#020817]" />
+
+      {/* Subtle purple/cyan ambient glow */}
+      <div className="fixed inset-0 z-0 bg-[radial-gradient(ellipse_at_top,_rgba(168,85,247,0.08)_0%,_transparent_50%)]" />
+      <div className="fixed inset-0 z-0 bg-[radial-gradient(ellipse_at_bottom,_rgba(34,211,238,0.05)_0%,_transparent_50%)]" />
+
+      {/* TOP FILM STRIP - Scrolls RIGHT */}
+      <div className="fixed top-16 left-0 right-0 h-32 z-40 overflow-hidden border-b-2 border-[#FDB022]/40">
+        <div className="absolute inset-0 bg-gradient-to-b from-black/80 to-transparent" />
+        {/* Film sprocket holes - top */}
+        <div className="absolute top-0 left-0 right-0 h-3 bg-black flex">
+          {Array.from({ length: 100 }).map((_, i) => (
+            <div key={i} className="w-6 h-3 border-r-2 border-[#FDB022]/30" />
+          ))}
+        </div>
+        {/* Scrolling film frames */}
+        <div className="absolute top-3 bottom-3 left-0 flex animate-scroll-right">
+          {[...Array(3)].map((_, set) => (
+            <div key={set} className="flex">
+              {["Ip Man", "Bollywood", "Anime", "Drama", "Action", "Cinema"].map((title, i) => (
+                <div key={i} className="relative w-40 h-24 mx-2 flex-shrink-0 border-2 border-[#A855F7]/40 bg-gradient-to-br from-[#A855F7]/20 to-[#22D3EE]/20 backdrop-blur-sm rounded overflow-hidden">
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
+                  <div className="absolute bottom-2 left-2 right-2">
+                    <p className="text-white text-xs font-bold truncate">{title}</p>
+                    <p className="text-[#FDB022] text-[10px]">Classic Film</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+        {/* Film sprocket holes - bottom */}
+        <div className="absolute bottom-0 left-0 right-0 h-3 bg-black flex">
+          {Array.from({ length: 100 }).map((_, i) => (
+            <div key={i} className="w-6 h-3 border-r-2 border-[#FDB022]/30" />
+          ))}
+        </div>
+      </div>
+
+      {/* BOTTOM FILM STRIP - Scrolls LEFT */}
+      <div className="fixed bottom-0 left-0 right-0 h-32 z-40 overflow-hidden border-t-2 border-[#FDB022]/40">
+        <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent" />
+        {/* Film sprocket holes - top */}
+        <div className="absolute top-0 left-0 right-0 h-3 bg-black flex">
+          {Array.from({ length: 100 }).map((_, i) => (
+            <div key={i} className="w-6 h-3 border-r-2 border-[#FDB022]/30" />
+          ))}
+        </div>
+        {/* Scrolling film frames */}
+        <div className="absolute top-3 bottom-3 left-0 flex animate-scroll-left">
+          {[...Array(3)].map((_, set) => (
+            <div key={set} className="flex">
+              {["Martial Arts", "Romance", "Thriller", "Comedy", "Sci-Fi", "Adventure"].map((title, i) => (
+                <div key={i} className="relative w-40 h-24 mx-2 flex-shrink-0 border-2 border-[#22D3EE]/40 bg-gradient-to-br from-[#22D3EE]/20 to-[#A855F7]/20 backdrop-blur-sm rounded overflow-hidden">
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
+                  <div className="absolute bottom-2 left-2 right-2">
+                    <p className="text-white text-xs font-bold truncate">{title}</p>
+                    <p className="text-[#FDB022] text-[10px]">World Cinema</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+        {/* Film sprocket holes - bottom */}
+        <div className="absolute bottom-0 left-0 right-0 h-3 bg-black flex">
+          {Array.from({ length: 100 }).map((_, i) => (
+            <div key={i} className="w-6 h-3 border-r-2 border-[#FDB022]/30" />
+          ))}
+        </div>
+      </div>
+
+      {/* Add animation keyframes to globals.css */}
+      <style jsx global>{`
+        @keyframes scroll-right {
+          0% { transform: translateX(0); }
+          100% { transform: translateX(-50%); }
+        }
+        @keyframes scroll-left {
+          0% { transform: translateX(-50%); }
+          100% { transform: translateX(0); }
+        }
+        .animate-scroll-right {
+          animation: scroll-right 60s linear infinite;
+        }
+        .animate-scroll-left {
+          animation: scroll-left 60s linear infinite;
+        }
+      `}</style>
+
       <div className="relative z-10">
-        <Header activeTab={activeTab} onNavigate={setActiveTab} />
+        <Header
+          activeTab={activeTab}
+          onNavigate={setActiveTab}
+          editorMode={editorMode}
+          onEditorModeChange={handleEditorModeChange}
+        />
 
         {isWorkspaceOpen && selectedVideo ? (
-          <DubbingWorkspace video={selectedVideo} onClose={handleCloseWorkspace} />
+          editorMode === "professional" ? (
+            <AdvancedDubbingEditor
+              videoTitle={selectedVideo.title}
+              videoUrl={selectedVideo.url}
+              onBack={handleCloseWorkspace}
+              onExport={() => {}}
+            />
+          ) : (
+            <DubbingWorkspace video={selectedVideo} onClose={handleCloseWorkspace} />
+          )
         ) : (
-          <main className="container mx-auto px-4 py-8">
-            <div className="mb-8 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-              <div>
-                <h1 className="text-3xl font-bold text-foreground">DubVerse Studio</h1>
-                <p className="mt-2 text-muted-foreground">
-                  AI-powered video dubbing with intelligent voice detection and multi-language support
+          <main className="relative z-10 flex items-center justify-center px-4" style={{ minHeight: 'calc(100vh - 256px)', paddingTop: '220px', paddingBottom: '160px' }}>
+            <div className="max-w-6xl w-full mx-auto">
+              {/* USAGE TRACKING CARD - Compact */}
+              <div className="mb-6">
+                <div className="relative bg-gradient-to-r from-[#0F172A]/80 to-[#1E293B]/80 backdrop-blur-xl border border-[#A855F7]/30 rounded-xl p-4 shadow-[0_0_40px_rgba(168,85,247,0.2)]">
+                  <div className="absolute -inset-0.5 bg-gradient-to-r from-[#A855F7] via-[#FDB022] to-[#22D3EE] rounded-xl opacity-20 blur-xl" />
+
+                  <div className="relative grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
+                    {/* Plan Info */}
+                    <div>
+                      <p className="text-[#94A3B8] text-xs mb-1">Your Plan</p>
+                      <p className="text-white text-xl font-bold bg-gradient-to-r from-[#A855F7] to-[#FDB022] bg-clip-text text-transparent capitalize">
+                        {loadingUsage ? "..." : planType}
+                      </p>
+                    </div>
+
+                    {/* Usage Stats */}
+                    <div className="md:col-span-2">
+                      {!loadingUsage && (() => {
+                        const planRemaining = planLimit > 0 ? Math.max(0, planLimit - minutesUsed) : Infinity
+                        const totalRemaining = planRemaining === Infinity ? Infinity : planRemaining + bonusBalance
+                        const usagePercent = planLimit > 0 ? Math.min((minutesUsed / planLimit) * 100, 100) : 0
+                        const isLowUsage = totalRemaining !== Infinity && totalRemaining < 10
+                        const isExhausted = totalRemaining === 0
+
+                        return (
+                          <>
+                            <div className="flex justify-between items-center mb-1.5">
+                              <p className="text-[#94A3B8] text-xs">Monthly Usage</p>
+                              <p className="text-white text-sm font-bold">
+                                <span className={isExhausted ? "text-red-400" : isLowUsage ? "text-[#FDB022]" : "text-[#22D3EE]"}>
+                                  {planLimit > 0 ? minutesUsed : "Unlimited"}
+                                </span>
+                                {planLimit > 0 && (
+                                  <>
+                                    <span className="text-[#64748B]"> / </span>
+                                    <span className="text-[#94A3B8]">{planLimit} min</span>
+                                  </>
+                                )}
+                              </p>
+                            </div>
+
+                            {planLimit > 0 && (
+                              <>
+                                {/* Progress Bar */}
+                                <div className="relative h-2 bg-[#0F172A] rounded-full overflow-hidden border border-[#334155]">
+                                  <div
+                                    className={`absolute inset-y-0 left-0 rounded-full shadow-[0_0_15px_rgba(168,85,247,0.6)] ${
+                                      isExhausted
+                                        ? "bg-gradient-to-r from-red-500 to-red-600"
+                                        : isLowUsage
+                                        ? "bg-gradient-to-r from-[#FDB022] to-[#F59E0B]"
+                                        : "bg-gradient-to-r from-[#A855F7] via-[#C084FC] to-[#22D3EE]"
+                                    }`}
+                                    style={{ width: `${usagePercent}%` }}
+                                  />
+                                </div>
+
+                                <div className="flex justify-between mt-1.5">
+                                  <div className="text-[10px]">
+                                    {isExhausted ? (
+                                      <span className="text-red-400 font-semibold flex items-center gap-1">
+                                        <AlertTriangle className="h-3 w-3" />
+                                        Quota exceeded
+                                      </span>
+                                    ) : isLowUsage ? (
+                                      <span className="text-[#FDB022] font-semibold flex items-center gap-1">
+                                        <AlertTriangle className="h-3 w-3" />
+                                        Only {Math.floor(totalRemaining)} min remaining
+                                      </span>
+                                    ) : (
+                                      <span className="text-[#64748B]">
+                                        <span className="text-[#22D3EE] font-semibold">{Math.floor(planRemaining)} min</span> plan
+                                        {bonusBalance > 0 && <span className="text-[#22D3EE] font-semibold"> + {bonusBalance} bonus</span>}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <button
+                                    onClick={() => setBonusDialogOpen(true)}
+                                    className="text-[#FDB022] text-[10px] font-semibold hover:text-[#FDB022]/80 transition-colors"
+                                  >
+                                    Buy More →
+                                  </button>
+                                </div>
+                              </>
+                            )}
+                          </>
+                        )
+                      })()}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* CINEMATIC TITLE - Compact */}
+              <div className="text-center mb-6">
+                <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-[#A855F7] via-[#FDB022] to-[#22D3EE] bg-clip-text text-transparent drop-shadow-[0_0_30px_rgba(168,85,247,0.8)] mb-2">
+                  DubMaster Studio
+                </h1>
+                <p className="text-[#94A3B8] text-base md:text-lg italic">
+                  Transform Your Content. Reach The World.
                 </p>
               </div>
-              <h2 
-                className="text-xl font-bold italic text-right leading-tight"
-                style={{ 
-                  background: "linear-gradient(180deg, #fce38a 0%, #d4a843 25%, #f9e77f 45%, #c5952a 60%, #f0d060 75%, #a67c2e 100%)",
-                  WebkitBackgroundClip: "text",
-                  WebkitTextFillColor: "transparent",
-                  backgroundClip: "text",
-                  filter: "drop-shadow(0 2px 6px rgba(0,0,0,0.8))",
-                }}
-              >
-                Watch Award Winning Movies<br />In Your Own Language
-              </h2>
+
+              {/* TABS - Above upload */}
+              <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full mb-6">
+                <TabsList className="w-full grid grid-cols-5 bg-[#0F172A]/60 backdrop-blur-xl border border-[#A855F7]/20 shadow-[0_0_20px_rgba(168,85,247,0.15)] p-1 rounded-xl">
+                  <TabsTrigger
+                    value="upload"
+                    className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
+                  >
+                    <Upload className="h-4 w-4" />
+                    <span className="hidden sm:inline">Upload</span>
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="youtube"
+                    className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
+                  >
+                    <Youtube className="h-4 w-4" />
+                    <span className="hidden sm:inline">YouTube</span>
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="library"
+                    className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
+                  >
+                    <Film className="h-4 w-4" />
+                    <span className="hidden sm:inline">Library</span>
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="studio"
+                    className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
+                  >
+                    <Clapperboard className="h-4 w-4" />
+                    <span className="hidden sm:inline">Studio</span>
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="projects"
+                    className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
+                  >
+                    <Mic2 className="h-4 w-4" />
+                    <span className="hidden sm:inline">Projects</span>
+                  </TabsTrigger>
+                </TabsList>
+
+                {/* GLASS MORPHISM UPLOAD BOX - Compact */}
+                <TabsContent value="upload" className="mt-0">
+                  <div className="relative group">
+                    {/* Outer glow */}
+                    <div className="absolute -inset-1 bg-gradient-to-r from-[#A855F7] via-[#FDB022] to-[#22D3EE] rounded-2xl opacity-30 blur-2xl group-hover:opacity-50 transition-opacity duration-500" />
+
+                    {/* Glass container */}
+                    <div className="relative bg-gradient-to-br from-[#0F172A]/60 to-[#1E293B]/60 backdrop-blur-2xl border-2 border-[#A855F7]/40 rounded-2xl p-8 shadow-[0_0_60px_rgba(168,85,247,0.3)] group-hover:shadow-[0_0_80px_rgba(168,85,247,0.5)] group-hover:border-[#A855F7]/60 transition-all duration-500">
+                      <VideoUpload
+                        onVideoSelect={handleVideoSelect}
+                        quotaExceeded={!loadingUsage && planLimit > 0 && (planLimit - minutesUsed + bonusBalance) <= 0}
+                        remainingMinutes={planLimit > 0 ? Math.max(0, planLimit - minutesUsed + bonusBalance) : Infinity}
+                        onBuyMore={() => setBonusDialogOpen(true)}
+                      />
+                    </div>
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="youtube">
+                  <YouTubeIntegration onVideoSelect={handleVideoSelect} />
+                </TabsContent>
+                <TabsContent value="library">
+                  <PublicDomainLibrary onVideoSelect={handleVideoSelect} />
+                </TabsContent>
+                <TabsContent value="studio">
+                  <StudioModeSelector
+                    editorMode={editorMode}
+                    onEditorModeChange={handleEditorModeChange}
+                    onStartProject={() => setActiveTab("upload")}
+                    onOpenEditor={handleOpenEditor}
+                  />
+                </TabsContent>
+                <TabsContent value="projects">
+                  <RecentProjects onVideoSelect={handleVideoSelect} />
+                </TabsContent>
+              </Tabs>
             </div>
-
-            <Tabs value={activeTab} onValueChange={(value) => {
-              console.log("[v0] Tab changed to:", value)
-              setActiveTab(value)
-            }} className="w-full">
-              <TabsList className="mb-8 grid w-full grid-cols-5 lg:w-auto lg:inline-flex bg-background/50 backdrop-blur-md pointer-events-auto">
-                <TabsTrigger value="upload" className="gap-2 cursor-pointer" onClick={() => console.log("[v0] Upload clicked")}>
-                  <Upload className="h-4 w-4" />
-                  <span className="hidden sm:inline">Upload</span>
-                </TabsTrigger>
-                <TabsTrigger value="youtube" className="gap-2 cursor-pointer" onClick={() => console.log("[v0] YouTube clicked")}>
-                  <Youtube className="h-4 w-4" />
-                  <span className="hidden sm:inline">YouTube</span>
-                </TabsTrigger>
-                <TabsTrigger value="library" className="gap-2 cursor-pointer" onClick={() => console.log("[v0] Library clicked")}>
-                  <Film className="h-4 w-4" />
-                  <span className="hidden sm:inline">Library</span>
-                </TabsTrigger>
-                <TabsTrigger value="collaborate" className="gap-2 cursor-pointer" onClick={() => console.log("[v0] Collaborate clicked")}>
-                  <Users className="h-4 w-4" />
-                  <span className="hidden sm:inline">Collaborate</span>
-                </TabsTrigger>
-                <TabsTrigger value="projects" className="gap-2 cursor-pointer" onClick={() => console.log("[v0] Projects clicked")}>
-                  <Mic2 className="h-4 w-4" />
-                  <span className="hidden sm:inline">Projects</span>
-                </TabsTrigger>
-              </TabsList>
-
-              <TabsContent value="upload">
-                <VideoUpload onVideoSelect={handleVideoSelect} />
-              </TabsContent>
-              <TabsContent value="youtube">
-                <YouTubeIntegration onVideoSelect={handleVideoSelect} />
-              </TabsContent>
-              <TabsContent value="library">
-                <PublicDomainLibrary onVideoSelect={handleVideoSelect} />
-              </TabsContent>
-              <TabsContent value="collaborate">
-                <CreatorCollaboration />
-              </TabsContent>
-              <TabsContent value="projects">
-                <RecentProjects onVideoSelect={handleVideoSelect} />
-              </TabsContent>
-            </Tabs>
           </main>
         )}
       </div>
+
+      {/* Bonus Minutes Dialog */}
+      <BonusMinutesDialog
+        open={bonusDialogOpen}
+        onOpenChange={setBonusDialogOpen}
+        planMinutesUsed={minutesUsed}
+        planMinutesLimit={planLimit}
+        bonusBalance={bonusBalance}
+        planType={planType}
+      />
     </div>
   )
 }
