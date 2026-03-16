@@ -15,6 +15,7 @@ interface VoiceSelectorProps {
   detectedVoices: DetectedVoice[]
   targetLanguage: string
   onVoiceChange: (voiceId: string, newVoice: string) => void
+  onSettingsChange?: (voiceId: string, settings: { pitch: number; speed: number }) => void
   isAnalyzing: boolean
   availableVoices?: Voice[]
 }
@@ -76,6 +77,7 @@ export function VoiceSelector({
   detectedVoices,
   targetLanguage,
   onVoiceChange,
+  onSettingsChange,
   isAnalyzing,
   availableVoices,
 }: VoiceSelectorProps) {
@@ -113,13 +115,17 @@ export function VoiceSelector({
   }
 
   const handleSettingChange = (voiceId: string, setting: "pitch" | "speed", value: number) => {
-    setVoiceSettings((prev) => ({
-      ...prev,
-      [voiceId]: {
-        ...prev[voiceId],
-        [setting]: value,
-      },
-    }))
+    setVoiceSettings((prev) => {
+      const updated = {
+        ...prev,
+        [voiceId]: {
+          ...prev[voiceId],
+          [setting]: value,
+        },
+      }
+      onSettingsChange?.(voiceId, updated[voiceId])
+      return updated
+    })
   }
 
   const playVoiceSample = (voice: DetectedVoice, isPreview = false) => {

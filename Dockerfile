@@ -16,11 +16,11 @@ RUN apk add --no-cache libc6-compat
 # Copy package files
 COPY package.json package-lock.json ./
 
-# Install dependencies
-RUN npm ci
+# Install dependencies (using npm install to update lock file for next-intl)
+RUN npm install --force
 
 # Install Alpine/musl-specific native binaries (version-matched)
-RUN npm install --no-save \
+RUN npm install --no-save --force \
     lightningcss-linux-x64-musl@1.30.2 \
     @tailwindcss/oxide-linux-x64-musl@4.1.18 \
     @img/sharp-linux-x64@0.34.2
