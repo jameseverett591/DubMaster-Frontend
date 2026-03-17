@@ -386,7 +386,7 @@ class TranslationService:
             )
 
             payload = {
-                "model": "claude-sonnet-4-5-20250929",
+                "model": "claude-3-5-sonnet-20241022",
                 "max_tokens": 4096,
                 "temperature": 0.3,
                 "system": system_prompt,
@@ -742,7 +742,9 @@ class TranslationService:
             import httpx
 
             src = source_language
-            if src == "zh":
+            if src in ("yue", "yue-HK", "zh-yue", "zh-HK"):
+                src = "auto"
+            elif src == "zh":
                 src = "zh-TW"
 
             payload = {
