@@ -12,6 +12,7 @@ import { VoiceSelector } from "@/components/voice-selector"
 import { TranscriptEditor } from "@/components/transcript-editor"
 import { TimelineEditor } from "@/components/timeline-editor"
 import { DubbedVideoResult } from "@/components/dubbed-video-result"
+import PipelineMonitor from "@/components/pipeline-monitor"
 import { useJobStatus } from "@/hooks/use-job-status"
 import { getStatusMessage } from "@/lib/api-client"
 import { useToast } from "@/hooks/use-toast"
@@ -48,7 +49,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
   const [detectedVoices, setDetectedVoices] = useState<DetectedVoice[]>([])
   const [isDubbing, setIsDubbing] = useState(false)
   const [dubbingProgress, setDubbingProgress] = useState(0)
-  const [activeTab, setActiveTab] = useState("voices")
+  const [activeTab, setActiveTab] = useState("pipeline")
   const [dubbingComplete, setDubbingComplete] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
 
@@ -434,13 +435,17 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
         {/* Right Panel */}
         <div className="w-96 border-l border-border/50 bg-card/50 backdrop-blur-md flex flex-col">
           <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-1 flex-col overflow-hidden">
-            <TabsList className="grid w-full grid-cols-4 rounded-none border-b border-border/50">
+            <TabsList className="grid w-full grid-cols-5 rounded-none border-b border-border/50">
+              <TabsTrigger value="pipeline">Pipeline</TabsTrigger>
               <TabsTrigger value="voices">Voices</TabsTrigger>
               <TabsTrigger value="transcript">Script</TabsTrigger>
               <TabsTrigger value="timeline">Timeline</TabsTrigger>
               <TabsTrigger value="result">Result</TabsTrigger>
             </TabsList>
             <ScrollArea className="flex-1">
+              <TabsContent value="pipeline" className="m-0 p-4">
+                <PipelineMonitor jobId={video.id} />
+              </TabsContent>
               <TabsContent value="voices" className="m-0 p-4">
                 <VoiceSelector
                   detectedVoices={detectedVoices}
