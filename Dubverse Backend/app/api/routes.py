@@ -21,6 +21,7 @@ from app.models import (
 from app.config import get_settings
 from app.storage.manager import StorageManager
 from app.services.job_manager import job_manager
+from app.services.pipeline_tracker import pipeline_tracker
 from app.pipeline.chunk_video import VideoChunker
 from app.pipeline.extract_audio import extract_audio
 from app.pipeline.diarize_audio import diarize_audio
@@ -325,6 +326,10 @@ async def _run_diarization_with_heartbeat(job_id: str, extract_result: dict, tim
 
 async def process_video_pipeline(job_id: str, video_path: str):
     try:
+        # ── PIPELINE MONITOR: init ──
+        pipeline_tracker.init_pipeline(job_id, "analysis")
+        pipeline_tracker.start_stage(job_id, "upload")
+
         await job_manager.update_job_status(
             job_id,
             JobStatus.PROCESSING,
@@ -334,6 +339,7 @@ async def process_video_pipeline(job_id: str, video_path: str):
         
         duration = chunker.get_video_duration(video_path)
         if not duration:
+            pipeline_tracker.fail_stage(job_id, "upload", "Could not determine video duration")
             await job_manager.update_job_status(
                 job_id,
                 JobStatus.FAILED,
@@ -341,10 +347,16 @@ async def process_video_pipeline(job_id: str, video_path: str):
             )
             return
         
+        file_size_mb = round(os.path.getsize(video_path) / (1024 * 1024), 1) if os.path.exists(video_path) else 0
+        pipeline_tracker.complete_stage(job_id, "upload", f"File: {file_size_mb} MB, duration: {duration:.1f}s")
+
         job = await job_manager.get_job(job_id)
         if job:
             job.video_duration = duration
         
+        # ── PIPELINE MONITOR: chunking ──
+        pipeline_tracker.start_stage(job_id, "chunk")
+
         await job_manager.update_job_status(
             job_id,
             JobStatus.CHUNKING,
@@ -355,6 +367,7 @@ async def process_video_pipeline(job_id: str, video_path: str):
         chunks = chunker.chunk_video(job_id, video_path)
         
         if not chunks:
+            pipeline_tracker.fail_stage(job_id, "chunk", "Failed to create video chunks")
             await job_manager.update_job_status(
                 job_id,
                 JobStatus.FAILED,
@@ -362,8 +375,12 @@ async def process_video_pipeline(job_id: str, video_path: str):
             )
             return
         
+        pipeline_tracker.complete_stage(job_id, "chunk", f"{len(chunks)} chunks created, duration: {duration:.1f}s")
         await job_manager.update_job_chunks(job_id, chunks)
         
+        # ── PIPELINE MONITOR: extract audio ──
+        pipeline_tracker.start_stage(job_id, "extract_audio")
+
         await job_manager.update_job_status(
             job_id,
             JobStatus.EXTRACTING_AUDIO,
@@ -374,6 +391,7 @@ async def process_video_pipeline(job_id: str, video_path: str):
         extract_result = await asyncio.to_thread(extract_audio, video_path)
         
         if extract_result["status"] != "ok":
+            pipeline_tracker.fail_stage(job_id, "extract_audio", f"Audio extraction failed: {extract_result.get('reason', 'unknown')}")
             logger.warning(f"Audio extraction failed: {extract_result.get('reason')}")
             await job_manager.update_job_status(
                 job_id,
@@ -381,6 +399,11 @@ async def process_video_pipeline(job_id: str, video_path: str):
                 error_message=f"Audio extraction failed: {extract_result.get('reason', 'unknown')}"
             )
             return
+        
+        pipeline_tracker.complete_stage(job_id, "extract_audio", f"16kHz mono WAV, {extract_result.get('duration', 0):.1f}s")
+
+        # ── PIPELINE MONITOR: separation ──
+        pipeline_tracker.start_stage(job_id, "separate")
         
         await job_manager.update_job_status(
             job_id,
@@ -396,6 +419,8 @@ async def process_video_pipeline(job_id: str, video_path: str):
 
         transcribe_input = extract_result
         if separation_result.get("status") == "ok":
+            sep_model = separation_result.get("model", "demucs")
+            pipeline_tracker.complete_stage(job_id, "separate", f"Vocals separated using {sep_model}, path: {separation_result.get('vocals_path', 'N/A')}")
             vocals_path = separation_result.get("vocals_path")
             logger.info(f"Job {job_id}: using separated vocals for transcription: {vocals_path}")
             # Load the clean vocals WAV into the same format as extract_result
@@ -419,7 +444,11 @@ async def process_video_pipeline(job_id: str, video_path: str):
             except Exception as voc_err:
                 logger.warning(f"Job {job_id}: failed to load vocals for transcription, using raw audio: {voc_err}")
         else:
+            pipeline_tracker.skip_stage(job_id, "separate", f"Separation skipped: {separation_result.get('reason', 'unknown')}")
             logger.info(f"Job {job_id}: separation skipped ({separation_result.get('reason')}), transcribing raw audio")
+
+        # ── PIPELINE MONITOR: transcription ──
+        pipeline_tracker.start_stage(job_id, "transcribe")
 
         await job_manager.update_job_status(
             job_id,
@@ -455,6 +484,12 @@ async def process_video_pipeline(job_id: str, video_path: str):
 
                 raw_segments = transcript_data.get("segments", [])
 
+                engines_used = transcribe_result.get("engines_used", [whisper_language])
+                pipeline_tracker.complete_stage(job_id, "transcribe", f"{len(raw_segments)} segments, lang: {whisper_language or 'auto'}, engines: {', '.join(str(e) for e in engines_used)}")
+
+                # ── PIPELINE MONITOR: diarization ──
+                pipeline_tracker.start_stage(job_id, "diarize")
+
                 await job_manager.update_job_status(
                     job_id,
                     JobStatus.DIARIZING,
@@ -478,7 +513,10 @@ async def process_video_pipeline(job_id: str, video_path: str):
                 )
                 if diarization_result.get("status") == "ok":
                     diarization_segments = diarization_result.get("segments", [])
+                    num_speakers = len(set(s.get("speaker", "") for s in diarization_segments))
+                    pipeline_tracker.complete_stage(job_id, "diarize", f"{num_speakers} speakers identified, {len(diarization_segments)} diarization segments")
                 else:
+                    pipeline_tracker.skip_stage(job_id, "diarize", f"Diarization skipped: {diarization_result.get('reason', 'unknown')}")
                     logger.info(
                         f"Diarization skipped: {diarization_result.get('reason', 'unknown')}"
                     )
@@ -504,6 +542,8 @@ async def process_video_pipeline(job_id: str, video_path: str):
                 segments = _normalize_speaker_labels(segments)
 
                 # Classify each speaker's gender/age from pitch (Fix 2).
+                # ── PIPELINE MONITOR: classification ──
+                pipeline_tracker.start_stage(job_id, "classify")
                 try:
                     speaker_genders = classify_speakers(
                         audio=extract_result["audio"],
@@ -513,7 +553,11 @@ async def process_video_pipeline(job_id: str, video_path: str):
                     if speaker_genders:
                         await job_manager.update_job_speaker_genders(job_id, speaker_genders)
                         logger.info(f"Job {job_id}: speaker genders = {speaker_genders}")
+                        pipeline_tracker.complete_stage(job_id, "classify", f"Classified: {', '.join(f'{k}={v}' for k, v in speaker_genders.items())}")
+                    else:
+                        pipeline_tracker.skip_stage(job_id, "classify", "No gender data returned")
                 except Exception as cls_err:
+                    pipeline_tracker.fail_stage(job_id, "classify", str(cls_err))
                     logger.warning(f"Job {job_id}: speaker classification failed: {cls_err}")
 
                 transcript = Transcript(
@@ -527,6 +571,7 @@ async def process_video_pipeline(job_id: str, video_path: str):
                 logger.info(f"Job {job_id}: Transcription complete with {len(segments)} segments")
         else:
             err_msg = transcribe_result.get('error_message', 'unknown error')
+            pipeline_tracker.fail_stage(job_id, "transcribe", f"Transcription failed: {err_msg}")
             logger.error(f"Transcription failed for job {job_id}: {transcribe_result.get('reason')} — {err_msg}")
             await job_manager.update_job_status(
                 job_id,
