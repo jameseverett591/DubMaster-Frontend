@@ -5,6 +5,21 @@ import logging
 import os
 import sys
 
+# Load .env into os.environ before anything else so os.getenv() calls
+# (e.g. RUNPOD_API_KEY, PROCESSING_MODE) pick up the values.
+# pydantic_settings reads .env for the Settings model but does NOT
+# populate os.environ — dotenv.load_dotenv() fills that gap.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"), override=False)
+except ImportError:
+    pass
+
+# Ensure ffmpeg/ffprobe are on PATH when running outside Docker
+_FFMPEG_BIN = r"C:\ffmpeg\bin"
+if os.path.isdir(_FFMPEG_BIN) and _FFMPEG_BIN not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = _FFMPEG_BIN + os.pathsep + os.environ.get("PATH", "")
+
 from app.config import get_settings
 from app.api import routes
 from app.storage.manager import setup_storage_dirs

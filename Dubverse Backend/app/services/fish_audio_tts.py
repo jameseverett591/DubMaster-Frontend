@@ -14,9 +14,11 @@ Voice identity can come from:
    by ID via ``FISH_VOICE_*`` env vars.
 """
 
+import asyncio
 import os
 import logging
 import importlib.util
+import random
 from typing import Optional, Dict, List
 
 from app.config import get_settings
@@ -25,6 +27,39 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 FISH_AUDIO_API_KEY = settings.FISH_AUDIO_API_KEY or os.getenv("FISH_AUDIO_API_KEY", "")
+
+# ---------------------------------------------------------------------------
+# Concurrency + rate-limit handling
+# ---------------------------------------------------------------------------
+# Fish Audio's basic tier rate-limits bursts. The dubbing pipeline fires every
+# segment's TTS call in parallel via asyncio.gather (see dubbing_service.py),
+# so without a concurrency cap we saturate Fish's limit, get HTTP 429 on most
+# calls, and silently fall back to Edge TTS — producing a dub where almost
+# every character sounds like the same generic Microsoft narrator.
+#
+# Tune via env var; 3 is conservative and safe for the basic tier.
+_FISH_MAX_CONCURRENT = int(os.getenv("FISH_AUDIO_MAX_CONCURRENT", "3"))
+_FISH_429_MAX_RETRIES = int(os.getenv("FISH_AUDIO_429_MAX_RETRIES", "4"))
+_FISH_429_BASE_BACKOFF_SEC = float(os.getenv("FISH_AUDIO_429_BASE_BACKOFF_SEC", "1.5"))
+# Lazy-initialised so the semaphore binds to whichever event loop imports us.
+_fish_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _get_fish_semaphore() -> asyncio.Semaphore:
+    global _fish_semaphore
+    if _fish_semaphore is None:
+        _fish_semaphore = asyncio.Semaphore(_FISH_MAX_CONCURRENT)
+    return _fish_semaphore
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    """Detect Fish Audio 429 responses.
+
+    The fish SDK raises generic Exception with the HTTP status embedded in
+    the message, e.g. 'HTTP 429: Too many requests...'. We match on that.
+    """
+    msg = str(exc)
+    return "429" in msg or "Too Many Requests" in msg or "rate limit" in msg.lower()
 
 # ---------------------------------------------------------------------------
 # Voice map: canonical keys -> Fish Audio reference_ids (from env vars)
@@ -147,6 +182,56 @@ class FishAudioTTS:
 
     # ----- TTS ------------------------------------------------------------ #
 
+    async def _convert_with_backoff(self, tts_kwargs: Dict) -> bytes:
+        """Call Fish Audio's tts.convert with concurrency cap and 429 backoff.
+
+        Concurrency is bounded by FISH_AUDIO_MAX_CONCURRENT so we never burst
+        past the tier's rate limit. On 429 we sleep with exponential backoff
+        and jitter, up to FISH_AUDIO_429_MAX_RETRIES attempts. Non-429 errors
+        propagate immediately so the caller's outer retry path can handle
+        them (e.g. drop inline refs and retry with reference_id only).
+
+        Returns the audio bytes on success.
+        """
+        client = self._get_client()
+        sem = _get_fish_semaphore()
+        last_exc: Optional[BaseException] = None
+
+        for attempt in range(_FISH_429_MAX_RETRIES + 1):
+            async with sem:
+                try:
+                    audio = await client.tts.convert(**tts_kwargs)
+                    # SDK may return bytes directly or an async iterator.
+                    if isinstance(audio, (bytes, bytearray)):
+                        return bytes(audio)
+                    buf = bytearray()
+                    async for chunk in audio:
+                        buf.extend(chunk)
+                    return bytes(buf)
+                except Exception as e:
+                    last_exc = e
+                    if not _is_rate_limit_error(e):
+                        raise
+                    # Fall through to backoff (outside the semaphore so we
+                    # don't hold the slot while waiting — other callers can
+                    # use it if they're not being rate-limited).
+
+            if attempt >= _FISH_429_MAX_RETRIES:
+                break
+            # Exponential backoff with jitter: 1.5, 3, 6, 12s (+/- 25%)
+            base = _FISH_429_BASE_BACKOFF_SEC * (2 ** attempt)
+            jitter = base * random.uniform(-0.25, 0.25)
+            sleep_sec = max(0.1, base + jitter)
+            logger.warning(
+                f"[FISH-TTS] 429 rate limit (attempt {attempt + 1}/{_FISH_429_MAX_RETRIES + 1}); "
+                f"backing off {sleep_sec:.1f}s"
+            )
+            await asyncio.sleep(sleep_sec)
+
+        # Exhausted retries on 429
+        assert last_exc is not None
+        raise last_exc
+
     async def text_to_speech(
         self,
         text: str,
@@ -207,7 +292,6 @@ class FishAudioTTS:
         )
 
         try:
-            client = self._get_client()
             from fishaudio import ReferenceAudio
 
             # Build call kwargs
@@ -227,19 +311,11 @@ class FishAudioTTS:
             elif voice_id:
                 tts_kwargs["reference_id"] = voice_id
 
-            audio = await client.tts.convert(**tts_kwargs)
+            audio_bytes = await self._convert_with_backoff(tts_kwargs)
 
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-            # SDK returns bytes directly
-            if isinstance(audio, (bytes, bytearray)):
-                with open(output_path, "wb") as f:
-                    f.write(audio)
-            else:
-                # Async iterator / streaming response
-                with open(output_path, "wb") as f:
-                    async for chunk in audio:
-                        f.write(chunk)
+            with open(output_path, "wb") as f:
+                f.write(audio_bytes)
 
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 engine = "fish-audio-cloned" if use_inline else "fish-audio"
@@ -256,19 +332,13 @@ class FishAudioTTS:
         # to Edge TTS which produces a completely different voice mid-job.
         if use_inline:
             try:
-                client = self._get_client()
                 retry_kwargs = dict(text=tagged_text, speed=speed, format="mp3")
                 if voice_id:
                     retry_kwargs["reference_id"] = voice_id
-                audio = await client.tts.convert(**retry_kwargs)
+                audio_bytes = await self._convert_with_backoff(retry_kwargs)
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                if isinstance(audio, (bytes, bytearray)):
-                    with open(output_path, "wb") as f:
-                        f.write(audio)
-                else:
-                    with open(output_path, "wb") as f:
-                        async for chunk in audio:
-                            f.write(chunk)
+                with open(output_path, "wb") as f:
+                    f.write(audio_bytes)
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     logger.info(f"[FISH-TTS] RETRY SUCCESS (fish-audio-bare) -> {output_path}")
                     return {"path": output_path, "engine": "fish-audio"}

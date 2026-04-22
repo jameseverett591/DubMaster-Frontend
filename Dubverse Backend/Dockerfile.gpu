@@ -1,7 +1,11 @@
 # ============================================
-# DUBVERSE BACKEND DOCKERFILE — GPU (CUDA)
+# DUBVERSE BACKEND DOCKERFILE — GPU SERVERLESS
 # CUDA 11.8 + cuDNN 8 + Python 3.11
-# For RunPod / AWS g4dn / any NVIDIA GPU host
+# For RunPod Serverless Endpoints
+#
+# LEAN IMAGE — models download at runtime via
+# _warm_models() in handler.py, NOT at build time.
+# Target size: ~4-6GB (down from 16GB+)
 # ============================================
 
 FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
@@ -15,14 +19,12 @@ WORKDIR /app
 # ============================================
 # SYSTEM DEPENDENCIES
 # ============================================
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3.11-dev \
     python3-pip \
     ffmpeg \
-    build-essential \
     libsndfile1 \
-    libsndfile1-dev \
     curl \
     git \
     && rm -rf /var/lib/apt/lists/*
@@ -36,26 +38,30 @@ RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
 # ============================================
 COPY requirements.gpu.txt .
 
-RUN pip install --no-cache-dir -r requirements.gpu.txt
-
-# ============================================
-# VERIFY GPU STACK
-# ============================================
-RUN python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print(f'PyTorch {torch.__version__} CUDA {torch.version.cuda}')" && \
-    python -c "import fastapi; print(f'FastAPI {fastapi.__version__}')" && \
-    python -c "import edge_tts; print('Edge TTS OK')" && \
-    echo "All GPU dependencies verified"
+RUN pip install --no-cache-dir -r requirements.gpu.txt && \
+    pip install --no-cache-dir runpod>=1.6.0
 
 # ============================================
 # APPLICATION
 # ============================================
 COPY ./app /app/app
+COPY handler.py /app/handler.py
 
-RUN mkdir -p /app/data /app/uploads /app/outputs /app/logs
+RUN mkdir -p /app/data/uploads /app/data/separated /app/data/transcripts \
+    /app/data/diarization /app/data/chunks /app/data/processed /app/data/output \
+    /app/uploads /app/outputs /app/logs
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+# ============================================
+# NO MODEL PRE-CACHING
+# Models are downloaded at runtime by _warm_models()
+# in handler.py on first container start. This keeps
+# the image small (~4-6GB) for fast RunPod pulls.
+# ============================================
 
-EXPOSE 8000
+# HF_TOKEN passed as env var at runtime (not build arg)
+# for pyannote model access
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# ============================================
+# ENTRYPOINT — RunPod Serverless Handler
+# ============================================
+CMD ["python", "-u", "handler.py"]

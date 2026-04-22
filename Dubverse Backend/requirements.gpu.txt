@@ -13,6 +13,11 @@ pydantic>=2.0.0
 pydantic-settings>=2.0.0
 
 # ============================================
+# CORE — pin NumPy < 2.0 (np.NaN removed in 2.0, breaks pyannote/demucs)
+# ============================================
+numpy==1.26.4
+
+# ============================================
 # AUDIO/VIDEO PROCESSING
 # ============================================
 ffmpeg-python>=0.2.0
@@ -31,11 +36,18 @@ torchaudio==2.1.0+cu118
 # Speaker Diarization
 pyannote.audio>=3.1.0
 
+huggingface_hub<1.0.0
+
 # Audio Source Separation
 demucs>=4.0.0
 
 # Speech Recognition
 faster-whisper>=0.10.0
+openai-whisper>=20231117
+
+# Cantonese ASR — Paraformer (Alibaba FunASR)
+funasr>=1.0.0
+modelscope>=1.9.0
 
 # ============================================
 # TEXT-TO-SPEECH

@@ -7,6 +7,7 @@ from typing import Dict, Any, List
 logger = logging.getLogger(__name__)
 
 _PIPELINE = None
+_PIPELINE_LOAD_ERROR: Dict[str, Any] | None = None
 
 
 def _get_pipeline(job_id: str | None = None):
@@ -16,16 +17,30 @@ def _get_pipeline(job_id: str | None = None):
     Never crashes the pipeline.
     """
     global _PIPELINE
+    global _PIPELINE_LOAD_ERROR
 
     if _PIPELINE is not None:
         return _PIPELINE
 
-    token = os.getenv("HF_TOKEN")
+    token = None
+    token_source = None
+    for k in ["HF_TOKEN", "HUGGING_FACE_TOKEN", "HUGGINGFACE_TOKEN", "HUGGINGFACE_HUB_TOKEN"]:
+        v = os.getenv(k)
+        if v is None:
+            continue
+        v = str(v).strip()
+        if v:
+            token = v
+            token_source = k
+            break
+
     if not token:
-        logger.warning("[DIARIZE] HF_TOKEN is not set — skipping diarization")
+        logger.warning("[DIARIZE] HF token is not set — skipping diarization")
         return None
 
-    logger.info(f"[DIARIZE] HF_TOKEN present (length={len(token)}), loading pyannote pipeline...")
+    logger.info(
+        f"[DIARIZE] HF token present via {token_source} (length={len(token)}), loading pyannote pipeline..."
+    )
 
     try:
         from pyannote.audio import Pipeline
@@ -35,10 +50,8 @@ def _get_pipeline(job_id: str | None = None):
         return None
 
     try:
-        _PIPELINE = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            token=token,
-        )
+        _PIPELINE = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
+        _PIPELINE_LOAD_ERROR = None
         import torch
         if torch.cuda.is_available():
             _PIPELINE = _PIPELINE.to(torch.device("cuda"))
@@ -47,7 +60,26 @@ def _get_pipeline(job_id: str | None = None):
             logger.info("[DIARIZE] Pipeline running on CPU")
         logger.info("[DIARIZE] Pipeline loaded successfully")
     except Exception as e:
-        logger.error(f"[DIARIZE] Failed to load pipeline: {e}")
+        versions: Dict[str, Any] = {}
+        try:
+            import importlib.metadata as _md
+            for pkg in ["pyannote.audio", "torch", "torchaudio", "huggingface_hub", "pyannote.core"]:
+                try:
+                    versions[pkg] = _md.version(pkg)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        _PIPELINE_LOAD_ERROR = {
+            "exception_type": type(e).__name__,
+            "exception_message": str(e),
+            "versions": versions or None,
+        }
+        logger.error(
+            f"[DIARIZE] Failed to load pipeline: {type(e).__name__}: {e}",
+            exc_info=True,
+        )
         logger.error(
             "[DIARIZE] Common causes: (1) HF_TOKEN lacks access to pyannote/speaker-diarization-3.1 "
             "— accept the license at https://huggingface.co/pyannote/speaker-diarization-3.1 "
@@ -94,10 +126,20 @@ def diarize_audio(extract_result: Dict[str, Any], job_id: str | None = None) -> 
     try:
         pipeline = _get_pipeline(job_id)
         if pipeline is None:
+            token_present = bool(
+                (os.getenv("HF_TOKEN", "") or "").strip()
+                or (os.getenv("HUGGING_FACE_TOKEN", "") or "").strip()
+                or (os.getenv("HUGGINGFACE_TOKEN", "") or "").strip()
+                or (os.getenv("HUGGINGFACE_HUB_TOKEN", "") or "").strip()
+            )
             return {
                 "status": "skipped",
-                "reason": "missing_hf_token",
-                "error_message": "HF_TOKEN is not set or pipeline failed to load (check logs above)",
+                "reason": "pipeline_load_failed" if token_present else "missing_hf_token",
+                "error_message": (
+                    json.dumps(_PIPELINE_LOAD_ERROR, ensure_ascii=False)
+                    if token_present and _PIPELINE_LOAD_ERROR
+                    else "Pipeline not available"
+                ),
             }
 
         logger.info("[DIARIZE] Running pipeline inference...")
@@ -105,8 +147,8 @@ def diarize_audio(extract_result: Dict[str, Any], job_id: str | None = None) -> 
         # DIARIZATION_MIN_SPEAKERS and DIARIZATION_MAX_SPEAKERS to N in .env
         # (e.g. =3) so pyannote is forced to find exactly 3 clusters instead
         # of collapsing similar-sounding speakers.
-        min_speakers = int(os.getenv("DIARIZATION_MIN_SPEAKERS", "2"))
-        max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "4"))
+        min_speakers = int(os.getenv("DIARIZATION_MIN_SPEAKERS", "3"))
+        max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "5"))
 
         # Ensure audio is float32 mono [1, samples] as pyannote expects
         import torch

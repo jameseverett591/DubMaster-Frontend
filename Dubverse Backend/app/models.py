@@ -53,12 +53,14 @@ class Job(BaseModel):
     status: JobStatus
     progress: int = Field(ge=0, le=100, default=0)
     current_stage: Optional[str] = None
+    runpod_job_id: Optional[str] = None
     
     video_filename: str
     video_path: str
     video_duration: Optional[float] = None
     video_size: int
     expected_speakers: int = 3
+    source_language: Optional[str] = None  # ISO code (e.g. "yue", "en") or None for auto-detect
     
     chunks: List[VideoChunk] = []
     total_chunks: int = 0
@@ -92,10 +94,12 @@ class StatusResponse(BaseModel):
     progress: int
     current_stage: Optional[str]
     video_filename: str
+    video_url: Optional[str] = None
     video_duration: Optional[float]
     total_chunks: int
     processed_chunks: int
     chunks: List[VideoChunk]
+    source_language: Optional[str] = None
     dubbed_video_url: Optional[str] = None
     tts_engine: Optional[str] = None
     segment_tts_engines: Optional[List[Optional[str]]] = None

@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 #   F0_FEMALE_THRESHOLD=185   (was 165 — raised to handle shouting males)
 #   F0_CHILD_THRESHOLD=220    (was 230 — lowered to catch more child voices)
 F0_FEMALE_THRESHOLD = float(os.getenv("F0_FEMALE_THRESHOLD", "185"))
-F0_CHILD_THRESHOLD  = float(os.getenv("F0_CHILD_THRESHOLD",  "200"))
+F0_CHILD_THRESHOLD  = float(os.getenv("F0_CHILD_THRESHOLD",  "220"))
 
 # RMS threshold: frames below this energy level are silence/noise, not speech.
 RMS_VOICED_THRESHOLD = float(os.getenv("RMS_VOICED_THRESHOLD", "0.01"))
@@ -122,7 +122,11 @@ def _median_f0(
         if e <= s:
             continue
 
-        seg_audio = audio[s:e]
+        # Slice along the time (last) dimension so both 1-D [T] and 2-D [1, T]
+        # tensors (e.g. vocals from _load_vocals_tensor) work correctly.
+        # audio[s:e] on a [1, T] tensor slices dim-0 (giving an empty tensor
+        # for s≥1), whereas audio[..., s:e] always slices the time axis.
+        seg_audio = audio[..., s:e]
         if seg_audio.dtype != torch.float32:
             seg_audio = seg_audio.float()
         if seg_audio.dim() == 1:
@@ -144,7 +148,12 @@ def _median_f0(
                 raw = torch.nn.functional.pad(raw, (0, pad))
 
             # Reshape into [n_frames, frame_samples] and compute RMS vectorized
-            frames = raw[: n_frames * frame_samples].reshape(n_frames, frame_samples)
+            expected_samples = n_frames * frame_samples
+            if raw.numel() < expected_samples:
+                # Not enough samples to match pitch frames, skip this segment
+                continue
+            
+            frames = raw[:expected_samples].reshape(n_frames, frame_samples)
             rms_per_frame = frames.pow(2).mean(dim=1).sqrt()  # [n_frames]
 
             # Voiced mask: sufficient energy AND plausible F0 range

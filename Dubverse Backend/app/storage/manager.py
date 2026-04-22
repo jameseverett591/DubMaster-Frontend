@@ -18,6 +18,7 @@ def setup_storage_dirs():
         settings.CHUNKS_DIR,
         settings.PROCESSED_DIR,
         settings.OUTPUT_DIR,
+        settings.PROJECTS_DIR,
     ]
     
     for dir_path in dirs:

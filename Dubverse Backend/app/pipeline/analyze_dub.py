@@ -203,7 +203,7 @@ def _retranscribe_dubbed_audio(dubbed_video: Path) -> Dict[str, Any]:
         import torch as _torch
         _device = "cuda" if _torch.cuda.is_available() else "cpu"
         _compute = "float16" if _device == "cuda" else "int8"
-        model_size = os.getenv("WHISPER_MODEL", "small")
+        model_size = os.getenv("WHISPER_MODEL", "medium")
         model = WhisperModel(model_size, device=_device, compute_type=_compute)
         segments_gen, info = model.transcribe(
             audio_data,

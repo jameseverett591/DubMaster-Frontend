@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class TranscriptionService:
     def __init__(self):
-        self.model_size = "base"
+        self.model_size = "medium"
         self._model = None
     
     def _get_model(self):

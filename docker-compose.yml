@@ -9,13 +9,14 @@ services:
     container_name: dubverse-backend
     ports:
       - "8000:8000"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    # GPU: uncomment below for NVIDIA GPU hosts (Azure VM, RunPod, etc.)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
     volumes:
       # Mount source code for hot reload
       - "./Dubverse Backend/app:/app/app:ro"
@@ -33,13 +34,20 @@ services:
       # with ${VAR} syntax — that pulls from the host system env and
       # silently overrides the .env values.
       - PYTHONUNBUFFERED=1
+      - PROCESSING_MODE=gpu
+      - RUNPOD_SUBMIT_TIMEOUT_SEC=120
+      - RUNPOD_STATUS_TIMEOUT_SEC=30
+      - RUNPOD_POLL_TIMEOUT_SEC=7200
+      - RUNPOD_QUEUE_TIMEOUT_SEC=7200
+      - RUNPOD_HTTP_MAX_RETRIES=3
+      - RUNPOD_HTTP_RETRY_BACKOFF_SEC=2
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      interval: 60s
+      timeout: 30s
+      retries: 10
+      start_period: 60s
     networks:
       - dubverse-network
 

@@ -1,4 +1,5 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
+from typing import Optional
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
 from fastapi.responses import JSONResponse, FileResponse
 import uuid
 import os
@@ -7,6 +8,7 @@ from pathlib import Path
 import logging
 import asyncio
 import torchaudio
+import re
 
 from app.models import (
     UploadResponse,
@@ -39,6 +41,30 @@ router = APIRouter()
 
 settings = get_settings()
 storage = StorageManager()
+
+
+def _projects_base_dir() -> Path:
+    return Path(settings.PROJECTS_DIR)
+
+
+def _safe_copytree(src: Path, dst: Path):
+    import shutil
+    if not src.exists():
+        return
+    if src.is_file():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        target = dst / item.name
+        if item.is_dir():
+            _safe_copytree(item, target)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, target)
+
+
 chunker = VideoChunker()
 
 
@@ -93,6 +119,9 @@ def _load_transcript_from_disk(job_id: str) -> Transcript | None:
 
 
 async def _rehydrate_job(job_id: str):
+    if os.getenv("REHYDRATE_JOBS", "0") != "1":
+        return None
+
     existing = await job_manager.get_job(job_id)
     if existing:
         return existing
@@ -160,7 +189,7 @@ async def _get_or_rehydrate_job(job_id: str):
     return await _rehydrate_job(job_id)
 
 
-def _assign_speakers_from_diarization(raw_segments, diarization_segments):
+def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, **__):
     if not diarization_segments:
         return None
 
@@ -171,6 +200,160 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments):
         speaker = seg.get("speaker")
         if speaker and speaker not in speaker_map:
             speaker_map[speaker] = f"speaker-{len(speaker_map) + 1}"
+
+    unique_speakers = len(speaker_map)
+
+    # ── Split single-blob transcripts using diarization timestamps ──
+    # ONLY split when ASR returns exactly 1 segment (a true blob).
+    # When Whisper produces multiple segments with timestamps, use
+    # the standard speaker-assignment path instead (preserves text).
+    if len(raw_segments) == 1 and unique_speakers >= 2:
+        logger.info(
+            f"[DIARIZE-SPLIT] Transcript has {len(raw_segments)} segment(s) but "
+            f"diarization found {unique_speakers} speakers — splitting by diarization turns"
+        )
+        split_segments = []
+        blob_text = " ".join((s.get("text") or "").strip() for s in raw_segments).strip()
+        blob_tokens = [t for t in blob_text.split() if t]
+        total_dur = 0.0
+        dia_kept = []
+        for dia in diarization_sorted:
+            dia_start = dia.get("start", 0.0)
+            dia_end = dia.get("end", 0.0)
+            dia_speaker = speaker_map.get(dia.get("speaker"), "speaker-1")
+            duration = dia_end - dia_start
+            # Skip very short turns (< 0.3s) — likely noise
+            if duration < 0.3:
+                continue
+            dia_kept.append({"start": dia_start, "end": dia_end, "speaker": dia_speaker, "dur": duration})
+            total_dur += max(0.0, float(duration))
+
+        if dia_kept:
+            idx = 0
+            n_tokens = len(blob_tokens)
+            for j, dk in enumerate(dia_kept):
+                if n_tokens <= 0:
+                    seg_text = blob_text if (j == 0 and blob_text) else ""
+                else:
+                    remaining = n_tokens - idx
+                    if remaining <= 0:
+                        seg_text = ""
+                    else:
+                        if j == len(dia_kept) - 1:
+                            take = remaining
+                        else:
+                            ratio = (dk["dur"] / total_dur) if total_dur > 0 else (1.0 / len(dia_kept))
+                            take = max(1, int(round(ratio * n_tokens)))
+                            take = min(take, remaining)
+                        seg_text = " ".join(blob_tokens[idx: idx + take]).strip()
+                        idx += take
+
+                split_segments.append(
+                    TranscriptSegment(
+                        text=seg_text,
+                        start=dk["start"],
+                        end=dk["end"],
+                        speaker=dk["speaker"],
+                    )
+                )
+
+        if split_segments:
+            logger.info(
+                f"[DIARIZE-SPLIT] Created {len(split_segments)} segments from "
+                f"{unique_speakers} speakers"
+            )
+            return split_segments
+
+    # ── Standard path: label existing segments with best-overlap speaker ──
+    # If an ASR segment overlaps multiple diarization speakers (common when
+    # Whisper emits long segments), split the ASR segment at diarization turn
+    # boundaries and distribute text proportionally so speakers don't collapse.
+    def _split_segment_by_diarization(seg):
+        seg_start = float(seg.get("start", 0.0) or 0.0)
+        seg_end = float(seg.get("end", 0.0) or 0.0)
+        seg_text = (seg.get("text") or "").strip()
+        seg_dur = max(0.0, seg_end - seg_start)
+
+        if seg_dur <= 0.0:
+            return []
+
+        overlaps = []
+        for dia in diarization_sorted:
+            dia_start = float(dia.get("start", 0.0) or 0.0)
+            dia_end = float(dia.get("end", 0.0) or 0.0)
+            ov = max(0.0, min(seg_end, dia_end) - max(seg_start, dia_start))
+            if ov <= 0.0:
+                continue
+            overlaps.append((ov, dia_start, dia_end, speaker_map.get(dia.get("speaker"), dia.get("speaker"))))
+
+        if not overlaps:
+            return []
+
+        overlaps.sort(key=lambda x: x[1])
+        speakers_in_seg = [o[3] for o in overlaps if o[3]]
+        unique = list(dict.fromkeys(speakers_in_seg))
+
+        # Only split when there are multiple speakers AND the segment is long enough.
+        # Keep short segments intact to avoid over-fragmenting.
+        if len(unique) < 2 or seg_dur < 1.2:
+            return []
+
+        # Build diarization slices clipped to the ASR segment.
+        slices = []
+        for ov, dia_start, dia_end, spk in overlaps:
+            s = max(seg_start, dia_start)
+            e = min(seg_end, dia_end)
+            if e - s < 0.2:
+                continue
+            slices.append({"start": s, "end": e, "speaker": spk, "dur": e - s})
+
+        if len(slices) < 2:
+            return []
+
+        # Distribute text across slices by duration, respecting sentence boundaries.
+        # Split into sentences first so we never cut mid-sentence across speakers.
+        import re as _re
+        sentences = _re.split(r'(?<=[.!?])\s+', seg_text.strip())
+        sentences = [s for s in sentences if s]
+
+        if not sentences:
+            for sl in slices:
+                sl["text"] = ""
+        elif len(sentences) == 1:
+            # Only one sentence — assign to the dominant speaker slice by duration.
+            total = sum(sl["dur"] for sl in slices) or 1.0
+            dominant = max(slices, key=lambda x: x["dur"])
+            for sl in slices:
+                sl["text"] = seg_text.strip() if sl is dominant else ""
+        else:
+            total = sum(sl["dur"] for sl in slices) or seg_dur
+            n = len(sentences)
+            idx = 0
+            for j, sl in enumerate(slices):
+                remaining = n - idx
+                if remaining <= 0:
+                    sl["text"] = ""
+                    continue
+                if j == len(slices) - 1:
+                    take = remaining
+                else:
+                    ratio = (sl["dur"] / total) if total > 0 else (1.0 / len(slices))
+                    take = max(1, int(round(ratio * n)))
+                    take = min(take, remaining)
+                sl["text"] = " ".join(sentences[idx: idx + take]).strip()
+                idx += take
+
+        out = []
+        for sl in slices:
+            out.append(
+                TranscriptSegment(
+                    text=sl.get("text", ""),
+                    start=sl["start"],
+                    end=sl["end"],
+                    speaker=sl.get("speaker") or "speaker-1",
+                )
+            )
+        return out
 
     def _best_speaker(seg):
         best_speaker = None
@@ -191,6 +374,13 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments):
     assigned = []
     last_speaker = "speaker-1"
     for seg in raw_segments:
+        split = _split_segment_by_diarization(seg)
+        if split:
+            for s in split:
+                if s.speaker:
+                    last_speaker = s.speaker
+                assigned.append(s)
+            continue
         speaker = _best_speaker(seg) or last_speaker
         last_speaker = speaker
         assigned.append(
@@ -252,6 +442,97 @@ def _normalize_speaker_labels(segments):
             idx += 1
         seg.speaker = mapping[speaker]
     return segments
+
+
+_CJK_RE = re.compile(r"[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]")
+
+
+def _collapse_cjk_spaces(text: str) -> str:
+    if not text:
+        return text
+
+    # If the string does not contain CJK chars, avoid touching it.
+    if not _CJK_RE.search(text):
+        return text
+
+    # Remove spaces between adjacent CJK chars.
+    text = re.sub(
+        r"([\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF])\s+([\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF])",
+        r"\1\2",
+        text,
+    )
+    # Collapse repeated whitespace elsewhere.
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _is_low_quality_cjk_transcript(segments, whisper_language: str) -> bool:
+    if not segments:
+        return False
+
+    lang = (whisper_language or "").lower().strip()
+    if lang not in ("yue", "zh-yue", "yue-hk", "zh-hk", "zh", "zh-cn", "zh-tw"):
+        return False
+
+    texts = [(getattr(s, "text", None) or "").strip() for s in segments]
+    texts = [t for t in texts if t]
+    if not texts:
+        return True
+
+    total = len(texts)
+    tiny = sum(1 for t in texts if len(t) <= 2)
+    avg_len = sum(len(t) for t in texts) / max(1, total)
+    return (tiny / max(1, total)) >= 0.55 or avg_len <= 4.0
+
+
+def _merge_close_transcript_segments(
+    segments: list[TranscriptSegment],
+    max_gap: float = 0.35,
+    max_merged_chars: int = 220,
+    max_merge_count: int = 8,
+    max_merged_duration: float = 14.0,
+) -> list[TranscriptSegment]:
+    if not segments:
+        return segments
+
+    unique_speakers = set((s.speaker or "speaker-1") for s in segments)
+    # If diarization failed (single speaker label), do not merge — it can mash
+    # different characters into one line.
+    if len(unique_speakers) <= 1:
+        return segments
+
+    segs = sorted(segments, key=lambda s: float(s.start))
+    merged: list[TranscriptSegment] = [segs[0]]
+    merge_counts: list[int] = [1]
+
+    for seg in segs[1:]:
+        prev = merged[-1]
+        prev_speaker = prev.speaker or "speaker-1"
+        seg_speaker = seg.speaker or "speaker-1"
+        gap = float(seg.start) - float(prev.end)
+        candidate_text = (prev.text or "").rstrip() + " " + (seg.text or "").lstrip()
+        merged_duration = float(seg.end) - float(prev.start)
+
+        if (
+            prev_speaker == seg_speaker
+            and gap >= 0.0
+            and gap < max_gap
+            and len(prev.text or "") <= max_merged_chars
+            and merge_counts[-1] < max_merge_count
+            and merged_duration <= max_merged_duration
+        ):
+            merged[-1] = TranscriptSegment(
+                text=candidate_text.strip(),
+                start=prev.start,
+                end=seg.end,
+                speaker=prev_speaker,
+            )
+            merge_counts[-1] += 1
+        else:
+            merged.append(seg)
+            merge_counts.append(1)
+
+    return merged
 
 def _estimate_speakers_from_segments(raw_segments) -> int:
     """
@@ -323,7 +604,528 @@ async def _run_diarization_with_heartbeat(job_id: str, extract_result: dict, tim
         )
         await asyncio.sleep(5)
 
+async def _get_runpod_file_url(job_id: str, video_path: str) -> str:
+    """
+    Return a publicly accessible URL for the video file so RunPod can download it.
+
+    Prefers Cloudflare R2 (stable, no tunnel required).
+    Falls back to PUBLIC_BASE_URL if R2 is not configured.
+    """
+    r2_bucket   = os.getenv("R2_BUCKET_NAME", "")
+    r2_key_id   = os.getenv("R2_ACCESS_KEY_ID", "")
+    r2_secret   = os.getenv("R2_SECRET_ACCESS_KEY", "")
+    r2_account  = os.getenv("R2_ACCOUNT_ID", "")
+    r2_pub_url  = os.getenv("R2_PUBLIC_URL", "").rstrip("/")
+
+    if r2_bucket and r2_key_id and r2_secret and r2_account:
+        try:
+            import re
+            import boto3
+            from botocore.config import Config
+
+            endpoint = f"https://{r2_account}.r2.cloudflarestorage.com"
+            s3 = boto3.client(
+                "s3",
+                endpoint_url=endpoint,
+                aws_access_key_id=r2_key_id,
+                aws_secret_access_key=r2_secret,
+                config=Config(signature_version="s3v4"),
+                region_name="auto",
+            )
+
+            safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(video_path).name)
+            object_key = f"{job_id}/{safe_name}"
+            logger.info(f"Job {job_id}: uploading video to R2 → {r2_bucket}/{object_key}")
+
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: s3.upload_file(
+                    video_path,
+                    r2_bucket,
+                    object_key,
+                    ExtraArgs={"ContentType": "video/mp4"},
+                ),
+            )
+
+            # Generate a pre-signed URL (2 hours) — works regardless of bucket public access
+            url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": r2_bucket, "Key": object_key},
+                ExpiresIn=7200,
+            )
+            logger.info(f"Job {job_id}: R2 upload complete, presigned URL generated")
+            return url
+
+        except Exception as r2_err:
+            logger.warning(f"Job {job_id}: R2 upload failed ({r2_err}), falling back to PUBLIC_BASE_URL")
+
+    # Fallback: tunnel / ngrok URL
+    public_base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+    if not public_base:
+        raise RuntimeError(
+            "No video URL available for RunPod: configure R2_BUCKET_NAME / R2_ACCESS_KEY_ID / "
+            "R2_SECRET_ACCESS_KEY / R2_ACCOUNT_ID / R2_PUBLIC_URL in .env, "
+            "or set PUBLIC_BASE_URL for a tunnel."
+        )
+    return f"{public_base}/api/media/{job_id}/video"
+
+
+async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float):
+    from app.services.runpod_service import runpod_service
+
+    await job_manager.update_job_status(
+        job_id, JobStatus.PROCESSING, progress=15,
+        current_stage="Uploading to GPU cloud"
+    )
+
+    file_url = await _get_runpod_file_url(job_id, video_path)
+
+    # Per-job source language overrides the global WHISPER_LANGUAGE env var.
+    # The frontend sends this on upload (e.g. "yue" for Cantonese videos) so
+    # one server can dub videos in different source languages without restart.
+    job_for_lang = await job_manager.get_job(job_id)
+    job_source_lang = (job_for_lang.source_language if job_for_lang else None) or ""
+    whisper_language = (job_source_lang or os.getenv("WHISPER_LANGUAGE", "")).strip()
+    if job_source_lang:
+        logger.info(
+            f"Job {job_id}: using per-job source_language={job_source_lang!r} "
+            f"(overrides WHISPER_LANGUAGE env var)"
+        )
+    min_speakers = int(os.getenv("DIARIZATION_MIN_SPEAKERS", "2"))
+    max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "4"))
+
+    # Cantonese quality defaults for GPU worker:
+    # - Prefer Whisper large-v3 for yue
+    # - Disable Paraformer for yue (Mandarin-focused, often produces blob/junk)
+    if whisper_language.lower() == "yue":
+        if not os.getenv("WHISPER_MODEL", "").strip():
+            os.environ["WHISPER_MODEL"] = "large-v3"
+        if not os.getenv("CANTONESE_ASR_ENGINES", "").strip():
+            os.environ["CANTONESE_ASR_ENGINES"] = "whisper"
+
+    # Collect env vars the GPU worker needs for ASR engines and callbacks
+    _env_keys = [
+        "TENCENT_SECRET_ID", "TENCENT_SECRET_KEY",
+        "CANTONESE_ASR_ENGINES", "CANTONESE_ASR_WHISPER_GAP_FILL",
+        "WHISPER_LANGUAGE", "WHISPER_MODEL",
+        "HF_TOKEN", "HUGGING_FACE_TOKEN", "HUGGINGFACE_TOKEN", "HUGGINGFACE_HUB_TOKEN",
+        "PARAFORMER_DEVICE",
+        "PUBLIC_BASE_URL",  # Worker uses this to POST stage callbacks back to us
+    ]
+    gpu_env_vars = {}
+    for k in _env_keys:
+        v = os.getenv(k, "")
+        if v is None:
+            continue
+        v = str(v).strip()
+        if v:
+            gpu_env_vars[k] = v
+
+    # Force per-job WHISPER_LANGUAGE into the worker env so it overrides any
+    # stale value the worker container was started with. Same for the
+    # Cantonese-specific defaults applied above.
+    if whisper_language:
+        gpu_env_vars["WHISPER_LANGUAGE"] = whisper_language
+        if whisper_language.lower() == "yue":
+            gpu_env_vars.setdefault("WHISPER_MODEL", os.environ.get("WHISPER_MODEL", "large-v3"))
+            gpu_env_vars.setdefault("CANTONESE_ASR_ENGINES", os.environ.get("CANTONESE_ASR_ENGINES", "whisper"))
+            # Disable VAD for Cantonese — fight-scene audio triggers aggressive speech filtering
+            # that removes all dialogue. large-v3 with no VAD is more reliable for mixed content.
+            gpu_env_vars.setdefault("VAD_THRESHOLD", "0")
+
+    # Compatibility: the worker (and diarization pipeline) primarily reads HF_TOKEN.
+    if not gpu_env_vars.get("HF_TOKEN"):
+        alt_hf = (
+            os.getenv("HUGGING_FACE_TOKEN", "")
+            or os.getenv("HUGGINGFACE_TOKEN", "")
+            or os.getenv("HUGGINGFACE_HUB_TOKEN", "")
+        )
+        alt_hf = str(alt_hf).strip()
+        if alt_hf:
+            gpu_env_vars["HF_TOKEN"] = alt_hf
+
+    async def _progress_cb(pct):
+        from app.services.pipeline_tracker import pipeline_tracker
+        # NOTE: RunPod can sit in IN_QUEUE for a while. While queued we
+        # should not advance pipeline stages.
+        if pct < 15:
+            stage = "Waiting for GPU worker (RunPod queue)"
+        else:
+            stage = "Processing on GPU"
+
+            def _ensure_started(stage_id: str):
+                p = pipeline_tracker.get_pipeline(job_id)
+                if not p:
+                    return
+                for s in p.get("stages", []):
+                    if s.get("id") == stage_id and s.get("status") == "pending":
+                        pipeline_tracker.start_stage(job_id, stage_id)
+                        return
+
+            def _ensure_completed(stage_id: str, summary: str):
+                p = pipeline_tracker.get_pipeline(job_id)
+                if not p:
+                    return
+                for s in p.get("stages", []):
+                    if s.get("id") == stage_id and s.get("status") in ("pending", "active"):
+                        pipeline_tracker.complete_stage(job_id, stage_id, summary)
+                        return
+
+            # RunPod progress callbacks can jump (e.g. 55% → 90%).
+            # Make stage transitions monotonic: once pct passes a threshold,
+            # force-complete earlier stages so the UI doesn't get stuck.
+            if pct >= 55:
+                _ensure_completed("download", "Video downloaded to GPU worker")
+                _ensure_started("extract")
+            if pct >= 65:
+                _ensure_completed("extract", "Audio extracted")
+                _ensure_started("separate")
+            if pct >= 75:
+                _ensure_completed("separate", "Demucs separation complete")
+                _ensure_started("transcribe")
+            if pct >= 90:
+                _ensure_completed("transcribe", "Transcription complete")
+                _ensure_started("diarize")
+
+            if pct < 55:
+                stage = "Downloading video (GPU)"
+            elif pct < 65:
+                stage = "Extracting audio (GPU)"
+            elif pct < 75:
+                stage = "Separating audio (GPU)"
+            elif pct < 90:
+                stage = "Transcribing (GPU)"
+            else:
+                stage = "Diarizing speakers (GPU)"
+        await job_manager.update_job_status(
+            job_id, JobStatus.TRANSCRIBING, progress=pct, current_stage=stage
+        )
+
+    try:
+        runpod_poll_timeout = int(
+            os.getenv(
+                "RUNPOD_POLL_TIMEOUT_SEC",
+                os.getenv("RUNPOD_QUEUE_TIMEOUT_SEC", "7200"),
+            )
+        )
+    except Exception:
+        try:
+            runpod_poll_timeout = int(os.getenv("RUNPOD_QUEUE_TIMEOUT_SEC", "7200"))
+        except Exception:
+            runpod_poll_timeout = 7200
+
+    submit_result = await runpod_service.submit_job(
+        file_url=file_url,
+        job_id=job_id,
+        language=whisper_language,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+        env_vars=gpu_env_vars,
+    )
+
+    try:
+        _runpod_job_id = submit_result.get("id")
+        job_for_rp = await job_manager.get_job(job_id)
+        if job_for_rp and _runpod_job_id:
+            job_for_rp.runpod_job_id = _runpod_job_id
+            logger.info(f"Job {job_id}: stored runpod_job_id={_runpod_job_id}")
+    except Exception:
+        pass
+
+    runpod_job_id = submit_result.get("id")
+    if not runpod_job_id:
+        raise RuntimeError(f"RunPod did not return a job ID: {submit_result}")
+
+    result = await runpod_service.poll_until_complete(
+        runpod_job_id=runpod_job_id,
+        timeout=runpod_poll_timeout,
+        progress_callback=_progress_cb,
+    )
+
+    if result.get("error"):
+        raise RuntimeError(f"RunPod GPU pipeline failed: {result['error']}")
+
+    # Clear runpod_job_id after success
+    try:
+        job_for_rp2 = await job_manager.get_job(job_id)
+        if job_for_rp2:
+            job_for_rp2.runpod_job_id = None
+    except Exception:
+        pass
+
+    logger.info(f"Job {job_id}: RunPod result keys={list(result.keys())}, "
+                f"segments={len(result.get('segments', []))}, "
+                f"transcript_segments={len(result.get('transcript', {}).get('segments', []))}, "
+                f"timings={result.get('timings')}, gpu={result.get('gpu')}")
+
+    segments_data = result.get("segments", [])
+    transcript_data = result.get("transcript", {})
+    speaker_genders = result.get("speaker_genders", {})
+
+    diarization_segments = (result.get("diarization", {}) or {}).get("segments", [])
+
+    segments = [
+        TranscriptSegment(
+            text=seg.get("text", ""),
+            start=seg.get("start", 0),
+            end=seg.get("end", 0),
+            speaker=seg.get("speaker", "speaker-1"),
+        )
+        for seg in segments_data
+        if seg.get("text", "").strip()
+    ]
+
+    if not segments and transcript_data.get("segments"):
+        for seg in transcript_data["segments"]:
+            segments.append(
+                TranscriptSegment(
+                    text=seg.get("text", ""),
+                    start=seg.get("start", 0),
+                    end=seg.get("end", 0),
+                    speaker=seg.get("speaker", "speaker-1"),
+                )
+            )
+
+    if diarization_segments and segments:
+        unique_speakers = set((s.speaker or "speaker-1") for s in segments)
+        diar_speakers = set((d.get("speaker") or "").strip() for d in diarization_segments if d.get("speaker"))
+        if len(unique_speakers) <= 1 and len(diar_speakers) > 1:
+            logger.info(
+                f"Job {job_id}: transcript has {len(unique_speakers)} speaker label(s) but diarization has "
+                f"{len(diar_speakers)} — re-assigning speakers from diarization"
+            )
+            raw_segments = [
+                {"text": s.text, "start": s.start, "end": s.end, "speaker": s.speaker}
+                for s in segments
+            ]
+            reassigned = _assign_speakers_from_diarization(raw_segments, diarization_segments)
+            reassigned = _smooth_speaker_assignments(reassigned)
+            reassigned = _normalize_speaker_labels(reassigned)
+            if reassigned:
+                segments = reassigned
+
+    # Quality gate: some worker versions can return an empty transcript (0
+    # segments) even though the job ran. For Cantonese jobs, fall back to local
+    # transcription so the user can still dub.
+    if (not segments) and whisper_language and whisper_language.lower() in ("yue", "zh-yue", "yue-hk", "zh-hk"):
+        logger.warning(
+            f"Job {job_id}: GPU transcript is empty for lang={whisper_language!r}. "
+            "Falling back to local transcription."
+        )
+        try:
+            from app.pipeline.extract_audio import extract_audio
+            from app.pipeline.transcribe_cantonese import transcribe_cantonese
+
+            prev_lang = os.environ.get("WHISPER_LANGUAGE")
+            os.environ["WHISPER_LANGUAGE"] = whisper_language or "yue"
+            extract_result = extract_audio(video_path)
+            local_result = transcribe_cantonese(extract_result, job_id=job_id)
+            if prev_lang is None:
+                os.environ.pop("WHISPER_LANGUAGE", None)
+            else:
+                os.environ["WHISPER_LANGUAGE"] = prev_lang
+
+            local_segments_raw = (local_result or {}).get("segments") or []
+            if local_segments_raw:
+                segments = [
+                    TranscriptSegment(
+                        text=(s.get("text") or "").strip(),
+                        start=s.get("start", 0),
+                        end=s.get("end", 0),
+                        speaker=s.get("speaker", "speaker-1"),
+                    )
+                    for s in local_segments_raw
+                    if (s.get("text") or "").strip()
+                ]
+
+                # RunPod handler doesn't return diarization data — run it locally now
+                # so speaker labels are assigned before the transcript is saved.
+                if not diarization_segments and extract_result:
+                    try:
+                        local_diarize = diarize_audio(extract_result, job_id=job_id)
+                        if local_diarize.get("status") == "ok":
+                            diarization_segments = local_diarize.get("segments", [])
+                            logger.info(
+                                f"Job {job_id}: local diarization (empty-transcript fallback) "
+                                f"found {len(diarization_segments)} speaker turns"
+                            )
+                    except Exception as diar_err:
+                        logger.warning(f"Job {job_id}: local diarization failed in empty-transcript fallback: {diar_err}")
+
+                if diarization_segments and segments:
+                    raw_segments = [
+                        {"text": s.text, "start": s.start, "end": s.end, "speaker": s.speaker}
+                        for s in segments
+                    ]
+                    reassigned = _assign_speakers_from_diarization(raw_segments, diarization_segments)
+                    reassigned = _smooth_speaker_assignments(reassigned)
+                    reassigned = _normalize_speaker_labels(reassigned)
+                    if reassigned:
+                        segments = reassigned
+
+                logger.info(
+                    f"Job {job_id}: local transcription fallback (empty transcript) succeeded "
+                    f"(segments={len(segments)})."
+                )
+            else:
+                logger.warning(f"Job {job_id}: local transcription fallback returned no segments")
+        except Exception as e:
+            logger.error(f"Job {job_id}: local transcription fallback failed: {e}")
+
+    # Quality gate: if GPU transcript is CJK character-soup (tons of 1–2 char
+    # segments), fall back to local transcription which previously produced
+    # sentence-level output.
+    if _is_low_quality_cjk_transcript(segments, whisper_language):
+        logger.warning(
+            f"Job {job_id}: GPU transcript is low-quality CJK character soup for lang={whisper_language!r}. "
+            "Falling back to local transcription."
+        )
+        try:
+            from app.pipeline.extract_audio import extract_audio
+            from app.pipeline.transcribe_cantonese import transcribe_cantonese
+
+            prev_lang = os.environ.get("WHISPER_LANGUAGE")
+            os.environ["WHISPER_LANGUAGE"] = whisper_language or "yue"
+            extract_result = extract_audio(video_path)
+            local_result = transcribe_cantonese(extract_result, job_id=job_id)
+            if prev_lang is None:
+                os.environ.pop("WHISPER_LANGUAGE", None)
+            else:
+                os.environ["WHISPER_LANGUAGE"] = prev_lang
+
+            local_segments_raw = (local_result or {}).get("segments") or []
+            if local_segments_raw:
+                segments = [
+                    TranscriptSegment(
+                        text=(s.get("text") or "").strip(),
+                        start=s.get("start", 0),
+                        end=s.get("end", 0),
+                        speaker=s.get("speaker", "speaker-1"),
+                    )
+                    for s in local_segments_raw
+                    if (s.get("text") or "").strip()
+                ]
+
+                # RunPod handler doesn't return diarization data — run it locally now
+                # so speaker labels are assigned before the transcript is saved.
+                if not diarization_segments and extract_result:
+                    try:
+                        local_diarize = diarize_audio(extract_result, job_id=job_id)
+                        if local_diarize.get("status") == "ok":
+                            diarization_segments = local_diarize.get("segments", [])
+                            logger.info(
+                                f"Job {job_id}: local diarization (CJK-quality fallback) "
+                                f"found {len(diarization_segments)} speaker turns"
+                            )
+                    except Exception as diar_err:
+                        logger.warning(f"Job {job_id}: local diarization failed in CJK-quality fallback: {diar_err}")
+
+                if diarization_segments and segments:
+                    raw_segments = [
+                        {"text": s.text, "start": s.start, "end": s.end, "speaker": s.speaker}
+                        for s in segments
+                    ]
+                    reassigned = _assign_speakers_from_diarization(raw_segments, diarization_segments)
+                    reassigned = _smooth_speaker_assignments(reassigned)
+                    reassigned = _normalize_speaker_labels(reassigned)
+                    if reassigned:
+                        segments = reassigned
+
+                logger.info(
+                    f"Job {job_id}: local transcription fallback (low-quality CJK) succeeded "
+                    f"(segments={len(segments)})."
+                )
+            else:
+                logger.warning(f"Job {job_id}: local transcription fallback returned no segments")
+        except Exception as e:
+            logger.error(f"Job {job_id}: local transcription fallback failed: {e}")
+
+    # Cantonese cleanup: GPU workers often return CJK characters spaced like tokens.
+    # Fix at ingestion time so downstream translation/TTS sees real sentences.
+    if whisper_language.lower() in ("yue", "zh-yue", "yue-hk", "zh-hk") and segments:
+        before = len(segments)
+        segments = [
+            TranscriptSegment(
+                text=_collapse_cjk_spaces(s.text or ""),
+                start=s.start,
+                end=s.end,
+                speaker=s.speaker or "speaker-1",
+            )
+            for s in segments
+            if (s.text or "").strip()
+        ]
+        segments = _merge_close_transcript_segments(segments)
+        after = len(segments)
+        if after != before:
+            logger.info(f"Job {job_id}: merged micro-fragments after CJK cleanup: {before} -> {after}")
+
+    transcript = Transcript(
+        language=transcript_data.get("language", whisper_language or "en"),
+        duration=transcript_data.get("duration", duration),
+        text=_collapse_cjk_spaces(transcript_data.get("text", " ".join(s.text for s in segments))),
+        segments=segments,
+    )
+
+    await job_manager.update_job_transcript(job_id, transcript)
+
+    if speaker_genders:
+        await job_manager.update_job_speaker_genders(job_id, speaker_genders)
+    else:
+        # RunPod handler didn't return speaker gender classifications.
+        # Run local F0 pitch analysis on the uploaded video so child-voice
+        # routing and gender-based voice assignment work correctly.
+        try:
+            from app.pipeline.extract_audio import extract_audio
+            from app.pipeline.classify_speakers import classify_speakers as _classify
+
+            logger.info(f"Job {job_id}: speaker_genders empty from GPU — running local F0 classification")
+            extract_result = extract_audio(video_path)
+            if extract_result and extract_result.get("status") == "ok":
+                audio_tensor = extract_result["audio"]
+                sr = extract_result["sample_rate"]
+                segs_for_classify = [
+                    {"speaker": s.speaker, "start": s.start, "end": s.end}
+                    for s in segments
+                ]
+                local_genders = _classify(audio_tensor, sr, segs_for_classify)
+                if local_genders:
+                    await job_manager.update_job_speaker_genders(job_id, local_genders)
+                    speaker_genders = local_genders
+                    logger.info(f"Job {job_id}: local F0 classification: {local_genders}")
+                else:
+                    logger.warning(f"Job {job_id}: local F0 classification returned no genders")
+        except Exception as classify_err:
+            logger.warning(f"Job {job_id}: local F0 classification failed: {classify_err}")
+
+    timings = result.get("timings", {})
+    gpu_info = result.get("gpu", {})
+    logger.info(
+        f"Job {job_id}: RunPod GPU pipeline complete — "
+        f"{len(segments)} segments, {len(speaker_genders)} speakers, "
+        f"total={timings.get('total', '?')}s, device={gpu_info.get('device', '?')}"
+    )
+
+    return True
+
+
+def _should_use_gpu() -> bool:
+    mode = os.getenv("PROCESSING_MODE", "cpu").lower()
+    if mode == "gpu":
+        return True
+    if mode == "auto":
+        from app.services.runpod_service import runpod_service
+        return runpod_service.is_available()
+    return False
+
+
 async def process_video_pipeline(job_id: str, video_path: str):
+    from app.services.pipeline_tracker import pipeline_tracker
+
+    pipeline_type = "gpu" if _should_use_gpu() else "analysis"
+    pipeline_tracker.init_pipeline(job_id, pipeline_type)
+    pipeline_tracker.start_stage(job_id, "upload")
+    pipeline_tracker.complete_stage(job_id, "upload", f"File: {Path(video_path).name}")
+
     try:
         await job_manager.update_job_status(
             job_id,
@@ -344,14 +1146,72 @@ async def process_video_pipeline(job_id: str, video_path: str):
         job = await job_manager.get_job(job_id)
         if job:
             job.video_duration = duration
-        
+
+        if _should_use_gpu():
+            from app.services.runpod_service import runpod_service
+            if runpod_service.is_available():
+                logger.info(f"Job {job_id}: routing to RunPod GPU serverless endpoint")
+                # Re-init as GPU pipeline with GPU-specific stages
+                pipeline_tracker.init_pipeline(job_id, "gpu")
+                pipeline_tracker.start_stage(job_id, "download")
+                try:
+                    await _run_runpod_gpu_pipeline(job_id, video_path, duration)
+                    # Mark all GPU stages complete
+                    for sid in ["download", "extract", "separate", "transcribe", "diarize"]:
+                        if pipeline_tracker.get_pipeline(job_id):
+                            stage_data = pipeline_tracker._pipelines[job_id]["stages"].get(sid, {})
+                            if stage_data.get("status") in ("pending", "active"):
+                                pipeline_tracker.complete_stage(job_id, sid)
+                    await job_manager.update_job_status(
+                        job_id, JobStatus.COMPLETED, progress=100,
+                        current_stage="Video processing complete (GPU)"
+                    )
+                    return
+                except Exception as gpu_err:
+                    mode = os.getenv("PROCESSING_MODE", "cpu").lower()
+                    allow_fallback = os.getenv("GPU_ALLOW_CPU_FALLBACK", "").lower()
+                    if allow_fallback in {"1", "true", "yes"}:
+                        allow_fallback_bool = True
+                    elif allow_fallback in {"0", "false", "no"}:
+                        allow_fallback_bool = False
+                    else:
+                        allow_fallback_bool = (mode == "auto")
+
+                    if not allow_fallback_bool and mode == "gpu":
+                        logger.error(f"Job {job_id}: GPU pipeline failed (no CPU fallback): {gpu_err}")
+                        try:
+                            p = pipeline_tracker.get_pipeline(job_id) or {}
+                            active_stage = p.get("active_stage")
+                            if active_stage:
+                                pipeline_tracker.fail_stage(job_id, active_stage, str(gpu_err))
+                            else:
+                                pipeline_tracker.fail_stage(job_id, "download", str(gpu_err))
+                        except Exception:
+                            pipeline_tracker.fail_stage(job_id, "download", str(gpu_err))
+                        await job_manager.update_job_status(
+                            job_id,
+                            JobStatus.FAILED,
+                            progress=100,
+                            error_message=f"GPU pipeline failed: {gpu_err}",
+                        )
+                        return
+
+                    logger.warning(f"Job {job_id}: GPU pipeline failed, falling back to CPU: {gpu_err}")
+                    # Re-init as CPU analysis pipeline for fallback
+                    pipeline_tracker.init_pipeline(job_id, "analysis")
+                    pipeline_tracker.start_stage(job_id, "upload")
+                    pipeline_tracker.complete_stage(job_id, "upload", f"File: {Path(video_path).name}")
+            else:
+                logger.info(f"Job {job_id}: PROCESSING_MODE=gpu but RunPod not configured, using CPU")
+
+        pipeline_tracker.start_stage(job_id, "chunk")
         await job_manager.update_job_status(
             job_id,
             JobStatus.CHUNKING,
             progress=20,
             current_stage="Chunking video"
         )
-        
+
         chunks = chunker.chunk_video(job_id, video_path)
         
         if not chunks:
@@ -363,14 +1223,16 @@ async def process_video_pipeline(job_id: str, video_path: str):
             return
         
         await job_manager.update_job_chunks(job_id, chunks)
-        
+        pipeline_tracker.complete_stage(job_id, "chunk", f"{len(chunks)} chunk(s)")
+
+        pipeline_tracker.start_stage(job_id, "extract_audio")
         await job_manager.update_job_status(
             job_id,
             JobStatus.EXTRACTING_AUDIO,
             progress=40,
             current_stage="Extracting audio from video"
         )
-        
+
         extract_result = await asyncio.to_thread(extract_audio, video_path)
         
         if extract_result["status"] != "ok":
@@ -382,6 +1244,9 @@ async def process_video_pipeline(job_id: str, video_path: str):
             )
             return
         
+        pipeline_tracker.complete_stage(job_id, "extract_audio", f"{extract_result.get('sample_rate', 16000)}Hz audio extracted")
+
+        pipeline_tracker.start_stage(job_id, "separate")
         await job_manager.update_job_status(
             job_id,
             JobStatus.TRANSCRIBING,
@@ -391,8 +1256,17 @@ async def process_video_pipeline(job_id: str, video_path: str):
 
         # Run Demucs vocal separation before Whisper so transcription uses
         # clean isolated speech instead of the raw mix (fight SFX, music, crowd).
+        from app.services.replicate_service import is_cloud_enabled, cloud_separate
         from app.pipeline.separate_audio import separate_audio
-        separation_result = await asyncio.to_thread(separate_audio, video_path, job_id)
+
+        if is_cloud_enabled():
+            logger.info(f"Job {job_id}: using CLOUD GPU for Demucs separation")
+            separation_result = await asyncio.to_thread(cloud_separate, video_path, job_id)
+            if separation_result.get("status") != "ok":
+                logger.warning(f"Job {job_id}: cloud separation failed, falling back to local CPU")
+                separation_result = await asyncio.to_thread(separate_audio, video_path, job_id)
+        else:
+            separation_result = await asyncio.to_thread(separate_audio, video_path, job_id)
 
         transcribe_input = extract_result
         if separation_result.get("status") == "ok":
@@ -411,6 +1285,43 @@ async def process_video_pipeline(job_id: str, video_path: str):
                     vocals_sr = 16000
                 if vocals_waveform.shape[0] > 1:
                     vocals_waveform = vocals_waveform.mean(dim=0, keepdim=True)
+
+                # ── Speech energy gate ──
+                # Zero out low-energy frames to suppress residual grunts/noise
+                # that Demucs couldn't fully remove from the vocals track.
+                frame_size = int(0.03 * vocals_sr)  # 30ms frames
+                hop = frame_size
+                n_samples = vocals_waveform.shape[-1]
+                rms_values = []
+                for fi in range(0, n_samples - frame_size, hop):
+                    frame = vocals_waveform[0, fi:fi + frame_size]
+                    rms_values.append(frame.pow(2).mean().sqrt().item())
+
+                if rms_values:
+                    rms_tensor = torch.tensor(rms_values)
+                    # Use adaptive threshold: median + 1 std of non-silent frames
+                    non_silent = rms_tensor[rms_tensor > 0.001]
+                    if len(non_silent) > 10:
+                        threshold = float(non_silent.median() * 0.5)
+                    else:
+                        threshold = 0.01
+
+                    gated = vocals_waveform.clone()
+                    frames_zeroed = 0
+                    for fi_idx, fi in enumerate(range(0, n_samples - frame_size, hop)):
+                        if rms_values[fi_idx] < threshold:
+                            gated[0, fi:fi + frame_size] = 0.0
+                            frames_zeroed += 1
+
+                    total_frames = len(rms_values)
+                    speech_pct = 100 * (1 - frames_zeroed / total_frames) if total_frames else 0
+                    logger.info(
+                        f"Job {job_id}: speech energy gate — threshold={threshold:.4f}, "
+                        f"kept {total_frames - frames_zeroed}/{total_frames} frames "
+                        f"({speech_pct:.1f}% speech)"
+                    )
+                    vocals_waveform = gated
+
                 transcribe_input = {
                     "status": "ok",
                     "audio": vocals_waveform,
@@ -421,6 +1332,10 @@ async def process_video_pipeline(job_id: str, video_path: str):
         else:
             logger.info(f"Job {job_id}: separation skipped ({separation_result.get('reason')}), transcribing raw audio")
 
+        pipeline_tracker.complete_stage(job_id, "separate",
+            f"Demucs {separation_result.get('model', 'htdemucs')}" if separation_result.get("status") == "ok" else "Skipped")
+
+        pipeline_tracker.start_stage(job_id, "transcribe")
         await job_manager.update_job_status(
             job_id,
             JobStatus.TRANSCRIBING,
@@ -430,15 +1345,38 @@ async def process_video_pipeline(job_id: str, video_path: str):
 
         # Use the multi-engine Cantonese pipeline for CJK languages,
         # fall back to Whisper-only for other languages.
-        whisper_language = os.getenv("WHISPER_LANGUAGE", "").strip()
+        # Per-job source_language overrides the global WHISPER_LANGUAGE env var.
+        _job_for_lang = await job_manager.get_job(job_id)
+        _job_src_lang = (_job_for_lang.source_language if _job_for_lang else None) or ""
+        whisper_language = (_job_src_lang or os.getenv("WHISPER_LANGUAGE", "")).strip()
+        if _job_src_lang:
+            logger.info(
+                f"Job {job_id}: CPU transcribe using per-job source_language={_job_src_lang!r}"
+            )
         _CJK_LANGS = {"zh", "yue", "ja", "ko", "cmn"}
         vocals_path = separation_result.get("vocals_path") if separation_result.get("status") == "ok" else None
 
-        if whisper_language in _CJK_LANGS:
+        from app.services.replicate_service import cloud_transcribe
+
+        if is_cloud_enabled() and vocals_path:
+            logger.info(f"Job {job_id}: using CLOUD GPU for Whisper transcription")
+            transcribe_result = await asyncio.to_thread(
+                cloud_transcribe, vocals_path, whisper_language or "yue", job_id
+            )
+            if transcribe_result.get("status") != "ok":
+                logger.warning(f"Job {job_id}: cloud transcription failed, falling back to local")
+                if whisper_language in _CJK_LANGS:
+                    from app.pipeline.transcribe_cantonese import transcribe_cantonese
+                    transcribe_result = await asyncio.to_thread(
+                        transcribe_cantonese, transcribe_input, vocals_path, job_id, whisper_language
+                    )
+                else:
+                    transcribe_result = await asyncio.to_thread(transcribe_audio, transcribe_input, job_id)
+        elif whisper_language in _CJK_LANGS:
             from app.pipeline.transcribe_cantonese import transcribe_cantonese
             logger.info(f"Job {job_id}: using multi-engine Cantonese ASR pipeline (lang={whisper_language})")
             transcribe_result = await asyncio.to_thread(
-                transcribe_cantonese, transcribe_input, vocals_path, job_id
+                transcribe_cantonese, transcribe_input, vocals_path, job_id, whisper_language
             )
         else:
             transcribe_result = await asyncio.to_thread(transcribe_audio, transcribe_input, job_id)
@@ -455,6 +1393,9 @@ async def process_video_pipeline(job_id: str, video_path: str):
 
                 raw_segments = transcript_data.get("segments", [])
 
+                pipeline_tracker.complete_stage(job_id, "transcribe", f"{len(raw_segments)} segments")
+
+                pipeline_tracker.start_stage(job_id, "diarize")
                 await job_manager.update_job_status(
                     job_id,
                     JobStatus.DIARIZING,
@@ -464,18 +1405,34 @@ async def process_video_pipeline(job_id: str, video_path: str):
 
                 diarization_segments = []
                 diarization_timeout_sec = int(os.getenv("DIARIZATION_TIMEOUT_SEC", "600"))
+                min_speakers = int(os.getenv("DIARIZATION_MIN_SPEAKERS", "2"))
+                max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "4"))
+
                 # Use separated vocals for diarization when available —
                 # the original mix has fight SFX / music that confuse pyannote.
                 diarize_input = transcribe_input if transcribe_input is not extract_result else extract_result
-                logger.info(
-                    f"Job {job_id}: diarization using "
-                    f"{'separated vocals' if diarize_input is not extract_result else 'original audio'}"
-                )
-                diarization_result = await _run_diarization_with_heartbeat(
-                    job_id,
-                    diarize_input,
-                    diarization_timeout_sec,
-                )
+
+                from app.services.replicate_service import cloud_diarize
+
+                if is_cloud_enabled() and vocals_path:
+                    logger.info(f"Job {job_id}: using CLOUD GPU for diarization")
+                    diarization_result = await asyncio.to_thread(
+                        cloud_diarize, vocals_path, min_speakers, max_speakers, job_id
+                    )
+                    if diarization_result.get("status") != "ok":
+                        logger.warning(f"Job {job_id}: cloud diarization failed, falling back to local")
+                        diarization_result = await _run_diarization_with_heartbeat(
+                            job_id, diarize_input, diarization_timeout_sec,
+                        )
+                else:
+                    logger.info(
+                        f"Job {job_id}: diarization using "
+                        f"{'separated vocals' if diarize_input is not extract_result else 'original audio'}"
+                    )
+                    diarization_result = await _run_diarization_with_heartbeat(
+                        job_id, diarize_input, diarization_timeout_sec,
+                    )
+
                 if diarization_result.get("status") == "ok":
                     diarization_segments = diarization_result.get("segments", [])
                 else:
@@ -484,6 +1441,52 @@ async def process_video_pipeline(job_id: str, video_path: str):
                     )
 
                 segments = _assign_speakers_from_diarization(raw_segments, diarization_segments)
+
+                # ── Re-transcribe split segments that have empty text ──
+                # When diarization splits a single blob, each segment needs
+                # its own transcription from the isolated time range.
+                if segments and any(not seg.text.strip() for seg in segments):
+                    logger.info(f"Job {job_id}: re-transcribing {len(segments)} diarization-split segments")
+                    import soundfile as sf
+                    import numpy as np
+
+                    # Use the vocals waveform for re-transcription
+                    src_audio = transcribe_input.get("audio")
+                    src_sr = transcribe_input.get("sample_rate", 16000)
+
+                    for i, seg in enumerate(segments):
+                        if seg.text.strip():
+                            continue
+                        start_sample = int(seg.start * src_sr)
+                        end_sample = int(seg.end * src_sr)
+                        if src_audio is not None and end_sample <= src_audio.shape[-1]:
+                            chunk = src_audio[..., start_sample:end_sample]
+                            chunk_input = {"status": "ok", "audio": chunk, "sample_rate": src_sr}
+                            try:
+                                chunk_result = await asyncio.to_thread(
+                                    transcribe_audio, chunk_input, f"{job_id}_seg{i}"
+                                )
+                                if chunk_result.get("status") == "ok":
+                                    chunk_segs = chunk_result.get("segments", [])
+                                    if chunk_segs:
+                                        seg_text = " ".join(s.get("text", "") for s in chunk_segs).strip()
+                                        segments[i] = TranscriptSegment(
+                                            text=seg_text,
+                                            start=seg.start,
+                                            end=seg.end,
+                                            speaker=seg.speaker,
+                                        )
+                                        logger.info(
+                                            f"Job {job_id}: seg {i} ({seg.speaker}) "
+                                            f"[{seg.start:.1f}-{seg.end:.1f}s]: {seg_text[:60]}"
+                                        )
+                            except Exception as rt_err:
+                                logger.warning(f"Job {job_id}: re-transcribe seg {i} failed: {rt_err}")
+
+                    # Remove segments that still have no text after re-transcription
+                    segments = [s for s in segments if s.text.strip()]
+                    logger.info(f"Job {job_id}: {len(segments)} segments with text after re-transcription")
+
                 if not segments:
                     total_segments = len(raw_segments)
                     expected_speakers = _estimate_speakers_from_segments(raw_segments)
@@ -503,7 +1506,11 @@ async def process_video_pipeline(job_id: str, video_path: str):
                 segments = _smooth_speaker_assignments(segments)
                 segments = _normalize_speaker_labels(segments)
 
+                pipeline_tracker.complete_stage(job_id, "diarize",
+                    f"{len(set(s.speaker for s in segments))} speakers detected")
+
                 # Classify each speaker's gender/age from pitch (Fix 2).
+                pipeline_tracker.start_stage(job_id, "classify")
                 try:
                     speaker_genders = classify_speakers(
                         audio=extract_result["audio"],
@@ -513,8 +1520,11 @@ async def process_video_pipeline(job_id: str, video_path: str):
                     if speaker_genders:
                         await job_manager.update_job_speaker_genders(job_id, speaker_genders)
                         logger.info(f"Job {job_id}: speaker genders = {speaker_genders}")
+                    pipeline_tracker.complete_stage(job_id, "classify",
+                        f"Genders: {speaker_genders}" if speaker_genders else "No genders detected")
                 except Exception as cls_err:
                     logger.warning(f"Job {job_id}: speaker classification failed: {cls_err}")
+                    pipeline_tracker.fail_stage(job_id, "classify", str(cls_err))
 
                 transcript = Transcript(
                     language=transcript_data.get("language", "en"),
@@ -556,29 +1566,55 @@ async def process_video_pipeline(job_id: str, video_path: str):
 @router.post("/upload", response_model=UploadResponse)
 async def upload_video(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    source_language: Optional[str] = Form(None),
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
-    
+
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in settings.ALLOWED_VIDEO_FORMATS:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid file format. Allowed: {', '.join(settings.ALLOWED_VIDEO_FORMATS)}"
         )
-    
+
+    # Normalize source language. "auto"/empty → leave as None so detection runs.
+    src_lang: Optional[str] = None
+    if source_language:
+        normalized = normalize_language_code(source_language, allow_auto=True)
+        if normalized and normalized != "auto":
+            src_lang = normalized
+
+    # Heuristic default: if user didn't pick a source language, but the filename
+    # strongly suggests Cantonese, persist yue so the UI doesn't show "none".
+    if not src_lang:
+        try:
+            fn = (file.filename or "").lower()
+            if "canton" in fn or "cantonese" in fn or " yue" in fn or "_yue" in fn or "-yue" in fn:
+                src_lang = "yue"
+        except Exception:
+            pass
+
     job_id = str(uuid.uuid4())
-    
+
     try:
         video_path = storage.get_upload_path(job_id, file.filename)
-        
+
         await job_manager.create_job(
             job_id=job_id,
             video_filename=file.filename,
             video_path=video_path,
             video_size=0
         )
+
+        # Persist explicit source language hint (e.g. "yue") so the
+        # transcription stage can override the global WHISPER_LANGUAGE env var.
+        if src_lang:
+            job_for_lang = await job_manager.get_job(job_id)
+            if job_for_lang:
+                job_for_lang.source_language = src_lang
+                logger.info(f"Job {job_id}: source_language set to {src_lang!r} from upload request")
         
         await job_manager.update_job_status(
             job_id,
@@ -638,10 +1674,12 @@ async def get_job_status(job_id: str):
         progress=job.progress,
         current_stage=job.current_stage,
         video_filename=job.video_filename,
+        video_url=f"/api/media/{job.job_id}/video",
         video_duration=job.video_duration,
         total_chunks=job.total_chunks,
         processed_chunks=job.processed_chunks,
         chunks=job.chunks,
+        source_language=getattr(job, "source_language", None),
         dubbed_video_url=job.dubbed_video_url,
         tts_engine=job.tts_engine,
         segment_tts_engines=job.segment_tts_engines,
@@ -697,37 +1735,104 @@ async def get_transcript(job_id: str):
     transcript_file = Path("data/transcripts") / f"{job_id}.json"
     if not transcript_file.exists():
         transcript_file = Path("data/transcripts/transcript.json")
+
     if transcript_file.exists():
         try:
             with open(transcript_file, "r", encoding="utf-8") as f:
                 transcript_data = json.load(f)
-            
-            raw_segments = transcript_data.get("segments", [])
-            expected_speakers = 3
-            total_segments = len(raw_segments)
-            segments_per_speaker = max(1, total_segments // expected_speakers) if total_segments > 0 else 1
-            
-            segments = []
-            for i, seg in enumerate(raw_segments):
-                speaker_idx = min(i // segments_per_speaker, expected_speakers - 1)
-                segments.append({
-                    "text": seg.get("text", ""),
-                    "start": seg.get("start", 0),
-                    "end": seg.get("end", 0),
-                    "speaker": f"speaker-{speaker_idx + 1}"
-                })
-            
+
+            # Return the transcript exactly as stored (including speaker labels)
+            # to avoid inventing speakers and to preserve correct downstream QA.
             return {
                 "job_id": job_id,
                 "language": transcript_data.get("language", "en"),
                 "duration": transcript_data.get("duration", 0),
                 "text": transcript_data.get("text", ""),
-                "segments": segments
+                "segments": transcript_data.get("segments", []),
             }
         except Exception as e:
             logger.error(f"Error reading transcript file: {e}")
     
     raise HTTPException(status_code=404, detail="Transcript not available yet")
+
+
+@router.delete("/jobs/clear-all")
+async def clear_all_jobs(force: bool = False):
+    """Delete all jobs and their data files.
+
+    Safety: by default this only clears jobs/files that are older than a
+    minimum age window, to avoid accidentally wiping a freshly completed job.
+    Pass force=true to preserve the old destructive behavior.
+    """
+    import shutil
+    import time
+
+    min_age_minutes = int(os.getenv("CLEAR_ALL_MIN_AGE_MINUTES", "60"))
+    now = time.time()
+    cutoff = now - (min_age_minutes * 60)
+
+    # Clear in-memory jobs (respect age window unless forced)
+    cleared_ids: list[str] = []
+    if force:
+        cleared_ids = list(job_manager._jobs.keys())
+        job_manager._jobs.clear()
+    else:
+        for jid, job in list(job_manager._jobs.items()):
+            try:
+                updated = getattr(job, "updated_at", None)
+                created = getattr(job, "created_at", None)
+                ts = None
+                if updated:
+                    ts = updated.timestamp()
+                elif created:
+                    ts = created.timestamp()
+                if ts is not None and ts >= cutoff:
+                    continue
+            except Exception:
+                # If we can't determine age, keep it.
+                continue
+            cleared_ids.append(jid)
+            job_manager._jobs.pop(jid, None)
+
+    # Clear data directories (respect age window unless forced)
+    data_dirs = [
+        "data/uploads", "data/separated", "data/transcripts",
+        "data/diarization", "data/chunks", "data/processed", "data/output",
+    ]
+    files_removed = 0
+    kept_recent = 0
+    for d in data_dirs:
+        p = Path(d)
+        if not p.exists():
+            continue
+        for child in p.iterdir():
+            try:
+                if not force:
+                    mtime = child.stat().st_mtime
+                    if mtime >= cutoff:
+                        kept_recent += 1
+                        continue
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+                files_removed += 1
+            except Exception:
+                # Best-effort cleanup
+                continue
+
+    logger.info(
+        f"[CLEAR-ALL] force={force} min_age_minutes={min_age_minutes} "
+        f"cleared_jobs={len(cleared_ids)} removed={files_removed} kept_recent={kept_recent}"
+    )
+    return {
+        "force": force,
+        "min_age_minutes": min_age_minutes,
+        "cleared_jobs": len(cleared_ids),
+        "files_removed": files_removed,
+        "kept_recent": kept_recent,
+        "job_ids": cleared_ids,
+    }
 
 
 @router.delete("/job/{job_id}")
@@ -758,24 +1863,66 @@ async def delete_job(job_id: str):
     return {"message": f"Job {job_id} deleted successfully"}
 
 
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str):
+    """Cancel an in-flight job.
+
+    If the job was submitted to RunPod GPU, also cancels the RunPod serverless job.
+    """
+    from app.services.runpod_service import runpod_service
+
+    job = await _get_or_rehydrate_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Best-effort cancel of GPU job
+    runpod_id = getattr(job, "runpod_job_id", None)
+    runpod_cancel_result = None
+    if runpod_id and runpod_service.is_available():
+        try:
+            runpod_cancel_result = await runpod_service.cancel_job(runpod_id)
+        except Exception as exc:
+            logger.warning(f"Job {job_id}: RunPod cancel failed for {runpod_id}: {exc}")
+
+    await job_manager.update_job_status(
+        job_id, JobStatus.CANCELLED, progress=100,
+        current_stage="Cancelled",
+        error_message="Cancelled by user",
+    )
+
+    # Delete artifacts (but keep job record in memory until delete endpoint is called)
+    try:
+        storage.delete_job_files(job_id)
+    except Exception:
+        pass
+
+    return {
+        "job_id": job_id,
+        "status": "cancelled",
+        "runpod_job_id": runpod_id,
+        "runpod_cancel_result": runpod_cancel_result,
+    }
+
+
 @router.get("/jobs")
 async def list_all_jobs():
-    # Rehydrate only the most recent jobs from disk (by folder mtime), skip old stale ones
-    uploads_dir = settings.UPLOAD_DIR
-    if os.path.isdir(uploads_dir):
-        entries = []
-        for entry in os.scandir(uploads_dir):
-            if entry.is_dir():
-                try:
-                    entries.append((entry.stat().st_mtime, entry.name))
-                except OSError:
-                    pass
-        # Only rehydrate the 10 most recently modified job folders
-        entries.sort(reverse=True)
-        for _, job_id in entries[:10]:
-            existing = await job_manager.get_job(job_id)
-            if not existing:
-                await _rehydrate_job(job_id)
+    if os.getenv("REHYDRATE_JOBS", "0") == "1":
+        # Rehydrate only the most recent jobs from disk (by folder mtime), skip old stale ones
+        uploads_dir = settings.UPLOAD_DIR
+        if os.path.isdir(uploads_dir):
+            entries = []
+            for entry in os.scandir(uploads_dir):
+                if entry.is_dir():
+                    try:
+                        entries.append((entry.stat().st_mtime, entry.name))
+                    except OSError:
+                        pass
+            # Only rehydrate the 10 most recently modified job folders
+            entries.sort(reverse=True)
+            for _, job_id in entries[:10]:
+                existing = await job_manager.get_job(job_id)
+                if not existing:
+                    await _rehydrate_job(job_id)
 
     jobs = await job_manager.list_jobs()
     # Sort by most recently updated, newest first
@@ -801,6 +1948,87 @@ async def list_all_jobs():
             for job in filtered
         ]
     }
+
+
+@router.get("/projects")
+async def list_projects():
+    base = _projects_base_dir()
+    base.mkdir(parents=True, exist_ok=True)
+    projects = []
+    for entry in base.iterdir():
+        if not entry.is_dir():
+            continue
+        meta_path = entry / "project.json"
+        if meta_path.exists():
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    projects.append(_json.load(f))
+                continue
+            except Exception:
+                pass
+        projects.append({"project_id": entry.name})
+    projects.sort(key=lambda p: p.get("updated_at") or p.get("created_at") or "", reverse=True)
+    return {"total": len(projects), "projects": projects}
+
+
+@router.post("/projects/save/{job_id}")
+async def save_project(job_id: str):
+    job = await job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    from datetime import datetime
+
+    project_id = job_id
+    base = _projects_base_dir() / project_id
+    base.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.utcnow().isoformat()
+    meta = {
+        "project_id": project_id,
+        "job_id": job_id,
+        "video_filename": getattr(job, "video_filename", None),
+        "source_language": getattr(job, "source_language", None),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    # Copy canonical artifacts
+    try:
+        if getattr(job, "video_path", None):
+            vp = Path(job.video_path)
+            _safe_copytree(vp, base / "video" / vp.name)
+    except Exception:
+        pass
+
+    try:
+        transcript_path = Path("data/transcripts") / f"{job_id}.json"
+        if transcript_path.exists():
+            _safe_copytree(transcript_path, base / "transcript.json")
+    except Exception:
+        pass
+
+    try:
+        dubbed_dir = Path(settings.DUBBED_DIR) / job_id
+        if dubbed_dir.exists():
+            _safe_copytree(dubbed_dir, base / "dubbed")
+    except Exception:
+        pass
+
+    with open(base / "project.json", "w", encoding="utf-8") as f:
+        _json.dump(meta, f, indent=2, ensure_ascii=False)
+
+    return meta
+
+
+@router.delete("/projects/{project_id}")
+async def delete_project(project_id: str):
+    import shutil
+    base = _projects_base_dir() / project_id
+    if not base.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    shutil.rmtree(base)
+    return {"deleted": True, "project_id": project_id}
 
 
 @router.post("/cleanup")
@@ -1025,6 +2253,18 @@ async def dub_video(request: DubRequest, background_tasks: BackgroundTasks):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found. Please upload the video first.")
 
+    req_speakers = set((seg.speaker or "speaker-1") for seg in (request.transcript or []))
+    job_segments = (job.transcript.segments if job and job.transcript and job.transcript.segments else [])
+    job_speakers = set((seg.speaker or "speaker-1") for seg in job_segments)
+
+    transcript_source = request.transcript
+    if len(req_speakers) <= 1 and len(job_speakers) > 1:
+        transcript_source = job_segments
+        logger.info(
+            f"Job {request.job_id}: overriding dub request transcript with stored job transcript "
+            f"(req_speakers={sorted(req_speakers)}, job_speakers={sorted(job_speakers)})"
+        )
+
     transcript_dicts = [
         {
             "text": seg.text,
@@ -1032,14 +2272,18 @@ async def dub_video(request: DubRequest, background_tasks: BackgroundTasks):
             "end": seg.end,
             "speaker": seg.speaker,
         }
-        for seg in request.transcript
+        for seg in transcript_source
     ]
 
     detected_lang = job.transcript.language if job and job.transcript else None
 
     source_lang = request.source_language
     if (not source_lang) or normalize_language_code(source_lang, allow_auto=True) == "auto":
-        if detected_lang:
+        # Prefer the explicit hint the user gave at upload time, then the
+        # language Whisper actually detected, then fall back to "auto".
+        if job and getattr(job, "source_language", None):
+            source_lang = job.source_language
+        elif detected_lang:
             source_lang = detected_lang
         else:
             source_lang = "auto"
@@ -1176,6 +2420,7 @@ async def serve_job_audio(job_id: str, filename: str):
 @router.get("/dubbing-engines")
 async def get_dubbing_engines():
     """Return available dubbing engines and their status."""
+    from app.services.runpod_service import runpod_service
     return {
         "engines": {
             "dubmaster": {
@@ -1191,6 +2436,140 @@ async def get_dubbing_engines():
                 "public_url_set": bool(settings.PUBLIC_BASE_URL),
             },
         },
+        "processing_mode": os.getenv("PROCESSING_MODE", "cpu"),
+        "gpu_available": runpod_service.is_available(),
+    }
+
+
+@router.get("/pipeline/{job_id}")
+async def get_pipeline_status(job_id: str):
+    """Return structured pipeline stage data for the Pipeline Monitor frontend component."""
+    from app.services.pipeline_tracker import pipeline_tracker
+
+    job = await job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    status_str = job.status.value if hasattr(job.status, "value") else str(job.status)
+    progress = job.progress or 0
+    current_stage = getattr(job, "current_stage", None)
+
+    pipeline_data = pipeline_tracker.get_pipeline(job_id)
+
+    # Safety net: if the job is terminal but a stage is still marked active,
+    # force stages to terminal states so the UI can't show impossible combinations
+    # like "Download: Running" while later stages are Done at 100%.
+    try:
+        terminal = {"COMPLETED", "FAILED", "CANCELLED"}
+        if status_str in terminal and pipeline_data and pipeline_data.get("type") == "gpu":
+            p_raw = pipeline_tracker._pipelines.get(job_id) or {}
+            stages = (p_raw.get("stages") or {})
+            stage_ids = list(stages.keys())
+            if status_str == "COMPLETED":
+                for sid in stage_ids:
+                    if stages.get(sid, {}).get("status") in ("pending", "active"):
+                        pipeline_tracker.complete_stage(job_id, sid)
+            else:
+                active = pipeline_data.get("active_stage")
+                if active and stages.get(active, {}).get("status") == "active":
+                    pipeline_tracker.fail_stage(job_id, active, f"Job ended with status={status_str}")
+            pipeline_data = pipeline_tracker.get_pipeline(job_id)
+    except Exception:
+        pass
+
+    return {
+        "job_id": job_id,
+        "job_status": status_str,
+        "job_progress": progress,
+        "current_stage": current_stage,
+        "pipeline": pipeline_data,
+    }
+
+
+@router.post("/worker-stage")
+async def worker_stage_update(request: Request):
+    """
+    Called by the RunPod worker at each stage boundary so the backend can
+    update pipeline_tracker in real time — giving the frontend live progress
+    even before the job completes.
+
+    Payload:
+        { "job_id": "...", "stage": "download|extract|separate|transcribe|diarize",
+          "status": "started|completed|failed|skipped",
+          "summary": "optional human-readable summary",
+          "error": "optional error message" }
+    """
+    from app.services.pipeline_tracker import pipeline_tracker
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    job_id = body.get("job_id", "")
+    stage   = body.get("stage", "")
+    status  = body.get("status", "")
+    summary = body.get("summary", "")
+    error   = body.get("error", "")
+
+    if not job_id or not stage or not status:
+        raise HTTPException(status_code=400, detail="job_id, stage, and status are required")
+
+    job = await job_manager.get_job(job_id)
+    if not job:
+        # Worker may call back before backend registers the job — ignore gracefully
+        logger.warning(f"[WORKER-STAGE] Unknown job_id={job_id}, ignoring callback")
+        return {"ok": True}
+
+    logger.info(f"[WORKER-STAGE] job={job_id} stage={stage} status={status} summary={summary!r}")
+
+    if status == "started":
+        # Ensure GPU pipeline is initialised if the first callback arrives before
+        # process_video_pipeline has had a chance to init it.
+        p = pipeline_tracker.get_pipeline(job_id)
+        if not p or p.get("type") != "gpu":
+            pipeline_tracker.init_pipeline(job_id, "gpu")
+        pipeline_tracker.start_stage(job_id, stage)
+
+        # Map stage → job status label so the top-level status reflects the active step
+        _stage_status_map = {
+            "download":  (JobStatus.PROCESSING,   "Downloading video to GPU"),
+            "extract":   (JobStatus.PROCESSING,   "Extracting audio on GPU"),
+            "separate":  (JobStatus.PROCESSING,   "Separating audio (Demucs)"),
+            "transcribe":(JobStatus.TRANSCRIBING, "Transcribing audio (Whisper)"),
+            "diarize":   (JobStatus.TRANSCRIBING, "Identifying speakers (pyannote)"),
+        }
+        if stage in _stage_status_map:
+            new_status, new_label = _stage_status_map[stage]
+            _stage_pct = {"download": 20, "extract": 35, "separate": 50, "transcribe": 65, "diarize": 82}
+            await job_manager.update_job_status(
+                job_id, new_status,
+                progress=_stage_pct.get(stage, job.progress or 20),
+                current_stage=new_label,
+            )
+
+    elif status == "completed":
+        pipeline_tracker.complete_stage(job_id, stage, summary or None)
+
+    elif status == "failed":
+        pipeline_tracker.fail_stage(job_id, stage, error or summary or "Worker reported failure")
+
+    elif status == "skipped":
+        pipeline_tracker.skip_stage(job_id, stage, summary or "Skipped by worker")
+
+    return {"ok": True}
+
+
+@router.get("/gpu-status")
+async def get_gpu_status():
+    from app.services.runpod_service import runpod_service
+    health = await runpod_service.get_endpoint_health()
+    return {
+        "processing_mode": os.getenv("PROCESSING_MODE", "cpu"),
+        "runpod_configured": runpod_service.is_available(),
+        "endpoint_id": runpod_service.endpoint_id or None,
+        "endpoint_health": health,
+        "public_base_url": os.getenv("PUBLIC_BASE_URL", "") or None,
     }
 
 

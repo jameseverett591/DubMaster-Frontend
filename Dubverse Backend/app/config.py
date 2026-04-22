@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     PROCESSED_DIR: str = "data/processed"
     OUTPUT_DIR: str = "data/output"
     DUBBED_DIR: str = "data/dubbed"
+    PROJECTS_DIR: str = "data/projects"
     
     MAX_UPLOAD_SIZE: int = 5 * 1024 * 1024 * 1024
     ALLOWED_VIDEO_FORMATS: list[str] = [".mp4", ".mov", ".avi", ".mkv", ".webm"]

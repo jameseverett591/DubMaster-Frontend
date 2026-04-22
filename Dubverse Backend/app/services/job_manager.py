@@ -2,6 +2,8 @@ from typing import Dict
 from datetime import datetime
 import asyncio
 import logging
+import json
+from pathlib import Path
 
 from app.models import Job, JobStatus
 
@@ -95,6 +97,33 @@ class JobManager:
                 job.transcript = transcript
                 job.updated_at = datetime.now()
                 logger.info(f"Job {job_id} transcript updated with {len(transcript.segments) if transcript else 0} segments")
+
+                if transcript:
+                    try:
+                        output_dir = Path("data/transcripts")
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        output_path = output_dir / f"{job_id}.json"
+
+                        payload = {
+                            "job_id": job_id,
+                            "language": getattr(transcript, "language", None),
+                            "duration": getattr(transcript, "duration", None),
+                            "text": getattr(transcript, "text", None),
+                            "segments": [
+                                {
+                                    "text": getattr(seg, "text", ""),
+                                    "start": getattr(seg, "start", 0),
+                                    "end": getattr(seg, "end", 0),
+                                    "speaker": getattr(seg, "speaker", None),
+                                }
+                                for seg in (getattr(transcript, "segments", None) or [])
+                            ],
+                        }
+
+                        with open(output_path, "w", encoding="utf-8") as f:
+                            json.dump(payload, f, indent=2, ensure_ascii=False)
+                    except Exception as exc:
+                        logger.warning(f"Job {job_id}: failed to persist transcript to disk: {exc}")
     
     async def update_job_speaker_genders(self, job_id: str, speaker_genders: dict):
         async with self._lock:

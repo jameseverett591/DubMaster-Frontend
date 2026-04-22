@@ -249,8 +249,10 @@ def separate_audio(video_path: str, job_id: str | None = None) -> Dict[str, Any]
 
         # --- 5. Save outputs ---
         # Again use soundfile directly to avoid the torchcodec DLL issue.
-        sf.write(accompaniment_path, accompaniment.numpy().T, model.samplerate)
-        sf.write(vocals_path, vocals.numpy().T, model.samplerate)
+        accompaniment_np = accompaniment.detach().cpu().numpy().T
+        vocals_np = vocals.detach().cpu().numpy().T
+        sf.write(accompaniment_path, accompaniment_np, model.samplerate)
+        sf.write(vocals_path, vocals_np, model.samplerate)
 
         logger.info(
             f"[SEPARATE] accompaniment → {accompaniment_path} "

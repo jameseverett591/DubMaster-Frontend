@@ -1,5 +1,6 @@
 import subprocess
 import os
+import re
 import tempfile
 from pathlib import Path
 import logging
@@ -160,6 +161,7 @@ class DubbingService:
         r"\[applause\]",
         r"\[laughter\]",
         r"^[\s\d一二三四五六七八九十,，、\.。]+$",
+        r"(\b\w+\b\s+){2,}\1",  # Repetitive word patterns (e.g., "said said said")
     ]
 
     def _strip_hallucinations(self, transcript: List[Dict]) -> List[Dict]:
@@ -195,11 +197,16 @@ class DubbingService:
             if hallucination_re.search(text):
                 logger.info(f"[CLEAN] Dropped hallucination: {text[:60]!r}")
                 continue
-            # Reject ANY segment without CJK characters when the transcript
-            # is CJK.  Catches Cyrillic (Согон!), Telugu, Latin-only, and
-            # any other wrong-script hallucinations from Whisper.
-            if is_cjk_transcript and not cjk_re.search(text) and len(text.strip()) > 1:
-                logger.info(f"[CLEAN] Dropped wrong-script segment: {text[:60]!r}")
+            # Drop only short non-CJK snippets in a mostly-CJK transcript. Longer Latin
+            # text is kept (bilingual films, English-dubbed source) — dropping all Latin
+            # lines removes TTS and the mix can sound like "no speech".
+            if (
+                is_cjk_transcript
+                and not cjk_re.search(text)
+                and len(text.strip()) > 1
+                and len(text.strip()) <= int(os.getenv("DUBBING_LATIN_DROP_MAX_CHARS", "24"))
+            ):
+                logger.info(f"[CLEAN] Dropped short wrong-script segment: {text[:60]!r}")
                 continue
             cleaned.append(seg)
 
@@ -443,16 +450,23 @@ class DubbingService:
                 "text": text,
             })
 
-        # Sort each speaker's segments: prefer early, calm segments over long
-        # fight-scene clips.  Early segments (0-30s) are typically calm
-        # introductions — Fish Audio clones the vocal *style* from references,
-        # so excited references → excited output for every segment.
-        # Score: lower start time = better, moderate duration (3-8s) preferred.
+        # Sort each speaker's segments: strongly prefer early, calm segments.
+        # Fish Audio clones vocal *style* from references — fight-scene clips
+        # (shouting, exhausted, high-energy) produce those qualities in every
+        # synthesised segment, including calm dialogue.  Three-tier priority:
+        #   Tier 0: early (<60s) AND ideal duration (3-8s)  — best of both
+        #   Tier 1: early (<60s) any duration               — calm voice wins
+        #   Tier 2: late clips (fight scene, post-fight)    — last resort only
+        # Within each tier, prefer earliest start time.
+        # This prevents the ref selector from picking a 3.78s clip at 237s
+        # over a 2.34s clip at 11s just because it hits the ideal-length range.
         for spk in speaker_segments:
             speaker_segments[spk].sort(
                 key=lambda s: (
-                    0 if 3.0 <= s["duration"] <= 8.0 else 1,  # ideal length first
-                    s["start"],                                 # then earliest
+                    0 if (s["start"] < 60 and 3.0 <= s["duration"] <= 8.0) else
+                    1 if s["start"] < 60 else
+                    2,
+                    s["start"],
                 ),
             )
 
@@ -494,7 +508,7 @@ class DubbingService:
 
                     refs.append({
                         "audio": audio_bytes,
-                        "text": seg["text"],
+                        "text": "",  # blank prevents Cantonese text from steering English phonetics
                     })
                     total_duration += clip_duration
 
@@ -615,19 +629,12 @@ class DubbingService:
             # Must happen BEFORE translation so the reference text matches the
             # language spoken in the vocal audio.
             _, provider_name_check = self._get_tts_provider()
+            # Inline voice cloning disabled — preset voices only.
+            # Zero-shot cloning from source audio produced inconsistent output
+            # because pyannote merges similar-sounding speakers, contaminating
+            # the reference clips with multiple actors' voices.
             speaker_voice_refs: Dict[str, List[Dict]] = {}
-            if provider_name_check == "fish-audio" and vocals_path:
-                logger.info("[VOICE-CLONE] Fish Audio active — extracting speaker references from vocals")
-                speaker_voice_refs = self._extract_speaker_references(
-                    transcript, vocals_path, output_dir
-                )
-                if speaker_voice_refs:
-                    logger.info(
-                        f"[VOICE-CLONE] Extracted references for {len(speaker_voice_refs)} speaker(s): "
-                        f"{', '.join(f'{k}={len(v)} clips' for k, v in speaker_voice_refs.items())}"
-                    )
-                else:
-                    logger.warning("[VOICE-CLONE] No references extracted — will use pre-uploaded voices or defaults")
+            logger.info("[VOICE-CLONE] Preset-only mode — inline cloning disabled")
 
             source_norm = normalize_language_code(source_language, allow_auto=True)
             target_norm = normalize_language_code(target_language)
@@ -696,6 +703,55 @@ class DubbingService:
 
                 text = self._sanitize_text(text)
 
+                # Safety net: skip repetitive-character hallucinations
+                # (e.g. "Aaaaaaaaa", "hhhhhhh") — fight grunt noise that Whisper
+                # or translation garbled into repeated chars.
+                _stripped = text.replace(' ', '')
+                if len(_stripped) >= 4:
+                    _unique_ratio = len(set(_stripped.lower())) / len(_stripped)
+                    if _unique_ratio < 0.25:
+                        logger.warning(
+                            f"[TTS] Segment {i}: repetitive-char hallucination — skipping: '{text[:40]}'"
+                        )
+                        return {"index": i, "skipped": True, "reason": "repetitive_hallucination"}
+
+                # Safety net: skip segments that are still mostly CJK — the
+                # translation pipeline failed to translate them and sending raw
+                # Cantonese to an English TTS engine produces garbage audio.
+                _cjk_chars = len(re.findall(
+                    r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', text
+                ))
+                if _cjk_chars > 2:
+                    logger.warning(
+                        f"[TTS] Segment {i}: text appears untranslated ({_cjk_chars} CJK chars) "
+                        f"— skipping: '{text[:60]}'"
+                    )
+                    return {"index": i, "skipped": True, "reason": "untranslated"}
+
+                # Safety net: drop any unresolved glossary placeholder tokens
+                # (XGLO###X) that survived the translation pipeline — sending
+                # them to TTS produces literal "XGLO one zero four X" audio.
+                if re.search(r'XGLO\d{3}X', text):
+                    cleaned = re.sub(r'XGLO\d{3}X', '', text).strip()
+                    logger.warning(
+                        f"[TTS] Segment {i}: unresolved glossary placeholder(s) in text "
+                        f"'{text}' — stripped to '{cleaned}'"
+                    )
+                    text = cleaned
+                    if not text:
+                        logger.warning(f"[TTS] Segment {i}: text was entirely a placeholder — skipping")
+                        return {"index": i, "skipped": True, "reason": "unresolved_placeholder"}
+
+                # TTS-only phonetic substitutions — display/transcript text unchanged
+                tts_text = re.sub(r'\bIp Man\b', 'Yip Man', text, flags=re.IGNORECASE)
+                tts_text = re.sub(r'\bMaster Shin\b', 'Master Sheen', tts_text, flags=re.IGNORECASE)
+                tts_text = re.sub(r'\bMaster Xin\b', 'Master Sheen', tts_text, flags=re.IGNORECASE)
+                tts_text = re.sub(r'\bMaster Jin\b', 'Master Sheen', tts_text, flags=re.IGNORECASE)
+                tts_text = re.sub(r'\bMaster Xing\b', 'Master Sheen', tts_text, flags=re.IGNORECASE)
+                tts_text = re.sub(r'\bWing Chun\b', 'Wing Chun', tts_text)  # already correct
+                if tts_text != text:
+                    logger.info(f"[PHONETIC] seg {i}: {text!r} -> {tts_text!r}")
+
                 tts_provider, provider_name = self._get_tts_provider()
                 default_voice = "pNInz6obpgDQGcFmaJgB" if provider_name == "elevenlabs" else ""
                 voice_key = speaker_to_voice.get(speaker, default_voice)
@@ -711,7 +767,7 @@ class DubbingService:
                 style            = override.get("style",            emotion_defaults["style"])
 
                 tts_kwargs: Optional[Dict] = dict(
-                    text=text,
+                    text=tts_text,
                     voice_id=voice_id,
                     output_path=audio_path,
                     model_id=model_id,
@@ -722,53 +778,51 @@ class DubbingService:
                 )
 
                 result = None
+                fish_speed_applied = False
                 speaker_gender = (speaker_genders or {}).get(speaker, "male")
 
                 if speaker_gender == "child":
-                    logger.info(
-                        f"[CHILD-VOICE] seg {i} speaker={speaker} provider={provider_name}: "
-                        f"routing to Edge TTS child voice"
-                    )
-                    child_result = await elevenlabs_tts._fallback_tts(
-                        text, audio_path, target_norm, voice_key, "child"
-                    )
-                    if child_result:
-                        result = {"path": child_result, "engine": "edge-tts-child"}
-                        tts_kwargs = None
-                    else:
-                        logger.warning(
-                            f"[CHILD-VOICE] Edge TTS child voice failed for seg {i}, "
-                            f"falling back to normal TTS"
+                    child_fish_id = fish_audio_tts.get_voice_id("child-1") if provider_name == "fish-audio" else ""
+                    if child_fish_id:
+                        # Use Fish Audio child preset — overwrite voice_id so the normal
+                        # Fish Audio path below uses the right voice.
+                        voice_id = child_fish_id
+                        logger.info(
+                            f"[CHILD-VOICE] seg {i} speaker={speaker}: Fish Audio child preset {child_fish_id!r}"
                         )
+                    else:
+                        logger.info(
+                            f"[CHILD-VOICE] seg {i} speaker={speaker}: no Fish child preset — Edge TTS fallback"
+                        )
+                        child_result = await elevenlabs_tts._fallback_tts(
+                            tts_text, audio_path, target_norm, voice_key, "child"
+                        )
+                        if child_result:
+                            result = {"path": child_result, "engine": "edge-tts-child"}
+                            tts_kwargs = None
 
                 if provider_name == "fish-audio" and tts_kwargs is not None:
-                    fish_tags = analyze_emotion_fish(text)
-                    tts_kwargs["emotion_tags"] = fish_tags
-                    if speaker in speaker_voice_refs:
-                        tts_kwargs["speaker_references"] = speaker_voice_refs[speaker]
+                    tts_kwargs["emotion_tags"] = ""
+                    # Preset-only: always use reference_id, never inline references.
+                    # voice_id is already set from the preset voice map above.
 
                     # Pre-compute Fish Audio speed parameter for duration targeting.
-                    # Estimate: English ~3.5 words/sec at 1.0x, target slot is end-start.
-                    # If estimated TTS duration exceeds the slot, speed up at the TTS
-                    # level (better quality than post-hoc ffmpeg atempo).
                     seg_slot = float(segment.get("end", 0)) - float(segment.get("start", 0))
                     if seg_slot > 0.3:
                         word_count = len(text.split())
                         est_tts_dur = max(0.5, word_count / 3.5)
-                        if est_tts_dur > seg_slot * 1.1:
-                            # Need to speed up — clamp to Fish Audio range [0.5, 2.0]
-                            speed_hint = min(2.0, max(1.0, est_tts_dur / seg_slot))
+                        if est_tts_dur > seg_slot * 1.25:
+                            speed_hint = min(1.5, max(1.0, est_tts_dur / seg_slot))
                             tts_kwargs["speed"] = round(speed_hint, 2)
+                            fish_speed_applied = True
                             logger.info(
                                 f"[FISH-SPEED] seg {i}: est={est_tts_dur:.1f}s slot={seg_slot:.1f}s "
                                 f"-> speed={speed_hint:.2f}x"
                             )
 
                     logger.info(
-                        f"[EMOTION-FISH] seg {i} speaker={speaker} "
-                        f"gender={speaker_gender} tags={fish_tags!r} "
-                        f"refs={len(speaker_voice_refs.get(speaker, []))} "
-                        f"text={text[:60]!r}"
+                        f"[FISH-TTS] seg {i} speaker={speaker} gender={speaker_gender} "
+                        f"voice_id={voice_id!r} text={text[:60]!r}"
                     )
                 elif tts_kwargs is not None:
                     logger.info(
@@ -780,8 +834,13 @@ class DubbingService:
                     result = await tts_provider.text_to_speech(**tts_kwargs)
 
                 if result:
-                    logger.info(f"Segment {i}: provider={provider_name}, speaker={speaker}, voice_id={voice_id}, text={text[:50]}...")
-                    return {"index": i, "result": result, "text": text, "speaker": speaker}
+                    actual_engine = result.get("engine", provider_name)
+                    logger.info(
+                        f"Segment {i}: engine={actual_engine} speaker={speaker} "
+                        f"voice={voice_id} speed={tts_kwargs.get('speed', 1.0) if tts_kwargs else 1.0} "
+                        f"text={text[:50]!r}"
+                    )
+                    return {"index": i, "result": result, "text": text, "speaker": speaker, "fish_speed_applied": fish_speed_applied}
                 else:
                     logger.warning(f"Failed to generate TTS for segment {i}")
                     return {"index": i, "failed": True}
@@ -833,32 +892,70 @@ class DubbingService:
                     target_duration = max(0.2, end_time - start_time)
 
                 final_path = result["path"]
+
+                # Trim leading silence — Fish Audio inline cloning often prepends
+                # 0.5-2s of silence before speech, causing perceived lip-sync delay.
+                silence_trimmed_path = os.path.join(output_dir, f"segment_{i:04d}_notrim.mp3")
+                trimmed_ok = await asyncio.to_thread(
+                    self._trim_leading_silence, final_path, silence_trimmed_path
+                )
+                if trimmed_ok and os.path.exists(silence_trimmed_path):
+                    trimmed_dur = await asyncio.to_thread(self._get_audio_duration, silence_trimmed_path)
+                    orig_dur = await asyncio.to_thread(self._get_audio_duration, final_path)
+                    silence_removed = orig_dur - trimmed_dur
+                    if silence_removed > 0.08:  # only swap if >80ms was trimmed
+                        logger.info(f"[SILENCE-TRIM] seg {i}: removed {silence_removed:.3f}s leading silence")
+                        final_path = silence_trimmed_path
+
                 adjusted_audio_path = os.path.join(output_dir, f"segment_{i:04d}_adjusted.mp3")
                 actual_duration = await asyncio.to_thread(self._get_audio_duration, final_path)
 
-                max_speedup = float(os.getenv("DUBBING_MAX_SPEEDUP", "1.8"))
-                if actual_duration > target_duration + 0.05 and target_duration > 0.3:
-                    speed_needed = actual_duration / target_duration
+                # --- Hard-fit: TTS audio NEVER overflows into the next segment ---
+                #
+                # start_time is the word-level first-word timestamp (Whisper
+                # words[0].start from transcribe_audio._segments_to_dicts).
+                # target_duration = next_segment.word_start - this.word_start - 50ms
+                # so the window is tight and precise.
+                #
+                # Two-stage enforcement:
+                #   1. Time-stretch via ffmpeg atempo (no speedup cap — correctness
+                #      over quality when the slot is tight).  Fish Audio pre-speed
+                #      gets a wider tolerance (150ms) before atempo fires, to avoid
+                #      compounding two back-to-back speed operations on audio that
+                #      already fits.  For larger overflows, atempo fires regardless.
+                #   2. Hard-trim to 20ms tolerance as an absolute guarantee.
+                _fish_speed_was_applied = raw.get("fish_speed_applied", False)
+                _atempo_tolerance = 0.15 if _fish_speed_was_applied else 0.05
+                _speed_applied = 1.0
+                if actual_duration > target_duration + _atempo_tolerance and target_duration > 0.2:
+                    _speed_applied = actual_duration / target_duration
+                    # Allow up to 3x via chained atempo (2.0 × 1.5).  Beyond 3x,
+                    # speech is unintelligible — hard-trim handles the remainder.
                     adjusted = await asyncio.to_thread(
                         self._adjust_audio_duration,
                         final_path, adjusted_audio_path, target_duration,
-                        min_speed=0.8, max_speed=max_speedup,
+                        min_speed=0.8, max_speed=1.5,
                     )
                     if adjusted and os.path.exists(adjusted_audio_path):
                         final_path = adjusted_audio_path
                         actual_duration = await asyncio.to_thread(self._get_audio_duration, final_path)
-                        if speed_needed <= max_speedup:
-                            logger.info(f"[FIT] seg={i} sped up {speed_needed:.2f}x to fit slot")
-                        else:
-                            logger.info(f"[FIT] seg={i} sped up {max_speedup}x (needed {speed_needed:.2f}x, will trim remainder)")
+                    logger.info(
+                        f"[FIT] seg={i} stretched {_speed_applied:.2f}x "
+                        f"word_start={start_time:.3f}s slot={target_duration:.2f}s "
+                        f"after={actual_duration:.2f}s fish_pre={_fish_speed_was_applied}"
+                    )
 
-                if actual_duration > target_duration + 0.05:
+                # Absolute guarantee — hard-trim to slot boundary (20ms tolerance).
+                if actual_duration > target_duration + 0.02:
                     trimmed_path = os.path.join(output_dir, f"segment_{i:04d}_trimmed.mp3")
                     trimmed = await asyncio.to_thread(self._trim_audio_duration, final_path, trimmed_path, target_duration)
-                    if trimmed:
+                    if trimmed and os.path.exists(trimmed_path):
                         final_path = trimmed_path
                         actual_duration = target_duration
-                        logger.warning(f"[FIT] seg={i} hard-trimmed to {target_duration:.2f}s (speech may be cut)")
+                        logger.warning(
+                            f"[FIT] seg={i} hard-trimmed to {target_duration:.2f}s "
+                            f"(needed {_speed_applied:.2f}x — tail may be cut)"
+                        )
 
                 overlap_with_prev = ""
                 if audio_segments:
@@ -925,7 +1022,7 @@ class DubbingService:
                 json.dump(timing_report, f, indent=2, ensure_ascii=False)
             logger.info(f"[TIMING] Diagnostics written to {report_path}")
 
-            merged_audio = os.path.join(output_dir, "dubbed_audio.mp3")
+            merged_audio = os.path.join(output_dir, "dubbed_audio.wav")
             # video_duration already computed above (before gap recovery)
 
             success = await asyncio.to_thread(
@@ -1424,6 +1521,41 @@ class DubbingService:
             logger.error(f"Audio duration adjustment error: {e}")
             return False
 
+    def _trim_leading_silence(
+        self,
+        input_path: str,
+        output_path: str,
+        silence_threshold_db: float = -40.0,
+        min_silence_duration: float = 0.1,
+    ) -> bool:
+        """Remove leading silence from a TTS audio file.
+        Fish Audio inline cloning often prepends 0.5-2s of silence before speech.
+        Only trims if >100ms of silence is detected so normal attack isn't clipped.
+        """
+        try:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", input_path,
+                "-af", (
+                    f"silenceremove=start_periods=1"
+                    f":start_silence={min_silence_duration}"
+                    f":start_threshold={silence_threshold_db}dB"
+                ),
+                "-ar", "44100",
+                "-ac", "2",
+                output_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                return False
+            # Sanity: if output is empty or shorter than 0.1s, keep original
+            if not os.path.exists(output_path):
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"Leading silence trim error: {e}")
+            return False
+
     def _trim_audio_duration(
         self,
         input_path: str,
@@ -1478,17 +1610,25 @@ class DubbingService:
             # Single N-input amix: silent base + all delayed segments
             n_inputs = 1 + len(segments_sorted)  # base + segments
 
+            # apad whole_dur is in samples, not seconds (FFmpeg docs).
+            sample_rate = 44100
+            pad_samples = max(1, int(float(total_duration) * sample_rate))
+
             # Delay each segment to its correct position.
-            # Boost each by n_inputs to compensate for amix dividing by N.
+            # normalize=0 means amix sums without dividing — correct here because
+            # segments are non-overlapping so at most one is non-silent at any
+            # instant.  Do NOT boost volume before amix (old bug: volume=n_inputs
+            # with normalize=0 stacked to ~20x gain, causing clipping/distortion).
+            # Final loudnorm brings the mix to broadcast level (-16 LUFS, -1 dBTP).
             for i, seg in enumerate(segments_sorted):
                 input_idx = i + 1
                 delay_ms = int(seg["start"] * 1000)
                 filter_parts.append(
-                    f"[{input_idx}]adelay={delay_ms}|{delay_ms},apad=whole_dur={total_duration},volume={n_inputs}[delayed{i}]"
+                    f"[{input_idx}]adelay={delay_ms}|{delay_ms},apad=whole_dur={pad_samples}[delayed{i}]"
                 )
             delayed_labels = "".join(f"[delayed{i}]" for i in range(len(segments_sorted)))
             filter_parts.append(
-                f"[0]{delayed_labels}amix=inputs={n_inputs}:duration=first:normalize=0[mixout]"
+                f"[0]{delayed_labels}amix=inputs={n_inputs}:duration=first:normalize=0,loudnorm=I=-16:TP=-1:LRA=11[mixout]"
             )
 
             final_label = "[mixout]"
@@ -1501,6 +1641,7 @@ class DubbingService:
                 "-t", str(total_duration),
                 "-ar", "44100",
                 "-ac", "2",
+                "-c:a", "pcm_s16le",
                 output_path
             ]
             
@@ -1555,7 +1696,7 @@ class DubbingService:
                     actual_dur = self._get_audio_duration(seg["path"])
                     prev_end = seg["start"] + actual_dur
             
-            cmd = [
+            concat_cmd = [
                 "ffmpeg", "-y",
                 "-f", "concat",
                 "-safe", "0",
@@ -1563,8 +1704,11 @@ class DubbingService:
                 "-t", str(total_duration),
                 "-ar", "44100",
                 "-ac", "2",
-                output_path
             ]
+            if output_path.lower().endswith(".wav"):
+                concat_cmd += ["-c:a", "pcm_s16le"]
+            concat_cmd.append(output_path)
+            cmd = concat_cmd
             
             result = subprocess.run(cmd, capture_output=True, text=True)
             
@@ -1604,22 +1748,28 @@ class DubbingService:
                     logger.warning(f"Audio stream probe failed: {err}")
                     return False
 
-            boost_cmd = [
-                "ffmpeg", "-y",
-                "-i", audio_path,
-                "-filter:a", "loudnorm=I=-14:TP=-1.5:LRA=11",
-                "-ar", "44100",
-                "-ac", "2",
-                audio_path + ".normalized.wav"
-            ]
-            boost_result = subprocess.run(boost_cmd, capture_output=True, text=True)
-
-            if boost_result.returncode == 0:
-                audio_to_use = audio_path + ".normalized.wav"
-                logger.info("Normalized dubbed audio volume")
-            else:
+            if os.getenv("DUBBING_SKIP_LOUDNORM", "").lower() in ("1", "true", "yes"):
                 audio_to_use = audio_path
-                logger.warning(f"Volume normalization failed: {boost_result.stderr}")
+                logger.info("[MIX] Skipping loudnorm (DUBBING_SKIP_LOUDNORM)")
+            else:
+                boost_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", audio_path,
+                    "-filter:a", "loudnorm=I=-14:TP=-1.5:LRA=11",
+                    "-ar", "44100",
+                    "-ac", "2",
+                    audio_path + ".normalized.wav",
+                ]
+                boost_result = subprocess.run(boost_cmd, capture_output=True, text=True)
+
+                if boost_result.returncode == 0:
+                    audio_to_use = audio_path + ".normalized.wav"
+                    logger.info("Normalized dubbed audio volume")
+                else:
+                    audio_to_use = audio_path
+                    logger.warning(
+                        f"Volume normalization failed: {boost_result.stderr}"
+                    )
 
             use_separation = (
                 accompaniment_path is not None
@@ -1648,7 +1798,7 @@ class DubbingService:
                     "-filter_complex",
                     (
                         f"[1:a]volume={accompaniment_level}[bgm];"
-                        f"[2:a]volume=1.5[speech];"
+                        f"[2:a]volume=3.0[speech];"
                         f"[bgm][speech]amix=inputs=2:duration=longest:normalize=0[aout]"
                     ),
                     "-map", "0:v:0",
@@ -1656,6 +1806,7 @@ class DubbingService:
                     "-c:v", "copy",
                     "-c:a", "aac",
                     "-b:a", "192k",
+                    "-movflags", "+faststart",
                     output_path,
                 ]
             elif _video_has_audio(video_path):
@@ -1682,6 +1833,7 @@ class DubbingService:
                     "-c:v", "copy",
                     "-c:a", "aac",
                     "-b:a", "192k",
+                    "-movflags", "+faststart",
                     output_path,
                 ]
             else:
@@ -1695,6 +1847,7 @@ class DubbingService:
                     "-b:a", "192k",
                     "-map", "0:v:0",
                     "-map", "1:a:0",
+                    "-movflags", "+faststart",
                     output_path,
                 ]
 

@@ -297,3 +297,85 @@ def merge_with_whisper_fallback(
 
     result.sort(key=lambda s: s["start"])
     return result
+
+
+def merge_whisper_paraformer(
+    whisper_segments: List[Dict[str, Any]],
+    paraformer_segments: List[Dict[str, Any]],
+    source_language: str = "yue",
+    job_id: str | None = None,
+) -> List[Dict[str, Any]]:
+    """Merge Whisper + Paraformer without Tencent.
+
+    Use Whisper's segmentation/timestamps as the base (typically higher quality
+    phrase boundaries), but swap in Paraformer text when it overlaps strongly
+    and has sufficient confidence.
+    """
+    is_cjk_lang = source_language in {"zh", "yue", "ja", "ko", "cmn"}
+
+    whisper_clean = _filter_garbage(whisper_segments, is_cjk_lang, "whisper")
+    paraformer_clean = _filter_garbage(paraformer_segments, is_cjk_lang, "paraformer")
+
+    logger.info(
+        f"[ASR-MERGE] Whisper+Paraformer input: whisper={len(whisper_clean)} segments, "
+        f"paraformer={len(paraformer_clean)} segments (job={job_id})"
+    )
+
+    if not whisper_clean and not paraformer_clean:
+        return []
+    if not whisper_clean:
+        return paraformer_clean
+    if not paraformer_clean:
+        return whisper_clean
+
+    merged: List[Dict[str, Any]] = []
+    used_paraformer: set[int] = set()
+
+    for w_seg in whisper_clean:
+        best_match = None
+        best_overlap = 0.0
+        best_idx = -1
+
+        for p_idx, p_seg in enumerate(paraformer_clean):
+            if p_idx in used_paraformer:
+                continue
+            overlap = _segments_overlap(w_seg, p_seg)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_match = p_seg
+                best_idx = p_idx
+
+        if best_match and best_overlap >= _OVERLAP_THRESHOLD:
+            p_conf = float(best_match.get("confidence", 0.0) or 0.0)
+            if p_conf >= _PARAFORMER_CONFIDENCE_THRESHOLD:
+                used_paraformer.add(best_idx)
+                merged.append({
+                    "start": w_seg.get("start"),
+                    "end": w_seg.get("end"),
+                    "text": best_match.get("text", "") or w_seg.get("text", ""),
+                    "confidence": p_conf,
+                    "source": "paraformer_text_whisper_ts",
+                })
+                continue
+
+        merged.append({
+            "start": w_seg.get("start"),
+            "end": w_seg.get("end"),
+            "text": w_seg.get("text", ""),
+            "confidence": float(w_seg.get("confidence", 0.0) or 0.0),
+            "source": w_seg.get("source", "whisper"),
+        })
+
+    merged.sort(key=lambda s: s.get("start", 0))
+    merged = _deduplicate_segments(merged)
+
+    sources = {}
+    for seg in merged:
+        src = seg.get("source", "unknown")
+        sources[src] = sources.get(src, 0) + 1
+    logger.info(
+        f"[ASR-MERGE] Whisper+Paraformer output: {len(merged)} segments "
+        f"(sources: {sources}, job={job_id})"
+    )
+
+    return merged

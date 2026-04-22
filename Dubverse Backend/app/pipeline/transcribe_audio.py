@@ -6,6 +6,14 @@ from typing import Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
+# Proper noun context seed for Whisper — biases the model toward correct CJK
+# characters for names and martial arts terms that appear in Ip Man content.
+# This is passed as initial_prompt to every model.transcribe() call.
+INITIAL_PROMPT = (
+    "葉問，詠春，師父，金山找，三浦，木人樁，黐手，北拳，南拳，功夫，武術，葉師傅，"
+    "請，我賠，我畀錢，夠了，沒事，好呀，豁出去"
+)
+
 _WHISPER_MODEL = None
 
 
@@ -24,7 +32,14 @@ def _get_whisper_model():
     if _WHISPER_MODEL is not None:
         return _WHISPER_MODEL
     from faster_whisper import WhisperModel
-    model_size = os.getenv("WHISPER_MODEL", "small")
+    if "WHISPER_MODEL" in os.environ:
+        model_size = os.getenv("WHISPER_MODEL", "medium")
+    else:
+        wl = (os.getenv("WHISPER_LANGUAGE", "") or "").strip().lower()
+        if wl in ("yue", "zh-yue", "yue-hk", "zh-hk"):
+            model_size = "large-v3"
+        else:
+            model_size = "medium"
     device, compute_type = _get_compute_device()
     logger.info(f"[WHISPER] Loading model '{model_size}' on {device} (will be cached for subsequent jobs)...")
     _WHISPER_MODEL = WhisperModel(model_size, device=device, compute_type=compute_type)
@@ -74,6 +89,35 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
         if len(text) <= 1:
             continue
 
+        # Unconditional minimum-duration guard — must run before every other filter.
+        # No real phoneme can be produced in under 300ms: even the shortest stop
+        # consonant + vowel pair (e.g. 打, 的) takes ~120ms of frication + release.
+        # Sub-300ms segments are always Whisper hallucinations produced when it
+        # forces a transcription onto a single click, breath, or frame boundary
+        # artifact.  The 0:43 "Leopard skin" / "Now play this game" phantom slot
+        # (42.88–42.94s, 60ms) is a canonical example.
+        _dur = float(seg.get("end", 0)) - float(seg.get("start", 0))
+        if _dur < 0.3:
+            logger.info(
+                f"[HALLUCINATION] Rejected sub-300ms segment ({_dur*1000:.0f}ms): "
+                f"'{text[:60]}' at {seg.get('start','?')}-{seg.get('end','?')}"
+            )
+            continue
+
+        # Reject repetitive single-character hallucinations produced by Whisper
+        # when processing fight grunts, screams, or impact noise — e.g.
+        # "Aaaaaaaaaaaaa", "hhhhhhhh", "eeeeeeee".  Real speech has varied chars.
+        stripped = text.replace(' ', '')
+        if len(stripped) >= 4:
+            unique_ratio = len(set(stripped.lower())) / len(stripped)
+            if unique_ratio < 0.25:   # >75% of chars are the same 1-2 characters
+                logger.info(
+                    f"[HALLUCINATION] Rejected repetitive-char segment "
+                    f"(unique_ratio={unique_ratio:.2f}): '{text[:40]}' "
+                    f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
+                )
+                continue
+
         # Reject short single-word Latin-script hallucinations.
         # Whisper often produces nonsense English words during fight scenes
         # or silent moments (e.g. "pave", "the", "you").  Real dialogue
@@ -118,13 +162,46 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
             cjk_chars = len(_re.findall(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', text))
             non_space = len(_re.findall(r'\S', text))
             cjk_ratio = cjk_chars / max(non_space, 1)
-            # Require at least 30% CJK characters — catches garbage like
-            # "而已 ੁ ੀ ਗ਼ ੁ ੀ" where a stray CJK word is buried in
-            # Gurmukhi/Bengali/Latin hallucination noise.
-            if cjk_ratio < 0.3 and len(text.strip()) > 1:
+
+            # PRIMARY: reject any segment with zero CJK characters when transcribing
+            # CJK audio.  Real Cantonese/Mandarin dialogue always contains CJK chars.
+            # Pure-Latin/Cyrillic/etc. output is a hallucination produced by Whisper
+            # when it encounters fight sounds, music, or silence — e.g. "Always a
+            # stunner", "Groove", "Согон!".  This is the strongest signal we have.
+            if cjk_chars == 0 and len(text.strip()) > 1:
+                logger.info(
+                    f"[HALLUCINATION] Rejected zero-CJK segment in {source_language} audio: "
+                    f"'{text[:60]}' at {seg.get('start', '?')}-{seg.get('end', '?')}"
+                )
+                continue
+
+            # SECONDARY: mixed-script garbage — some CJK but ratio too low.
+            # Catches "而已 ੁ ੀ ਗ਼" where a stray CJK word is buried in Gurmukhi noise.
+            min_ratio = 0.3
+            if source_language == "yue":
+                min_ratio = 0.15
+            if cjk_ratio < min_ratio and cjk_chars < 6 and len(text.strip()) > 1:
                 logger.info(
                     f"[HALLUCINATION] Rejected low-CJK-ratio segment ({cjk_ratio:.0%}): '{text[:60]}' "
                     f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
+                )
+                continue
+
+        # Short isolated CJK hallucinations (e.g. 老闆 during a table-break silence):
+        # Whisper produces real CJK text but with low confidence on very short segments.
+        # Apply a moderate logprob threshold when the segment is short (< 2s) and
+        # the word count is low (≤ 2 words).  Threshold -0.8 is stricter than the
+        # strict-mode -1.2 but lenient enough to keep genuine short utterances
+        # like 好呀 (Sure) or 夠了 (That's enough) that Whisper hears clearly.
+        if source_language in _CJK_LANGS:
+            dur = float(seg.get("end", 0)) - float(seg.get("start", 0))
+            avg_lp = seg.get("avg_logprob", 0.0)
+            word_count = len(seg.get("text", "").split())
+            if dur < 2.0 and word_count <= 2 and avg_lp < -0.8:
+                logger.info(
+                    f"[HALLUCINATION] Rejected short low-confidence CJK segment "
+                    f"({dur:.2f}s, lp={avg_lp:.2f}): '{seg.get('text','')[:60]}' "
+                    f"at {seg.get('start','?')}-{seg.get('end','?')}"
                 )
                 continue
 
@@ -233,77 +310,154 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
         import os
         model = _get_whisper_model()
 
-        # VAD filter removes background noise / crowd cheers so they are not
-        # mistaken for speech.  condition_on_previous_text=False reduces
-        # hallucinations in noisy audio.  beam_size=5 improves accuracy.
-        # VAD threshold controls how aggressively non-speech is filtered.
-        # 0.20 is a good balance for action content with dialogue.
-        # Set VAD_THRESHOLD=0 to disable VAD entirely (not recommended —
-        # degrades transcription quality in noisy audio).
-        vad_threshold = float(os.getenv("VAD_THRESHOLD", "0.20"))
-        use_vad = vad_threshold > 0
-
-        # Allow explicit language override via env var.
-        # For Cantonese content set WHISPER_LANGUAGE=yue so Whisper preserves
-        # Cantonese grammar/particles instead of normalising to Standard Chinese.
-        # Leave unset for auto-detection on mixed or unknown-language content.
         whisper_language = os.getenv("WHISPER_LANGUAGE", "").strip() or None
+        _is_yue = (whisper_language or "").lower().strip() in ("yue", "zh-yue", "yue-hk", "zh-hk")
 
-        transcribe_kwargs = dict(
-            beam_size=5,
-            word_timestamps=True,
-            condition_on_previous_text=False,
-        )
-        if whisper_language:
-            transcribe_kwargs["language"] = whisper_language
-            logger.info(f"[WHISPER] Language forced to '{whisper_language}' via WHISPER_LANGUAGE env var")
-
-        if use_vad:
-            transcribe_kwargs["vad_filter"] = True
-            transcribe_kwargs["vad_parameters"] = dict(
-                threshold=vad_threshold,
-                min_speech_duration_ms=50,
-                min_silence_duration_ms=150,
-                speech_pad_ms=400,
+        def _do_transcribe(_use_vad: bool, _vad_threshold: float):
+            transcribe_kwargs = dict(
+                beam_size=5,
+                word_timestamps=True,
+                condition_on_previous_text=False,
+                initial_prompt=INITIAL_PROMPT,
             )
+            if whisper_language:
+                transcribe_kwargs["language"] = whisper_language
+                logger.info(f"[WHISPER] Language forced to '{whisper_language}' via WHISPER_LANGUAGE env var")
 
-        segments_gen, info = model.transcribe(
-            waveform,
-            **transcribe_kwargs,
-        )
+            if _use_vad:
+                transcribe_kwargs["vad_filter"] = True
+                transcribe_kwargs["vad_parameters"] = dict(
+                    threshold=_vad_threshold,
+                    min_speech_duration_ms=50,
+                    min_silence_duration_ms=150,
+                    speech_pad_ms=400,
+                )
 
-        # Convert generator to list to avoid exhaustion
-        segments = list(segments_gen)
+            segments_gen, info = model.transcribe(waveform, **transcribe_kwargs)
+            return list(segments_gen), info
+
+        if "VAD_THRESHOLD" in os.environ:
+            vad_threshold = float(os.getenv("VAD_THRESHOLD", "0.20"))
+            use_vad = vad_threshold > 0
+        else:
+            vad_threshold = 0.0 if _is_yue else 0.20
+            use_vad = vad_threshold > 0
+
+        segments, info = _do_transcribe(use_vad, vad_threshold)
 
         # ---------- Build raw segment dicts ----------
         # When word_timestamps=True, use word-level boundaries for tighter
         # start/end times instead of Whisper's segment-level estimates which
         # often bleed far beyond the actual speech.
-        raw_segments = []
-        for seg in segments:
-            words = getattr(seg, "words", None)
-            if words and len(words) > 0:
-                # Use first word's start and last word's end for tight bounds
-                seg_start = round(words[0].start, 3)
-                seg_end = round(words[-1].end, 3)
-            else:
-                seg_start = round(seg.start, 3)
-                seg_end = round(seg.end, 3)
-            raw_segments.append({
-                "start": seg_start,
-                "end": seg_end,
-                "text": seg.text,
-            })
+        def _segments_to_dicts(_segments):
+            raw = []
+            for seg in _segments:
+                words = getattr(seg, "words", None)
+                if words and len(words) > 0:
+                    seg_start = round(words[0].start, 3)
+                    seg_end = round(words[-1].end, 3)
+                else:
+                    seg_start = round(seg.start, 3)
+                    seg_end = round(seg.end, 3)
+                raw.append({
+                    "start": seg_start,
+                    "end": seg_end,
+                    "text": seg.text,
+                })
+            return raw
+
+        raw_segments = _segments_to_dicts(segments)
 
         # ---------- Filter hallucinations (pass 1 — with VAD) ----------
         _detected_lang = whisper_language or info.language or ""
         raw_segments = _filter_hallucinations(raw_segments, strict=False, source_language=_detected_lang)
 
+        # ---------- Cantonese auto-rescue ----------
+        # Whisper often misdetects Cantonese as "zh" (Mandarin) when no source
+        # language is specified, collapsing the full audio into one or a handful
+        # of segments. Detect this by checking for Cantonese-specific particles
+        # in the returned text, then re-run with language="yue" explicitly.
+        _CANTONESE_PARTICLES = frozenset("唔嘅係喺囉啩佢哋喇咋噉嗰呢㗎咩咗")
+        if (
+            not whisper_language                       # user did not specify a source language
+            and (info.language or "") == "zh"          # Whisper auto-detected Mandarin
+            and len(raw_segments) < 8                  # collapsed / very few segments
+            and "CANTONESE_RESCUE" not in os.environ   # prevent infinite recursion
+        ):
+            full_text = "".join(s["text"] for s in raw_segments)
+            has_cantonese_particles = any(p in full_text for p in _CANTONESE_PARTICLES)
+            if has_cantonese_particles or len(raw_segments) < 3:
+                os.environ["CANTONESE_RESCUE"] = "1"
+                try:
+                    logger.info(
+                        f"[WHISPER] Cantonese auto-rescue: detected language='zh' with "
+                        f"{len(raw_segments)} segment(s), Cantonese particles={has_cantonese_particles} "
+                        f"— re-running with language='yue', VAD disabled"
+                    )
+                    rescue_gen, rescue_info = model.transcribe(
+                        waveform,
+                        language="yue",
+                        beam_size=5,
+                        word_timestamps=True,
+                        condition_on_previous_text=False,
+                        initial_prompt=INITIAL_PROMPT,
+                        vad_filter=False,
+                    )
+                    rescue_raw = _segments_to_dicts(list(rescue_gen))
+                    rescue_raw = _filter_hallucinations(rescue_raw, strict=False, source_language="yue")
+                    if len(rescue_raw) > len(raw_segments):
+                        raw_segments = rescue_raw
+                        info = rescue_info
+                        use_vad = False
+                        _detected_lang = "yue"
+                        logger.info(
+                            f"[WHISPER] Cantonese rescue succeeded: "
+                            f"{len(rescue_raw)} segment(s) recovered"
+                        )
+                    else:
+                        logger.info(
+                            f"[WHISPER] Cantonese rescue did not improve output "
+                            f"({len(rescue_raw)} vs {len(raw_segments)}) — keeping original"
+                        )
+                finally:
+                    os.environ.pop("CANTONESE_RESCUE", None)
+
+        if _is_yue and len(raw_segments) < 12 and "YUE_TRANSCRIBE_RETRY" not in os.environ:
+            os.environ["YUE_TRANSCRIBE_RETRY"] = "1"
+            try:
+                if use_vad:
+                    retry_use_vad, retry_thr = False, 0.0
+                else:
+                    retry_use_vad, retry_thr = True, 0.10
+
+                logger.info(
+                    f"[WHISPER] yue retry: use_vad={retry_use_vad} threshold={retry_thr} "
+                    f"(initial_segments={len(raw_segments)})"
+                )
+                retry_segments, retry_info = _do_transcribe(retry_use_vad, retry_thr)
+                retry_raw = _segments_to_dicts(retry_segments)
+                retry_raw = _filter_hallucinations(retry_raw, strict=False, source_language=_detected_lang)
+                if len(retry_raw) > len(raw_segments):
+                    raw_segments = retry_raw
+                    info = retry_info
+                    use_vad = retry_use_vad
+                    vad_threshold = retry_thr
+            finally:
+                os.environ.pop("YUE_TRANSCRIBE_RETRY", None)
+
         # ---------- Two-pass gap recovery ----------
         # VAD aggressively filters dialogue mixed with SFX (fight scenes).
         # Detect large gaps in the transcript and re-transcribe WITHOUT VAD.
-        two_pass = os.getenv("VAD_TWO_PASS", "1") == "1"
-        gap_threshold = float(os.getenv("VAD_GAP_THRESHOLD", "3.0"))
+        # NOTE: This is expensive on CPU. Default is disabled for local dev.
+        if "VAD_TWO_PASS" in os.environ:
+            two_pass = os.getenv("VAD_TWO_PASS", "0") == "1"
+        else:
+            two_pass = True if (_is_yue and use_vad) else False
+
+        if "VAD_GAP_THRESHOLD" in os.environ:
+            gap_threshold = float(os.getenv("VAD_GAP_THRESHOLD", "3.0"))
+        else:
+            gap_threshold = 2.5 if _is_yue else 3.0
 
         if use_vad and two_pass:
             gaps = _find_gaps(raw_segments, info.duration, gap_threshold)
@@ -316,6 +470,7 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
                     beam_size=5,
                     word_timestamps=True,
                     condition_on_previous_text=False,
+                    initial_prompt=INITIAL_PROMPT,
                 )
                 if whisper_language:
                     no_vad_kwargs["language"] = whisper_language
@@ -392,10 +547,19 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(transcript, f, indent=2, ensure_ascii=False)
 
-        return {
+        result = {
             "status": "ok",
             "transcript_path": str(output_path),
         }
+
+        if os.getenv("GC_BETWEEN_STEPS", "1") == "1":
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
+
+        return result
 
     except Exception as e:
         import traceback

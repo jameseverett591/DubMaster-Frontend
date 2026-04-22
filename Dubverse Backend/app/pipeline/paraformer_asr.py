@@ -133,6 +133,17 @@ def transcribe_with_paraformer(
 
     This function NEVER raises — returns status="skipped" on failure.
     """
+    # Paraformer models we use are Mandarin (zh) focused; for Cantonese (yue)
+    # they frequently return garbage or a single giant blob. Avoid poisoning
+    # the Cantonese pipeline — use Whisper for yue.
+    if (language or "").strip().lower() == "yue":
+        logger.info(f"[PARAFORMER] Skipping for Cantonese (language=yue), job={job_id}")
+        return {
+            "status": "skipped",
+            "reason": "unsupported_language_yue",
+            "segments": [],
+        }
+
     if not os.path.exists(audio_path):
         logger.warning(f"[PARAFORMER] Audio file not found: {audio_path}")
         return {

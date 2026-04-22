@@ -18,15 +18,37 @@ GLOSSARY: Dict[str, str] = {
     "熱吻": "Ip Man",        # Whisper mishearing of 葉問
     "叶师傅": "Master Ip",
     "葉師傅": "Master Ip",
-    "金師傅": "Master Jin",
-    "金师傅": "Master Jin",
-    "金師父": "Master Jin",    # 父 variant (Whisper sometimes outputs 父 instead of 傅)
-    "金师父": "Master Jin",
-    "甘師傅": "Master Jin",    # Whisper mishearing: 甘 instead of 金
-    "甘师傅": "Master Jin",
-    "甘師父": "Master Jin",
-    "甘师父": "Master Jin",
-    "金山找": "Jin Shanzhao",
+    "金師傅": "Master Shin",
+    "金师傅": "Master Shin",
+    "金師父": "Master Shin",    # 父 variant (Whisper sometimes outputs 父 instead of 傅)
+    "金师父": "Master Shin",
+    "甘師傅": "Master Shin",    # Whisper mishearing: 甘 (gam) instead of 金 (gam) — homophones in Cantonese
+    "甘师傅": "Master Shin",
+    "甘師父": "Master Shin",
+    "甘师父": "Master Shin",
+    "甘師":   "Master Shin",    # Shortened variant Whisper sometimes produces
+    "金山找": "Master Shin",
+    # Additional phonetic variants Whisper produces for "Shin" (xīn/xìn sounds)
+    "心師傅": "Master Shin",    # xīn — most common "Xin" variant
+    "心师傅": "Master Shin",
+    "心師父": "Master Shin",
+    "心师父": "Master Shin",
+    "新師傅": "Master Shin",    # xīn — "new" character
+    "新师傅": "Master Shin",
+    "新師父": "Master Shin",
+    "新师父": "Master Shin",
+    "辛師傅": "Master Shin",    # xīn — "bitter" character
+    "辛师傅": "Master Shin",
+    "辛師父": "Master Shin",
+    "辛师父": "Master Shin",
+    "信師傅": "Master Shin",    # xìn — "trust" character
+    "信师傅": "Master Shin",
+    "信師父": "Master Shin",
+    "信师父": "Master Shin",
+    "星師傅": "Master Shin",    # xīng — "star" character (Whisper mishearing)
+    "星师傅": "Master Shin",
+    "星師父": "Master Shin",
+    "星师父": "Master Shin",
     "三浦": "Miura",
     "武痴林": "Lam",
     "李钊": "Li Zhao",
@@ -35,13 +57,26 @@ GLOSSARY: Dict[str, str] = {
     "臭小子": "You little brat",
     "沒事": "I'm fine",
     "没事": "I'm fine",
+    "老婆大人": "My dear wife",
+    "老婆": "Honey",
+    "老公": "Honey",
+    "親愛的": "Darling",
+    "亲爱的": "Darling",
     # Martial arts terms
     "榮春": "Wing Chun",      # Whisper mishearing of 詠春
     "永春": "Wing Chun",
     "詠春": "Wing Chun",
     "咏春拳": "Wing Chun",
     "詠春拳": "Wing Chun",
+    "龄春": "Wing Chun",
+    "龄春, 燕文": "Wing Chun, Ip Man",
+    "看別人而已": "It's up to you.",
+    "看别人而已": "It's up to you.",
+    "看別人": "It's on you",
+    "打開吧": "",
+    "好的功夫是不分男女路友": "Good kung fu doesn't discriminate between men and women",
     "套牌": "I'll pay",        # Whisper mishears 我付 (I'll pay) as 套牌
+    "藍北拳": "Northern Fist",   # Whisper mishearing: 藍 (laam) prepended to 北拳
     "北拳": "Northern Fist",
     "北權": "Northern Fist",    # Whisper mishearing
     "南拳": "Southern Fist",
@@ -70,6 +105,12 @@ GLOSSARY: Dict[str, str] = {
     "我付": "I'll pay",
     "我來付": "I'll pay",
     "我来付": "I'll pay",
+    "我埋單": "I'll pay",
+    "我埋单": "I'll pay",
+    "我付錢": "I'll pay",
+    "我付钱": "I'll pay",
+    "我請客": "It's my treat",
+    "我请客": "It's my treat",
     # Whisper transcription artifacts and fight-scene mishearings
     "男女路友": "male and female",   # 路友 is Whisper noise; real phrase is 男女的
     "路友": "",                       # Remove stray 路友 artifact
@@ -79,11 +120,13 @@ GLOSSARY: Dict[str, str] = {
     "你跑": "",                       # Fight grunt misheard — drop
     "我陪你": "",                     # Fight grunt misheard — full phrase drop (prevents "你" residue)
     "我陪": "",                       # Fight grunt misheard — drop
+    "老闆": "",                       # CJK hallucination during table-break silence — drop
+    "老板": "",                       # Simplified variant
     "看人的": "It's up to you",      # Whisper drops 家 → 看人的 instead of 看人家的
     # Short expressions
-    "好啊": "Sure",
-    "好": "Good",
-    "好的": "Okay",
+    "好呀": "Okay.",
+    "好了": "Alright.",
+    "好啊": "Okay.",
     "请": "Please",
     "請": "Please",
     "爸爸": "Daddy",
@@ -104,8 +147,8 @@ GLOSSARY: Dict[str, str] = {
     "家裡的東西就會爛了": "everything in the house will be ruined.",
     "大哥没事吧": "Brother, are you okay?",
     "大哥沒事吧": "Brother, are you okay?",
-    "金師傅沒事吧": "Master Jin, are you okay?",
-    "金师傅没事吧": "Master Jin, are you okay?",
+    "金師傅沒事吧": "Master Shin, are you okay?",
+    "金师傅没事吧": "Master Shin, are you okay?",
     "你没事吧": "Are you okay?",
     "你沒事吧": "Are you okay?",
     "厉害": "He's better",
@@ -128,41 +171,41 @@ GLOSSARY: Dict[str, str] = {
     "家裡的東西就會爛了": "or everything in the house will be broken",
     "好功夫是不會分男女路友的": "Kung fu doesn't discriminate between male and female",
     "好功夫是不会分男女路友的": "Kung fu doesn't discriminate between male and female",
-    "金師傅 沒事吧": "Master Jin, are you okay?",
-    "金师傅 没事吧": "Master Jin, are you okay?",
-    "金師傅沒事吧": "Master Jin, are you okay?",
-    "金师傅没事吧": "Master Jin, are you okay?",
+    "金師傅 沒事吧": "Master Shin, are you okay?",
+    "金师傅 没事吧": "Master Shin, are you okay?",
+    "金師傅沒事吧": "Master Shin, are you okay?",
+    "金师傅没事吧": "Master Shin, are you okay?",
     # Mixed traditional/simplified variants (Whisper vocal recovery mixes scripts)
-    "金師傅没事吧": "Master Jin, are you okay?",
-    "金师傅沒事吧": "Master Jin, are you okay?",
-    "金師傅 没事吧": "Master Jin, are you okay?",
-    "金师傅 沒事吧": "Master Jin, are you okay?",
+    "金師傅没事吧": "Master Shin, are you okay?",
+    "金师傅沒事吧": "Master Shin, are you okay?",
+    "金師傅 没事吧": "Master Shin, are you okay?",
+    "金师傅 沒事吧": "Master Shin, are you okay?",
     # 師父 (father) variants — Whisper vocal recovery often outputs 父 instead of 傅
-    "金師父沒事吧": "Master Jin, are you okay?",
-    "金师父没事吧": "Master Jin, are you okay?",
-    "金師父 沒事吧": "Master Jin, are you okay?",
-    "金师父 没事吧": "Master Jin, are you okay?",
-    "金師父没事吧": "Master Jin, are you okay?",
-    "金师父沒事吧": "Master Jin, are you okay?",
+    "金師父沒事吧": "Master Shin, are you okay?",
+    "金师父没事吧": "Master Shin, are you okay?",
+    "金師父 沒事吧": "Master Shin, are you okay?",
+    "金师父 没事吧": "Master Shin, are you okay?",
+    "金師父没事吧": "Master Shin, are you okay?",
+    "金师父沒事吧": "Master Shin, are you okay?",
     # 甘 (Whisper mishearing of 金) variants
-    "甘師傅沒事吧": "Master Jin, are you okay?",
-    "甘师傅没事吧": "Master Jin, are you okay?",
-    "甘師父沒事吧": "Master Jin, are you okay?",
-    "甘师父没事吧": "Master Jin, are you okay?",
-    "甘師傅 沒事吧": "Master Jin, are you okay?",
-    "甘师傅 没事吧": "Master Jin, are you okay?",
-    "甘師父 沒事吧": "Master Jin, are you okay?",
-    "甘师父 没事吧": "Master Jin, are you okay?",
-    "甘師傅没事吧": "Master Jin, are you okay?",
-    "甘师傅沒事吧": "Master Jin, are you okay?",
-    "甘師父没事吧": "Master Jin, are you okay?",
-    "甘师父沒事吧": "Master Jin, are you okay?",
-    "怎麼樣 金師傅": "Master Jin, are you alright?",
-    "怎么样 金师傅": "Master Jin, are you alright?",
-    "怎麼樣金師傅": "Master Jin, are you alright?",
-    "怎么样金师傅": "Master Jin, are you alright?",
-    "怎麼樣金師傅沒事吧": "How's it going? Master Jin, are you okay?",
-    "怎么样金师傅没事吧": "How's it going? Master Jin, are you okay?",
+    "甘師傅沒事吧": "Master Shin, are you okay?",
+    "甘师傅没事吧": "Master Shin, are you okay?",
+    "甘師父沒事吧": "Master Shin, are you okay?",
+    "甘师父没事吧": "Master Shin, are you okay?",
+    "甘師傅 沒事吧": "Master Shin, are you okay?",
+    "甘师傅 没事吧": "Master Shin, are you okay?",
+    "甘師父 沒事吧": "Master Shin, are you okay?",
+    "甘师父 没事吧": "Master Shin, are you okay?",
+    "甘師傅没事吧": "Master Shin, are you okay?",
+    "甘师傅沒事吧": "Master Shin, are you okay?",
+    "甘師父没事吧": "Master Shin, are you okay?",
+    "甘师父沒事吧": "Master Shin, are you okay?",
+    "怎麼樣 金師傅": "Master Shin, are you alright?",
+    "怎么样 金师傅": "Master Shin, are you alright?",
+    "怎麼樣金師傅": "Master Shin, are you alright?",
+    "怎么样金师傅": "Master Shin, are you alright?",
+    "怎麼樣金師傅沒事吧": "How's it going? Master Shin, are you okay?",
+    "怎么样金师傅没事吧": "How's it going? Master Shin, are you okay?",
     # End section dialogue
     "今天北拳": "Today, Northern Fist",
     "今天被放權": "Today, Northern Fist",    # Whisper mishearing
@@ -170,6 +213,36 @@ GLOSSARY: Dict[str, str] = {
     "輸給南方權": "lost to Southern Fist",  # Whisper mishearing
     "不是南北拳的問題": "It's not about Northern or Southern Fist",
     "不是南北權的問題": "It's not about Northern or Southern Fist",  # Whisper mishearing
+    # Cantonese-specific final section (local Whisper outputs Cantonese, not Mandarin)
+    "點下金師父": "Master Shin, was my kung fu any good?",
+    "點下金師傅": "Master Shin, was my kung fu any good?",
+    "我啲功夫橫可以": "My kung fu's not bad, right?",
+    "唔用數啦": "That's enough.",
+    "唔用數": "That's enough.",
+    "今天北方拳": "Today, Northern Fist",
+    "輸俾南方拳": "lost to Southern Fist",
+    "輸俾南拳": "lost to Southern Fist",
+    "唔系南北拳㗎嘛": "It's not about Northern or Southern Fist",
+    "唔係南北拳㗎嘛": "It's not about Northern or Southern Fist",
+    "唔系南北拳": "It's not about Northern or Southern Fist",
+    "唔係南北拳": "It's not about Northern or Southern Fist",
+    "係你㗎笨": "It's your problem.",
+    "係你嘅問題": "It's your problem.",
+    "錯錯錯": "Wrong.",
+    # Cantonese deduplication
+    "大哥 大哥 大哥": "Big brother",
+    "大哥大哥大哥": "Big brother",
+    # Cantonese fight grunts (local Whisper catches these separately)
+    "我賠，": "",
+    "我赔，": "",
+    "行，": "",
+    # Phonetic-English identity entries — if Whisper outputs a romanized name
+    # instead of CJK (e.g. because initial_prompt didn't fully suppress it),
+    # these prevent DeepL from "translating" proper nouns into something wrong.
+    "Ip Man": "Ip Man",
+    "Wing Chun": "Wing Chun",
+    "Ip man": "Ip Man",
+    "wing chun": "Wing Chun",
 }
 
 
@@ -210,8 +283,26 @@ class TranslationService:
         """Replace placeholder tokens with correct target-language terms after translation."""
         for placeholder, tgt_term in replacements:
             # Also try lowercase variant in case the engine lowercased it
-            text = text.replace(placeholder, tgt_term)
-            text = text.replace(placeholder.lower(), tgt_term)
+            for ph in (placeholder, placeholder.lower()):
+                if ph not in text:
+                    continue
+                # Ensure a space between the restored term and adjacent word chars
+                # e.g. "OkayKung" → "Okay Kung", "Okaykung" → "Okay kung"
+                idx = text.find(ph)
+                before = text[idx - 1] if idx > 0 else ""
+                after = text[idx + len(ph)] if idx + len(ph) < len(text) else ""
+                repl = tgt_term
+                if before and before.isalpha() and repl and repl[0].isalpha():
+                    repl = " " + repl
+                if after and after.isalpha() and repl and repl[-1].isalpha():
+                    repl = repl + " "
+                text = text.replace(ph, repl)
+        # Strip any placeholder tokens that were NOT in the replacements list
+        # (e.g. tokens from a prior pass or batch misalignment) so they never
+        # reach TTS as literal "XGLO one zero four X" audio.
+        if re.search(r'XGLO\d{3}X', text, re.IGNORECASE):
+            logger.warning(f"[GLOSSARY] Unresolved placeholder(s) in post-pass: '{text}' — stripping")
+            text = re.sub(r'XGLO\d{3}X', '', text, flags=re.IGNORECASE).strip()
         # Fix concatenated English words from adjacent glossary replacements
         # e.g. "Wing ChunIp Man" → "Wing Chun Ip Man"
         text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
@@ -225,10 +316,43 @@ class TranslationService:
             "left-handed": "Southern Fist",
             "Northern Boxing": "Northern Fist",
             "Southern Boxing": "Southern Fist",
+            "Northern Fist Boxing": "Northern Fist",
+            "Southern Fist Boxing": "Southern Fist",
+            "Master Xing": "Master Shin",
+            "Master Xin": "Master Shin",
+            "Master Jin": "Master Shin",
+            "Master Kin": "Master Shin",
+            "Master Gam": "Master Shin",
+            # LLM hallucinations observed on short Cantonese utterances
+            "Fire Mindup": "Please",
+            "fire mindup": "Please",
+            "Obsessed": "I'll pay",
+            "obsessed": "I'll pay",
+            # GPT double-negative on 唔係南北拳㗎嘛
+            "not non-northern fist": "It's not about Northern or Southern Fist",
+            "Not non-northern fist": "It's not about Northern or Southern Fist",
+            "Not non-Northern Fist": "It's not about Northern or Southern Fist",
+            "not non-Northern Fist": "It's not about Northern or Southern Fist",
+            "not non-northern": "It's not about Northern or Southern Fist",
+            "Not non-northern": "It's not about Northern or Southern Fist",
+            # GPT inconsistencies on final section
+            "It is not a matter of Northern or Southern Fist": "It's not about Northern or Southern Fist",
+            "It's not a matter of Northern or Southern Fist": "It's not about Northern or Southern Fist",
         }
         for wrong, correct in _POST_FIXES.items():
             if wrong in text:
                 text = text.replace(wrong, correct)
+        # Strip leading discourse-particle prefixes that LLMs sometimes emit
+        # when Cantonese 講/gong opens a line (e.g. "Kong, I really want to see"
+        # or "Gong, today Northern Fist lost...").  These are NOT character names.
+        text = re.sub(r'^(?:Kong|Gong|Cobb|Cobbs?|Come\s+on|Come|Kami|Wai|Hai|Kwam|Kwom|Kwong|Kemei|Keme|Kerm|Ker|Gam|Gem)[,\s]+', '', text, flags=re.IGNORECASE).strip()
+        # Second pass: catch bare "Come" before a proper noun (no comma)
+        text = re.sub(r'^Come\s+(?=[A-Z])', '', text).strip()
+        # Strip trailing TTS/translation artifacts — single non-words appended to real lines
+        text = re.sub(r'\s+\bmigers?\b\.?$', '', text, flags=re.IGNORECASE).strip()
+        # Drop YouTube outro / promotional content hallucinated by Whisper
+        if re.search(r'like.*subscribe|subscribe.*bell|hit the bell|tip tip', text, re.IGNORECASE):
+            return ""
         return text
     
     async def translate_segments(
@@ -254,11 +378,27 @@ class TranslationService:
         # knows it is spoken Cantonese grammar, not Standard Written Chinese.
         is_cantonese = source_norm in ("yue", "zh-yue", "zh-HK") or \
                        source_language in ("yue", "zh-yue", "zh-HK")
+
+        # Auto-detect Cantonese from text even when source is reported as "zh".
+        # Local Whisper outputs Cantonese particles (唔, 㗎, 係, 喺 etc.) that
+        # DeepL cannot handle — force LLM path for any CJK text.
+        _CJK_SOURCES = {"zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant", "zh-sg"}
+        if not is_cantonese and source_norm in _CJK_SOURCES:
+            _CANTONESE_MARKERS = {"唔", "㗎", "喺", "嘅", "佢", "啩", "喎", "囉", "囉"}
+            all_text = " ".join(seg.get("text", "") for seg in segments)
+            if any(m in all_text for m in _CANTONESE_MARKERS):
+                is_cantonese = True
+                logger.info("[TRANSLATE] Cantonese markers detected in zh transcript — routing to LLM")
+            else:
+                # Even for standard Mandarin zh, use LLM — DeepL loses glossary context
+                is_cantonese = True
+                logger.info("[TRANSLATE] zh source detected — routing to LLM (skipping DeepL)")
+
         effective_source = "yue-HK" if is_cantonese else source_norm
 
         if is_cantonese:
             logger.info(
-                f"[TRANSLATE] Cantonese detected ({source_language}) — "
+                f"[TRANSLATE] Cantonese/CJK detected ({source_language}) — "
                 f"using source=yue-HK for Google Cloud; GPT-4 fallback available"
             )
 
@@ -270,6 +410,20 @@ class TranslationService:
         azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "")
         azure_key = os.getenv("AZURE_OPENAI_KEY", "")
         has_llm = bool(anthropic_key) or bool(openai_key) or (bool(azure_endpoint) and bool(azure_key))
+
+        # Exact-match overrides for single-word utterances — bypass LLM entirely.
+        # These are short Cantonese words that LLMs hallucinate into garbage.
+        _EXACT_OVERRIDES = {
+            "好": "Okay.", "好呀": "Sure.", "好了": "Alright.",
+            "請": "Please.", "请": "Please.",
+            "我賠": "I'll pay.", "我赔": "I'll pay.",
+            "包賠": "I'll pay.", "照賠": "I'll pay.",
+            "賠": "I'll pay.", "赔": "I'll pay.",
+        }
+        for seg in segments:
+            stripped = (seg.get("text") or "").strip()
+            if stripped in _EXACT_OVERRIDES:
+                seg["text"] = _EXACT_OVERRIDES[stripped]
 
         if is_cantonese and has_llm:
             # Try Claude first (most reliable for Cantonese)
@@ -371,10 +525,16 @@ class TranslationService:
             f"- Short exclamations (好啊, 沒事) must stay short: 'Sure.' / 'I'm fine.' — not sentences\n"
             f"- CRITICAL: each input line is a SEPARATE utterance by a DIFFERENT speaker or moment — "
             f"NEVER combine two numbered lines into one answer, even if they seem related\n"
-            f"- Preserve character names and martial arts terms exactly as given\n"
+            f"- Character names are PROPER NOUNS — output them EXACTLY as they appear in the input. "
+            f"NEVER romanize or translate them differently. "
+            f"'Ip Man' stays 'Ip Man', 'Master Shin' stays 'Master Shin', 'Wing Chun' stays 'Wing Chun'.\n"
             f"- Terms like XGLO###X are protected placeholders — keep them unchanged\n"
             f"- Return EXACTLY one numbered translation per input line — same count, same order\n"
             f"- Do NOT include the timing slot in your output. Do NOT add explanations or notes\n"
+            f"- Do NOT prefix any translation with a character name, speaker label, or address "
+            f"term (e.g. NEVER start a line with 'Kong, ...' or 'Ip Man: ...' or 'Master Shin, ...')\n"
+            f"- Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) that open a line are fillers — "
+            f"drop them entirely, do NOT render them as 'Come', 'Kong', 'Kami', 'Wai', 'Hai', or any English word\n"
         )
 
         user_prompt = f"Translate these {lang_name} dialogue lines to {target_name}:\n\n{numbered_lines}"
@@ -386,7 +546,7 @@ class TranslationService:
             )
 
             payload = {
-                "model": "claude-3-5-sonnet-20241022",
+                "model": "claude-sonnet-4-6",
                 "max_tokens": 4096,
                 "temperature": 0.3,
                 "system": system_prompt,
@@ -426,6 +586,7 @@ class TranslationService:
 
             result: List[Dict] = []
             changed = 0
+            retry_indices: List[int] = []
             for i, seg in enumerate(segments):
                 if i < len(gpt_lines):
                     raw = gpt_lines[i]
@@ -433,12 +594,46 @@ class TranslationService:
                     if raw.strip() != protected[i].strip():
                         changed += 1
                 else:
+                    # Claude returned fewer lines than segments — mark for retry
+                    # rather than padding with raw CJK (which would go to TTS verbatim)
                     final = self._apply_glossary_post(
                         protected[i], replacements_per_seg[i]
                     )
+                    retry_indices.append(i)
                 result.append({
                     **seg, "original_text": seg.get("text", ""), "text": final,
                 })
+
+            # Retry segments that didn't get a Claude translation by translating
+            # them individually via _translate_text (uses DeepL/Google/Claude single).
+            if retry_indices:
+                logger.warning(
+                    f"[TRANSLATE] Retrying {len(retry_indices)} untranslated segment(s) "
+                    f"individually: indices {retry_indices}"
+                )
+                _cjk_re = re.compile(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]')
+                for i in retry_indices:
+                    original_text = segments[i].get("text", "")
+                    if not original_text.strip():
+                        continue
+                    try:
+                        retranslated = await self._translate_text(
+                            original_text,
+                            source_language,
+                            target_language,
+                        )
+                        if retranslated and not _cjk_re.search(retranslated):
+                            result[i] = {
+                                **segments[i],
+                                "original_text": original_text,
+                                "text": retranslated,
+                            }
+                            changed += 1
+                            logger.info(
+                                f"[TRANSLATE] Retry seg {i}: '{original_text[:40]}' → '{retranslated[:40]}'"
+                            )
+                    except Exception as retry_e:
+                        logger.error(f"[TRANSLATE] Retry seg {i} failed: {retry_e}")
 
             ratio = changed / max(1, len(segments))
             logger.info(
@@ -518,10 +713,16 @@ class TranslationService:
             f"- Short exclamations (好啊, 沒事) must stay short: 'Sure.' / 'I'm fine.' — not sentences\n"
             f"- CRITICAL: each input line is a SEPARATE utterance by a DIFFERENT speaker or moment — "
             f"NEVER combine two numbered lines into one answer, even if they seem related\n"
-            f"- Preserve character names and martial arts terms exactly as given\n"
+            f"- Character names are PROPER NOUNS — output them EXACTLY as they appear in the input. "
+            f"NEVER romanize or translate them differently. "
+            f"'Ip Man' stays 'Ip Man', 'Master Shin' stays 'Master Shin', 'Wing Chun' stays 'Wing Chun'.\n"
             f"- Terms like XGLO###X are protected placeholders — keep them unchanged\n"
             f"- Return EXACTLY one numbered translation per input line — same count, same order\n"
             f"- Do NOT include the timing slot in your output. Do NOT add explanations or notes\n"
+            f"- Do NOT prefix any translation with a character name, speaker label, or address "
+            f"term (e.g. NEVER start a line with 'Kong, ...' or 'Ip Man: ...' or 'Master Shin, ...')\n"
+            f"- Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) that open a line are fillers — "
+            f"drop them entirely, do NOT render them as 'Come', 'Kong', 'Kami', 'Wai', 'Hai', or any English word\n"
         )
 
         user_prompt = f"Translate these {lang_name} dialogue lines to {target_name}:\n\n{numbered_lines}"
