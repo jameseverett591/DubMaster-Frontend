@@ -1799,7 +1799,7 @@ class DubbingService:
                     (
                         f"[1:a]volume={accompaniment_level}[bgm];"
                         f"[2:a]volume=3.0[speech];"
-                        f"[bgm][speech]amix=inputs=2:duration=longest:normalize=0[aout]"
+                        f"[bgm][speech]amix=inputs=2:duration=longest:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[aout]"
                     ),
                     "-map", "0:v:0",
                     "-map", "[aout]",
@@ -1827,7 +1827,7 @@ class DubbingService:
                     "-i", video_path,
                     "-i", audio_to_use,
                     "-filter_complex",
-                    f"{original_filter};[1:a]volume=1.5[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0[aout]",
+                    f"{original_filter};[1:a]volume=1.5[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[aout]",
                     "-map", "0:v:0",
                     "-map", "[aout]",
                     "-c:v", "copy",
@@ -1842,11 +1842,12 @@ class DubbingService:
                     "ffmpeg", "-y",
                     "-i", video_path,
                     "-i", audio_to_use,
+                    "-filter_complex", "[1:a]loudnorm=I=-14:TP=-1.5:LRA=11[aout]",
+                    "-map", "0:v:0",
+                    "-map", "[aout]",
                     "-c:v", "copy",
                     "-c:a", "aac",
                     "-b:a", "192k",
-                    "-map", "0:v:0",
-                    "-map", "1:a:0",
                     "-movflags", "+faststart",
                     output_path,
                 ]
