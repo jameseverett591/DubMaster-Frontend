@@ -17,6 +17,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
+  Activity,
   ArrowLeft,
   Play,
   Pause,
@@ -45,6 +46,7 @@ import { VoiceSelector } from "@/components/voice-selector"
 import { TranscriptEditor } from "@/components/transcript-editor"
 import { TimelineEditor } from "@/components/timeline-editor"
 import { DubbedVideoResult } from "@/components/dubbed-video-result"
+import PipelineMonitor from "@/components/pipeline-monitor"
 import { QualityAnalysisPanel } from "@/components/quality-analysis"
 import {
   apiClient,
@@ -125,7 +127,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
   const [dubbingProgress, setDubbingProgress] = useState(0)
   const [dubbingError, setDubbingError] = useState<string | null>(null)
   const [voiceSettingsMap, setVoiceSettingsMap] = useState<Record<string, { pitch: number; speed: number }>>({})
-  const [activeTab, setActiveTab] = useState("voices")
+  const [activeTab, setActiveTab] = useState("pipeline")
   const [dubbingComplete, setDubbingComplete] = useState(false)
   const [dubbedVideoUrl, setDubbedVideoUrl] = useState<string | null>(null)
   const [showOriginal, setShowOriginal] = useState(false)
@@ -244,7 +246,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
     }
 
     let retries = 0
-    const MAX_RETRIES = 360
+    const MAX_RETRIES = 1440
     let interval = 5000
 
     const poll = async () => {
@@ -394,7 +396,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
   const pollDubbingStatus = (jobId: string) => {
     let cancelled = false
     let retries = 0
-    const MAX_RETRIES = 360
+    const MAX_RETRIES = 1440
     let interval = 5000
 
     const poll = async () => {
@@ -778,35 +780,48 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
         {/* Sidebar Panel — fixed width, fits in viewport */}
         <div className="w-80 shrink-0 border-l border-border/50 bg-card/50 backdrop-blur-md flex flex-col min-h-0">
           <Tabs value={activeTab} onValueChange={setActiveTab} className="flex h-full flex-col min-h-0">
-            <TabsList className="mx-3 mt-3 grid grid-cols-6 shrink-0">
-              <TabsTrigger value="voices" className="gap-1 text-xs px-1">
-                <Mic2 className="h-3.5 w-3.5" />
-                Voices
-              </TabsTrigger>
-              <TabsTrigger value="transcript" className="gap-1 text-xs px-1">
-                <Waveform className="h-3.5 w-3.5" />
-                Script
-              </TabsTrigger>
-              <TabsTrigger value="timeline" className="gap-1 text-xs px-1">
-                <Settings2 className="h-3.5 w-3.5" />
-                Timeline
-              </TabsTrigger>
-              <TabsTrigger value="result" className="gap-1 text-xs px-1 relative">
-                <CheckCircle2 className="h-3.5 w-3.5" />
-                Result
-                {dubbingComplete && <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-green-500" />}
-              </TabsTrigger>
-              <TabsTrigger value="quality" className="gap-1 text-xs px-1">
-                <BarChart3 className="h-3.5 w-3.5" />
-                Quality
-              </TabsTrigger>
-              <TabsTrigger value="studio" className="gap-1 text-xs px-1 relative">
-                <Film className="h-3.5 w-3.5" />
-                Studio
-                <Crown className="absolute -right-1 -top-1 h-2.5 w-2.5 text-amber-400" />
-              </TabsTrigger>
-            </TabsList>
+            <div className="mx-3 mt-3 shrink-0 space-y-1">
+              <TabsList className="grid w-full grid-cols-4">
+                <TabsTrigger value="pipeline" className="gap-1 text-xs px-1">
+                  <Activity className="h-3.5 w-3.5" />
+                  Pipeline
+                </TabsTrigger>
+                <TabsTrigger value="voices" className="gap-1 text-xs px-1">
+                  <Mic2 className="h-3.5 w-3.5" />
+                  Voices
+                </TabsTrigger>
+                <TabsTrigger value="transcript" className="gap-1 text-xs px-1">
+                  <Waveform className="h-3.5 w-3.5" />
+                  Script
+                </TabsTrigger>
+                <TabsTrigger value="timeline" className="gap-1 text-xs px-1">
+                  <Settings2 className="h-3.5 w-3.5" />
+                  Timeline
+                </TabsTrigger>
+              </TabsList>
+              <TabsList className="grid w-full grid-cols-3">
+                <TabsTrigger value="result" className="gap-1 text-xs px-1 relative">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  Result
+                  {dubbingComplete && <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-green-500" />}
+                </TabsTrigger>
+                <TabsTrigger value="quality" className="gap-1 text-xs px-1">
+                  <BarChart3 className="h-3.5 w-3.5" />
+                  Quality
+                </TabsTrigger>
+                <TabsTrigger value="studio" className="gap-1 text-xs px-1 relative">
+                  <Film className="h-3.5 w-3.5" />
+                  Studio
+                  <Crown className="absolute -right-1 -top-1 h-2.5 w-2.5 text-amber-400" />
+                </TabsTrigger>
+              </TabsList>
+            </div>
 
+            <TabsContent value="pipeline" className="flex-1 min-h-0 overflow-hidden">
+              <ScrollArea className="h-full p-3">
+                <PipelineMonitor jobId={video.id} />
+              </ScrollArea>
+            </TabsContent>
             <TabsContent value="voices" className="flex-1 min-h-0 overflow-hidden">
               <ScrollArea className="h-full p-3">
                 <VoiceSelector

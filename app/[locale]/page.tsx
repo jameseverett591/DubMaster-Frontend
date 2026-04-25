@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from "react"
 import { useRouter } from "next/navigation"
-import { useTranslations } from "next-intl"
+import { useTranslations, useLocale } from "next-intl"
 import { createClient } from "@/lib/supabase/client"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -76,6 +76,7 @@ export default function LandingPage() {
   const [scrollY, setScrollY] = useState(0)
   const router = useRouter()
   const t = useTranslations('landing')
+  const locale = useLocale()
 
   // Redirect authenticated users with an active subscription to /studio
   useEffect(() => {
@@ -92,7 +93,7 @@ export default function LandingPage() {
           .limit(1)
           .maybeSingle()
         if (subscription) {
-          router.replace("/studio")
+          router.replace(`/${locale}/studio`)
         }
       } catch {
         // Ignore auth errors on landing page
