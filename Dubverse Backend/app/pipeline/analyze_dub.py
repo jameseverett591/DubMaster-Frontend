@@ -479,10 +479,19 @@ def _analyze_loudness(dubbed_video: Path) -> Dict[str, Any]:
         input_tp = float(loudness.get("input_tp", -100))
         input_lra = float(loudness.get("input_lra", 0))
 
-        # Flag if outside broadcast standards (-14 LUFS +/- 3 LU)
+        # Flag if outside broadcast standards (-14 LUFS +/- 3 LU, true peak <= -1.0 dBFS)
         target_lufs = -14.0
         tolerance = 3.0
-        within_spec = abs(input_i - target_lufs) <= tolerance
+        lufs_ok = abs(input_i - target_lufs) <= tolerance
+        tp_ok = input_tp <= -1.0
+
+        within_spec = lufs_ok and tp_ok
+
+        reasons = []
+        if not lufs_ok:
+            reasons.append("lufs_out_of_range")
+        if not tp_ok:
+            reasons.append("true_peak_clipping")
 
         return {
             "status": "ok",
@@ -492,6 +501,7 @@ def _analyze_loudness(dubbed_video: Path) -> Dict[str, Any]:
             "target_lufs": target_lufs,
             "within_spec": within_spec,
             "deviation_from_target": round(input_i - target_lufs, 2),
+            "reason": ", ".join(reasons) if reasons else "",
         }
     except Exception as e:
         logger.warning(f"[ANALYSIS] Loudness analysis failed: {e}")
@@ -779,9 +789,20 @@ def _compute_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
         "claude_report": (analysis.get("qc_report") or {}).get("status") == "ok",
     }
 
+    # Use Claude synthesis score as authoritative when available
+    qc_report = analysis.get("qc_report") or {}
+    synthesis_score = qc_report.get("overall_score") if qc_report.get("status") == "ok" else None
+    synthesis_grade = qc_report.get("overall_grade") if qc_report.get("status") == "ok" else None
+    score_source = "synthesis" if synthesis_score is not None else "pipeline"
+
     return {
-        "score": score,
-        "grade": grade,
+        "score": synthesis_score if synthesis_score is not None else score,
+        "grade": synthesis_grade if synthesis_grade is not None else grade,
+        "pipeline_score": score,
+        "pipeline_grade": grade,
+        "synthesis_score": synthesis_score,
+        "synthesis_grade": synthesis_grade,
+        "score_source": score_source,
         "component_scores": {k: round(v) for k, v in scores.items()},
         "weights_used": weights,
         "services_available": services_available,
