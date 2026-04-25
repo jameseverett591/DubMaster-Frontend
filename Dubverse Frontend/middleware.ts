@@ -34,6 +34,16 @@ export async function middleware(request: NextRequest) {
     ? pathname.split('/').slice(2).join('/')
     : pathname.substring(1)
 
+  const currentPath = `/${pathnameWithoutLocale}`
+
+  // Only call Supabase auth for routes that actually need it
+  const needsAuth = PROTECTED_ROUTES.some((route) => currentPath.startsWith(route)) ||
+    AUTH_ROUTES.some((route) => currentPath.startsWith(route))
+
+  if (!needsAuth) {
+    return intlResponse || NextResponse.next({ request })
+  }
+
   let supabaseResponse = NextResponse.next({ request })
 
   const supabase = createServerClient(
@@ -83,8 +93,6 @@ export async function middleware(request: NextRequest) {
     }
     return response
   }
-
-  const currentPath = `/${pathnameWithoutLocale}`
 
   // Redirect authenticated users away from auth pages
   if (user && AUTH_ROUTES.some((route) => currentPath.startsWith(route))) {

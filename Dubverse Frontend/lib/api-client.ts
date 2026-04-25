@@ -301,16 +301,21 @@ class DubVerseAPIClient {
    * Upload a video file to the backend
    * @param file - The video file to upload
    * @param onProgress - Optional callback for upload progress (0-100)
+   * @param sourceLanguage - Optional ISO code (e.g. "yue") to override Whisper auto-detect
    * @returns UploadResponse with job_id
    */
   async uploadVideo(
     file: File,
-    onProgress?: (progress: number) => void
+    onProgress?: (progress: number) => void,
+    sourceLanguage?: string
   ): Promise<UploadResponse> {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
       const formData = new FormData()
       formData.append('file', file)
+      if (sourceLanguage && sourceLanguage !== 'auto') {
+        formData.append('source_language', sourceLanguage)
+      }
 
       xhr.upload.addEventListener('progress', (e) => {
         if (e.lengthComputable && onProgress) {

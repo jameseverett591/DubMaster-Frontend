@@ -1,16 +1,40 @@
 "use client"
 
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { useDropzone } from "react-dropzone"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
-import { Upload, FileVideo, X, CheckCircle2, AlertCircle } from "lucide-react"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Upload, FileVideo, X, CheckCircle2, AlertCircle, Languages } from "lucide-react"
 import type { VideoSource } from "@/components/dashboard"
 import { apiClient, isTerminalStatus, JobNotFoundError, type JobStatusValue } from "@/lib/api-client"
+import PipelineMonitor from "@/components/pipeline-monitor"
 
 const STORAGE_KEY = "dubverse_uploaded_files"
+const SOURCE_LANG_STORAGE_KEY = "dubverse_source_language"
+
+// Source languages the ASR pipeline supports. "auto" lets Whisper detect.
+// "yue" (Cantonese) is critical — it's distinct from "zh" (Mandarin) and the
+// backend uses it to disable Paraformer and run Whisper-only for accuracy.
+const SOURCE_LANGUAGES: { code: string; name: string; flag: string }[] = [
+  { code: "auto", name: "Auto-detect", flag: "🌐" },
+  { code: "en", name: "English", flag: "🇺🇸" },
+  { code: "yue", name: "Cantonese", flag: "🇭🇰" },
+  { code: "zh", name: "Mandarin", flag: "🇨🇳" },
+  { code: "ja", name: "Japanese", flag: "🇯🇵" },
+  { code: "ko", name: "Korean", flag: "🇰🇷" },
+  { code: "es", name: "Spanish", flag: "🇪🇸" },
+  { code: "fr", name: "French", flag: "🇫🇷" },
+  { code: "de", name: "German", flag: "🇩🇪" },
+  { code: "it", name: "Italian", flag: "🇮🇹" },
+  { code: "pt", name: "Portuguese", flag: "🇵🇹" },
+  { code: "ar", name: "Arabic", flag: "🇸🇦" },
+  { code: "hi", name: "Hindi", flag: "🇮🇳" },
+  { code: "ru", name: "Russian", flag: "🇷🇺" },
+  { code: "nl", name: "Dutch", flag: "🇳🇱" },
+]
 
 type PersistedFile = {
   id: string
@@ -47,8 +71,27 @@ export function VideoUpload({
   onBuyMore
 }: VideoUploadProps) {
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
+  const [sourceLanguage, setSourceLanguage] = useState<string>("auto")
+  // Ref mirror so the dropzone callback (created once) always sees the
+  // current selection without forcing the dropzone to be re-created.
+  const sourceLanguageRef = useRef<string>("auto")
   const t = useTranslations('upload')
   const ts = useTranslations('studio')
+
+  // Restore previously chosen source language so users uploading multiple
+  // Cantonese videos in a row don't have to re-select it each time.
+  useEffect(() => {
+    const saved = localStorage.getItem(SOURCE_LANG_STORAGE_KEY)
+    if (saved && SOURCE_LANGUAGES.some((l) => l.code === saved)) {
+      setSourceLanguage(saved)
+      sourceLanguageRef.current = saved
+    }
+  }, [])
+
+  useEffect(() => {
+    sourceLanguageRef.current = sourceLanguage
+    localStorage.setItem(SOURCE_LANG_STORAGE_KEY, sourceLanguage)
+  }, [sourceLanguage])
 
   // Restore persisted jobs on mount and verify their status
   useEffect(() => {
@@ -106,8 +149,11 @@ export function VideoUpload({
 
     setUploadedFiles((prev) => [...prev, ...newFiles])
 
+    // Snapshot the language for this upload batch so subsequent UI changes
+    // don't affect in-flight uploads.
+    const langForBatch = sourceLanguageRef.current
     newFiles.forEach((uploadedFile) => {
-      startUpload(uploadedFile.id, uploadedFile.file)
+      startUpload(uploadedFile.id, uploadedFile.file, langForBatch)
     })
   }, [])
 
@@ -121,13 +167,18 @@ export function VideoUpload({
     return `${mins}:${secs.toString().padStart(2, "0")}`
   }
 
-  const startUpload = async (tempId: string, file: File) => {
+  const startUpload = async (tempId: string, file: File, langOverride?: string) => {
     try {
-      const response = await apiClient.uploadVideo(file, (progress) => {
-        setUploadedFiles((prev) =>
-          prev.map((f) => (f.id === tempId ? { ...f, progress } : f))
-        )
-      })
+      const lang = langOverride ?? sourceLanguageRef.current
+      const response = await apiClient.uploadVideo(
+        file,
+        (progress) => {
+          setUploadedFiles((prev) =>
+            prev.map((f) => (f.id === tempId ? { ...f, progress } : f))
+          )
+        },
+        lang
+      )
 
       // Upload received by backend — now it's processing
       setUploadedFiles((prev) => {
@@ -142,9 +193,45 @@ export function VideoUpload({
 
       pollJobStatus(tempId, response.job_id)
     } catch (err) {
+      const msg = err instanceof Error ? err.message : t('uploadFailed')
+      if (msg === "Upload cancelled") {
+        try {
+          const jobs = await apiClient.listJobs()
+          const now = Date.now()
+          const recentMatch = jobs
+            .filter((j) => j.video_filename === file.name)
+            .filter((j) => {
+              const ts = Date.parse(j.created_at)
+              return Number.isFinite(ts) && now - ts <= 5 * 60 * 1000
+            })
+            .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0]
+
+          if (recentMatch?.job_id) {
+            setUploadedFiles((prev) => {
+              const next = prev.map((f) =>
+                f.id === tempId
+                  ? {
+                      ...f,
+                      progress: 100,
+                      status: "processing" as const,
+                      jobId: recentMatch.job_id,
+                      name: file.name,
+                      statusLabel: t('analysingVideo'),
+                    }
+                  : f
+              )
+              persistFiles(next)
+              return next
+            })
+            pollJobStatus(tempId, recentMatch.job_id)
+            return
+          }
+        } catch {}
+      }
+
       setUploadedFiles((prev) =>
         prev.map((f) =>
-          f.id === tempId ? { ...f, status: "error", statusLabel: err instanceof Error ? err.message : t('uploadFailed') } : f
+          f.id === tempId ? { ...f, status: "error", statusLabel: msg } : f
         )
       )
     }
@@ -161,7 +248,7 @@ export function VideoUpload({
     }
 
     let retries = 0
-    const MAX_RETRIES = 360  // ~30 min at 5s intervals
+    const MAX_RETRIES = 1440  // ~2 hours at 5s intervals (matches backend RUNPOD_QUEUE_TIMEOUT_SEC=7200)
     let interval = 5000
 
     const poll = async () => {
@@ -266,8 +353,13 @@ export function VideoUpload({
     disabled: quotaExceeded,
   })
 
+  // Find the first file that is currently processing (to show its pipeline monitor)
+  const activeProcessingFile = uploadedFiles.find((f) => f.status === "processing" && f.jobId)
+
   return (
     <div className="space-y-6">
+      {/* Top section: Upload Area + Pipeline Monitor side by side when processing */}
+      <div className={`grid gap-6 transition-all duration-500 ${activeProcessingFile ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"}`}>
       {/* Main Upload Area - Compact */}
       <div>
         <div className="text-center mb-4">
@@ -275,6 +367,30 @@ export function VideoUpload({
           <p className="text-[#94A3B8] text-sm">
             {ts('uploadSubtitle')}
           </p>
+        </div>
+
+        {/* Source language selector — must be set BEFORE upload because
+            transcription runs immediately on the backend. Choosing the
+            correct language (e.g. Cantonese) prevents Whisper from
+            mis-detecting the audio as Mandarin and producing garbled output. */}
+        <div className="mb-4 flex items-center justify-center gap-3">
+          <label className="text-sm text-[#94A3B8] font-medium">
+            Source language:
+          </label>
+          <Select value={sourceLanguage} onValueChange={setSourceLanguage}>
+            <SelectTrigger className="w-[200px] h-9 text-sm bg-[#0F172A]/60 border-[#A855F7]/30">
+              <Languages className="mr-2 h-3.5 w-3.5 text-[#A855F7]" />
+              <SelectValue placeholder="Auto-detect" />
+            </SelectTrigger>
+            <SelectContent>
+              {SOURCE_LANGUAGES.map((lang) => (
+                <SelectItem key={lang.code} value={lang.code}>
+                  <span className="mr-2">{lang.flag}</span>
+                  {lang.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
 
         <div
@@ -358,11 +474,38 @@ export function VideoUpload({
         </div>
       </div>
 
+      {/* Pipeline Monitor - appears beside upload area when processing */}
+      {activeProcessingFile && (
+        <div className="min-w-0 overflow-hidden self-start">
+          <PipelineMonitor jobId={activeProcessingFile.jobId!} />
+        </div>
+      )}
+      </div>
+
       {uploadedFiles.length > 0 && (
         <div className="mt-12">
-          <div className="mb-6">
-            <h3 className="text-2xl font-bold text-white mb-2">{ts('yourVideos')}</h3>
-            <p className="text-[#94A3B8]">{ts('readyToTransform')}</p>
+          <div className="mb-6 flex items-center justify-between">
+            <div>
+              <h3 className="text-2xl font-bold text-white mb-2">{ts('yourVideos')}</h3>
+              <p className="text-[#94A3B8]">{ts('readyToTransform')}</p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-red-400 border-red-400/30 hover:bg-red-400/10 hover:text-red-300"
+              onClick={async () => {
+                try {
+                  await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/jobs/clear-all?force=true`, { method: "DELETE" })
+                  setUploadedFiles([])
+                  localStorage.removeItem(STORAGE_KEY)
+                } catch (e) {
+                  console.error("Failed to clear jobs:", e)
+                }
+              }}
+            >
+              <X className="h-3.5 w-3.5 mr-1" />
+              Clear All
+            </Button>
           </div>
 
           <div className="space-y-4">
@@ -374,41 +517,42 @@ export function VideoUpload({
                 {/* Outer glow on hover */}
                 <div className="absolute -inset-0.5 bg-gradient-to-r from-[#A855F7] to-[#22D3EE] rounded-2xl opacity-0 group-hover:opacity-30 blur-xl transition-opacity duration-300" />
 
-                <div className="relative flex items-center gap-4 rounded-2xl border border-[#A855F7]/30 bg-[#0F172A]/60 backdrop-blur-xl p-5 group-hover:border-[#A855F7]/60 transition-all duration-300">
-                  <div className="flex h-20 w-32 items-center justify-center rounded-xl bg-gradient-to-br from-[#A855F7]/20 to-[#22D3EE]/20 border border-[#A855F7]/30 overflow-hidden">
-                    {uploadedFile.status === "ready" && uploadedFile.thumbnail ? (
-                      <img
-                        src={uploadedFile.thumbnail || "/placeholder.svg"}
-                        alt={uploadedFile.name ?? uploadedFile.file?.name ?? "video"}
-                        className="h-full w-full object-cover"
-                      />
-                    ) : (
-                      <FileVideo className="h-10 w-10 text-[#A855F7]" />
-                    )}
-                  </div>
-
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-4">
-                      <p className="font-semibold text-white truncate">{uploadedFile.name ?? uploadedFile.file?.name ?? "video"}</p>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => removeFile(uploadedFile.id)}
-                        className="text-[#64748B] hover:text-[#A855F7] hover:bg-[#A855F7]/10 shrink-0"
-                      >
-                        <X className="h-4 w-4" />
-                      </Button>
-                    </div>
-
-                    <div className="mt-1 flex items-center gap-2 text-sm text-[#94A3B8]">
-                      {uploadedFile.file && <span>{(uploadedFile.file.size / (1024 * 1024)).toFixed(1)} MB</span>}
-                      {uploadedFile.duration && (
-                        <>
-                          <span>•</span>
-                          <span>{uploadedFile.duration}</span>
-                        </>
+                <div className="relative rounded-2xl border border-[#A855F7]/30 bg-[#0F172A]/60 backdrop-blur-xl p-5 group-hover:border-[#A855F7]/60 transition-all duration-300">
+                  <div className="flex items-center gap-4">
+                    <div className="flex h-20 w-32 items-center justify-center rounded-xl bg-gradient-to-br from-[#A855F7]/20 to-[#22D3EE]/20 border border-[#A855F7]/30 overflow-hidden">
+                      {uploadedFile.status === "ready" && uploadedFile.thumbnail ? (
+                        <img
+                          src={uploadedFile.thumbnail || "/placeholder.svg"}
+                          alt={uploadedFile.name ?? uploadedFile.file?.name ?? "video"}
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <FileVideo className="h-10 w-10 text-[#A855F7]" />
                       )}
                     </div>
+
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-4">
+                        <p className="font-semibold text-white truncate">{uploadedFile.name ?? uploadedFile.file?.name ?? "video"}</p>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => removeFile(uploadedFile.id)}
+                          className="text-[#64748B] hover:text-[#A855F7] hover:bg-[#A855F7]/10 shrink-0"
+                        >
+                          <X className="h-4 w-4" />
+                        </Button>
+                      </div>
+
+                      <div className="mt-1 flex items-center gap-2 text-sm text-[#94A3B8]">
+                        {uploadedFile.file && <span>{(uploadedFile.file.size / (1024 * 1024)).toFixed(1)} MB</span>}
+                        {uploadedFile.duration && (
+                          <>
+                            <span>•</span>
+                            <span>{uploadedFile.duration}</span>
+                          </>
+                        )}
+                      </div>
 
                     {uploadedFile.status === "uploading" && (
                       <div className="mt-3">
@@ -421,13 +565,6 @@ export function VideoUpload({
                         <p className="mt-2 text-xs text-[#94A3B8]">
                           {t('uploading')} <span className="text-[#22D3EE] font-semibold">{Math.round(uploadedFile.progress)}%</span>
                         </p>
-                      </div>
-                    )}
-
-                    {uploadedFile.status === "processing" && (
-                      <div className="mt-3 flex items-center gap-2 text-sm">
-                        <div className="h-4 w-4 animate-spin rounded-full border-2 border-[#FDB022] border-t-transparent" />
-                        <span className="text-[#FDB022]">{uploadedFile.statusLabel ?? t('processing')}</span>
                       </div>
                     )}
 
@@ -447,12 +584,20 @@ export function VideoUpload({
                       </div>
                     )}
 
+                    {uploadedFile.status === "processing" && (
+                      <div className="mt-3 flex items-center gap-2 text-sm">
+                        <div className="h-4 w-4 animate-spin rounded-full border-2 border-[#FDB022] border-t-transparent" />
+                        <span className="text-[#FDB022]">{uploadedFile.statusLabel ?? t('processing')}</span>
+                      </div>
+                    )}
+
                     {uploadedFile.status === "error" && (
                       <div className="mt-3 flex items-center gap-2 text-sm text-red-400">
                         <AlertCircle className="h-4 w-4" />
                         {uploadedFile.statusLabel ?? t('uploadFailedRetry')}
                       </div>
                     )}
+                    </div>
                   </div>
                 </div>
               </div>
