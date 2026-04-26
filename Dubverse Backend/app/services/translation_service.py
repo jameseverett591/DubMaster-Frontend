@@ -49,6 +49,11 @@ GLOSSARY: Dict[str, str] = {
     "星师傅": "Master Shin",
     "星師父": "Master Shin",
     "星师父": "Master Shin",
+    "陳師父": "Master Chin",    # Traditional: father variant
+    "陳師傅": "Master Chin",    # Traditional: teacher variant
+    "陈师父": "Master Chin",    # Simplified: father variant
+    "陈师傅": "Master Chin",    # Simplified: teacher variant
+    "阿俊":   "Ah Jun",         # The kid
     "三浦": "Miura",
     "武痴林": "Lam",
     "李钊": "Li Zhao",
@@ -338,6 +343,8 @@ class TranslationService:
             # GPT inconsistencies on final section
             "It is not a matter of Northern or Southern Fist": "It's not about Northern or Southern Fist",
             "It's not a matter of Northern or Southern Fist": "It's not about Northern or Southern Fist",
+            "Brother Quan":  "Master Chin",   # observed LLM hallucination for 陳師父
+            "Master Quan":   "Master Chin",   # LLM romanization of 陳 (Chan → Quan)
         }
         for wrong, correct in _POST_FIXES.items():
             if wrong in text:
@@ -527,7 +534,7 @@ class TranslationService:
             f"NEVER combine two numbered lines into one answer, even if they seem related\n"
             f"- Character names are PROPER NOUNS — output them EXACTLY as they appear in the input. "
             f"NEVER romanize or translate them differently. "
-            f"'Ip Man' stays 'Ip Man', 'Master Shin' stays 'Master Shin', 'Wing Chun' stays 'Wing Chun'.\n"
+            f"'Ip Man' stays 'Ip Man', 'Master Shin' stays 'Master Shin', 'Master Chin' stays 'Master Chin', 'Ah Jun' stays 'Ah Jun', 'Wing Chun' stays 'Wing Chun'.\n"
             f"- Terms like XGLO###X are protected placeholders — keep them unchanged\n"
             f"- Return EXACTLY one numbered translation per input line — same count, same order\n"
             f"- Do NOT include the timing slot in your output. Do NOT add explanations or notes\n"
@@ -715,7 +722,7 @@ class TranslationService:
             f"NEVER combine two numbered lines into one answer, even if they seem related\n"
             f"- Character names are PROPER NOUNS — output them EXACTLY as they appear in the input. "
             f"NEVER romanize or translate them differently. "
-            f"'Ip Man' stays 'Ip Man', 'Master Shin' stays 'Master Shin', 'Wing Chun' stays 'Wing Chun'.\n"
+            f"'Ip Man' stays 'Ip Man', 'Master Shin' stays 'Master Shin', 'Master Chin' stays 'Master Chin', 'Ah Jun' stays 'Ah Jun', 'Wing Chun' stays 'Wing Chun'.\n"
             f"- Terms like XGLO###X are protected placeholders — keep them unchanged\n"
             f"- Return EXACTLY one numbered translation per input line — same count, same order\n"
             f"- Do NOT include the timing slot in your output. Do NOT add explanations or notes\n"
