@@ -1061,7 +1061,12 @@ class DubbingService:
                         engine_summary = next(iter(unique_engines))
                     else:
                         engine_summary = "mixed"
-                self._write_segments_json(job_id, target_norm, audio_segments, output_dir)
+                self._write_segments_json(
+                    job_id, target_norm, audio_segments, output_dir,
+                    video_path=video_path,
+                    accompaniment_path=accompaniment_path,
+                    video_duration=video_duration,
+                )
                 return {
                     "output_path": output_video,
                     "tts_engine": engine_summary,
@@ -1888,6 +1893,9 @@ class DubbingService:
         language: str,
         audio_segments: List[Dict],
         output_dir: str,
+        video_path: str = "",
+        accompaniment_path: Optional[str] = None,
+        video_duration: float = 0.0,
     ) -> None:
         path = os.path.join(output_dir, "segments.json")
         snapshot_path = os.path.join(output_dir, "segments_snapshot.json")
@@ -1895,6 +1903,9 @@ class DubbingService:
             "job_id": job_id,
             "language": language,
             "generated_at": datetime.utcnow().isoformat() + "Z",
+            "video_path": video_path,
+            "accompaniment_path": accompaniment_path,
+            "video_duration": video_duration,
             "segments": [
                 {
                     **seg,
@@ -1973,6 +1984,83 @@ class DubbingService:
 
         logger.info(f"[SEGMENTS] Regenerated segment {segment_index} for job {job_id}")
         return seg
+
+    async def remix_dub(self, job_id: str) -> Dict:
+        import time
+        t0 = time.monotonic()
+
+        output_dir = os.path.join(self.dubbed_dir, job_id)
+        segments_path = os.path.join(output_dir, "segments.json")
+
+        if not os.path.exists(segments_path):
+            raise FileNotFoundError(f"segments.json not found for job {job_id}")
+
+        with open(segments_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        language = data.get("language", "en")
+        segments = data["segments"]
+
+        # --- Backwards-compat: pre-patch segments.json lacks video_path,
+        # accompaniment_path, and video_duration.  Reconstruct from disk
+        # conventions rather than refusing to remix.  Post-patch jobs have
+        # these fields written by _write_segments_json at dub time. ---
+        video_path = data.get("video_path") or ""
+        if not video_path or not os.path.exists(video_path):
+            upload_dir = os.path.join(settings.UPLOAD_DIR, job_id)
+            candidates = [
+                f for f in os.listdir(upload_dir)
+                if f.lower().endswith((".mp4", ".mkv", ".avi", ".mov", ".webm"))
+            ] if os.path.isdir(upload_dir) else []
+            if not candidates:
+                raise FileNotFoundError(
+                    f"Source video not found for job {job_id} "
+                    f"(checked segments.json.video_path and {upload_dir})"
+                )
+            video_path = os.path.join(upload_dir, candidates[0])
+
+        accompaniment_path = data.get("accompaniment_path") or None
+        if not accompaniment_path or not os.path.exists(accompaniment_path):
+            candidate_acc = os.path.join("data/separated", f"{job_id}_accompaniment.wav")
+            accompaniment_path = candidate_acc if os.path.exists(candidate_acc) else None
+
+        video_duration = data.get("video_duration") or 0.0
+        if not video_duration:
+            video_duration = await asyncio.to_thread(self._get_video_duration, video_path)
+
+        merge_segments = [
+            {"path": seg["path"], "start": seg["start"], "end": seg["end"]}
+            for seg in segments
+        ]
+
+        merged_audio = os.path.join(output_dir, "dubbed_audio.wav")
+        ok = await asyncio.to_thread(
+            self._merge_audio_segments, merge_segments, merged_audio, video_duration
+        )
+        if not ok:
+            raise RuntimeError(f"Remix failed: could not merge {len(merge_segments)} segments for job {job_id}")
+
+        output_video = os.path.join(output_dir, f"dubbed_{language}.mp4")
+        ok = await asyncio.to_thread(
+            self._replace_audio_in_video, video_path, merged_audio, output_video, accompaniment_path
+        )
+        if not ok:
+            raise RuntimeError(f"Remix failed: could not mux audio into video for job {job_id}")
+
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        data["last_remixed_at"] = datetime.utcnow().isoformat() + "Z"
+        with open(segments_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"[REMIX] job={job_id} segments={len(merge_segments)} elapsed={elapsed_ms}ms")
+        return {
+            "job_id": job_id,
+            "dubbed_video_url": f"/api/media/{job_id}/video",
+            "duration_seconds": video_duration,
+            "status": "ok",
+            "remix_duration_ms": elapsed_ms,
+            "segments_used": len(merge_segments),
+        }
 
 
 dubbing_service = DubbingService()

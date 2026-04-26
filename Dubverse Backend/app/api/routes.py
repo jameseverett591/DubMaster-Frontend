@@ -2786,6 +2786,17 @@ async def get_analysis(job_id: str, language: str):
     return {"status": "complete", "analysis": analysis}
 
 
+@router.post("/dub/remix/{job_id}")
+async def remix_dub(job_id: str):
+    try:
+        result = await dubbing_service.remix_dub(job_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return result
+
+
 @router.get("/segments/{job_id}")
 async def get_segments(job_id: str):
     segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
