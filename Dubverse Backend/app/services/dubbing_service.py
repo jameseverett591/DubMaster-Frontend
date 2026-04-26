@@ -1895,7 +1895,16 @@ class DubbingService:
             "job_id": job_id,
             "language": language,
             "generated_at": datetime.utcnow().isoformat() + "Z",
-            "segments": audio_segments,
+            "segments": [
+                {
+                    **seg,
+                    "locked": False,
+                    "candidates": [],
+                    "edit_history": [],
+                    "qc_findings": [],
+                }
+                for seg in audio_segments
+            ],
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -1928,6 +1937,11 @@ class DubbingService:
         use_speed = speed if speed is not None else seg.get("speed", 1.0)
         use_text = text or seg.get("text", "")
 
+        previous_text = seg.get("text", "")
+        previous_path = seg.get("path", "")
+
+        # Regen always writes to segment_NNNN_regen.mp3, overwriting any prior
+        # regen for this segment. edit_history preserves the change record.
         audio_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen.mp3")
 
         result = await fish_audio_tts.text_to_speech(
@@ -1943,6 +1957,15 @@ class DubbingService:
         seg["voice_id"] = use_voice_id
         seg["speed"] = use_speed
         seg["text"] = use_text
+
+        history_entry = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "previous_text": previous_text,
+            "new_text": use_text,
+            "previous_path": previous_path,
+            "new_path": result["path"],
+        }
+        seg.setdefault("edit_history", []).append(history_entry)
 
         data["regenerated_at"] = datetime.utcnow().isoformat() + "Z"
         with open(segments_path, "w", encoding="utf-8") as f:
