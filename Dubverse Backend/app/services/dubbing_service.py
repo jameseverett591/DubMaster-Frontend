@@ -1,7 +1,9 @@
 import subprocess
 import os
 import re
+import shutil
 import tempfile
+from datetime import datetime
 from pathlib import Path
 import logging
 from typing import Optional, List, Dict
@@ -840,7 +842,12 @@ class DubbingService:
                         f"voice={voice_id} speed={tts_kwargs.get('speed', 1.0) if tts_kwargs else 1.0} "
                         f"text={text[:50]!r}"
                     )
-                    return {"index": i, "result": result, "text": text, "speaker": speaker, "fish_speed_applied": fish_speed_applied}
+                    return {
+                        "index": i, "result": result, "text": text, "speaker": speaker,
+                        "fish_speed_applied": fish_speed_applied,
+                        "voice_id": voice_id,
+                        "speed": tts_kwargs.get("speed", 1.0) if tts_kwargs else 1.0,
+                    }
                 else:
                     logger.warning(f"Failed to generate TTS for segment {i}")
                     return {"index": i, "failed": True}
@@ -974,8 +981,11 @@ class DubbingService:
                 )
 
                 audio_segments.append({
+                    "transcript_index": i,
                     "text": text,
                     "speaker": speaker,
+                    "voice_id": raw.get("voice_id", ""),
+                    "speed": raw.get("speed", 1.0),
                     "path": final_path,
                     "start": start_time,
                     "end": start_time + actual_duration,
@@ -1051,6 +1061,7 @@ class DubbingService:
                         engine_summary = next(iter(unique_engines))
                     else:
                         engine_summary = "mixed"
+                self._write_segments_json(job_id, target_norm, audio_segments, output_dir)
                 return {
                     "output_path": output_video,
                     "tts_engine": engine_summary,
@@ -1479,7 +1490,6 @@ class DubbingService:
                 logger.warning(f"Speed factor clamped to maximum: {max_speed}")
             
             if 0.95 <= speed_factor <= 1.05:
-                import shutil
                 shutil.copy(input_path, output_path)
                 return True
             
@@ -1867,6 +1877,79 @@ class DubbingService:
         except Exception as e:
             logger.error(f"Replace audio error: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # Segment editor support
+    # ------------------------------------------------------------------
+
+    def _write_segments_json(
+        self,
+        job_id: str,
+        language: str,
+        audio_segments: List[Dict],
+        output_dir: str,
+    ) -> None:
+        path = os.path.join(output_dir, "segments.json")
+        snapshot_path = os.path.join(output_dir, "segments_snapshot.json")
+        payload = {
+            "job_id": job_id,
+            "language": language,
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "segments": audio_segments,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+        shutil.copy2(path, snapshot_path)
+        logger.info(f"[SEGMENTS] Wrote {len(audio_segments)} segments to {path}")
+
+    async def regenerate_segment(
+        self,
+        job_id: str,
+        segment_index: int,
+        voice_id: Optional[str] = None,
+        speed: Optional[float] = None,
+        text: Optional[str] = None,
+    ) -> Dict:
+        output_dir = os.path.join(self.dubbed_dir, job_id)
+        segments_path = os.path.join(output_dir, "segments.json")
+
+        if not os.path.exists(segments_path):
+            raise FileNotFoundError(f"segments.json not found for job {job_id}")
+
+        with open(segments_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        segments = data["segments"]
+        seg = next((s for s in segments if s.get("transcript_index") == segment_index), None)
+        if seg is None:
+            raise ValueError(f"Segment with transcript_index={segment_index} not found in job {job_id}")
+
+        use_voice_id = voice_id or seg.get("voice_id", "")
+        use_speed = speed if speed is not None else seg.get("speed", 1.0)
+        use_text = text or seg.get("text", "")
+
+        audio_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen.mp3")
+
+        result = await fish_audio_tts.text_to_speech(
+            text=use_text,
+            voice_id=use_voice_id,
+            output_path=audio_path,
+            speed=use_speed,
+        )
+        if not result:
+            raise RuntimeError(f"TTS failed for segment {segment_index} in job {job_id}")
+
+        seg["path"] = result["path"]
+        seg["voice_id"] = use_voice_id
+        seg["speed"] = use_speed
+        seg["text"] = use_text
+
+        data["regenerated_at"] = datetime.utcnow().isoformat() + "Z"
+        with open(segments_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"[SEGMENTS] Regenerated segment {segment_index} for job {job_id}")
+        return seg
 
 
 dubbing_service = DubbingService()

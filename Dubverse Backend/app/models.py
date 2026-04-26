@@ -134,3 +134,9 @@ class DubResponse(BaseModel):
     tts_engine: Optional[str] = None
     dubbing_engine: Optional[str] = None
     message: str
+
+
+class RegenerateRequest(BaseModel):
+    voice_id: Optional[str] = None
+    speed: Optional[float] = None
+    text: Optional[str] = None

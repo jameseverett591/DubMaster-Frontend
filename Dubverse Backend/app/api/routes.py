@@ -19,6 +19,7 @@ from app.models import (
     DubResponse,
     Transcript,
     TranscriptSegment,
+    RegenerateRequest,
 )
 from app.config import get_settings
 from app.storage.manager import StorageManager
@@ -2783,3 +2784,32 @@ async def get_analysis(job_id: str, language: str):
         analysis = _json.load(f)
 
     return {"status": "complete", "analysis": analysis}
+
+
+@router.get("/segments/{job_id}")
+async def get_segments(job_id: str):
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    return data
+
+
+@router.post("/segment/regenerate/{job_id}/{index}")
+async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
+    try:
+        seg = await dubbing_service.regenerate_segment(
+            job_id=job_id,
+            segment_index=index,
+            voice_id=body.voice_id,
+            speed=body.speed,
+            text=body.text,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "ok", "segment": seg}
