@@ -92,6 +92,32 @@ export interface Transcript {
   segments: TranscriptSegment[]
 }
 
+export interface Segment {
+  transcript_index: number
+  text: string
+  speaker: string
+  voice_id: string
+  speed: number
+  path: string
+  start: number
+  end: number
+  duration: number
+  locked: boolean
+  candidates: string[]
+  edit_history: unknown[]
+  qc_findings: unknown[]
+}
+
+export interface SegmentsData {
+  job_id: string
+  language: string
+  generated_at: string
+  video_path: string
+  accompaniment_path: string
+  video_duration: number
+  segments: Segment[]
+}
+
 export interface Voice {
   voice_id: string
   name: string
@@ -372,6 +398,19 @@ class DubVerseAPIClient {
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }))
       throw new Error(error.detail || `Failed to fetch transcript: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  /**
+   * Get the segment state for a dubbed job (segments.json)
+   */
+  async getSegments(jobId: string): Promise<SegmentsData> {
+    const response = await fetch(`${this.baseURL}/api/segments/${jobId}`)
+    if (!response.ok) {
+      if (response.status === 404) throw new JobNotFoundError(jobId)
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Failed to fetch segments: ${response.statusText}`)
     }
     return response.json()
   }

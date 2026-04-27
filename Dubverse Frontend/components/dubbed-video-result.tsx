@@ -4,6 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
+import Link from "next/link"
 import {
   Download,
   Share2,
@@ -14,6 +15,7 @@ import {
   Mic2,
   Clock,
   AlertCircle,
+  Pencil,
 } from "lucide-react"
 import type { VideoSource, DetectedVoice } from "@/components/dashboard"
 
@@ -222,6 +224,14 @@ export function DubbedVideoResult({
         </div>
 
         {/* Action Buttons */}
+        {originalVideo.jobId && (
+          <Button asChild className="w-full gap-1.5 h-8 text-xs">
+            <Link href={`/editor/${originalVideo.jobId}`}>
+              <Pencil className="h-3.5 w-3.5" />
+              Open in Editor
+            </Link>
+          </Button>
+        )}
         <div className="flex gap-2">
           <Button className="flex-1 gap-1.5 h-8 text-xs" onClick={handleDownload} disabled={!dubbedVideoUrl}>
             <Download className="h-3.5 w-3.5" />
