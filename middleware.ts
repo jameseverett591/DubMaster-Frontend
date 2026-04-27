@@ -5,9 +5,9 @@ import createMiddleware from 'next-intl/middleware'
 import { locales } from './i18n'
 
 // Routes that require authentication (WITHOUT locale prefix)
-const PROTECTED_ROUTES = ["/studio", "/editor", "/account"]
+const PROTECTED_ROUTES = ["/studio", "/editor", "/dashboard", "/account"]
 // Routes that require an active subscription
-const SUBSCRIPTION_ROUTES = ["/studio", "/editor"]
+const SUBSCRIPTION_ROUTES = ["/studio", "/editor", "/dashboard"]
 // Routes only for unauthenticated users
 const AUTH_ROUTES = ["/signin", "/signup"]
 
