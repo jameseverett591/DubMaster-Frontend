@@ -136,7 +136,15 @@ class DubResponse(BaseModel):
     message: str
 
 
+class VoiceParams(BaseModel):
+    voice_id: Optional[str] = None
+    speed: Optional[float] = None
+    speed_ratio: Optional[float] = None
+    target_duration: Optional[float] = None
+
+
 class RegenerateRequest(BaseModel):
     voice_id: Optional[str] = None
     speed: Optional[float] = None
     text: Optional[str] = None
+    voice_params: Optional[VoiceParams] = None

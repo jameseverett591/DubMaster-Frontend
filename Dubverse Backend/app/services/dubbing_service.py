@@ -1928,6 +1928,8 @@ class DubbingService:
         segment_index: int,
         voice_id: Optional[str] = None,
         speed: Optional[float] = None,
+        speed_ratio: Optional[float] = None,
+        target_duration: Optional[float] = None,
         text: Optional[str] = None,
     ) -> Dict:
         output_dir = os.path.join(self.dubbed_dir, job_id)
@@ -1946,6 +1948,29 @@ class DubbingService:
 
         use_voice_id = voice_id or seg.get("voice_id", "")
         use_speed = speed if speed is not None else seg.get("speed", 1.0)
+        if speed is None and speed_ratio is not None:
+            try:
+                sr = float(speed_ratio)
+                if sr > 0:
+                    use_speed = sr
+            except Exception:
+                pass
+
+        if speed is None and target_duration is not None and "duration" in seg:
+            try:
+                base_dur = float(seg.get("duration") or 0.0)
+                td = float(target_duration)
+                if base_dur > 0 and td > 0:
+                    use_speed = base_dur / td
+            except Exception:
+                pass
+
+        try:
+            use_speed = float(use_speed)
+        except Exception:
+            use_speed = 1.0
+
+        use_speed = max(0.5, min(2.0, use_speed))
         use_text = text or seg.get("text", "")
 
         previous_text = seg.get("text", "")
@@ -1968,6 +1993,10 @@ class DubbingService:
         seg["voice_id"] = use_voice_id
         seg["speed"] = use_speed
         seg["text"] = use_text
+        if speed_ratio is not None:
+            seg["speed_ratio"] = speed_ratio
+        if target_duration is not None:
+            seg["target_duration"] = target_duration
 
         history_entry = {
             "timestamp": datetime.utcnow().isoformat() + "Z",

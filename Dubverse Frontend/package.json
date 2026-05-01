@@ -135,7 +135,8 @@
     "use-sync-external-store": "^1.6.0",
     "vaul": "^1.1.2",
     "victory-vendor": "^36.9.2",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "zustand": "^5.0.12"
   },
   "scripts": {
     "dev": "next dev -p 3001",

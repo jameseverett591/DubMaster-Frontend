@@ -2810,11 +2810,26 @@ async def get_segments(job_id: str):
 @router.post("/segment/regenerate/{job_id}/{index}")
 async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
     try:
+        voice_id = body.voice_id
+        speed = body.speed
+        speed_ratio = None
+        target_duration = None
+
+        if getattr(body, "voice_params", None):
+            if body.voice_params.voice_id is not None:
+                voice_id = body.voice_params.voice_id
+            if body.voice_params.speed is not None:
+                speed = body.voice_params.speed
+            speed_ratio = body.voice_params.speed_ratio
+            target_duration = body.voice_params.target_duration
+
         seg = await dubbing_service.regenerate_segment(
             job_id=job_id,
             segment_index=index,
-            voice_id=body.voice_id,
-            speed=body.speed,
+            voice_id=voice_id,
+            speed=speed,
+            speed_ratio=speed_ratio,
+            target_duration=target_duration,
             text=body.text,
         )
     except FileNotFoundError as e:
