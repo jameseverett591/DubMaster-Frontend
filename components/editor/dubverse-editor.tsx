@@ -1893,7 +1893,8 @@ export function DubVerseEditor({
               onClick={(e) => {
                 const target = e.target as HTMLElement
                 if (target.closest('[data-segment-block]')) return
-                const rect = e.currentTarget.getBoundingClientRect()
+                const rect = timelineRef.current?.getBoundingClientRect()
+                if (!rect) return
                 const scrollLeft = timelineRef.current?.scrollLeft ?? 0
                 const x = e.clientX - rect.left + scrollLeft
                 const newTime = Math.max(0, Math.min(x / PIXELS_PER_SECOND, videoDuration))
@@ -1901,7 +1902,6 @@ export function DubVerseEditor({
                 if (videoRef.current) {
                   videoRef.current.currentTime = newTime
                 }
-                setIsPlaying(true)
               }}
             >
               {/* Vertical grid lines — rendered behind all tracks */}
