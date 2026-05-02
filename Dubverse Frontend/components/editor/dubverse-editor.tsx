@@ -1290,7 +1290,7 @@ export function DubVerseEditor({
                     highlightColor === 'yellow' && 'border-l-4 border-l-yellow-500 bg-yellow-500/5',
                     highlightColor === 'green' && 'border-l-4 border-l-emerald-500/30',
                   )}
-                  onClick={() => selectSegment(index)}
+                  onClick={() => { selectSegment(index); setCurrentTime(displaySegments[index].start_time) }}
                 >
                   {/* Suggestion dropdown - drag to timeline */}
                   <DropdownMenu>
