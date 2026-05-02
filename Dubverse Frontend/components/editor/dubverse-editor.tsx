@@ -1757,7 +1757,10 @@ export function DubVerseEditor({
                   const absUrl = rawUrl.startsWith('http') ? rawUrl : apiClient.getAudioFileUrl(jobId, filename)
                   const audio = new Audio(absUrl)
                   audio.playbackRate = stagedSpeeds[selectedSegmentIndex] ?? 1.0
-                  audio.onended = () => setIsSegmentPreviewing(false)
+                  audio.onended = () => {
+                    setIsSegmentPreviewing(false)
+                    selectSegment(null)
+                  }
                   segmentAudioRef.current = audio
                   setIsSegmentPreviewing(true)
                   audio.play()
@@ -1813,7 +1816,7 @@ export function DubVerseEditor({
         {/* Timeline tracks */}
         <div className="flex-1 flex overflow-hidden">
           {/* Track labels - fixed left column */}
-          <div className="w-28 shrink-0 border-r border-neutral-800 bg-neutral-900/80 flex flex-col">
+          <div className="w-28 shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col">
             {/* Time ruler header spacer */}
             <div className="h-6 shrink-0 border-b border-neutral-800 bg-neutral-900" />
             {/* Track labels - equal heights */}
@@ -1903,6 +1906,22 @@ export function DubVerseEditor({
                 }
               }}
             >
+              {/* Vertical grid lines — rendered behind all tracks */}
+              <div className="absolute inset-0 pointer-events-none">
+                {Array.from({ length: Math.ceil(videoDuration) + 1 }).map((_, i) => (
+                  <div
+                    key={i}
+                    className="absolute top-0 bottom-0 w-px"
+                    style={{
+                      left: i * PIXELS_PER_SECOND,
+                      backgroundColor: i % 5 === 0
+                        ? 'rgba(255,255,255,0.08)'
+                        : 'rgba(255,255,255,0.03)',
+                    }}
+                  />
+                ))}
+              </div>
+
               {/* Time ruler */}
               <div className="h-6 shrink-0 bg-neutral-900 border-b border-neutral-800 relative" data-timeline-track>
                 {Array.from({ length: Math.ceil(videoDuration) }).map((_, i) => (
@@ -1918,7 +1937,7 @@ export function DubVerseEditor({
               </div>
               
 {/* Video track with thumbnails */}
-              <div className="h-16 bg-neutral-900/30 border-b border-neutral-800/50 relative overflow-hidden" data-timeline-track>
+              <div className="h-16 bg-neutral-900/30 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
                 {videoThumbnails.length > 0 ? (
                   <div 
                     className="absolute inset-y-1 left-1 right-1 flex rounded overflow-hidden border border-emerald-500/50"
@@ -1945,7 +1964,7 @@ export function DubVerseEditor({
               </div>
               
 {/* Audio waveform track - two stereo channels with mirrored waveforms */}
-              <div className="h-16 bg-neutral-900/50 border-b border-neutral-600 relative overflow-hidden" data-timeline-track>
+              <div className="h-16 bg-neutral-900/50 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
                 <div className="absolute inset-0 flex flex-col">
                   {/* Top stereo channel */}
                   <div className="flex-1 relative border-b border-neutral-700/50">
@@ -1999,7 +2018,7 @@ export function DubVerseEditor({
               </div>
               
               {/* Original audio track */}
-              <div className="flex-1 bg-neutral-900/20 border-b border-neutral-800/50 relative" data-timeline-track>
+              <div className="flex-1 bg-neutral-900/20 border-b border-neutral-700 relative" data-timeline-track>
                 {displaySegments.map((segment) => (
                   <div
                     key={`orig-${segment.id}`}
@@ -2015,7 +2034,7 @@ export function DubVerseEditor({
 {/* Dubbed audio track with stretch/squeeze handles */}
               <div
                 className={cn(
-                  "flex-1 bg-neutral-900/20 border-b border-neutral-800/50 relative",
+                  "flex-1 bg-neutral-900/20 border-b border-neutral-700 relative",
                   draggedTranslation && "bg-amber-500/10 border-amber-500/30"
                 )}
                 data-timeline-track
@@ -2114,7 +2133,7 @@ export function DubVerseEditor({
               </div>
               
               {/* Background track */}
-              <div className="flex-1 bg-neutral-900/10 relative" data-timeline-track>
+              <div className="flex-1 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
               </div>
               
               {/* QC Highlight Box - transparent rectangle with independently draggable needles */}
