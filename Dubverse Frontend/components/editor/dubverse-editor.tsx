@@ -1889,7 +1889,7 @@ export function DubVerseEditor({
           >
             <div 
               className="flex flex-col min-h-full relative" 
-              style={{ width: timelineWidth }}
+              style={{ minWidth: timelineWidth, width: '100%' }}
               onClick={(e) => {
                 const target = e.target as HTMLElement
                 if (target.closest('[data-segment-block]')) return
