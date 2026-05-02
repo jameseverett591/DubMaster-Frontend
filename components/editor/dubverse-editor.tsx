@@ -1915,8 +1915,8 @@ export function DubVerseEditor({
                     style={{
                       left: i * PIXELS_PER_SECOND,
                       backgroundColor: i % 5 === 0
-                        ? 'rgba(255,255,255,0.08)'
-                        : 'rgba(255,255,255,0.03)',
+                        ? 'rgba(255,255,255,0.15)'
+                        : 'rgba(255,255,255,0.06)',
                     }}
                   />
                 ))}
