@@ -74,6 +74,7 @@ services:
       - "./Dubverse Frontend/public:/app/public"
       - "./Dubverse Frontend/messages:/app/messages"
       - "./Dubverse Frontend/postcss.config.mjs:/app/postcss.config.mjs"
+      - "./Dubverse Frontend/next.config.mjs:/app/next.config.mjs:ro"
       - "./Dubverse Frontend/.env.local:/app/.env.local:ro"
       - "./Dubverse Frontend/middleware.ts:/app/middleware.ts"
       - "./Dubverse Frontend/i18n.ts:/app/i18n.ts"

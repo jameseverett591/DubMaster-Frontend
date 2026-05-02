@@ -1,94 +1,126 @@
-import { notFound } from "next/navigation"
-import { DubVerseEditor } from "@/components/editor/dubverse-editor"
-import { DubNotReadyView } from "@/components/dub-not-ready-view"
-import type { Segment, QCFinding } from "@/lib/editor-types"
+'use client'
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+import { use, useState, useEffect } from 'react'
+import { DubVerseEditor } from '@/components/editor/dubverse-editor'
+import { LoadingSpinner } from '@/components/loading-spinner'
+import { ErrorBoundary } from '@/components/error-boundary'
+import type { Segment } from '@/lib/editor-types'
 
-function toAbsoluteUrl(url: string, base: string): string {
-  if (!url) return url
-  if (url.startsWith("http://") || url.startsWith("https://")) return url
-  if (url.startsWith("//")) return `https:${url}`
-  if (url.startsWith("/")) return `${base}${url}`
-  return `${base}/${url}`
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+
+function toAbsoluteUrl(url: string): string {
+  if (!url) return ''
+  if (url.startsWith('http://') || url.startsWith('https://')) return url
+  return `${API_BASE}${url.startsWith('/') ? url : `/${url}`}`
 }
 
-function speakerIdFor(speaker: string): string {
-  const n = speaker.match(/\d+/)
-  return n ? `speaker-${parseInt(n[0], 10) + 1}` : "speaker-1"
-}
+export default function EditorJobPage({ params }: { params: Promise<{ jobId: string }> }) {
+  const { jobId } = use(params)
+  const [editorProps, setEditorProps] = useState<any>(null)
+  const [segments, setSegments] = useState<Segment[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-type PageProps = { params: Promise<{ jobId: string; locale: string }> }
+  useEffect(() => {
+    async function loadJob() {
+      try {
+        const [statusRes, segmentsRes, transcriptRes] = await Promise.allSettled([
+          fetch(`${API_BASE}/api/status/${jobId}`),
+          fetch(`${API_BASE}/api/segments/${jobId}`),
+          fetch(`${API_BASE}/api/transcript/${jobId}`),
+        ])
 
-export default async function EditorJobPage({ params }: PageProps) {
-  const { jobId } = await params
+        const statusFetch = statusRes.status === 'fulfilled' ? statusRes.value : null
+        if (!statusFetch || statusFetch.status === 404) throw new Error('Job not found')
+        if (!statusFetch.ok) throw new Error('Failed to load job')
+        const status = await statusFetch.json()
 
-  const [statusRes, segmentsRes, transcriptRes] = await Promise.allSettled([
-    fetch(`${API_BASE}/api/status/${jobId}`, { cache: "no-store" }),
-    fetch(`${API_BASE}/api/segments/${jobId}`, { cache: "no-store" }),
-    fetch(`${API_BASE}/api/transcript/${jobId}`, { cache: "no-store" }),
-  ])
+        const segFetch = segmentsRes.status === 'fulfilled' ? segmentsRes.value : null
+        const segmentsData = segFetch?.ok ? await segFetch.json() : null
 
-  // Job not found → 404 page
-  const statusFetch = statusRes.status === "fulfilled" ? statusRes.value : null
-  if (!statusFetch || statusFetch.status === 404) notFound()
+        const txFetch = transcriptRes.status === 'fulfilled' ? transcriptRes.value : null
+        const transcript = txFetch?.ok ? await txFetch.json() : null
 
-  // Segments missing → dub not complete yet
-  const segFetch = segmentsRes.status === "fulfilled" ? segmentsRes.value : null
-  if (!segFetch || !segFetch.ok) {
-    return <DubNotReadyView jobId={jobId} />
-  }
+        // Build source text lookup from transcript
+        const sourceByIndex = new Map<number, string>()
+        if (transcript?.segments) {
+          ;(transcript.segments as Array<{ text: string }>).forEach((seg, idx) => {
+            sourceByIndex.set(idx, seg.text)
+          })
+        }
 
-  const status = await statusFetch.json()
-  const segmentsData = await segFetch.json()
-  const transcript =
-    transcriptRes.status === "fulfilled" && transcriptRes.value.ok
-      ? await transcriptRes.value.json()
-      : null
+        // Map API segments → editor Segment type
+        const editorSegments: Segment[] = (segmentsData?.segments || []).map((seg: any, idx: number) => ({
+          id: `segment-${idx}`,
+          index: idx,
+          status: seg.locked ? 'locked' : 'auto',
+          start_time: seg.start ?? 0,
+          end_time: seg.end ?? 0,
+          source_text: sourceByIndex.get(seg.transcript_index ?? idx) ?? '',
+          target_text: seg.text ?? '',
+          speaker_id: `speaker-${String(seg.speaker ?? '').replace(/\D/g, '') || '1'}`,
+          speaker_label: seg.speaker ?? 'Speaker 1',
+          audio_url: seg.path,
+          qc_findings: seg.qc_findings ?? [],
+        }))
 
-  // Dub not yet produced
-  if (!status.dubbed_video_url) {
-    return <DubNotReadyView jobId={jobId} />
-  }
-
-  // Build source text lookup from transcript
-  const sourceByIndex = new Map<number, string>()
-  if (transcript?.segments?.length) {
-    (transcript.segments as Array<{ text: string }>).forEach((seg, idx) => {
-      sourceByIndex.set(idx, seg.text)
-    })
-  }
-
-  // Map API segments to editor Segment type
-  const editorSegments: Segment[] = segmentsData.segments.map((seg: any, idx: number) => {
-    const sourceText = sourceByIndex.get(seg.transcript_index) ?? ""
-    return {
-      id: `segment-${idx}`,
-      index: idx,
-      status: seg.locked ? "locked" : "auto",
-      start_time: seg.start,
-      end_time: seg.end,
-      source_text: sourceText,
-      target_text: seg.text,
-      speaker_id: speakerIdFor(seg.speaker),
-      speaker_label: seg.speaker,
-      audio_url: seg.path,
-      qc_findings: (seg.qc_findings as QCFinding[]) ?? [],
+        setEditorProps({
+          title: status.video_filename || `Job ${jobId.slice(0, 8)}`,
+          sourceLanguage: transcript?.language || 'Source',
+          targetLanguage: segmentsData?.language || 'Target',
+          // video_url from /api/status is "/api/media/{id}/video" — convert to absolute
+          videoUrl: toAbsoluteUrl(status.video_url || `/api/media/${jobId}/video`),
+          // dubbed_video_url is "/api/download/{id}/en" — filesystem-based, no job-in-memory needed
+          dubbedVideoUrl: status.dubbed_video_url ? toAbsoluteUrl(status.dubbed_video_url) : null,
+          videoDuration: segmentsData?.video_duration ?? status.video_duration ?? 0,
+        })
+        setSegments(editorSegments)
+      } catch (e: any) {
+        setError(e.message)
+      } finally {
+        setLoading(false)
+      }
     }
-  })
+    loadJob()
+  }, [jobId])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-slate-950">
+        <LoadingSpinner />
+      </div>
+    )
+  }
+
+  if (error || !editorProps) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen bg-slate-950 text-white gap-4">
+        <h2 className="text-xl font-semibold">Job Not Found</h2>
+        <p className="text-slate-400">Could not load job {jobId}</p>
+      </div>
+    )
+  }
 
   return (
-    <DubVerseEditor
-      jobId={jobId}
-      title={status.video_filename || "DubMaster Project"}
-      sourceLanguage={transcript?.language || "Source"}
-      targetLanguage={segmentsData.language || "Target"}
-      videoUrl={toAbsoluteUrl(segmentsData.video_path || "", API_BASE)}
-      dubbedVideoUrl={status.dubbed_video_url ? toAbsoluteUrl(status.dubbed_video_url, API_BASE) : null}
-      videoDuration={segmentsData.video_duration}
-      segments={editorSegments}
-      onExport={() => {}}
-      onGenerateSpeech={() => {}}
-    />
+    <ErrorBoundary>
+      <DubVerseEditor
+        jobId={jobId}
+        title={editorProps.title}
+        sourceLanguage={editorProps.sourceLanguage}
+        targetLanguage={editorProps.targetLanguage}
+        videoUrl={editorProps.videoUrl}
+        dubbedVideoUrl={editorProps.dubbedVideoUrl}
+        videoDuration={editorProps.videoDuration}
+        segments={segments}
+        qcScore={null}
+        qcFindings={[]}
+        pointsLeft={100}
+        minutesAvailable={60}
+        onExport={() => {}}
+        onShare={() => {}}
+        onGenerateSpeech={() => {}}
+        onTranslateAndDub={() => {}}
+      />
+    </ErrorBoundary>
   )
 }
