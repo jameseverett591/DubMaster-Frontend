@@ -37,6 +37,7 @@ import {
 } from 'lucide-react'
 import Link from 'next/link'
 import { cn } from '@/lib/utils'
+import { apiClient } from '@/lib/api-client'
 import { useEditorStore, type SidebarTab } from '@/lib/editor-store'
 import type { Segment, QCScore, QCFinding, QCFindingType } from '@/lib/editor-types'
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
@@ -150,8 +151,11 @@ export function DubVerseEditor({
     zoomLevel,
     setZoomLevel,
     updateSegmentText,
+    updateSegment,
   } = useEditorStore()
   
+  const [isRegenerating, setIsRegenerating] = useState(false)
+  const [regenError, setRegenError] = useState<string | null>(null)
   const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
   const [editingText, setEditingText] = useState('')
   const [activeQCCategory, setActiveQCCategory] = useState<QCCategory | null>(null)
@@ -891,30 +895,46 @@ export function DubVerseEditor({
     setDraggedTranslation(null)
   }, [updateSegmentText])
   
-  // Handle Generate Speech - lock in the selected segment
-  const handleGenerateSpeech = useCallback(() => {
-    if (selectedSegmentIndex !== null) {
-      // Lock the segment
+  // Handle Generate Speech - calls backend TTS regeneration for the selected segment
+  const handleGenerateSpeech = useCallback(async () => {
+    if (selectedSegmentIndex === null || isRegenerating) return
+    const segment = displaySegments[selectedSegmentIndex]
+    if (!segment) return
+
+    setRegenError(null)
+    setIsRegenerating(true)
+    try {
+      const response = await apiClient.regenerateSegment(jobId, selectedSegmentIndex, {
+        text: segment.target_text,
+      })
+      const filename = response.segment.path.split('/').pop() ?? ''
+      const audio_url = filename
+        ? apiClient.getAudioFileUrl(jobId, filename)
+        : segment.audio_url
+      updateSegment(selectedSegmentIndex, {
+        target_text: response.segment.text,
+        audio_url,
+        status: 'locked',
+      })
       setLockedSegments(prev => new Set([...prev, selectedSegmentIndex]))
-      
-      // If not already dropped, add to dropped translations
-      const segment = displaySegments[selectedSegmentIndex]
-      if (segment && !droppedTranslations.some(t => t.segmentIndex === selectedSegmentIndex)) {
+      if (!droppedTranslations.some(t => t.segmentIndex === selectedSegmentIndex)) {
         setDroppedTranslations(prev => [
           ...prev,
           {
             segmentIndex: selectedSegmentIndex,
-            text: segment.target_text,
+            text: response.segment.text,
             startTime: segment.start_time,
-            endTime: segment.end_time
+            endTime: segment.end_time,
           }
         ])
       }
-      
-      // Call the onGenerateSpeech prop if provided
-      onGenerateSpeech?.()
+    } catch (err: any) {
+      console.error('[Generate Speech] Failed:', err.message)
+      setRegenError('Generation failed — please try again')
+    } finally {
+      setIsRegenerating(false)
     }
-  }, [selectedSegmentIndex, segments, droppedTranslations, onGenerateSpeech])
+  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment])
   
   const handleTimelineDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -1369,29 +1389,39 @@ export function DubVerseEditor({
               <Sparkles className="h-4 w-4 mr-1" />
               Ask AI
             </Button>
-            <Button 
-              size="sm" 
-              className={cn(
-                "h-8 text-xs ml-auto",
-                selectedSegmentIndex !== null && lockedSegments.has(selectedSegmentIndex)
-                  ? "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30"
-                  : "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
+            <div className="ml-auto flex flex-col items-end gap-1">
+              <Button
+                size="sm"
+                className={cn(
+                  "h-8 text-xs",
+                  selectedSegmentIndex !== null && lockedSegments.has(selectedSegmentIndex)
+                    ? "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30"
+                    : "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
+                )}
+                onClick={handleGenerateSpeech}
+                disabled={selectedSegmentIndex === null || isRegenerating}
+              >
+                {isRegenerating ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 mr-1 animate-spin" />
+                    Generating...
+                  </>
+                ) : selectedSegmentIndex !== null && lockedSegments.has(selectedSegmentIndex) ? (
+                  <>
+                    <Lock className="h-4 w-4 mr-1" />
+                    Locked
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="h-4 w-4 mr-1" />
+                    Generate Speech
+                  </>
+                )}
+              </Button>
+              {regenError && (
+                <p className="text-xs text-red-400">{regenError}</p>
               )}
-              onClick={handleGenerateSpeech}
-              disabled={selectedSegmentIndex === null}
-            >
-              {selectedSegmentIndex !== null && lockedSegments.has(selectedSegmentIndex) ? (
-                <>
-                  <Lock className="h-4 w-4 mr-1" />
-                  Locked
-                </>
-              ) : (
-                <>
-                  <Sparkles className="h-4 w-4 mr-1" />
-                  Generate Speech
-                </>
-              )}
-            </Button>
+            </div>
             <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-400">
               <Trash2 className="h-4 w-4" />
             </Button>

@@ -147,6 +147,28 @@ export interface DubResponse {
   message: string
 }
 
+export interface RegenerateSegmentRequest {
+  text?: string
+  voice_id?: string
+  speed?: number
+}
+
+export interface RegenerateSegmentResponse {
+  status: string
+  segment: {
+    path: string
+    text: string
+    voice_id: string
+    speed: number
+    transcript_index: number
+    speaker: string
+    start: number
+    end: number
+    duration: number
+    locked: boolean
+  }
+}
+
 // Quality Analysis types
 export interface TimingIssue {
   segment: number
@@ -576,6 +598,31 @@ class DubVerseAPIClient {
       throw new Error(error.detail || `Failed to fetch analysis: ${response.statusText}`)
     }
     return response.json()
+  }
+
+  async regenerateSegment(
+    jobId: string,
+    index: number,
+    request: RegenerateSegmentRequest
+  ): Promise<RegenerateSegmentResponse> {
+    const response = await fetch(
+      `${this.baseURL}/api/segment/regenerate/${jobId}/${index}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+      }
+    )
+    if (!response.ok) {
+      if (response.status === 404) throw new JobNotFoundError(jobId)
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Failed to regenerate segment: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  getAudioFileUrl(jobId: string, filename: string): string {
+    return `${this.baseURL}/api/media/${jobId}/audio/${filename}`
   }
 }
 
