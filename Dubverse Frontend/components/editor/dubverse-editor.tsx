@@ -1891,19 +1891,17 @@ export function DubVerseEditor({
               className="flex flex-col min-h-full relative" 
               style={{ width: timelineWidth }}
               onClick={(e) => {
-                // Only seek if clicking directly on timeline, not on QC box or player needle
-                if (e.target !== e.currentTarget && 
-                    !(e.target as HTMLElement).closest('[data-timeline-track]')) {
-                  return
-                }
-                // Click to seek - calculate time from click position
+                const target = e.target as HTMLElement
+                if (target.closest('[data-segment-block]')) return
                 const rect = e.currentTarget.getBoundingClientRect()
-                const x = e.clientX - rect.left
+                const scrollLeft = timelineRef.current?.scrollLeft ?? 0
+                const x = e.clientX - rect.left + scrollLeft
                 const newTime = Math.max(0, Math.min(x / PIXELS_PER_SECOND, videoDuration))
                 setCurrentTime(newTime)
                 if (videoRef.current) {
                   videoRef.current.currentTime = newTime
                 }
+                setIsPlaying(true)
               }}
             >
               {/* Vertical grid lines — rendered behind all tracks */}
@@ -2074,6 +2072,7 @@ export function DubVerseEditor({
                           return (originalDuration / activeSpeed) * PIXELS_PER_SECOND
                         })(),
                       }}
+                      data-segment-block={true}
                       onClick={() => handleSegmentClickForQC(index)}
                       onDrop={(e) => handleTimelineDrop(e, index)}
                       onDragOver={handleTimelineDragOver}
