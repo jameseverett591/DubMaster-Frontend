@@ -8,6 +8,7 @@ import {
   ChevronDown,
   RotateCcw,
   Trash2,
+  Check,
   Clock,
   Volume2,
   VolumeX,
