@@ -14,6 +14,7 @@ import {
   VolumeX,
   Play,
   Pause,
+  PlayCircle,
   SkipBack,
   SkipForward,
   ZoomIn,
@@ -157,6 +158,10 @@ export function DubVerseEditor({
   
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [regenError, setRegenError] = useState<string | null>(null)
+  const [stagedSpeeds, setStagedSpeeds] = useState<Record<number, number>>({})
+  const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
+  const [isSegmentPreviewing, setIsSegmentPreviewing] = useState(false)
+  const segmentAudioRef = useRef<HTMLAudioElement | null>(null)
   const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
   const [editingText, setEditingText] = useState('')
   const [activeQCCategory, setActiveQCCategory] = useState<QCCategory | null>(null)
@@ -907,6 +912,7 @@ export function DubVerseEditor({
     try {
       const response = await apiClient.regenerateSegment(jobId, selectedSegmentIndex, {
         text: segment.target_text,
+        speed: stagedSpeeds[selectedSegmentIndex] ?? 1.0,
       })
       const filename = response.segment.path.split('/').pop() ?? ''
       const audio_url = filename
@@ -935,7 +941,7 @@ export function DubVerseEditor({
     } finally {
       setIsRegenerating(false)
     }
-  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment])
+  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds])
   
   // Handle Revert to Original — restores text and audio from the initial load snapshot
   const handleRevert = useCallback(() => {
@@ -957,6 +963,7 @@ export function DubVerseEditor({
       return next
     })
     setDroppedTranslations(prev => prev.filter(t => t.segmentIndex !== selectedSegmentIndex))
+    setStagedSpeeds(prev => { const next = { ...prev }; delete next[selectedSegmentIndex]; return next })
   }, [selectedSegmentIndex, initialSegments, jobId, updateSegment])
 
   const handleTimelineDragOver = useCallback((e: React.DragEvent) => {
@@ -1722,13 +1729,42 @@ export function DubVerseEditor({
             <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => setCurrentTime(0)}>
               <SkipBack className="h-4 w-4" />
             </Button>
-            <Button 
-              variant="ghost" 
-              size="sm" 
+            <Button
+              variant="ghost"
+              size="sm"
               className="h-8 w-8 p-0"
-              onClick={() => setIsPlaying(!isPlaying)}
+              onClick={() => {
+                if (selectedSegmentIndex !== null) {
+                  const seg = displaySegments[selectedSegmentIndex]
+                  const rawUrl = seg?.audio_url ?? ''
+                  if (isSegmentPreviewing) {
+                    segmentAudioRef.current?.pause()
+                    segmentAudioRef.current = null
+                    setIsSegmentPreviewing(false)
+                    return
+                  }
+                  if (!rawUrl) return
+                  const filename = rawUrl.split('/').pop() ?? ''
+                  const absUrl = rawUrl.startsWith('http') ? rawUrl : apiClient.getAudioFileUrl(jobId, filename)
+                  const audio = new Audio(absUrl)
+                  audio.playbackRate = stagedSpeeds[selectedSegmentIndex] ?? 1.0
+                  audio.onended = () => setIsSegmentPreviewing(false)
+                  segmentAudioRef.current = audio
+                  setIsSegmentPreviewing(true)
+                  audio.play()
+                } else {
+                  setIsPlaying(!isPlaying)
+                }
+              }}
             >
-              {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+              {selectedSegmentIndex !== null
+                ? isSegmentPreviewing
+                  ? <Pause className="h-4 w-4 text-amber-400" />
+                  : <PlayCircle className="h-4 w-4 text-amber-400" />
+                : isPlaying
+                  ? <Pause className="h-4 w-4" />
+                  : <Play className="h-4 w-4" />
+              }
             </Button>
             <Button 
               variant="ghost" 
@@ -2002,7 +2038,13 @@ export function DubVerseEditor({
                       )}
                       style={{
                         left: segment.start_time * PIXELS_PER_SECOND,
-                        width: (segment.end_time - segment.start_time) * PIXELS_PER_SECOND,
+                        width: (() => {
+                          const originalDuration = segment.end_time - segment.start_time
+                          const activeSpeed = dragSpeedPreview?.index === index
+                            ? dragSpeedPreview.speed
+                            : (stagedSpeeds[index] ?? 1.0)
+                          return (originalDuration / activeSpeed) * PIXELS_PER_SECOND
+                        })(),
                       }}
                       onClick={() => handleSegmentClickForQC(index)}
                       onDrop={(e) => handleTimelineDrop(e, index)}
@@ -2012,14 +2054,49 @@ export function DubVerseEditor({
                       <div className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-l">
                         <GripHorizontal className="h-3 w-3 rotate-90" />
                       </div>
-                      
+
                       {/* Content */}
-                      <div className="px-3 truncate text-[10px] h-full flex items-center text-white/80">
-                        {segment.target_text}
+                      <div className="px-3 truncate text-[10px] h-full flex items-center text-white/80 gap-1">
+                        {dragSpeedPreview?.index === index ? (
+                          <span className="text-amber-400 font-mono shrink-0">{dragSpeedPreview.speed.toFixed(2)}x</span>
+                        ) : stagedSpeeds[index] !== undefined ? (
+                          <>
+                            <span className="text-amber-400 font-mono shrink-0">{stagedSpeeds[index].toFixed(2)}x</span>
+                            <span className="truncate">{segment.target_text}</span>
+                          </>
+                        ) : (
+                          segment.target_text
+                        )}
                       </div>
-                      
+
                       {/* Right stretch handle */}
-                      <div className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-r">
+                      <div
+                        className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-r"
+                        onMouseDown={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          const startX = e.clientX
+                          const originalDuration = segment.end_time - segment.start_time
+                          const onMouseMove = (ev: MouseEvent) => {
+                            const dx = ev.clientX - startX
+                            const newDuration = Math.max(0.1, originalDuration + dx / PIXELS_PER_SECOND)
+                            const newSpeed = Math.min(2.0, Math.max(0.5, originalDuration / newDuration))
+                            setDragSpeedPreview({ index, speed: newSpeed })
+                          }
+                          const onMouseUp = () => {
+                            setDragSpeedPreview(prev => {
+                              if (prev?.index === index) {
+                                setStagedSpeeds(s => ({ ...s, [index]: prev.speed }))
+                              }
+                              return null
+                            })
+                            document.removeEventListener('mousemove', onMouseMove)
+                            document.removeEventListener('mouseup', onMouseUp)
+                          }
+                          document.addEventListener('mousemove', onMouseMove)
+                          document.addEventListener('mouseup', onMouseUp)
+                        }}
+                      >
                         <GripHorizontal className="h-3 w-3 rotate-90" />
                       </div>
                     </div>
