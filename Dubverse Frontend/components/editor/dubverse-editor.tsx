@@ -937,6 +937,28 @@ export function DubVerseEditor({
     }
   }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment])
   
+  // Handle Revert to Original — restores text and audio from the initial load snapshot
+  const handleRevert = useCallback(() => {
+    if (selectedSegmentIndex === null) return
+    const original = initialSegments[selectedSegmentIndex]
+    if (!original) return
+
+    const filename = (original.audio_url ?? '').split('/').pop() ?? ''
+    const audio_url = filename ? apiClient.getAudioFileUrl(jobId, filename) : undefined
+
+    updateSegment(selectedSegmentIndex, {
+      target_text: original.target_text,
+      audio_url,
+      status: 'auto',
+    })
+    setLockedSegments(prev => {
+      const next = new Set(prev)
+      next.delete(selectedSegmentIndex)
+      return next
+    })
+    setDroppedTranslations(prev => prev.filter(t => t.segmentIndex !== selectedSegmentIndex))
+  }, [selectedSegmentIndex, initialSegments, jobId, updateSegment])
+
   const handleTimelineDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
@@ -1368,7 +1390,7 @@ export function DubVerseEditor({
           
           {/* Bottom toolbar */}
           <div className="flex items-center gap-2 px-4 py-2 border-t border-neutral-800 bg-neutral-900/70">
-            <Button variant="ghost" size="sm" className="h-8 text-xs text-slate-400">
+            <Button variant="ghost" size="sm" className="h-8 text-xs text-slate-400" onClick={handleRevert} disabled={selectedSegmentIndex === null}>
               <RefreshCw className="h-4 w-4 mr-1" />
               Revert to Original
             </Button>
