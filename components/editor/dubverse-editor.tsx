@@ -1929,7 +1929,7 @@ export function DubVerseEditor({
                     style={{ left: i * PIXELS_PER_SECOND }}
                   >
                     <div className="h-2 w-px bg-slate-600" />
-                    <span className="text-[9px] text-slate-500 mt-0.5">{formatTime(i)}</span>
+                    <span className="text-[9px] text-white bg-black/70 px-1 rounded-sm mt-0.5">{formatTime(i)}</span>
                   </div>
                 ))}
               </div>
