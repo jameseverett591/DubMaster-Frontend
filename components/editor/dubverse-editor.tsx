@@ -162,6 +162,15 @@ export function DubVerseEditor({
   const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
   const [isSegmentPreviewing, setIsSegmentPreviewing] = useState(false)
   const segmentAudioRef = useRef<HTMLAudioElement | null>(null)
+
+  useEffect(() => {
+    if (segmentAudioRef.current) {
+      segmentAudioRef.current.pause()
+      segmentAudioRef.current = null
+    }
+    setIsSegmentPreviewing(false)
+  }, [selectedSegmentIndex])
+
   const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
   const [editingText, setEditingText] = useState('')
   const [activeQCCategory, setActiveQCCategory] = useState<QCCategory | null>(null)
