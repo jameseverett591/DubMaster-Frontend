@@ -2025,7 +2025,11 @@ export function DubVerseEditor({
                       left: segment.start_time * PIXELS_PER_SECOND,
                       width: (segment.end_time - segment.start_time) * PIXELS_PER_SECOND,
                     }}
-                  />
+                  >
+                    <div className="px-2 truncate text-[10px] h-full flex items-center text-blue-200/80">
+                      {segment.source_text}
+                    </div>
+                  </div>
                 ))}
               </div>
               
