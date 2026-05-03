@@ -137,6 +137,7 @@ export function DubVerseEditor({
 }: DubVerseEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
+  const editorContainerRef = useRef<HTMLDivElement>(null)
   
   const {
     setJobData,
@@ -192,7 +193,11 @@ export function DubVerseEditor({
       if (e.key === 'u' || e.key === 'U') {
         if (selectedSegmentIndex === null) return
         const target = e.target as HTMLElement
-        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+        if (
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.contentEditable === 'true'
+        ) return
         setLockedPairs(prev => {
           const next = new Set(prev)
           if (next.has(selectedSegmentIndex)) {
@@ -1104,7 +1109,11 @@ export function DubVerseEditor({
   ).length
   
   return (
-    <div className="h-screen flex flex-col bg-black text-white">
+    <div
+      ref={editorContainerRef}
+      tabIndex={0}
+      className="h-screen flex flex-col bg-black text-white outline-none"
+    >
       {/* Header */}
       <header className="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-neutral-900">
         <div className="flex items-center gap-4">
@@ -1381,7 +1390,11 @@ export function DubVerseEditor({
                     highlightColor === 'yellow' && 'border-l-4 border-l-yellow-500 bg-yellow-500/5',
                     highlightColor === 'green' && 'border-l-4 border-l-emerald-500/30',
                   )}
-                  onClick={() => { selectSegment(index); setCurrentTime(displaySegments[index].start_time) }}
+                  onClick={() => {
+                    selectSegment(index)
+                    setCurrentTime(displaySegments[index].start_time)
+                    editorContainerRef.current?.focus()
+                  }}
                 >
                   {/* Suggestion dropdown - drag to timeline */}
                   <DropdownMenu>
