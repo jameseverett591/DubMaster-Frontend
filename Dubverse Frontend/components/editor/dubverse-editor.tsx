@@ -183,6 +183,8 @@ export function DubVerseEditor({
   const [waveformReady, setWaveformReady] = useState(false)
   const [groupedSegments, setGroupedSegments] = useState<Set<number>>(new Set())
   const [isGroupLocked, setIsGroupLocked] = useState(false)
+  const [dragGroupDelta, setDragGroupDelta] = useState(0)
+  const groupOriginalTimesRef = useRef<Record<number, { start: number; end: number }>>({})
   const segmentAudioRef = useRef<HTMLAudioElement | null>(null)
 
   useEffect(() => {
@@ -792,39 +794,63 @@ export function DubVerseEditor({
   const handleQcBoxDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
-    
+
     if (!qcBoxPosition) return
-    
+
     const timelineElement = timelineRef.current
     if (!timelineElement) return
-    
+
     setIsDraggingQcBox(true)
     const boxWidth = qcBoxPosition.end - qcBoxPosition.start
     const startX = e.clientX
     const startBoxStart = qcBoxPosition.start
-    
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const rect = timelineElement.getBoundingClientRect()
-      const scrollLeft = timelineElement.scrollLeft
-      const deltaX = moveEvent.clientX - startX
-      const deltaTime = deltaX / PIXELS_PER_SECOND
-      
-      const newStart = Math.max(0, Math.min(startBoxStart + deltaTime, videoDuration - boxWidth))
-      setQcBoxPosition({
-        start: newStart,
-        end: newStart + boxWidth
+
+    // Snapshot original segment times before drag starts
+    if (isGroupLocked && groupedSegments.size > 0) {
+      const snap: Record<number, { start: number; end: number }> = {}
+      groupedSegments.forEach(idx => {
+        const seg = displaySegments[idx]
+        if (seg) snap[idx] = { start: seg.start_time, end: seg.end_time }
       })
+      groupOriginalTimesRef.current = snap
     }
-    
+
+    let currentDeltaTime = 0
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = moveEvent.clientX - startX
+      currentDeltaTime = deltaX / PIXELS_PER_SECOND
+
+      const newStart = Math.max(0, Math.min(startBoxStart + currentDeltaTime, videoDuration - boxWidth))
+      setQcBoxPosition({ start: newStart, end: newStart + boxWidth })
+
+      if (isGroupLocked && groupedSegments.size > 0) {
+        setDragGroupDelta(currentDeltaTime)
+      }
+    }
+
     const handleMouseUp = () => {
       setIsDraggingQcBox(false)
+      if (isGroupLocked && groupedSegments.size > 0) {
+        const snap = groupOriginalTimesRef.current
+        groupedSegments.forEach(idx => {
+          const orig = snap[idx]
+          if (!orig) return
+          updateSegment(idx, {
+            start_time: Math.max(0, orig.start + currentDeltaTime),
+            end_time: Math.max(0, orig.end + currentDeltaTime),
+          })
+        })
+        setDragGroupDelta(0)
+        groupOriginalTimesRef.current = {}
+      }
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
     }
-    
+
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
-  }, [qcBoxPosition, videoDuration])
+  }, [qcBoxPosition, videoDuration, isGroupLocked, groupedSegments, displaySegments, updateSegment])
   
   // Handle left needle drag - resize box from left
   const handleLeftNeedleDrag = useCallback((e: React.MouseEvent) => {
@@ -2246,7 +2272,7 @@ export function DubVerseEditor({
                         isDraggingThis ? 'cursor-grabbing' : 'cursor-grab'
                       )}
                       style={{
-                        left: (segment.start_time + delta) * PIXELS_PER_SECOND,
+                        left: (segment.start_time + delta + (groupedSegments.has(index) ? dragGroupDelta : 0)) * PIXELS_PER_SECOND,
                         width: (segment.end_time - segment.start_time) * PIXELS_PER_SECOND,
                       }}
                       onMouseDown={(e) => {
@@ -2332,7 +2358,7 @@ export function DubVerseEditor({
                           const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'dubbed'
                           const isDraggingPaired = draggingSegment?.index === index && draggingSegment?.track === 'original' && lockedPairs.has(index)
                           const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
-                          return (segment.start_time + delta) * PIXELS_PER_SECOND
+                          return (segment.start_time + delta + (groupedSegments.has(index) ? dragGroupDelta : 0)) * PIXELS_PER_SECOND
                         })(),
                         width: (() => {
                           const originalDuration = segment.end_time - segment.start_time
@@ -2448,7 +2474,7 @@ export function DubVerseEditor({
                 <div
                   className={cn(
                     "absolute top-0 bottom-0 z-25",
-                    isGroupLocked && "shadow-[0_0_12px_3px_rgba(34,197,94,0.7)] animate-pulse"
+                    isGroupLocked && "shadow-[0_0_12px_3px_rgba(34,197,94,0.7)] animate-pulse cursor-move"
                   )}
                   style={{
                     left: `${qcBoxPosition.start * PIXELS_PER_SECOND}px`,
