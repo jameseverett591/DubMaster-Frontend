@@ -2418,6 +2418,19 @@ async def serve_job_audio(job_id: str, filename: str):
     return FileResponse(audio_path, media_type=media_types.get(ext, "audio/mpeg"))
 
 
+@router.get("/media/{job_id}/separated/{audio_type}")
+async def get_separated_audio(job_id: str, audio_type: str):
+    """Serve a separated audio track (vocals or accompaniment) for waveform rendering."""
+    if audio_type not in ("vocals", "accompaniment"):
+        raise HTTPException(status_code=400, detail="audio_type must be 'vocals' or 'accompaniment'")
+    filename = f"{job_id}_{audio_type}.wav"
+    path = os.path.join(settings.SEPARATED_DIR, filename)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail=f"Separated audio not found: {filename}")
+    return FileResponse(path, media_type="audio/wav",
+        headers={"Cache-Control": "public, max-age=3600"})
+
+
 @router.get("/dubbing-engines")
 async def get_dubbing_engines():
     """Return available dubbing engines and their status."""
