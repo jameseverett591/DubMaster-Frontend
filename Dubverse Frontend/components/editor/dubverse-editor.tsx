@@ -2138,6 +2138,11 @@ export function DubVerseEditor({
                   videoRef.current.currentTime = newTime
                 }
                 selectSegment(null)
+                if (isGroupLocked) {
+                  setIsGroupLocked(false)
+                  setGroupedSegments(new Set())
+                  setDragGroupDelta(0)
+                }
               }}
             >
               {/* Vertical grid lines — rendered behind all tracks */}
