@@ -804,6 +804,8 @@ export function DubVerseEditor({
     const boxWidth = qcBoxPosition.end - qcBoxPosition.start
     const startX = e.clientX
     const startBoxStart = qcBoxPosition.start
+    const originalQcStart = qcBoxPosition.start
+    const originalQcEnd = qcBoxPosition.end
 
     // Snapshot original segment times before drag starts
     if (isGroupLocked && groupedSegments.size > 0) {
@@ -821,11 +823,15 @@ export function DubVerseEditor({
       const deltaX = moveEvent.clientX - startX
       currentDeltaTime = deltaX / PIXELS_PER_SECOND
 
-      const newStart = Math.max(0, Math.min(startBoxStart + currentDeltaTime, videoDuration - boxWidth))
-      setQcBoxPosition({ start: newStart, end: newStart + boxWidth })
-
       if (isGroupLocked && groupedSegments.size > 0) {
+        setQcBoxPosition(() => ({
+          start: Math.max(0, originalQcStart + currentDeltaTime),
+          end: Math.max(0, originalQcEnd + currentDeltaTime),
+        }))
         setDragGroupDelta(currentDeltaTime)
+      } else {
+        const newStart = Math.max(0, Math.min(startBoxStart + currentDeltaTime, videoDuration - boxWidth))
+        setQcBoxPosition({ start: newStart, end: newStart + boxWidth })
       }
     }
 
