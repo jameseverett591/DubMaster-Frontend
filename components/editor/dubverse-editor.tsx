@@ -2449,17 +2449,21 @@ export function DubVerseEditor({
                     />
                   </div>
                   
-                  {/* Transparent colored box - drag to move entire box */}
-                  <div 
-                    className="absolute inset-x-[3px] top-[24px] bottom-0 cursor-move border-t-2 border-b-2"
+                  {/* Transparent colored fill — pointer-events-none so clicks pass through to blocks */}
+                  <div
+                    className="absolute inset-x-[3px] top-[24px] bottom-0 pointer-events-none border-t-2 border-b-2"
                     style={{
-                      backgroundColor: qcBoxColor === 'red' ? 'rgba(239, 68, 68, 0.2)' : 
-                                       qcBoxColor === 'yellow' ? 'rgba(234, 179, 8, 0.2)' : 
+                      backgroundColor: qcBoxColor === 'red' ? 'rgba(239, 68, 68, 0.2)' :
+                                       qcBoxColor === 'yellow' ? 'rgba(234, 179, 8, 0.2)' :
                                        qcBoxColor === 'blue' ? 'rgba(59, 130, 246, 0.2)' : 'rgba(34, 197, 94, 0.2)',
-                      borderColor: qcBoxColor === 'red' ? '#ef4444' : 
-                                   qcBoxColor === 'yellow' ? '#eab308' : 
+                      borderColor: qcBoxColor === 'red' ? '#ef4444' :
+                                   qcBoxColor === 'yellow' ? '#eab308' :
                                    qcBoxColor === 'blue' ? '#3b82f6' : '#22c55e',
                     }}
+                  />
+                  {/* Narrow drag strip at top — grab here to move entire box */}
+                  <div
+                    className="absolute inset-x-[3px] top-[24px] h-3 cursor-move pointer-events-auto"
                     onMouseDown={handleQcBoxDragStart}
                   />
                   
