@@ -36,6 +36,7 @@ import {
   FileText,
   Settings,
   Square,
+  Link2,
 } from 'lucide-react'
 import Link from 'next/link'
 import { cn } from '@/lib/utils'
@@ -163,11 +164,14 @@ export function DubVerseEditor({
   const rebuildIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [draggingSegment, setDraggingSegment] = useState<{
     index: number
+    track: 'original' | 'dubbed'
     startX: number
     originalStart: number
     originalEnd: number
     currentDelta: number
   } | null>(null)
+  const [lockedPairs, setLockedPairs] = useState<Set<number>>(new Set())
+  const [flashingPair, setFlashingPair] = useState<number | null>(null)
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [regenError, setRegenError] = useState<string | null>(null)
   const [stagedSpeeds, setStagedSpeeds] = useState<Record<number, number>>({})
@@ -181,6 +185,29 @@ export function DubVerseEditor({
       segmentAudioRef.current = null
     }
     setIsSegmentPreviewing(false)
+  }, [selectedSegmentIndex])
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'u' || e.key === 'U') {
+        if (selectedSegmentIndex === null) return
+        const target = e.target as HTMLElement
+        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+        setLockedPairs(prev => {
+          const next = new Set(prev)
+          if (next.has(selectedSegmentIndex)) {
+            next.delete(selectedSegmentIndex)
+          } else {
+            next.add(selectedSegmentIndex)
+          }
+          return next
+        })
+        setFlashingPair(selectedSegmentIndex)
+        setTimeout(() => setFlashingPair(null), 300)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
   }, [selectedSegmentIndex])
 
   const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
@@ -2082,20 +2109,62 @@ export function DubVerseEditor({
               
               {/* Original audio track */}
               <div className="flex-1 bg-neutral-900/20 border-b border-neutral-700 relative" data-timeline-track>
-                {displaySegments.map((segment) => (
-                  <div
-                    key={`orig-${segment.id}`}
-                    className="absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded cursor-pointer hover:bg-blue-500/40"
-                    style={{
-                      left: segment.start_time * PIXELS_PER_SECOND,
-                      width: (segment.end_time - segment.start_time) * PIXELS_PER_SECOND,
-                    }}
-                  >
-                    <div className="px-2 truncate text-[10px] h-full flex items-center text-blue-200/80">
-                      {segment.source_text}
+                {displaySegments.map((segment, index) => {
+                  const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'original'
+                  const isDraggingPaired = draggingSegment?.index === index && draggingSegment?.track === 'dubbed' && lockedPairs.has(index)
+                  const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
+                  return (
+                    <div
+                      key={`orig-${segment.id}`}
+                      className={cn(
+                        'absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded',
+                        flashingPair === index && 'ring-1 ring-amber-400',
+                        isDraggingThis ? 'cursor-grabbing' : 'cursor-grab'
+                      )}
+                      style={{
+                        left: (segment.start_time + delta) * PIXELS_PER_SECOND,
+                        width: (segment.end_time - segment.start_time) * PIXELS_PER_SECOND,
+                      }}
+                      onMouseDown={(e) => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        const startX = e.clientX
+                        const originalStart = segment.start_time
+                        const originalEnd = segment.end_time
+                        setDraggingSegment({ index, track: 'original', startX, originalStart, originalEnd, currentDelta: 0 })
+                        const onMouseMove = (ev: MouseEvent) => {
+                          const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
+                          setDraggingSegment(prev => prev ? { ...prev, currentDelta: deltaTime } : null)
+                        }
+                        const onMouseUp = (ev: MouseEvent) => {
+                          const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
+                          updateSegment(index, {
+                            start_time: Math.max(0, originalStart + deltaTime),
+                            end_time: Math.max(0, originalEnd + deltaTime),
+                          })
+                          if (lockedPairs.has(index)) {
+                            updateSegment(index, {
+                              start_time: Math.max(0, originalStart + deltaTime),
+                              end_time: Math.max(0, originalEnd + deltaTime),
+                            })
+                          }
+                          setDraggingSegment(null)
+                          document.removeEventListener('mousemove', onMouseMove)
+                          document.removeEventListener('mouseup', onMouseUp)
+                        }
+                        document.addEventListener('mousemove', onMouseMove)
+                        document.addEventListener('mouseup', onMouseUp)
+                      }}
+                    >
+                      {lockedPairs.has(index) && (
+                        <Link2 className="absolute top-0.5 right-0.5 h-2.5 w-2.5 text-amber-400 opacity-80" />
+                      )}
+                      <div className="px-2 truncate text-[10px] h-full flex items-center text-blue-200/80">
+                        {segment.source_text}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
               
 {/* Dubbed audio track with stretch/squeeze handles */}
@@ -2130,12 +2199,16 @@ export function DubVerseEditor({
                         'absolute top-1 bottom-1 rounded group border transition-colors',
                         bgColor,
                         selectedSegmentIndex === index && 'ring-2 ring-white/50',
-                        draggingSegment?.index === index ? 'cursor-grabbing' : 'cursor-grab'
+                        flashingPair === index && 'ring-1 ring-amber-400',
+                        draggingSegment?.index === index && draggingSegment?.track === 'dubbed' ? 'cursor-grabbing' : 'cursor-grab'
                       )}
                       style={{
-                        left: (draggingSegment?.index === index
-                          ? segment.start_time + draggingSegment.currentDelta
-                          : segment.start_time) * PIXELS_PER_SECOND,
+                        left: (() => {
+                          const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'dubbed'
+                          const isDraggingPaired = draggingSegment?.index === index && draggingSegment?.track === 'original' && lockedPairs.has(index)
+                          const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
+                          return (segment.start_time + delta) * PIXELS_PER_SECOND
+                        })(),
                         width: (() => {
                           const originalDuration = segment.end_time - segment.start_time
                           const activeSpeed = dragSpeedPreview?.index === index
@@ -2156,7 +2229,7 @@ export function DubVerseEditor({
                         const startX = e.clientX
                         const originalStart = segment.start_time
                         const originalEnd = segment.end_time
-                        setDraggingSegment({ index, startX, originalStart, originalEnd, currentDelta: 0 })
+                        setDraggingSegment({ index, track: 'dubbed', startX, originalStart, originalEnd, currentDelta: 0 })
                         const onMouseMove = (ev: MouseEvent) => {
                           const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
                           setDraggingSegment(prev => prev ? { ...prev, currentDelta: deltaTime } : null)
@@ -2167,6 +2240,12 @@ export function DubVerseEditor({
                             start_time: Math.max(0, originalStart + deltaTime),
                             end_time: Math.max(0, originalEnd + deltaTime),
                           })
+                          if (lockedPairs.has(index)) {
+                            updateSegment(index, {
+                              start_time: Math.max(0, originalStart + deltaTime),
+                              end_time: Math.max(0, originalEnd + deltaTime),
+                            })
+                          }
                           setDraggingSegment(null)
                           document.removeEventListener('mousemove', onMouseMove)
                           document.removeEventListener('mouseup', onMouseUp)
@@ -2179,6 +2258,11 @@ export function DubVerseEditor({
                       <div className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-l">
                         <GripHorizontal className="h-3 w-3 rotate-90" />
                       </div>
+
+                      {/* Lock icon when paired */}
+                      {lockedPairs.has(index) && (
+                        <Link2 className="absolute top-0.5 right-0.5 h-2.5 w-2.5 text-amber-400 opacity-80" />
+                      )}
 
                       {/* Content */}
                       <div className="px-3 truncate text-[10px] h-full flex items-center text-white/80 gap-1">
