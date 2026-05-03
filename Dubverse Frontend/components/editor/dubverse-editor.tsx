@@ -2492,52 +2492,69 @@ export function DubVerseEditor({
               {showQcBox && qcBoxPosition && (
                 <div
                   className={cn(
-                    "absolute top-0 bottom-0",
-                    isGroupLocked ? "z-30 cursor-move shadow-[0_0_12px_3px_rgba(34,197,94,0.7)] animate-pulse" : "z-25"
+                    "absolute top-0 bottom-0 cursor-move",
+                    isGroupLocked ? "z-30 shadow-[0_0_12px_3px_rgba(34,197,94,0.7)] animate-pulse" : "z-25"
                   )}
                   style={{
                     left: `${(qcBoxPosition.start + (isGroupLocked ? dragGroupDelta : 0)) * PIXELS_PER_SECOND}px`,
                     width: `${(qcBoxPosition.end - qcBoxPosition.start) * PIXELS_PER_SECOND}px`,
                   }}
                   onMouseDown={(e) => {
-                    if (!isGroupLocked) return
                     e.preventDefault()
                     e.stopPropagation()
 
                     const startX = e.clientX
                     const originalQcStart = qcBoxPosition.start
                     const originalQcEnd = qcBoxPosition.end
-                    const originalTimes = Object.fromEntries(
-                      [...groupedSegments].map(i => [i, {
-                        start: displaySegments[i].start_time,
-                        end: displaySegments[i].end_time
-                      }])
-                    )
+                    const boxWidth = originalQcEnd - originalQcStart
 
-                    const onMove = (ev: MouseEvent) => {
-                      const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
-                      setDragGroupDelta(delta)
-                    }
+                    if (isGroupLocked) {
+                      const originalTimes = Object.fromEntries(
+                        [...groupedSegments].map(i => [i, {
+                          start: displaySegments[i].start_time,
+                          end: displaySegments[i].end_time
+                        }])
+                      )
 
-                    const onUp = (ev: MouseEvent) => {
-                      const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
-                      setQcBoxPosition({
-                        start: Math.max(0, originalQcStart + delta),
-                        end: Math.max(0, originalQcEnd + delta),
-                      })
-                      groupedSegments.forEach(i => {
-                        updateSegment(i, {
-                          start_time: Math.max(0, originalTimes[i].start + delta),
-                          end_time: Math.max(0, originalTimes[i].end + delta),
+                      const onMove = (ev: MouseEvent) => {
+                        const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
+                        setDragGroupDelta(delta)
+                      }
+
+                      const onUp = (ev: MouseEvent) => {
+                        const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
+                        setQcBoxPosition({
+                          start: Math.max(0, originalQcStart + delta),
+                          end: Math.max(0, originalQcEnd + delta),
                         })
-                      })
-                      setDragGroupDelta(0)
-                      document.removeEventListener('mousemove', onMove)
-                      document.removeEventListener('mouseup', onUp)
-                    }
+                        groupedSegments.forEach(i => {
+                          updateSegment(i, {
+                            start_time: Math.max(0, originalTimes[i].start + delta),
+                            end_time: Math.max(0, originalTimes[i].end + delta),
+                          })
+                        })
+                        setDragGroupDelta(0)
+                        document.removeEventListener('mousemove', onMove)
+                        document.removeEventListener('mouseup', onUp)
+                      }
 
-                    document.addEventListener('mousemove', onMove)
-                    document.addEventListener('mouseup', onUp)
+                      document.addEventListener('mousemove', onMove)
+                      document.addEventListener('mouseup', onUp)
+                    } else {
+                      const onMove = (ev: MouseEvent) => {
+                        const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
+                        const newStart = Math.max(0, Math.min(originalQcStart + delta, videoDuration - boxWidth))
+                        setQcBoxPosition({ start: newStart, end: newStart + boxWidth })
+                      }
+
+                      const onUp = () => {
+                        document.removeEventListener('mousemove', onMove)
+                        document.removeEventListener('mouseup', onUp)
+                      }
+
+                      document.addEventListener('mousemove', onMove)
+                      document.addEventListener('mouseup', onUp)
+                    }
                   }}
                 >
                   {/* Left needle - independently draggable */}
@@ -2569,12 +2586,9 @@ export function DubVerseEditor({
                     />
                   </div>
                   
-                  {/* Transparent colored fill — pointer-events-auto when locked so clicks bubble to outer div group drag */}
+                  {/* Transparent colored fill — pointer-events-auto always so clicks bubble to outer div drag handler */}
                   <div
-                    className={cn(
-                      "absolute inset-x-[3px] top-[24px] bottom-0 border-t-2 border-b-2",
-                      isGroupLocked ? "pointer-events-auto" : "pointer-events-none"
-                    )}
+                    className="absolute inset-x-[3px] top-[24px] bottom-0 border-t-2 border-b-2 pointer-events-auto"
                     style={{
                       backgroundColor: qcBoxColor === 'red' ? 'rgba(239, 68, 68, 0.2)' :
                                        qcBoxColor === 'yellow' ? 'rgba(234, 179, 8, 0.2)' :
@@ -2584,14 +2598,8 @@ export function DubVerseEditor({
                                    qcBoxColor === 'blue' ? '#3b82f6' : '#22c55e',
                     }}
                   />
-                  {/* Narrow drag strip at top — unlocked only; locked path handled by outer div */}
-                  <div
-                    className="absolute inset-x-[3px] top-[24px] h-3 cursor-move pointer-events-auto"
-                    onMouseDown={(e) => {
-                      if (isGroupLocked) return
-                      handleQcBoxDragStart(e)
-                    }}
-                  />
+                  {/* Drag strip — inert, outer div handles all drag */}
+                  <div className="absolute inset-x-[3px] top-[24px] h-3 cursor-move pointer-events-none" />
                   
                   {/* Right needle - independently draggable */}
                   <div 
