@@ -180,6 +180,7 @@ export function DubVerseEditor({
   const [stagedSpeeds, setStagedSpeeds] = useState<Record<number, number>>({})
   const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
   const [isSegmentPreviewing, setIsSegmentPreviewing] = useState(false)
+  const [waveformReady, setWaveformReady] = useState(false)
   const segmentAudioRef = useRef<HTMLAudioElement | null>(null)
 
   useEffect(() => {
@@ -346,7 +347,6 @@ export function DubVerseEditor({
     return waveform
   })
   const [isExtractingWaveform, setIsExtractingWaveform] = useState(false)
-  const [waveformReady, setWaveformReady] = useState(false)
 
   // Dragged translation state for timeline
   const [draggedTranslation, setDraggedTranslation] = useState<{ segmentIndex: number; text: string } | null>(null)
