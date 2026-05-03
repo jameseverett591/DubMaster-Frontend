@@ -576,6 +576,12 @@ export function DubVerseEditor({
     }
   }, [currentTime, isPlaying])
   
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+    video.volume = isMuted ? 0 : Math.max(0, Math.min(1, masterVolume / 100))
+  }, [masterVolume, isMuted])
+
   const handleVideoTimeUpdate = useCallback(() => {
     if (videoRef.current) {
       setCurrentTime(videoRef.current.currentTime)
@@ -985,6 +991,9 @@ export function DubVerseEditor({
       const response = await apiClient.remixDub(jobId)
       const absUrl = apiClient.toAbsoluteUrl(response.dubbed_video_url)
       setActiveDubbedVideoUrl(absUrl)
+      if (videoRef.current) {
+        videoRef.current.volume = isMuted ? 0 : masterVolume / 100
+      }
       setPlaybackMode('dubbed')
       if (videoRef.current) {
         videoRef.current.currentTime = 0
@@ -995,7 +1004,7 @@ export function DubVerseEditor({
     } finally {
       setIsRebuilding(false)
     }
-  }, [jobId, setPlaybackMode, setCurrentTime])
+  }, [jobId, setPlaybackMode, setCurrentTime, isMuted, masterVolume])
 
   const handleTimelineDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
