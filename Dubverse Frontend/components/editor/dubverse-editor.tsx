@@ -2132,6 +2132,7 @@ export function DubVerseEditor({
                       className={cn(
                         'absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded',
                         flashingPair === index && 'ring-1 ring-amber-400',
+                        lockedPairs.has(index) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
                         isDraggingThis ? 'cursor-grabbing' : 'cursor-grab'
                       )}
                       style={{
@@ -2213,6 +2214,7 @@ export function DubVerseEditor({
                         bgColor,
                         selectedSegmentIndex === index && 'ring-2 ring-white/50',
                         flashingPair === index && 'ring-1 ring-amber-400',
+                        lockedPairs.has(index) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
                         draggingSegment?.index === index && draggingSegment?.track === 'dubbed' ? 'cursor-grabbing' : 'cursor-grab'
                       )}
                       style={{
