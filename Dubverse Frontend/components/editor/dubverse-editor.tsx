@@ -824,10 +824,8 @@ export function DubVerseEditor({
       currentDeltaTime = deltaX / PIXELS_PER_SECOND
 
       if (isGroupLocked && groupedSegments.size > 0) {
-        setQcBoxPosition(() => ({
-          start: Math.max(0, originalQcStart + currentDeltaTime),
-          end: Math.max(0, originalQcEnd + currentDeltaTime),
-        }))
+        // Drive both box and segments via dragGroupDelta — no setQcBoxPosition during drag
+        // to avoid useCallback recreation mid-drag. Box left is offset at render time.
         setDragGroupDelta(currentDeltaTime)
       } else {
         const newStart = Math.max(0, Math.min(startBoxStart + currentDeltaTime, videoDuration - boxWidth))
@@ -838,6 +836,12 @@ export function DubVerseEditor({
     const handleMouseUp = () => {
       setIsDraggingQcBox(false)
       if (isGroupLocked && groupedSegments.size > 0) {
+        // Commit QC box to final position
+        setQcBoxPosition({
+          start: Math.max(0, originalQcStart + currentDeltaTime),
+          end: Math.max(0, originalQcEnd + currentDeltaTime),
+        })
+        // Commit grouped segments
         const snap = groupOriginalTimesRef.current
         groupedSegments.forEach(idx => {
           const orig = snap[idx]
@@ -2287,6 +2291,7 @@ export function DubVerseEditor({
                         width: (segment.end_time - segment.start_time) * PIXELS_PER_SECOND,
                       }}
                       onMouseDown={(e) => {
+                        if (isGroupLocked && groupedSegments.has(index)) return
                         e.preventDefault()
                         e.stopPropagation()
                         const startX = e.clientX
@@ -2386,6 +2391,7 @@ export function DubVerseEditor({
                       onMouseDown={(e) => {
                         const t = e.target as HTMLElement
                         if (t.closest('[data-resize-handle]')) return
+                        if (isGroupLocked && groupedSegments.has(index)) return
                         e.preventDefault()
                         e.stopPropagation()
                         const startX = e.clientX
@@ -2488,7 +2494,7 @@ export function DubVerseEditor({
                     isGroupLocked && "shadow-[0_0_12px_3px_rgba(34,197,94,0.7)] animate-pulse cursor-move"
                   )}
                   style={{
-                    left: `${qcBoxPosition.start * PIXELS_PER_SECOND}px`,
+                    left: `${(qcBoxPosition.start + (isDraggingQcBox && isGroupLocked ? dragGroupDelta : 0)) * PIXELS_PER_SECOND}px`,
                     width: `${(qcBoxPosition.end - qcBoxPosition.start) * PIXELS_PER_SECOND}px`,
                   }}
                 >
