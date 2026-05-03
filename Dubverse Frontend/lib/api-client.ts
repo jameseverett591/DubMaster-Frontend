@@ -169,6 +169,15 @@ export interface RegenerateSegmentResponse {
   }
 }
 
+export interface RemixResponse {
+  job_id: string
+  dubbed_video_url: string
+  duration_seconds: number
+  status: string
+  remix_duration_ms: number
+  segments_used: number
+}
+
 // Quality Analysis types
 export interface TimingIssue {
   segment: number
@@ -623,6 +632,25 @@ class DubVerseAPIClient {
 
   getAudioFileUrl(jobId: string, filename: string): string {
     return `${this.baseURL}/api/media/${jobId}/audio/${filename}`
+  }
+
+  async remixDub(jobId: string): Promise<RemixResponse> {
+    const response = await fetch(`${this.baseURL}/api/dub/remix/${jobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    if (!response.ok) {
+      if (response.status === 404) throw new JobNotFoundError(jobId)
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Failed to rebuild video: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  toAbsoluteUrl(url: string): string {
+    if (!url) return ''
+    if (url.startsWith('http://') || url.startsWith('https://')) return url
+    return `${this.baseURL}${url.startsWith('/') ? url : `/${url}`}`
   }
 }
 
