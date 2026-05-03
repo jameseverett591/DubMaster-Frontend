@@ -181,6 +181,8 @@ export function DubVerseEditor({
   const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
   const [isSegmentPreviewing, setIsSegmentPreviewing] = useState(false)
   const [waveformReady, setWaveformReady] = useState(false)
+  const [groupedSegments, setGroupedSegments] = useState<Set<number>>(new Set())
+  const [isGroupLocked, setIsGroupLocked] = useState(false)
   const segmentAudioRef = useRef<HTMLAudioElement | null>(null)
 
   useEffect(() => {
@@ -189,33 +191,6 @@ export function DubVerseEditor({
       segmentAudioRef.current = null
     }
     setIsSegmentPreviewing(false)
-  }, [selectedSegmentIndex])
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'u' || e.key === 'U') {
-        if (selectedSegmentIndex === null) return
-        const target = e.target as HTMLElement
-        if (
-          target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.contentEditable === 'true'
-        ) return
-        setLockedPairs(prev => {
-          const next = new Set(prev)
-          if (next.has(selectedSegmentIndex)) {
-            next.delete(selectedSegmentIndex)
-          } else {
-            next.add(selectedSegmentIndex)
-          }
-          return next
-        })
-        setFlashingPair(selectedSegmentIndex)
-        setTimeout(() => setFlashingPair(null), 300)
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
   }, [selectedSegmentIndex])
 
   // Fetch and decode separated accompaniment audio for waveform — runs once on mount
@@ -320,7 +295,64 @@ export function DubVerseEditor({
   
   // Use imported segments if set (even if empty), otherwise use initial segments
   const displaySegments = importedSegments !== null ? importedSegments : segments
-  
+
+  // Keyboard shortcuts — U: pair lock, M: QC group lock
+  // Placed after displaySegments and qcBoxPosition so dep array has no TDZ
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'u' || e.key === 'U') {
+        if (selectedSegmentIndex === null) return
+        const target = e.target as HTMLElement
+        if (
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.contentEditable === 'true'
+        ) return
+        setLockedPairs(prev => {
+          const next = new Set(prev)
+          if (next.has(selectedSegmentIndex)) {
+            next.delete(selectedSegmentIndex)
+          } else {
+            next.add(selectedSegmentIndex)
+          }
+          return next
+        })
+        setFlashingPair(selectedSegmentIndex)
+        setTimeout(() => setFlashingPair(null), 300)
+      }
+
+      if (e.key === 'm' || e.key === 'M') {
+        const target = e.target as HTMLElement
+        if (
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.contentEditable === 'true'
+        ) return
+
+        if (isGroupLocked) {
+          setGroupedSegments(new Set())
+          setIsGroupLocked(false)
+        } else {
+          const inside = new Set(
+            displaySegments
+              .map((s, i) => ({ s, i }))
+              .filter(({ s }) =>
+                s.start_time >= qcBoxPosition.start &&
+                s.start_time < qcBoxPosition.end
+              )
+              .map(({ i }) => i)
+          )
+          if (inside.size > 0) {
+            setGroupedSegments(inside)
+            setIsGroupLocked(true)
+          }
+        }
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [selectedSegmentIndex, isGroupLocked, displaySegments, qcBoxPosition])
+
   // Video thumbnails for timeline
   const [videoThumbnails, setVideoThumbnails] = useState<string[]>([])
   const [isExtractingThumbnails, setIsExtractingThumbnails] = useState(false)
@@ -2414,7 +2446,10 @@ export function DubVerseEditor({
               {/* QC Highlight Box - transparent rectangle with independently draggable needles */}
               {showQcBox && qcBoxPosition && (
                 <div
-                  className="absolute top-0 bottom-0 z-25"
+                  className={cn(
+                    "absolute top-0 bottom-0 z-25",
+                    isGroupLocked && "shadow-[0_0_12px_3px_rgba(34,197,94,0.7)] animate-pulse"
+                  )}
                   style={{
                     left: `${qcBoxPosition.start * PIXELS_PER_SECOND}px`,
                     width: `${(qcBoxPosition.end - qcBoxPosition.start) * PIXELS_PER_SECOND}px`,
