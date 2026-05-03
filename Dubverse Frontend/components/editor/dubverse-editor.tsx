@@ -138,6 +138,8 @@ export function DubVerseEditor({
   const videoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const editorContainerRef = useRef<HTMLDivElement>(null)
+  const waveformCanvasRef = useRef<HTMLCanvasElement>(null)
+  const decodedBufferRef = useRef<AudioBuffer | null>(null)
   
   const {
     setJobData,
@@ -215,6 +217,76 @@ export function DubVerseEditor({
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [selectedSegmentIndex])
 
+  // Fetch and decode separated accompaniment audio for waveform — runs once on mount
+  useEffect(() => {
+    if (!jobId) return
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+    const url = `${apiBase}/api/media/${jobId}/separated/accompaniment`
+    fetch(url)
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return res.arrayBuffer()
+      })
+      .then(arrayBuffer => {
+        const audioCtx = new AudioContext()
+        return audioCtx.decodeAudioData(arrayBuffer)
+      })
+      .then(audioBuffer => {
+        decodedBufferRef.current = audioBuffer
+        setWaveformReady(true)
+      })
+      .catch(err => {
+        console.error('Waveform decode failed:', err)
+      })
+  }, [jobId])
+
+  // Redraw canvas waveform when buffer is ready or zoom/duration changes
+  useEffect(() => {
+    if (!waveformReady || !decodedBufferRef.current || !waveformCanvasRef.current) return
+    const buffer = decodedBufferRef.current
+    const canvas = waveformCanvasRef.current
+    const canvasWidth = Math.min(Math.floor(videoDuration * 40 * zoomLevel), 16000)
+    canvas.width = canvasWidth
+    canvas.height = 96
+    canvas.style.width = `${canvasWidth}px`
+    canvas.style.height = '96px'
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    const leftChannel = buffer.getChannelData(0)
+    const rightChannel = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : leftChannel
+    const samplesPerPixel = Math.max(1, Math.floor(leftChannel.length / canvasWidth))
+
+    const leftPeaks = new Float32Array(canvasWidth)
+    const rightPeaks = new Float32Array(canvasWidth)
+    for (let i = 0; i < canvasWidth; i++) {
+      const start = i * samplesPerPixel
+      const end = start + samplesPerPixel
+      let lMax = 0
+      let rMax = 0
+      for (let j = start; j < end && j < leftChannel.length; j++) {
+        const lv = Math.abs(leftChannel[j])
+        const rv = Math.abs(rightChannel[j])
+        if (lv > lMax) lMax = lv
+        if (rv > rMax) rMax = rv
+      }
+      leftPeaks[i] = lMax
+      rightPeaks[i] = rMax
+    }
+
+    ctx.clearRect(0, 0, canvasWidth, 96)
+    ctx.fillStyle = '#22c55e'
+    const midY = 48
+    const maxAmp = 44
+
+    for (let i = 0; i < canvasWidth; i++) {
+      const lh = leftPeaks[i] * maxAmp
+      ctx.fillRect(i, midY - lh, 1, lh)
+      const rh = rightPeaks[i] * maxAmp
+      ctx.fillRect(i, midY, 1, rh)
+    }
+  }, [waveformReady, zoomLevel, videoDuration])
+
   const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
   const [editingText, setEditingText] = useState('')
   const [activeQCCategory, setActiveQCCategory] = useState<QCCategory | null>(null)
@@ -274,7 +346,8 @@ export function DubVerseEditor({
     return waveform
   })
   const [isExtractingWaveform, setIsExtractingWaveform] = useState(false)
-  
+  const [waveformReady, setWaveformReady] = useState(false)
+
   // Dragged translation state for timeline
   const [draggedTranslation, setDraggedTranslation] = useState<{ segmentIndex: number; text: string } | null>(null)
   const [droppedTranslations, setDroppedTranslations] = useState<{ segmentIndex: number; text: string; startTime: number; endTime: number }[]>([])
@@ -2066,58 +2139,63 @@ export function DubVerseEditor({
                 ) : null}
               </div>
               
-{/* Audio waveform track - two stereo channels with mirrored waveforms */}
-              <div className="h-16 bg-neutral-900/50 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
-                <div className="absolute inset-0 flex flex-col">
-                  {/* Top stereo channel */}
-                  <div className="flex-1 relative border-b border-neutral-700/50">
-                    <svg 
-                      className="absolute inset-0 w-full h-full"
-                      preserveAspectRatio="none"
-                      style={{ shapeRendering: 'crispEdges' }}
-                    >
-                      {waveformData.map((v, i) => {
-                        const barHeight = v * 45
-                        const x = (i / waveformData.length) * 100
-                        const width = 100 / waveformData.length
-                        return (
-                          <rect
-                            key={i}
-                            x={`${x}%`}
-                            y={`${50 - barHeight}%`}
-                            width={`${width}%`}
-                            height={`${barHeight * 2}%`}
-                            fill="#22c55e"
-                          />
-                        )
-                      })}
-                    </svg>
+{/* Audio waveform track */}
+              <div className="h-24 bg-neutral-900/50 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+                {waveformReady ? (
+                  <canvas
+                    ref={waveformCanvasRef}
+                    className="absolute top-0 left-0"
+                  />
+                ) : (
+                  <div className="absolute inset-0 flex flex-col">
+                    <div className="flex-1 relative border-b border-neutral-700/50">
+                      <svg
+                        className="absolute inset-0 w-full h-full"
+                        preserveAspectRatio="none"
+                        style={{ shapeRendering: 'crispEdges' }}
+                      >
+                        {waveformData.map((v, i) => {
+                          const barHeight = v * 45
+                          const x = (i / waveformData.length) * 100
+                          const width = 100 / waveformData.length
+                          return (
+                            <rect
+                              key={i}
+                              x={`${x}%`}
+                              y={`${50 - barHeight}%`}
+                              width={`${width}%`}
+                              height={`${barHeight * 2}%`}
+                              fill="#22c55e"
+                            />
+                          )
+                        })}
+                      </svg>
+                    </div>
+                    <div className="flex-1 relative">
+                      <svg
+                        className="absolute inset-0 w-full h-full"
+                        preserveAspectRatio="none"
+                        style={{ shapeRendering: 'crispEdges' }}
+                      >
+                        {waveformData.map((v, i) => {
+                          const barHeight = v * 42
+                          const x = (i / waveformData.length) * 100
+                          const width = 100 / waveformData.length
+                          return (
+                            <rect
+                              key={i}
+                              x={`${x}%`}
+                              y={`${50 - barHeight}%`}
+                              width={`${width}%`}
+                              height={`${barHeight * 2}%`}
+                              fill="#22c55e"
+                            />
+                          )
+                        })}
+                      </svg>
+                    </div>
                   </div>
-                  {/* Bottom stereo channel */}
-                  <div className="flex-1 relative">
-                    <svg 
-                      className="absolute inset-0 w-full h-full"
-                      preserveAspectRatio="none"
-                      style={{ shapeRendering: 'crispEdges' }}
-                    >
-                      {waveformData.map((v, i) => {
-                        const barHeight = v * 42
-                        const x = (i / waveformData.length) * 100
-                        const width = 100 / waveformData.length
-                        return (
-                          <rect
-                            key={i}
-                            x={`${x}%`}
-                            y={`${50 - barHeight}%`}
-                            width={`${width}%`}
-                            height={`${barHeight * 2}%`}
-                            fill="#22c55e"
-                          />
-                        )
-                      })}
-                    </svg>
-                  </div>
-                </div>
+                )}
               </div>
               
               {/* Original audio track */}
