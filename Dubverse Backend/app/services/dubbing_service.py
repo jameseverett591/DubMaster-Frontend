@@ -2084,7 +2084,7 @@ class DubbingService:
         logger.info(f"[REMIX] job={job_id} segments={len(merge_segments)} elapsed={elapsed_ms}ms")
         return {
             "job_id": job_id,
-            "dubbed_video_url": f"/api/media/{job_id}/video",
+            "dubbed_video_url": f"/api/download/{job_id}/{language}",
             "duration_seconds": video_duration,
             "status": "ok",
             "remix_duration_ms": elapsed_ms,
