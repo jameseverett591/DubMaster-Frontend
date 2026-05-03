@@ -156,6 +156,9 @@ export function DubVerseEditor({
     updateSegment,
   } = useEditorStore()
   
+  const [activeDubbedVideoUrl, setActiveDubbedVideoUrl] = useState(dubbedVideoUrl)
+  const [isRebuilding, setIsRebuilding] = useState(false)
+  const [rebuildError, setRebuildError] = useState<string | null>(null)
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [regenError, setRegenError] = useState<string | null>(null)
   const [stagedSpeeds, setStagedSpeeds] = useState<Record<number, number>>({})
@@ -446,7 +449,7 @@ export function DubVerseEditor({
   }, [])
   
   // Get the actual video URL to use (imported or original)
-  const activeVideoUrl = importedVideoUrl || (playbackMode === 'dubbed' && dubbedVideoUrl ? dubbedVideoUrl : videoUrl)
+  const activeVideoUrl = importedVideoUrl || (playbackMode === 'dubbed' && activeDubbedVideoUrl ? activeDubbedVideoUrl : videoUrl)
   
   // Track which URL we've already extracted thumbnails for
   const lastExtractedUrlRef = useRef<string | null>(null)
@@ -975,6 +978,25 @@ export function DubVerseEditor({
     setStagedSpeeds(prev => { const next = { ...prev }; delete next[selectedSegmentIndex]; return next })
   }, [selectedSegmentIndex, initialSegments, jobId, updateSegment])
 
+  const handleRebuildVideo = useCallback(async () => {
+    setRebuildError(null)
+    setIsRebuilding(true)
+    try {
+      const response = await apiClient.remixDub(jobId)
+      const absUrl = apiClient.toAbsoluteUrl(response.dubbed_video_url)
+      setActiveDubbedVideoUrl(absUrl)
+      setPlaybackMode('dubbed')
+      if (videoRef.current) {
+        videoRef.current.currentTime = 0
+      }
+      setCurrentTime(0)
+    } catch (err: any) {
+      setRebuildError(err.message || 'Rebuild failed — please try again')
+    } finally {
+      setIsRebuilding(false)
+    }
+  }, [jobId, setPlaybackMode, setCurrentTime])
+
   const handleTimelineDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
@@ -1071,15 +1093,21 @@ export function DubVerseEditor({
             </Button>
           </Link>
           <h1 className="text-sm font-medium truncate max-w-[300px]">{title}</h1>
-          <Button 
-            variant="outline" 
-            size="sm"
-            className="h-7 text-xs border-slate-700"
-            onClick={onTranslateAndDub}
-          >
-            <Sparkles className="h-3 w-3 mr-1" />
-            Translate & Dub
-          </Button>
+          <div className="flex flex-col items-start gap-0.5">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs border-slate-700"
+              onClick={handleRebuildVideo}
+              disabled={isRebuilding}
+            >
+              <RefreshCw className={cn("h-3 w-3 mr-1", isRebuilding && "animate-spin")} />
+              {isRebuilding ? 'Rebuilding...' : 'Rebuild Video'}
+            </Button>
+            {rebuildError && (
+              <span className="text-[10px] text-red-400 max-w-[160px] truncate">{rebuildError}</span>
+            )}
+          </div>
         </div>
         
         <div className="flex items-center gap-3">
