@@ -159,6 +159,15 @@ export function DubVerseEditor({
   const [activeDubbedVideoUrl, setActiveDubbedVideoUrl] = useState(dubbedVideoUrl)
   const [isRebuilding, setIsRebuilding] = useState(false)
   const [rebuildError, setRebuildError] = useState<string | null>(null)
+  const [rebuildProgress, setRebuildProgress] = useState(0)
+  const rebuildIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [draggingSegment, setDraggingSegment] = useState<{
+    index: number
+    startX: number
+    originalStart: number
+    originalEnd: number
+    currentDelta: number
+  } | null>(null)
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [regenError, setRegenError] = useState<string | null>(null)
   const [stagedSpeeds, setStagedSpeeds] = useState<Record<number, number>>({})
@@ -987,8 +996,15 @@ export function DubVerseEditor({
   const handleRebuildVideo = useCallback(async () => {
     setRebuildError(null)
     setIsRebuilding(true)
+    setRebuildProgress(0)
+    if (rebuildIntervalRef.current) clearInterval(rebuildIntervalRef.current)
+    rebuildIntervalRef.current = setInterval(() => {
+      setRebuildProgress(prev => Math.min(90, prev + (90 / 56)))
+    }, 500)
     try {
       const response = await apiClient.remixDub(jobId)
+      if (rebuildIntervalRef.current) clearInterval(rebuildIntervalRef.current)
+      setRebuildProgress(100)
       const absUrl = apiClient.toAbsoluteUrl(response.dubbed_video_url)
       setActiveDubbedVideoUrl(absUrl)
       if (videoRef.current) {
@@ -999,7 +1015,10 @@ export function DubVerseEditor({
         videoRef.current.currentTime = 0
       }
       setCurrentTime(0)
+      setTimeout(() => setRebuildProgress(0), 2000)
     } catch (err: any) {
+      if (rebuildIntervalRef.current) clearInterval(rebuildIntervalRef.current)
+      setRebuildProgress(0)
       setRebuildError(err.message || 'Rebuild failed — please try again')
     } finally {
       setIsRebuilding(false)
@@ -1102,7 +1121,7 @@ export function DubVerseEditor({
             </Button>
           </Link>
           <h1 className="text-sm font-medium truncate max-w-[300px]">{title}</h1>
-          <div className="flex flex-col items-start gap-0.5">
+          <div className="flex flex-col items-start gap-1">
             <Button
               variant="outline"
               size="sm"
@@ -1113,6 +1132,14 @@ export function DubVerseEditor({
               <RefreshCw className={cn("h-3 w-3 mr-1", isRebuilding && "animate-spin")} />
               {isRebuilding ? 'Rebuilding...' : 'Rebuild Video'}
             </Button>
+            {(isRebuilding || rebuildProgress > 0) && (
+              <div className="h-1 bg-neutral-700 rounded-full overflow-hidden w-32">
+                <div
+                  className="h-full bg-amber-500 rounded-full transition-all duration-500"
+                  style={{ width: `${rebuildProgress}%` }}
+                />
+              </div>
+            )}
             {rebuildError && (
               <span className="text-[10px] text-red-400 max-w-[160px] truncate">{rebuildError}</span>
             )}
@@ -1939,6 +1966,7 @@ export function DubVerseEditor({
                 if (videoRef.current) {
                   videoRef.current.currentTime = newTime
                 }
+                selectSegment(null)
               }}
             >
               {/* Vertical grid lines — rendered behind all tracks */}
@@ -2099,12 +2127,15 @@ export function DubVerseEditor({
                     <div
                       key={`dub-${segment.id}`}
                       className={cn(
-                        'absolute top-1 bottom-1 rounded cursor-pointer group border transition-all',
+                        'absolute top-1 bottom-1 rounded group border transition-colors',
                         bgColor,
-                        selectedSegmentIndex === index && 'ring-2 ring-white/50'
+                        selectedSegmentIndex === index && 'ring-2 ring-white/50',
+                        draggingSegment?.index === index ? 'cursor-grabbing' : 'cursor-grab'
                       )}
                       style={{
-                        left: segment.start_time * PIXELS_PER_SECOND,
+                        left: (draggingSegment?.index === index
+                          ? segment.start_time + draggingSegment.currentDelta
+                          : segment.start_time) * PIXELS_PER_SECOND,
                         width: (() => {
                           const originalDuration = segment.end_time - segment.start_time
                           const activeSpeed = dragSpeedPreview?.index === index
@@ -2117,6 +2148,32 @@ export function DubVerseEditor({
                       onClick={() => handleSegmentClickForQC(index)}
                       onDrop={(e) => handleTimelineDrop(e, index)}
                       onDragOver={handleTimelineDragOver}
+                      onMouseDown={(e) => {
+                        const t = e.target as HTMLElement
+                        if (t.closest('[data-resize-handle]')) return
+                        e.preventDefault()
+                        e.stopPropagation()
+                        const startX = e.clientX
+                        const originalStart = segment.start_time
+                        const originalEnd = segment.end_time
+                        setDraggingSegment({ index, startX, originalStart, originalEnd, currentDelta: 0 })
+                        const onMouseMove = (ev: MouseEvent) => {
+                          const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
+                          setDraggingSegment(prev => prev ? { ...prev, currentDelta: deltaTime } : null)
+                        }
+                        const onMouseUp = (ev: MouseEvent) => {
+                          const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
+                          updateSegment(index, {
+                            start_time: Math.max(0, originalStart + deltaTime),
+                            end_time: Math.max(0, originalEnd + deltaTime),
+                          })
+                          setDraggingSegment(null)
+                          document.removeEventListener('mousemove', onMouseMove)
+                          document.removeEventListener('mouseup', onMouseUp)
+                        }
+                        document.addEventListener('mousemove', onMouseMove)
+                        document.addEventListener('mouseup', onMouseUp)
+                      }}
                     >
                       {/* Left stretch handle */}
                       <div className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-l">
@@ -2139,6 +2196,7 @@ export function DubVerseEditor({
 
                       {/* Right stretch handle */}
                       <div
+                        data-resize-handle={true}
                         className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-r"
                         onMouseDown={(e) => {
                           e.preventDefault()
