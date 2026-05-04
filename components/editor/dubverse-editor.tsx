@@ -39,6 +39,7 @@ import {
   Link2,
 } from 'lucide-react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import { apiClient } from '@/lib/api-client'
 import { useEditorStore, type SidebarTab } from '@/lib/editor-store'
@@ -137,6 +138,7 @@ export function DubVerseEditor({
 }: DubVerseEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
+  const router = useRouter()
   const editorContainerRef = useRef<HTMLDivElement>(null)
   const waveformCanvasLRef = useRef<HTMLCanvasElement>(null)
   const waveformCanvasRRef = useRef<HTMLCanvasElement>(null)
@@ -1284,9 +1286,9 @@ export function DubVerseEditor({
           
           {/* Nav */}
           <nav className="hidden md:flex items-center gap-1 ml-4">
-            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white">Dashboard</Button>
-            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white">My Projects</Button>
-            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white">Collaborate</Button>
+            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/dashboard')}>Dashboard</Button>
+            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/projects')}>My Projects</Button>
+            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/collaborate')}>Collaborate</Button>
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white">Voice Library</Button>
             <Button variant="ghost" size="sm" className="bg-slate-800 text-white">Editor</Button>
           </nav>
@@ -2243,7 +2245,7 @@ export function DubVerseEditor({
               </div>
               
               {/* Audio L channel track */}
-              <div className="h-12 bg-[#1a1a2e] border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+              <div className="h-12 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
                 {waveformReady ? (
                   <canvas ref={waveformCanvasLRef} className="absolute bottom-0 left-0" />
                 ) : (
@@ -2263,7 +2265,7 @@ export function DubVerseEditor({
               </div>
 
               {/* Audio R channel track */}
-              <div className="h-12 bg-[#1a1a2e] border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+              <div className="h-12 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
                 {waveformReady ? (
                   <canvas ref={waveformCanvasRRef} className="absolute bottom-0 left-0" />
                 ) : (
