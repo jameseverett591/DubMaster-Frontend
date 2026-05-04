@@ -23,7 +23,7 @@ export function StudioModeSelector({ editorMode, onEditorModeChange, onStartProj
             <div className="flex items-center gap-3">
               <Clapperboard className="h-10 w-10 text-primary" />
               <div>
-                <h1 className="text-3xl font-bold text-foreground">DubVerse Studio</h1>
+                <h1 className="text-3xl font-bold text-foreground">DubMaster Studio</h1>
                 <p className="text-sm text-muted-foreground">Choose your editing experience</p>
               </div>
             </div>

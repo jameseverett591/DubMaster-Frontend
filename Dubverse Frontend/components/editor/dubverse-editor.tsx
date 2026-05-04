@@ -1792,7 +1792,7 @@ export function DubVerseEditor({
             
             {/* Watermark */}
             <div className="absolute bottom-2 right-2 flex items-center gap-1 text-xs text-slate-500">
-              <span>Video Translated by DubVerse</span>
+              <span>Video Translated by DubMaster</span>
             </div>
           </div>
         </div>
