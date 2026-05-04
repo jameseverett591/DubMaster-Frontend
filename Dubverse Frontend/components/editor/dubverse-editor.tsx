@@ -261,7 +261,7 @@ export function DubVerseEditor({
       ctx.clearRect(0, 0, canvasWidth, canvasHeight)
       ctx.fillStyle = '#67c8c8'
       for (let i = 0; i < canvasWidth; i += barW) {
-        const h = (peaks[i] ?? 0) * (canvasHeight - 1)
+        const h = (peaks[i] ?? 0) * (canvasHeight - 1) * 0.75
         if (h > 0.5) ctx.fillRect(i, canvasHeight - h, barW, h)
       }
     }
