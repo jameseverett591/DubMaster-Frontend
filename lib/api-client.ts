@@ -151,6 +151,7 @@ export interface RegenerateSegmentRequest {
   text?: string
   voice_id?: string
   speed?: number
+  emotion?: string
 }
 
 export interface RegenerateSegmentResponse {

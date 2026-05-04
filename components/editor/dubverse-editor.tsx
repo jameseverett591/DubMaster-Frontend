@@ -181,6 +181,7 @@ export function DubVerseEditor({
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [regenError, setRegenError] = useState<string | null>(null)
   const [stagedSpeeds, setStagedSpeeds] = useState<Record<number, number>>({})
+  const [stagedEmotions, setStagedEmotions] = useState<Record<number, string>>({})
   const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
   const [isSegmentPreviewing, setIsSegmentPreviewing] = useState(false)
   const [waveformReady, setWaveformReady] = useState(false)
@@ -749,6 +750,15 @@ export function DubVerseEditor({
   const handleVideoTimeUpdate = useCallback(() => {
     if (videoRef.current) {
       setCurrentTime(videoRef.current.currentTime)
+      if (timelineRef.current) {
+        const container = timelineRef.current
+        const playheadPx = videoRef.current.currentTime * PIXELS_PER_SECOND
+        const visibleRight = container.scrollLeft + container.clientWidth
+        const edgeThreshold = container.clientWidth * 0.1
+        if (playheadPx > visibleRight - edgeThreshold) {
+          container.scrollLeft = playheadPx - container.clientWidth * 0.5
+        }
+      }
     }
   }, [setCurrentTime])
   
@@ -1036,7 +1046,12 @@ export function DubVerseEditor({
       const x = clientX - rect.left + scrollLeft
       const newTime = Math.max(0, Math.min(x / PIXELS_PER_SECOND, videoDuration))
       setCurrentTime(newTime)
-      
+      if (timelineRef.current) {
+        const container = timelineRef.current
+        const playheadPx = newTime * PIXELS_PER_SECOND
+        container.scrollLeft = Math.max(0, playheadPx - container.clientWidth / 2)
+      }
+
       // Also update video position
       if (videoRef.current) {
         videoRef.current.currentTime = newTime
@@ -1141,6 +1156,7 @@ export function DubVerseEditor({
       const response = await apiClient.regenerateSegment(jobId, selectedSegmentIndex, {
         text: segment.target_text,
         speed: stagedSpeeds[selectedSegmentIndex] ?? 1.0,
+        emotion: stagedEmotions[selectedSegmentIndex],
       })
       const filename = response.segment.path.split('/').pop() ?? ''
       const audio_url = filename
@@ -1192,6 +1208,7 @@ export function DubVerseEditor({
     })
     setDroppedTranslations(prev => prev.filter(t => t.segmentIndex !== selectedSegmentIndex))
     setStagedSpeeds(prev => { const next = { ...prev }; delete next[selectedSegmentIndex]; return next })
+    setStagedEmotions(prev => { const next = { ...prev }; delete next[selectedSegmentIndex]; return next })
   }, [selectedSegmentIndex, initialSegments, jobId, updateSegment])
 
   const handleRebuildVideo = useCallback(async () => {
@@ -1267,6 +1284,8 @@ export function DubVerseEditor({
     return names[code] || code
   }
   
+  const EMOTIONS = ['Excited', 'Calm', 'Angry', 'Sad', 'Professional', 'Defiant', 'Confused']
+
   // Timeline constants
   const TRACK_HEIGHT = 48
   const PIXELS_PER_SECOND = 40 * zoomLevel
@@ -1691,9 +1710,46 @@ export function DubVerseEditor({
               <Sparkles className="h-4 w-4 mr-1" />
               Pronunciation
             </Button>
-            <Button variant="ghost" size="sm" className="h-8 text-xs text-slate-400">
-              Emotion
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 text-xs text-slate-400"
+                  disabled={selectedSegmentIndex === null}
+                >
+                  {selectedSegmentIndex !== null && stagedEmotions[selectedSegmentIndex]
+                    ? stagedEmotions[selectedSegmentIndex]
+                    : 'Emotion'}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-40 bg-[#0F172A] border-slate-700">
+                {EMOTIONS.map((emotion) => (
+                  <DropdownMenuItem
+                    key={emotion}
+                    className="text-slate-300 hover:text-white hover:bg-slate-700 cursor-pointer text-xs"
+                    onClick={() => {
+                      if (selectedSegmentIndex !== null) {
+                        setStagedEmotions(prev => ({ ...prev, [selectedSegmentIndex]: emotion }))
+                      }
+                    }}
+                  >
+                    {emotion}
+                  </DropdownMenuItem>
+                ))}
+                <DropdownMenuSeparator className="bg-slate-700" />
+                <DropdownMenuItem
+                  className="text-slate-500 hover:text-slate-300 hover:bg-slate-700 cursor-pointer text-xs"
+                  onClick={() => {
+                    if (selectedSegmentIndex !== null) {
+                      setStagedEmotions(prev => { const next = { ...prev }; delete next[selectedSegmentIndex]; return next })
+                    }
+                  }}
+                >
+                  Clear
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <Button variant="ghost" size="sm" className="h-8 text-xs text-slate-400">
               Pause
             </Button>
