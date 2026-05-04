@@ -138,7 +138,8 @@ export function DubVerseEditor({
   const videoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const editorContainerRef = useRef<HTMLDivElement>(null)
-  const waveformCanvasRef = useRef<HTMLCanvasElement>(null)
+  const waveformCanvasLRef = useRef<HTMLCanvasElement>(null)
+  const waveformCanvasRRef = useRef<HTMLCanvasElement>(null)
   const decodedBufferRef = useRef<AudioBuffer | null>(null)
   
   const {
@@ -220,16 +221,10 @@ export function DubVerseEditor({
 
   // Redraw canvas waveform when buffer is ready or zoom/duration changes
   useEffect(() => {
-    if (!waveformReady || !decodedBufferRef.current || !waveformCanvasRef.current) return
+    if (!waveformReady || !decodedBufferRef.current) return
     const buffer = decodedBufferRef.current
-    const canvas = waveformCanvasRef.current
     const canvasWidth = Math.min(Math.floor(videoDuration * 40 * zoomLevel), 16000)
-    canvas.width = canvasWidth
-    canvas.height = 96
-    canvas.style.width = `${canvasWidth}px`
-    canvas.style.height = '96px'
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
+    const canvasHeight = 48 // h-12 = 48px per channel row
 
     const leftChannel = buffer.getChannelData(0)
     const rightChannel = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : leftChannel
@@ -252,24 +247,33 @@ export function DubVerseEditor({
       rightPeaks[i] = rMax
     }
 
-    ctx.clearRect(0, 0, canvasWidth, 96)
-    ctx.fillStyle = '#22c55e'
-    const midY = 48
-    const maxAmp = 44
+    const barW = 2
 
-    for (let i = 0; i < canvasWidth; i++) {
-      const lh = leftPeaks[i] * maxAmp
-      ctx.fillRect(i, midY - lh, 1, lh)
-      const rh = rightPeaks[i] * maxAmp
-      ctx.fillRect(i, midY, 1, rh)
+    const drawChannel = (canvasRef: React.RefObject<HTMLCanvasElement>, peaks: Float32Array) => {
+      const canvas = canvasRef.current
+      if (!canvas) return
+      canvas.width = canvasWidth
+      canvas.height = canvasHeight
+      canvas.style.width = `${canvasWidth}px`
+      canvas.style.height = `${canvasHeight}px`
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      ctx.clearRect(0, 0, canvasWidth, canvasHeight)
+      ctx.fillStyle = '#67c8c8'
+      for (let i = 0; i < canvasWidth; i += barW) {
+        const h = (peaks[i] ?? 0) * (canvasHeight - 1)
+        if (h > 0.5) ctx.fillRect(i, canvasHeight - h, barW, h)
+      }
     }
-  }, [waveformReady, zoomLevel, videoDuration])
 
-  const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
-  const [editingText, setEditingText] = useState('')
+    drawChannel(waveformCanvasLRef, leftPeaks)
+    drawChannel(waveformCanvasRRef, rightPeaks)
+  }, [waveformReady, zoomLevel, videoDuration])
   const [activeQCCategory, setActiveQCCategory] = useState<QCCategory | null>(null)
   const [showCorrectionSlider, setShowCorrectionSlider] = useState(false)
   const [correctionValue, setCorrectionValue] = useState(0)
+  const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
+  const [editingText, setEditingText] = useState('')
   const [previewWidth, setPreviewWidth] = useState(400)
   const [isResizingPreview, setIsResizingPreview] = useState(false)
   const [timelineHeight, setTimelineHeight] = useState(260)
@@ -359,7 +363,9 @@ export function DubVerseEditor({
   const [videoThumbnails, setVideoThumbnails] = useState<string[]>([])
   const [isExtractingThumbnails, setIsExtractingThumbnails] = useState(false)
   
-  // Volume controls
+  // Zoom controls
+  const maxZoom = 20
+  const minZoom = 0.05
   const [masterVolume, setMasterVolume] = useState(80)
   const [audioVolume, setAudioVolume] = useState(100)
   const [originalTextVolume, setOriginalTextVolume] = useState(100)
@@ -615,6 +621,7 @@ export function DubVerseEditor({
     
     // Create a temporary video element for extraction
     const tempVideo = document.createElement('video')
+    tempVideo.crossOrigin = 'anonymous'
     tempVideo.src = videoSrc
     tempVideo.muted = true
     tempVideo.preload = 'metadata'
@@ -638,7 +645,7 @@ export function DubVerseEditor({
     
     // Thumbnail dimensions
     canvas.width = 120
-    canvas.height = 68
+    canvas.height = 96
     
     for (let time = 0; time < duration; time += frameInterval) {
       try {
@@ -675,6 +682,13 @@ export function DubVerseEditor({
       extractVideoThumbnails(importedVideoUrl)
     }
   }, [importedVideoUrl, extractVideoThumbnails])
+  
+  // Extract thumbnails when videoUrl prop changes (for loaded jobs)
+  useEffect(() => {
+    if (videoUrl && !importedVideoUrl) {
+      extractVideoThumbnails(videoUrl)
+    }
+  }, [videoUrl, importedVideoUrl, extractVideoThumbnails])
   
 // Regenerate waveform when video is imported
   const regenerateWaveform = useCallback(() => {
@@ -2070,10 +2084,24 @@ export function DubVerseEditor({
             <div className="h-16 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-800">
               Video
             </div>
-            <div className="h-16 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-600 gap-1">
-              <div className="flex items-center">
-                <Waves className="h-3 w-3 mr-1 text-green-500" />
-                <span>Audio</span>
+            <div className="h-12 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-700 gap-1">
+              <div className="flex items-center gap-1">
+                <Waves className="h-3 w-3 text-cyan-400" />
+                <span className="font-mono text-cyan-400">L</span>
+              </div>
+              <Slider
+                value={[audioVolume]}
+                onValueChange={(v) => setAudioVolume(v[0])}
+                max={100}
+                step={1}
+                thumbless
+                className="w-full h-1"
+              />
+            </div>
+            <div className="h-12 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-600 gap-1">
+              <div className="flex items-center gap-1">
+                <Waves className="h-3 w-3 text-cyan-400" />
+                <span className="font-mono text-cyan-400">R</span>
               </div>
               <Slider
                 value={[audioVolume]}
@@ -2214,65 +2242,46 @@ export function DubVerseEditor({
                 ) : null}
               </div>
               
-{/* Audio waveform track */}
-              <div className="h-24 bg-neutral-900/50 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+              {/* Audio L channel track */}
+              <div className="h-12 bg-[#1a1a2e] border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
                 {waveformReady ? (
-                  <canvas
-                    ref={waveformCanvasRef}
-                    className="absolute top-0 left-0"
-                  />
+                  <canvas ref={waveformCanvasLRef} className="absolute bottom-0 left-0" />
                 ) : (
-                  <div className="absolute inset-0 flex flex-col">
-                    <div className="flex-1 relative border-b border-neutral-700/50">
-                      <svg
-                        className="absolute inset-0 w-full h-full"
-                        preserveAspectRatio="none"
-                        style={{ shapeRendering: 'crispEdges' }}
-                      >
-                        {waveformData.map((v, i) => {
-                          const barHeight = v * 45
-                          const x = (i / waveformData.length) * 100
-                          const width = 100 / waveformData.length
-                          return (
-                            <rect
-                              key={i}
-                              x={`${x}%`}
-                              y={`${50 - barHeight}%`}
-                              width={`${width}%`}
-                              height={`${barHeight * 2}%`}
-                              fill="#22c55e"
-                            />
-                          )
-                        })}
-                      </svg>
-                    </div>
-                    <div className="flex-1 relative">
-                      <svg
-                        className="absolute inset-0 w-full h-full"
-                        preserveAspectRatio="none"
-                        style={{ shapeRendering: 'crispEdges' }}
-                      >
-                        {waveformData.map((v, i) => {
-                          const barHeight = v * 42
-                          const x = (i / waveformData.length) * 100
-                          const width = 100 / waveformData.length
-                          return (
-                            <rect
-                              key={i}
-                              x={`${x}%`}
-                              y={`${50 - barHeight}%`}
-                              width={`${width}%`}
-                              height={`${barHeight * 2}%`}
-                              fill="#22c55e"
-                            />
-                          )
-                        })}
-                      </svg>
-                    </div>
+                  <div className="absolute inset-0">
+                    <svg className="absolute inset-0 w-full h-full" preserveAspectRatio="none" style={{ shapeRendering: 'crispEdges' }}>
+                      {waveformData.map((v, i) => {
+                        const barHeight = v * 46
+                        const x = (i / waveformData.length) * 100
+                        const width = 100 / waveformData.length
+                        return (
+                          <rect key={i} x={`${x}%`} y={`${100 - barHeight}%`} width={`${width}%`} height={`${barHeight}%`} fill="#67c8c8" rx="0.5" />
+                        )
+                      })}
+                    </svg>
                   </div>
                 )}
               </div>
-              
+
+              {/* Audio R channel track */}
+              <div className="h-12 bg-[#1a1a2e] border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+                {waveformReady ? (
+                  <canvas ref={waveformCanvasRRef} className="absolute bottom-0 left-0" />
+                ) : (
+                  <div className="absolute inset-0">
+                    <svg className="absolute inset-0 w-full h-full" preserveAspectRatio="none" style={{ shapeRendering: 'crispEdges' }}>
+                      {waveformData.map((v, i) => {
+                        const barHeight = v * 46
+                        const x = (i / waveformData.length) * 100
+                        const width = 100 / waveformData.length
+                        return (
+                          <rect key={i} x={`${x}%`} y={`${100 - barHeight}%`} width={`${width}%`} height={`${barHeight}%`} fill="#67c8c8" rx="0.5" />
+                        )
+                      })}
+                    </svg>
+                  </div>
+                )}
+              </div>
+
               {/* Original audio track */}
               <div className="flex-1 bg-neutral-900/20 border-b border-neutral-700 relative" data-timeline-track>
                 {displaySegments.map((segment, index) => {
