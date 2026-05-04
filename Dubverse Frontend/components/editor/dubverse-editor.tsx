@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useCallback, useState, useRef } from 'react'
+import { useEffect, useCallback, useState, useRef, type ReactNode } from 'react'
 import {
   Lock,
   Unlock,
@@ -37,6 +37,7 @@ import {
   Settings,
   Square,
   Link2,
+  Scissors,
 } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -69,6 +70,17 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
+  ContextMenuShortcut,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu'
 
 // Import additional icons for QC tabs
 import { Mic2, Languages, Gauge, Music2, LayoutList, AudioLines, Zap, GitBranch } from 'lucide-react'
@@ -107,6 +119,97 @@ function inferEmotion(text: string): string {
   if (text.includes('Alt:')) return 'Neutral'
   if (text.includes('!')) return 'Excited'
   return 'Calm'
+}
+
+interface SegmentContextMenuProps {
+  index: number
+  children: ReactNode
+  lockedSegments: Set<number>
+  lockedPairs: Set<number>
+  stagedEmotions: Record<number, string>
+  emotions: string[]
+  onSplit: (index: number) => void
+  onAddAfter: (index: number) => void
+  onDelete: (index: number) => void
+  onToggleLock: (index: number) => void
+  onTogglePair: (index: number) => void
+  onRevert: (index: number) => void
+  onSetEmotion: (index: number, emotion: string) => void
+  onClearEmotion: (index: number) => void
+  onSelect: (index: number) => void
+}
+
+function SegmentContextMenu({
+  index,
+  children,
+  lockedSegments,
+  lockedPairs,
+  stagedEmotions,
+  emotions,
+  onSplit,
+  onAddAfter,
+  onDelete,
+  onToggleLock,
+  onTogglePair,
+  onRevert,
+  onSetEmotion,
+  onClearEmotion,
+  onSelect,
+}: SegmentContextMenuProps) {
+  return (
+    <ContextMenu onOpenChange={(open) => { if (open) onSelect(index) }}>
+      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+      <ContextMenuContent className="w-52 bg-neutral-900 border-neutral-700">
+        <ContextMenuItem onClick={() => onSplit(index)} className="text-xs gap-2">
+          ✂️ Split at Playhead
+          <ContextMenuShortcut>C</ContextMenuShortcut>
+        </ContextMenuItem>
+        <ContextMenuItem onClick={() => onAddAfter(index)} className="text-xs gap-2">
+          ➕ Add Segment After
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          onClick={() => onDelete(index)}
+          className="text-xs gap-2 text-red-400 focus:text-red-400">
+          🗑️ Delete Segment
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={() => onToggleLock(index)} className="text-xs gap-2">
+          {lockedSegments.has(index) ? '🔓 Unlock' : '🔒 Lock'}
+        </ContextMenuItem>
+        <ContextMenuItem onClick={() => onTogglePair(index)} className="text-xs gap-2">
+          {lockedPairs.has(index) ? '🔗 Unpair' : '🔗 Pair with Original'}
+          <ContextMenuShortcut>U</ContextMenuShortcut>
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={() => onRevert(index)} className="text-xs gap-2">
+          ↩️ Revert to Original
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuSub>
+          <ContextMenuSubTrigger className="text-xs gap-2">
+            🎭 Set Emotion
+          </ContextMenuSubTrigger>
+          <ContextMenuSubContent className="bg-neutral-900 border-neutral-700">
+            {emotions.map(emotion => (
+              <ContextMenuItem
+                key={emotion}
+                onClick={() => onSetEmotion(index, emotion)}
+                className="text-xs">
+                {emotion}{stagedEmotions[index] === emotion && ' ✓'}
+              </ContextMenuItem>
+            ))}
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              onClick={() => onClearEmotion(index)}
+              className="text-xs text-slate-400">
+              Clear Emotion
+            </ContextMenuItem>
+          </ContextMenuSubContent>
+        </ContextMenuSub>
+      </ContextMenuContent>
+    </ContextMenu>
+  )
 }
 
 interface DubVerseEditorProps {
@@ -193,6 +296,7 @@ export function DubVerseEditor({
   const [stagedSpeeds, setStagedSpeeds] = useState<Record<number, number>>({})
   const [stagedEmotions, setStagedEmotions] = useState<Record<number, string>>({})
   const [pendingDelete, setPendingDelete] = useState<number | null>(null)
+  const [contextSegmentIndex, setContextSegmentIndex] = useState<number | null>(null)
   const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
   const [isSegmentPreviewing, setIsSegmentPreviewing] = useState(false)
   const [waveformReady, setWaveformReady] = useState(false)
@@ -316,6 +420,39 @@ export function DubVerseEditor({
   // Use imported segments if set (even if empty), otherwise use initial segments
   const displaySegments = importedSegments !== null ? importedSegments : segments
 
+  const handleSplitAtPlayhead = useCallback((index: number) => {
+    const segment = displaySegments[index]
+    if (!segment || currentTime <= segment.start_time || currentTime >= segment.end_time) return
+    const leftSegment = { ...segment, end_time: currentTime }
+    const rightSegment = { ...segment, start_time: currentTime, target_text: '', source_text: '' }
+    setImportedSegments(prev => {
+      const base = prev ?? displaySegments
+      const result = [...base]
+      result.splice(index, 1, leftSegment, rightSegment)
+      return result
+    })
+  }, [displaySegments, currentTime])
+
+  const handleAddSegmentAfter = useCallback((index: number) => {
+    const segment = displaySegments[index]
+    if (!segment) return
+    const newSegment = {
+      ...segment,
+      id: `new-${Date.now()}`,
+      start_time: segment.end_time,
+      end_time: segment.end_time + 2,
+      target_text: 'New segment',
+      source_text: '',
+    }
+    setImportedSegments(prev => {
+      const base = prev ?? displaySegments
+      const result = [...base]
+      result.splice(index + 1, 0, newSegment)
+      return result
+    })
+    selectSegment(index + 1)
+  }, [displaySegments, selectSegment])
+
   // Keyboard shortcuts — U: pair lock, M: QC group lock
   // Placed after displaySegments and qcBoxPosition so dep array has no TDZ
   useEffect(() => {
@@ -368,10 +505,21 @@ export function DubVerseEditor({
           }
         }
       }
+
+      if (e.key === 'c' || e.key === 'C') {
+        if (selectedSegmentIndex === null) return
+        const target = e.target as HTMLElement
+        if (
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.contentEditable === 'true'
+        ) return
+        handleSplitAtPlayhead(selectedSegmentIndex)
+      }
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [selectedSegmentIndex, isGroupLocked, displaySegments, qcBoxPosition])
+  }, [selectedSegmentIndex, isGroupLocked, displaySegments, qcBoxPosition, handleSplitAtPlayhead])
 
   // Video thumbnails for timeline
   const [videoThumbnails, setVideoThumbnails] = useState<string[]>([])
@@ -624,8 +772,8 @@ export function DubVerseEditor({
   
   // Extract video thumbnails for timeline
   const extractVideoThumbnails = useCallback(async (videoSrc: string) => {
-    // Don't re-extract for same URL
-    if (lastExtractedUrlRef.current === videoSrc) return
+    // Don't re-extract for same URL unless thumbnails are missing (e.g. after hot reload)
+    if (lastExtractedUrlRef.current === videoSrc && videoThumbnails.length > 0) return
     lastExtractedUrlRef.current = videoSrc
     
     setIsExtractingThumbnails(true)
@@ -688,8 +836,8 @@ export function DubVerseEditor({
     }
     setIsExtractingThumbnails(false)
     tempVideo.remove()
-  }, [videoDuration])
-  
+  }, [videoDuration, videoThumbnails.length])
+
   // Extract thumbnails when imported video URL changes
   useEffect(() => {
     if (importedVideoUrl) {
@@ -1148,44 +1296,46 @@ export function DubVerseEditor({
   }, [updateSegmentText])
   
   // Handle Generate Speech - calls backend TTS regeneration for the selected segment
-  const handleGenerateSpeech = useCallback(async () => {
-    if (selectedSegmentIndex === null || isRegenerating) return
-    const segment = displaySegments[selectedSegmentIndex]
+  const handleGenerateSpeech = useCallback(async (segIdx?: number) => {
+    const activeIndex = segIdx ?? selectedSegmentIndex
+    if (activeIndex === null || isRegenerating) return
+    const segment = displaySegments[activeIndex]
     if (!segment) return
 
-    if (lockedSegments.has(selectedSegmentIndex)) {
+    if (lockedSegments.has(activeIndex)) {
       setLockedSegments(prev => {
         const next = new Set(prev)
-        next.delete(selectedSegmentIndex)
+        next.delete(activeIndex)
         return next
       })
-      updateSegment(selectedSegmentIndex, { status: 'auto' })
+      updateSegment(activeIndex, { status: 'auto' })
       return
     }
 
+    selectSegment(activeIndex)
     setRegenError(null)
     setIsRegenerating(true)
     try {
-      const response = await apiClient.regenerateSegment(jobId, selectedSegmentIndex, {
+      const response = await apiClient.regenerateSegment(jobId, activeIndex, {
         text: segment.target_text,
-        speed: stagedSpeeds[selectedSegmentIndex] ?? 1.0,
-        emotion: stagedEmotions[selectedSegmentIndex],
+        speed: stagedSpeeds[activeIndex] ?? 1.0,
+        emotion: stagedEmotions[activeIndex],
       })
       const filename = response.segment.path.split('/').pop() ?? ''
       const audio_url = filename
         ? apiClient.getAudioFileUrl(jobId, filename)
         : segment.audio_url
-      updateSegment(selectedSegmentIndex, {
+      updateSegment(activeIndex, {
         target_text: response.segment.text,
         audio_url,
         status: 'locked',
       })
-      setLockedSegments(prev => new Set([...prev, selectedSegmentIndex]))
-      if (!droppedTranslations.some(t => t.segmentIndex === selectedSegmentIndex)) {
+      setLockedSegments(prev => new Set([...prev, activeIndex]))
+      if (!droppedTranslations.some(t => t.segmentIndex === activeIndex)) {
         setDroppedTranslations(prev => [
           ...prev,
           {
-            segmentIndex: selectedSegmentIndex,
+            segmentIndex: activeIndex,
             text: response.segment.text,
             startTime: segment.start_time,
             endTime: segment.end_time,
@@ -1198,7 +1348,7 @@ export function DubVerseEditor({
     } finally {
       setIsRegenerating(false)
     }
-  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds])
+  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds, lockedSegments, selectSegment])
   
   // Handle Revert to Original — restores text and audio from the initial load snapshot
   const handleRevert = useCallback(() => {
@@ -1582,8 +1732,24 @@ export function DubVerseEditor({
               const segmentSuggestions = suggestions[index] || []
               
               return (
-                <div
+                <SegmentContextMenu
                   key={segment.id}
+                  index={index}
+                  lockedSegments={lockedSegments}
+                  lockedPairs={lockedPairs}
+                  stagedEmotions={stagedEmotions}
+                  emotions={EMOTIONS}
+                  onSelect={(idx) => { selectSegment(idx); setContextSegmentIndex(idx) }}
+                  onSplit={handleSplitAtPlayhead}
+                  onAddAfter={handleAddSegmentAfter}
+                  onDelete={(idx) => setPendingDelete(idx)}
+                  onToggleLock={(idx) => setLockedSegments(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
+                  onTogglePair={(idx) => setLockedPairs(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
+                  onRevert={() => handleRevert()}
+                  onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
+                  onClearEmotion={(idx) => setStagedEmotions(prev => { const n = { ...prev }; delete n[idx]; return n })}
+                >
+                <div
                   className={cn(
                     'flex items-start gap-3 px-4 py-3 border-b border-slate-800/50 transition-colors',
                     selectedSegmentIndex === index && 'bg-slate-800/50',
@@ -1718,6 +1884,7 @@ export function DubVerseEditor({
                     )}
                   </div>
                 </div>
+                </SegmentContextMenu>
 )
           })}
           </ScrollArea>
@@ -2415,8 +2582,24 @@ export function DubVerseEditor({
                   const isDraggingPaired = draggingSegment?.index === index && draggingSegment?.track === 'dubbed' && lockedPairs.has(index)
                   const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
                   return (
-                    <div
+                    <SegmentContextMenu
                       key={`orig-${segment.id}`}
+                      index={index}
+                      lockedSegments={lockedSegments}
+                      lockedPairs={lockedPairs}
+                      stagedEmotions={stagedEmotions}
+                      emotions={EMOTIONS}
+                      onSelect={(idx) => { selectSegment(idx); setContextSegmentIndex(idx) }}
+                      onSplit={handleSplitAtPlayhead}
+                      onAddAfter={handleAddSegmentAfter}
+                      onDelete={(idx) => setPendingDelete(idx)}
+                      onToggleLock={(idx) => setLockedSegments(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
+                      onTogglePair={(idx) => setLockedPairs(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
+                      onRevert={() => handleRevert()}
+                      onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
+                      onClearEmotion={(idx) => setStagedEmotions(prev => { const n = { ...prev }; delete n[idx]; return n })}
+                    >
+                    <div
                       className={cn(
                         'absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded',
                         flashingPair === index && 'ring-1 ring-amber-400',
@@ -2466,10 +2649,11 @@ export function DubVerseEditor({
                         {segment.source_text}
                       </div>
                     </div>
+                    </SegmentContextMenu>
                   )
                 })}
               </div>
-              
+
 {/* Dubbed audio track with stretch/squeeze handles */}
               <div
                 className={cn(
@@ -2496,8 +2680,24 @@ export function DubVerseEditor({
                     : 'bg-amber-500/30 border-amber-500/50'
                   
                   return (
-                    <div
+                    <SegmentContextMenu
                       key={`dub-${segment.id}`}
+                      index={index}
+                      lockedSegments={lockedSegments}
+                      lockedPairs={lockedPairs}
+                      stagedEmotions={stagedEmotions}
+                      emotions={EMOTIONS}
+                      onSelect={(idx) => { selectSegment(idx); setContextSegmentIndex(idx) }}
+                      onSplit={handleSplitAtPlayhead}
+                      onAddAfter={handleAddSegmentAfter}
+                      onDelete={(idx) => setPendingDelete(idx)}
+                      onToggleLock={(idx) => setLockedSegments(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
+                      onTogglePair={(idx) => setLockedPairs(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
+                      onRevert={() => handleRevert()}
+                      onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
+                      onClearEmotion={(idx) => setStagedEmotions(prev => { const n = { ...prev }; delete n[idx]; return n })}
+                    >
+                    <div
                       className={cn(
                         'absolute top-1 bottom-1 rounded group border transition-colors',
                         bgColor,
@@ -2615,10 +2815,11 @@ export function DubVerseEditor({
                         <GripHorizontal className="h-3 w-3 rotate-90" />
                       </div>
                     </div>
+                    </SegmentContextMenu>
                   )
                 })}
               </div>
-              
+
               {/* Background track */}
               <div className="flex-1 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
               </div>
