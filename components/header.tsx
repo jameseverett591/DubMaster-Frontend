@@ -70,11 +70,13 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
   }
 
   const handleNavClick = (tab: string) => {
-    if (onNavigate) {
-      onNavigate(tab)
-    } else {
-      router.push("/studio")
+    const routes: Record<string, string> = {
+      dashboard: "/",
+      projects: "/projects",
+      collaborate: "/collaborate",
+      studio: "/studio",
     }
+    router.push(routes[tab] ?? "/")
     setMobileMenuOpen(false)
   }
 
@@ -106,7 +108,7 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
 
           <nav className="hidden items-center gap-6 md:flex">
             <button
-              onClick={() => handleNavClick("upload")}
+              onClick={() => handleNavClick("dashboard")}
               className={`text-sm font-medium transition-colors ${activeTab === "upload" ? "text-[#C084FC]" : "text-[#94A3B8] hover:text-[#C084FC]"}`}
             >
               {t('dashboard')}
@@ -190,7 +192,7 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
           <div className="border-t border-[#A855F7]/30 bg-[#020817]/95 backdrop-blur-xl p-4 md:hidden">
             <nav className="flex flex-col gap-4">
               <button
-                onClick={() => handleNavClick("upload")}
+                onClick={() => handleNavClick("dashboard")}
                 className={`text-sm font-medium text-left ${activeTab === "upload" ? "text-[#C084FC]" : "text-[#94A3B8]"}`}
               >
                 {t('dashboard')}
