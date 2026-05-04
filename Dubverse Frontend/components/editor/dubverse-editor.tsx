@@ -182,6 +182,7 @@ export function DubVerseEditor({
   const [regenError, setRegenError] = useState<string | null>(null)
   const [stagedSpeeds, setStagedSpeeds] = useState<Record<number, number>>({})
   const [stagedEmotions, setStagedEmotions] = useState<Record<number, string>>({})
+  const [pendingDelete, setPendingDelete] = useState<number | null>(null)
   const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
   const [isSegmentPreviewing, setIsSegmentPreviewing] = useState(false)
   const [waveformReady, setWaveformReady] = useState(false)
@@ -746,6 +747,8 @@ export function DubVerseEditor({
     if (!video) return
     video.volume = isMuted ? 0 : Math.max(0, Math.min(1, masterVolume / 100))
   }, [masterVolume, isMuted])
+
+  useEffect(() => { setPendingDelete(null) }, [selectedSegmentIndex])
 
   const handleVideoTimeUpdate = useCallback(() => {
     if (videoRef.current) {
@@ -1790,10 +1793,41 @@ export function DubVerseEditor({
                 <p className="text-xs text-red-400">{regenError}</p>
               )}
             </div>
-            <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-400">
+            <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-400"
+              onClick={() => setPendingDelete(selectedSegmentIndex)}
+              disabled={selectedSegmentIndex === null}
+            >
               <Trash2 className="h-4 w-4" />
             </Button>
           </div>
+          {pendingDelete !== null && (
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-red-950/50 border border-red-500/30 rounded text-xs text-red-400 mx-4 mb-2">
+              <span>Delete this segment?</span>
+              <Button size="sm" className="h-6 text-xs bg-red-600 hover:bg-red-700 text-white px-2"
+                onClick={() => {
+                  const idx = pendingDelete
+                  setImportedSegments(prev => {
+                    const base = prev ?? displaySegments
+                    return base.filter((_, i) => i !== idx)
+                  })
+                  setLockedSegments(prev => {
+                    const next = new Set(prev)
+                    next.delete(idx)
+                    return next
+                  })
+                  setStagedSpeeds(prev => { const n = { ...prev }; delete n[idx]; return n })
+                  setStagedEmotions(prev => { const n = { ...prev }; delete n[idx]; return n })
+                  selectSegment(null)
+                  setPendingDelete(null)
+                }}>
+                Delete
+              </Button>
+              <Button size="sm" variant="ghost" className="h-6 text-xs px-2"
+                onClick={() => setPendingDelete(null)}>
+                Cancel
+              </Button>
+            </div>
+          )}
         </div>
         
         {/* Right panel - Video preview (resizable) */}
