@@ -655,7 +655,7 @@ export function AdvancedDubbingEditor({
                   </div>
                   {/* Translated By Badge */}
                   <div className="absolute top-2 right-2 text-xs text-white/70">
-                    Video Translated by DubVerse
+                    Video Translated by DubMaster
                   </div>
                 </div>
 
