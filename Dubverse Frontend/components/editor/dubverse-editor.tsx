@@ -98,6 +98,15 @@ interface Suggestion {
   text: string
   confidence: number
   source: 'ai' | 'memory' | 'user'
+  emotion?: string
+}
+
+function inferEmotion(text: string): string {
+  if (text.includes('[Formal]') || text.includes('formal')) return 'Professional'
+  if (text.includes('[casual]') || text.includes('casual')) return 'Calm'
+  if (text.includes('Alt:')) return 'Neutral'
+  if (text.includes('!')) return 'Excited'
+  return 'Calm'
 }
 
 interface DubVerseEditorProps {
@@ -1615,6 +1624,15 @@ export function DubVerseEditor({
                           className="cursor-grab text-sm p-2"
                           draggable
                           onDragStart={(e) => handleDragStart(e, sug, index)}
+                          onClick={() => {
+                            if (selectedSegmentIndex !== null) {
+                              updateSegmentText(selectedSegmentIndex, sug.text)
+                              setStagedEmotions(prev => ({
+                                ...prev,
+                                [selectedSegmentIndex]: inferEmotion(sug.text),
+                              }))
+                            }
+                          }}
                         >
                           <div className="flex items-center gap-2 w-full">
                             <GripHorizontal className="h-4 w-4 text-slate-600 shrink-0" />
@@ -1628,7 +1646,12 @@ export function DubVerseEditor({
                             )}>
                               {sugIdx + 1}
                             </span>
-                            <span className="truncate flex-1">{sug.text}</span>
+                            <div className="flex flex-col flex-1 min-w-0">
+                              <span className="truncate">{sug.text}</span>
+                              <span className="text-[9px] text-amber-400 bg-amber-400/10 px-1.5 py-0.5 rounded-full mt-0.5 self-start">
+                                {inferEmotion(sug.text)}
+                              </span>
+                            </div>
                             <span className="text-[10px] text-slate-500 shrink-0">{Math.round(sug.confidence * 100)}%</span>
                           </div>
                         </DropdownMenuItem>
