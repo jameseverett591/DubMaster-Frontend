@@ -1125,6 +1125,16 @@ export function DubVerseEditor({
     const segment = displaySegments[selectedSegmentIndex]
     if (!segment) return
 
+    if (lockedSegments.has(selectedSegmentIndex)) {
+      setLockedSegments(prev => {
+        const next = new Set(prev)
+        next.delete(selectedSegmentIndex)
+        return next
+      })
+      updateSegment(selectedSegmentIndex, { status: 'auto' })
+      return
+    }
+
     setRegenError(null)
     setIsRegenerating(true)
     try {
