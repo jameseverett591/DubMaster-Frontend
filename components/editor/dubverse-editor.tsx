@@ -274,7 +274,7 @@ export function DubVerseEditor({
   const [correctionValue, setCorrectionValue] = useState(0)
   const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
   const [editingText, setEditingText] = useState('')
-  const [previewWidth, setPreviewWidth] = useState(400)
+  const [previewWidth, setPreviewWidth] = useState(500)
   const [isResizingPreview, setIsResizingPreview] = useState(false)
   const [timelineHeight, setTimelineHeight] = useState(260)
   const [isResizingTimeline, setIsResizingTimeline] = useState(false)
@@ -964,7 +964,7 @@ export function DubVerseEditor({
     
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const delta = startX - moveEvent.clientX
-      const newWidth = Math.min(Math.max(startWidth + delta, 300), 700)
+      const newWidth = Math.min(Math.max(startWidth + delta, 300), 1100)
       setPreviewWidth(newWidth)
     }
     
