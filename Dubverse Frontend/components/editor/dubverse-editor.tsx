@@ -458,24 +458,23 @@ export function DubVerseEditor({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'u' || e.key === 'U') {
-        if (selectedSegmentIndex === null) return
         const target = e.target as HTMLElement
         if (
           target.tagName === 'INPUT' ||
           target.tagName === 'TEXTAREA' ||
           target.contentEditable === 'true'
         ) return
-        setLockedPairs(prev => {
-          const next = new Set(prev)
-          if (next.has(selectedSegmentIndex)) {
-            next.delete(selectedSegmentIndex)
-          } else {
-            next.add(selectedSegmentIndex)
-          }
-          return next
-        })
-        setFlashingPair(selectedSegmentIndex)
-        setTimeout(() => setFlashingPair(null), 300)
+        if (selectedSegmentIndex !== null) {
+          setLockedPairs(prev => {
+            const next = new Set(prev)
+            next.has(selectedSegmentIndex) ? next.delete(selectedSegmentIndex) : next.add(selectedSegmentIndex)
+            return next
+          })
+          setFlashingPair(selectedSegmentIndex)
+          setTimeout(() => setFlashingPair(null), 300)
+        } else if (lockedPairs.size > 0) {
+          setLockedPairs(new Set())
+        }
       }
 
       if (e.key === 'm' || e.key === 'M') {
@@ -519,7 +518,7 @@ export function DubVerseEditor({
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [selectedSegmentIndex, isGroupLocked, displaySegments, qcBoxPosition, handleSplitAtPlayhead])
+  }, [selectedSegmentIndex, isGroupLocked, lockedPairs, displaySegments, qcBoxPosition, handleSplitAtPlayhead])
 
   // Video thumbnails for timeline
   const [videoThumbnails, setVideoThumbnails] = useState<string[]>([])
@@ -1423,15 +1422,23 @@ export function DubVerseEditor({
   const startEditing = useCallback((index: number) => {
     setEditingSegmentIndex(index)
     setEditingText(displaySegments[index]?.target_text || '')
-  }, [segments])
+  }, [displaySegments])
   
   // Save editing
   const saveEditing = useCallback(() => {
     if (editingSegmentIndex !== null) {
-      updateSegmentText(editingSegmentIndex, editingText)
+      const idx = editingSegmentIndex
+      const text = editingText
+      updateSegmentText(idx, text)
+      setImportedSegments(prev => {
+        const base = prev ?? displaySegments
+        return base.map((seg, i) =>
+          i === idx ? { ...seg, target_text: text, status: seg.status === 'locked' ? 'locked' : 'edited' } : seg
+        )
+      })
       setEditingSegmentIndex(null)
     }
-  }, [editingSegmentIndex, editingText, updateSegmentText])
+  }, [editingSegmentIndex, editingText, updateSegmentText, displaySegments])
   
   // Cancel editing
   const cancelEditing = useCallback(() => {
@@ -1841,11 +1848,23 @@ export function DubVerseEditor({
                   {/* Target text (editable) */}
                   <div className="flex-1 min-w-0">
                     {isEditing ? (
-                      <div className="flex items-center gap-2 bg-slate-800 rounded-lg p-2">
+                      <div
+                        className="flex items-center gap-2 rounded-lg p-1.5 border-2 border-amber-400/80 bg-amber-500/10 shadow-[0_0_0_3px_rgba(251,191,36,0.15),0_0_20px_rgba(251,191,36,0.35)]"
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         <Input
                           value={editingText}
                           onChange={(e) => setEditingText(e.target.value)}
-                          className="flex-1 h-8 bg-transparent border-slate-600"
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') saveEditing()
+                            if (e.key === 'Escape') cancelEditing()
+                            e.stopPropagation()
+                          }}
+                          onFocus={(e) => {
+                            const len = e.target.value.length
+                            e.target.setSelectionRange(len, len)
+                          }}
+                          className="flex-1 h-8 bg-transparent border-amber-400/40 text-white focus-visible:ring-1 focus-visible:ring-amber-400/60 focus-visible:border-amber-400"
                           autoFocus
                         />
                         <Button size="sm" className="h-7 w-7 p-0" onClick={saveEditing}>
