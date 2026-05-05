@@ -1400,6 +1400,7 @@ export function DubVerseEditor({
       }
       setPlaybackMode('dubbed')
       if (videoRef.current) {
+        videoRef.current.load()
         videoRef.current.currentTime = 0
       }
       setCurrentTime(0)
@@ -2398,6 +2399,8 @@ export function DubVerseEditor({
         <div className="flex-1 flex overflow-hidden">
           {/* Track labels - fixed left column */}
           <div className="w-28 shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col">
+            {/* Seek bar spacer */}
+            <div className="h-2 shrink-0 bg-neutral-900 border-b border-neutral-600" />
             {/* Time ruler header spacer */}
             <div className="h-6 shrink-0 border-b border-neutral-800 bg-neutral-900" />
             {/* Track labels - equal heights */}
@@ -2519,6 +2522,25 @@ export function DubVerseEditor({
                     }}
                   />
                 ))}
+              </div>
+
+              {/* Seek bar */}
+              <div
+                className="h-2 shrink-0 bg-neutral-800 border-b border-neutral-600 cursor-pointer hover:bg-neutral-700 relative"
+                onClick={(e) => {
+                  const rect = timelineRef.current?.getBoundingClientRect()
+                  if (!rect) return
+                  const scrollLeft = timelineRef.current?.scrollLeft ?? 0
+                  const x = e.clientX - rect.left + scrollLeft
+                  const newTime = Math.max(0, Math.min(x / PIXELS_PER_SECOND, videoDuration))
+                  setCurrentTime(newTime)
+                  if (videoRef.current) videoRef.current.currentTime = newTime
+                }}
+              >
+                <div
+                  className="absolute top-0 bottom-0 w-0.5 bg-amber-400 pointer-events-none"
+                  style={{ left: currentTime * PIXELS_PER_SECOND }}
+                />
               </div>
 
               {/* Time ruler */}
