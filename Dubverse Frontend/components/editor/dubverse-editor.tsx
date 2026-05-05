@@ -1038,6 +1038,14 @@ export function DubVerseEditor({
             end_time: Math.max(0, orig.end + currentDeltaTime),
           })
         })
+        setImportedSegments(prev => {
+          const base = prev ?? displaySegments
+          return base.map((seg, i) => {
+            const orig = snap[i]
+            if (!orig || !groupedSegments.has(i)) return seg
+            return { ...seg, start_time: Math.max(0, orig.start + currentDeltaTime), end_time: Math.max(0, orig.end + currentDeltaTime) }
+          })
+        })
         setDragGroupDelta(0)
         groupOriginalTimesRef.current = {}
       }
@@ -2634,6 +2642,14 @@ export function DubVerseEditor({
                               end_time: Math.max(0, originalEnd + deltaTime),
                             })
                           }
+                          setImportedSegments(prev => {
+                            const base = prev ?? displaySegments
+                            return base.map((seg, i) =>
+                              i === index
+                                ? { ...seg, start_time: Math.max(0, originalStart + deltaTime), end_time: Math.max(0, originalEnd + deltaTime) }
+                                : seg
+                            )
+                          })
                           setDraggingSegment(null)
                           document.removeEventListener('mousemove', onMouseMove)
                           document.removeEventListener('mouseup', onMouseUp)
@@ -2751,6 +2767,14 @@ export function DubVerseEditor({
                               end_time: Math.max(0, originalEnd + deltaTime),
                             })
                           }
+                          setImportedSegments(prev => {
+                            const base = prev ?? displaySegments
+                            return base.map((seg, i) =>
+                              i === index
+                                ? { ...seg, start_time: Math.max(0, originalStart + deltaTime), end_time: Math.max(0, originalEnd + deltaTime) }
+                                : seg
+                            )
+                          })
                           setDraggingSegment(null)
                           document.removeEventListener('mousemove', onMouseMove)
                           document.removeEventListener('mouseup', onMouseUp)
