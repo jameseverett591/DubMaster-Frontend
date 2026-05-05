@@ -1987,7 +1987,7 @@ export function DubVerseEditor({
                     ? "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30"
                     : "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
                 )}
-                onClick={handleGenerateSpeech}
+                onClick={() => handleGenerateSpeech()}
                 disabled={selectedSegmentIndex === null || isRegenerating}
               >
                 {isRegenerating ? (
