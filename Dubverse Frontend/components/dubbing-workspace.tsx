@@ -936,12 +936,15 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                     <Button
                       className="w-full gap-2 h-9 text-xs bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white border-0"
                       onClick={() => {
-                        // Open studio editor with current job context
-                        window.open(`/studio?job=${video.jobId}&lang=${targetLanguage}`, "_blank")
+                        // Open the real DubVerse editor
+                        if (video.jobId) {
+                          window.open(`/editor/${video.jobId}`, "_blank")
+                        }
                       }}
+                      disabled={!video.jobId}
                     >
                       <Film className="h-3.5 w-3.5" />
-                      Open in Studio Editor
+                      Open in Editor
                     </Button>
                   ) : (
                     <div className="space-y-2">

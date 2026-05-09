@@ -22,6 +22,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    localStorage.setItem('dubverse.lastEditorJobId', jobId)
+  }, [jobId])
+
+  useEffect(() => {
     async function loadJob() {
       try {
         const [statusRes, segmentsRes, transcriptRes] = await Promise.allSettled([
