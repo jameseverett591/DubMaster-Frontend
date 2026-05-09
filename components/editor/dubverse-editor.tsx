@@ -2154,7 +2154,7 @@ export function DubVerseEditor({
                   data-index={index}
                   className={cn(
                     'flex items-start gap-3 px-4 py-3 border-b border-slate-800/50 transition-colors relative',
-                    selectedSegmentIndex === index && 'bg-slate-800/50',
+                    selectedSegmentIndex === index && 'bg-slate-800/50 ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                     highlightColor === 'red' && 'border-l-4 border-l-red-500 bg-red-500/5',
                     highlightColor === 'yellow' && 'border-l-4 border-l-yellow-500 bg-yellow-500/5',
                     highlightColor === 'green' && 'border-l-4 border-l-emerald-500/30',
@@ -3268,6 +3268,7 @@ export function DubVerseEditor({
                     <div
                       className={cn(
                         'absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded',
+                        selectedSegmentIndex === index && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                         flashingPair === index && 'ring-1 ring-amber-400',
                         lockedPairs.has(index) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
                         isDraggingThis ? 'cursor-grabbing' : 'cursor-grab'
@@ -3375,7 +3376,7 @@ export function DubVerseEditor({
                       className={cn(
                         'absolute top-1 bottom-1 rounded group border transition-colors',
                         bgColor,
-                        selectedSegmentIndex === index && 'ring-2 ring-white/50',
+                        selectedSegmentIndex === index && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                         flashingPair === index && 'ring-1 ring-amber-400',
                         lockedPairs.has(index) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
                         draggingSegment?.index === index && draggingSegment?.track === 'dubbed' ? 'cursor-grabbing' : 'cursor-grab'
