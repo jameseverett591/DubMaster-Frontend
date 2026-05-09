@@ -354,6 +354,7 @@ export function DubVerseEditor({
   const [stagedSpeeds, setStagedSpeeds] = useState<Record<number, number>>({})
   const [stagedEmotions, setStagedEmotions] = useState<Record<number, string>>({})
   const [pendingDelete, setPendingDelete] = useState<number | null>(null)
+  const [showRevertAllConfirm, setShowRevertAllConfirm] = useState(false)
   const [contextSegmentIndex, setContextSegmentIndex] = useState<number | null>(null)
   const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
   const [isSegmentPreviewing, setIsSegmentPreviewing] = useState(false)
@@ -1835,7 +1836,7 @@ export function DubVerseEditor({
                 <Plus className="h-4 w-4 mr-2" />
                 Add Segment
               </DropdownMenuItem>
-              <DropdownMenuItem 
+              <DropdownMenuItem
                 onClick={() => {
                   setImportedSegments([])
                   setLockedSegments(new Set())
@@ -1849,6 +1850,14 @@ export function DubVerseEditor({
               >
                 <Trash2 className="h-4 w-4 mr-2" />
                 Clear All
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={() => setShowRevertAllConfirm(true)}
+                className="cursor-pointer hover:bg-red-950/50 text-red-400"
+              >
+                <RefreshCw className="h-4 w-4 mr-2" />
+                Revert All Changes
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -2476,8 +2485,32 @@ export function DubVerseEditor({
               </Button>
             </div>
           )}
+          {showRevertAllConfirm && (
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-red-950/50 border border-red-500/30 rounded text-xs text-red-400 mx-4 mb-2">
+              <span>This will remove all edits and return to the original pipeline output. Are you sure?</span>
+              <Button size="sm" className="h-6 text-xs bg-red-600 hover:bg-red-700 text-white px-2"
+                onClick={() => {
+                  setImportedSegments(null)
+                  setLockedSegments(new Set())
+                  setStagedSpeeds({})
+                  setStagedEmotions({})
+                  setLockedPairs(new Set())
+                  setGroupedSegments(new Set())
+                  selectSegment(null)
+                  setCurrentTime(0)
+                  if (videoRef.current) videoRef.current.currentTime = 0
+                  setShowRevertAllConfirm(false)
+                }}>
+                Revert
+              </Button>
+              <Button size="sm" variant="ghost" className="h-6 text-xs px-2"
+                onClick={() => setShowRevertAllConfirm(false)}>
+                Cancel
+              </Button>
+            </div>
+          )}
         </div>
-        
+
         {/* Right panel - Video preview (resizable) */}
         <div 
           className="flex flex-col border-l border-neutral-800 bg-neutral-900/50 relative"
