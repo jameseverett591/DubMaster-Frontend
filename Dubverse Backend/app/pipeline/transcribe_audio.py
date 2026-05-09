@@ -340,7 +340,7 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
             vad_threshold = float(os.getenv("VAD_THRESHOLD", "0.20"))
             use_vad = vad_threshold > 0
         else:
-            vad_threshold = 0.0 if _is_yue else 0.20
+            vad_threshold = 0.0 if _is_yue else 0.05
             use_vad = vad_threshold > 0
 
         segments, info = _do_transcribe(use_vad, vad_threshold)
@@ -368,6 +368,8 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
 
         raw_segments = _segments_to_dicts(segments)
 
+        logger.info(f"[WHISPER] Raw segments before filtering: {len(raw_segments)}, detected language: {info.language}")
+
         # ---------- Filter hallucinations (pass 1 — with VAD) ----------
         _detected_lang = whisper_language or info.language or ""
         raw_segments = _filter_hallucinations(raw_segments, strict=False, source_language=_detected_lang)
@@ -381,7 +383,7 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
         if (
             not whisper_language                       # user did not specify a source language
             and (info.language or "") == "zh"          # Whisper auto-detected Mandarin
-            and len(raw_segments) < 8                  # collapsed / very few segments
+            and len(raw_segments) < 25                 # collapsed / very few segments
             and "CANTONESE_RESCUE" not in os.environ   # prevent infinite recursion
         ):
             full_text = "".join(s["text"] for s in raw_segments)
@@ -452,7 +454,7 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
         if "VAD_TWO_PASS" in os.environ:
             two_pass = os.getenv("VAD_TWO_PASS", "0") == "1"
         else:
-            two_pass = True if (_is_yue and use_vad) else False
+            two_pass = True if (_is_yue and use_vad) or (info.language == "zh" and use_vad) else False
 
         if "VAD_GAP_THRESHOLD" in os.environ:
             gap_threshold = float(os.getenv("VAD_GAP_THRESHOLD", "3.0"))
