@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { useRouter } from "next/navigation"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { VideoUpload } from "@/components/video-upload"
 import { YouTubeIntegration } from "@/components/youtube-integration"
@@ -46,6 +47,7 @@ const tabBackgrounds: Record<string, string> = {
 }
 
 export function Dashboard() {
+  const router = useRouter()
   const [activeTab, setActiveTab] = useState("upload")
   const [selectedVideo, setSelectedVideo] = useState<VideoSource | null>(null)
   const [isWorkspaceOpen, setIsWorkspaceOpen] = useState(false)
@@ -140,16 +142,7 @@ export function Dashboard() {
   }
 
   const handleOpenEditor = () => {
-    const demoVideo: VideoSource = {
-      id: "demo-video",
-      title: "Ip Man (2010) - Demo Scene",
-      url: "/demo-video.mp4",
-      thumbnail: "/backgrounds/ipman-kungfu.jpg",
-      duration: "4:22",
-      source: "public-domain"
-    }
-    setSelectedVideo(demoVideo)
-    setIsWorkspaceOpen(true)
+    router.push('/editor')
   }
 
   const currentBackground = tabBackgrounds[activeTab] || tabBackgrounds.upload

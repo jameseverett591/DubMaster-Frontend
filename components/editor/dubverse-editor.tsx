@@ -6,6 +6,7 @@ import {
   Unlock,
   Sparkles,
   ChevronDown,
+  ChevronUp,
   RotateCcw,
   Trash2,
   Check,
@@ -38,14 +39,20 @@ import {
   Square,
   Link2,
   Scissors,
+  Gauge,
+  Music2,
+  Languages,
+  Mic2,
 } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import { apiClient } from '@/lib/api-client'
 import { useEditorStore, type SidebarTab } from '@/lib/editor-store'
-import type { Segment, QCScore, QCFinding, QCFindingType } from '@/lib/editor-types'
+import type { Segment, QCScore, QCFinding, QCFindingType, QCReport } from '@/lib/editor-types'
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
+import { buildMockQCReport } from '@/lib/qc-mock-data'
+import { QCQualityPanel } from '@/components/editor/qc-quality-panel'
 
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -82,8 +89,8 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
 
-// Import additional icons for QC tabs
-import { Mic2, Languages, Gauge, Music2, LayoutList, AudioLines, Zap, GitBranch } from 'lucide-react'
+// Additional QC tab icons not in main import block
+import { LayoutList, AudioLines, Zap, GitBranch } from 'lucide-react'
 
 // QC Tab definitions - main navigation tabs + QC-specific tabs
 type QCCategory = 'speech' | 'lip-sync' | 'pipeline' | 'voices' | 'script' | 'timeline-tab' | 'timing' | 'pronunciation' | 'translation' | 'delivery' | 'sync'
@@ -156,57 +163,79 @@ function SegmentContextMenu({
   onClearEmotion,
   onSelect,
 }: SegmentContextMenuProps) {
+  const [showEmotions, setShowEmotions] = useState(false)
   return (
-    <ContextMenu onOpenChange={(open) => { if (open) onSelect(index) }}>
+    <ContextMenu onOpenChange={(open) => { 
+      if (open) onSelect(index)
+      else setShowEmotions(false)
+    }}>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      <ContextMenuContent className="w-52 bg-neutral-900 border-neutral-700">
-        <ContextMenuItem onClick={() => onSplit(index)} className="text-xs gap-2">
+      <ContextMenuContent className={cn("bg-neutral-900 border-neutral-700", showEmotions ? "w-72" : "w-52")}>
+        <ContextMenuItem onClick={(e) => { e.stopPropagation(); onSplit(index) }} className="text-xs gap-2">
           ✂️ Split at Playhead
           <ContextMenuShortcut>C</ContextMenuShortcut>
         </ContextMenuItem>
-        <ContextMenuItem onClick={() => onAddAfter(index)} className="text-xs gap-2">
+        <ContextMenuItem onClick={(e) => { e.stopPropagation(); onAddAfter(index) }} className="text-xs gap-2">
           ➕ Add Segment After
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem
-          onClick={() => onDelete(index)}
+          onClick={(e) => { e.stopPropagation(); onDelete(index) }}
           className="text-xs gap-2 text-red-400 focus:text-red-400">
           🗑️ Delete Segment
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem onClick={() => onToggleLock(index)} className="text-xs gap-2">
+        <ContextMenuItem onClick={(e) => { e.stopPropagation(); onToggleLock(index) }} className="text-xs gap-2">
           {lockedSegments.has(index) ? '🔓 Unlock' : '🔒 Lock'}
         </ContextMenuItem>
-        <ContextMenuItem onClick={() => onTogglePair(index)} className="text-xs gap-2">
+        <ContextMenuItem onClick={(e) => { e.stopPropagation(); onTogglePair(index) }} className="text-xs gap-2">
           {lockedPairs.has(index) ? '🔗 Unpair' : '🔗 Pair with Original'}
           <ContextMenuShortcut>U</ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem onClick={() => onRevert(index)} className="text-xs gap-2">
+        <ContextMenuItem onClick={(e) => { e.stopPropagation(); onRevert(index) }} className="text-xs gap-2">
           ↩️ Revert to Original
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuSub>
-          <ContextMenuSubTrigger className="text-xs gap-2">
-            🎭 Set Emotion
-          </ContextMenuSubTrigger>
-          <ContextMenuSubContent className="bg-neutral-900 border-neutral-700">
-            {emotions.map(emotion => (
-              <ContextMenuItem
-                key={emotion}
-                onClick={() => onSetEmotion(index, emotion)}
-                className="text-xs">
-                {emotion}{stagedEmotions[index] === emotion && ' ✓'}
-              </ContextMenuItem>
-            ))}
-            <ContextMenuSeparator />
-            <ContextMenuItem
-              onClick={() => onClearEmotion(index)}
-              className="text-xs text-slate-400">
+        <ContextMenuItem className="text-xs gap-2 text-blue-400 focus:text-blue-400">
+          🔤 Spell Check
+        </ContextMenuItem>
+        <ContextMenuItem className="text-xs gap-2 text-green-400 focus:text-green-400">
+          🌐 Translate to English
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <div
+          onClick={(e) => { e.stopPropagation(); setShowEmotions(!showEmotions) }}
+          className="flex items-center gap-2 px-2 py-1.5 text-xs cursor-pointer hover:bg-slate-700 rounded-sm"
+        >
+          🎭 Set Emotion
+          {showEmotions ? <ChevronUp className="h-3 w-3 ml-auto" /> : <ChevronDown className="h-3 w-3 ml-auto" />}
+        </div>
+        {showEmotions && (
+          <>
+            <div className="grid grid-cols-2 gap-1 px-1 py-1.5 bg-neutral-800/50 rounded">
+              {emotions.map(emotion => (
+                <div
+                  key={emotion}
+                  onClick={(e) => { e.stopPropagation(); onSetEmotion(index, emotion) }}
+                  className={cn(
+                    "text-left text-xs rounded px-2 py-1.5 cursor-pointer transition-colors select-none",
+                    stagedEmotions[index] === emotion
+                      ? "bg-amber-500/20 text-amber-400 font-medium"
+                      : "text-slate-300 hover:bg-slate-700 hover:text-white"
+                  )}>
+                  {stagedEmotions[index] === emotion && '✓ '}{emotion}
+                </div>
+              ))}
+            </div>
+            <div
+              onClick={(e) => { e.stopPropagation(); onClearEmotion(index) }}
+              className="text-center text-xs text-slate-400 hover:text-slate-200 py-1.5 mt-1 rounded hover:bg-neutral-800 transition-colors cursor-pointer select-none"
+            >
               Clear Emotion
-            </ContextMenuItem>
-          </ContextMenuSubContent>
-        </ContextMenuSub>
+            </div>
+          </>
+        )}
       </ContextMenuContent>
     </ContextMenu>
   )
@@ -275,7 +304,36 @@ export function DubVerseEditor({
     updateSegmentText,
     updateSegment,
   } = useEditorStore()
-  
+
+  const [layoutLocked, setLayoutLocked] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('dubverse.editor.layoutLocked') === 'true'
+    }
+    return false
+  })
+
+  // Right preview panel tab: Result (video) | Quality (QC) | Studio
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'studio'>('result')
+
+  // QC report — currently mocked from QC Score.txt; will be fetched from /api/qc/{jobId}
+  const [qcReport, setQcReport] = useState<QCReport | null>(() => buildMockQCReport(jobId || 'demo'))
+
+  // Active finding drives the severity color overlay + auto-opens correction tool
+  const [activeFinding, setActiveFinding] = useState<QCFinding | null>(null)
+
+  // Selected re-transcription index for highlighting in QC monitor
+  const [selectedRetranscriptionIndex, setSelectedRetranscriptionIndex] = useState<number | null>(null)
+
+  // QC monitor panel width — resizable, persisted
+  const [qcMonitorWidth, setQcMonitorWidth] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('dubverse.editor.qcMonitorWidth')
+      return saved ? parseInt(saved, 10) : 320
+    }
+    return 320
+  })
+  const [isResizingQcMonitor, setIsResizingQcMonitor] = useState(false)
+
   const [activeDubbedVideoUrl, setActiveDubbedVideoUrl] = useState(dubbedVideoUrl)
   const [isRebuilding, setIsRebuilding] = useState(false)
   const [rebuildError, setRebuildError] = useState<string | null>(null)
@@ -300,6 +358,11 @@ export function DubVerseEditor({
   const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
   const [isSegmentPreviewing, setIsSegmentPreviewing] = useState(false)
   const [waveformReady, setWaveformReady] = useState(false)
+  const [dragReorder, setDragReorder] = useState<{
+    fromIndex: number
+    toIndex: number | null
+    isDragging: boolean
+  } | null>(null)
   const [groupedSegments, setGroupedSegments] = useState<Set<number>>(new Set())
   const [isGroupLocked, setIsGroupLocked] = useState(false)
   const [dragGroupDelta, setDragGroupDelta] = useState(0)
@@ -313,6 +376,41 @@ export function DubVerseEditor({
     }
     setIsSegmentPreviewing(false)
   }, [selectedSegmentIndex])
+
+  // Persist / restore timeline zoom and scroll
+  useEffect(() => {
+    const savedZoom = localStorage.getItem('dubverse.editor.zoomLevel')
+    if (savedZoom) setZoomLevel(parseFloat(savedZoom))
+    const savedScroll = localStorage.getItem('dubverse.editor.scrollPosition')
+    if (savedScroll) {
+      const applyScroll = () => {
+        if (timelineRef.current) {
+          timelineRef.current.scrollLeft = parseInt(savedScroll, 10)
+        } else {
+          setTimeout(applyScroll, 100)
+        }
+      }
+      applyScroll()
+    }
+  }, [setZoomLevel])
+
+  useEffect(() => {
+    if (!layoutLocked) {
+      localStorage.setItem('dubverse.editor.zoomLevel', zoomLevel.toString())
+    }
+  }, [zoomLevel, layoutLocked])
+
+  useEffect(() => {
+    const el = timelineRef.current
+    if (!el) return
+    const onScroll = () => {
+      if (!layoutLocked) {
+        localStorage.setItem('dubverse.editor.scrollPosition', el.scrollLeft.toString())
+      }
+    }
+    el.addEventListener('scroll', onScroll)
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [layoutLocked])
 
   // Fetch and decode separated accompaniment audio for waveform — runs once on mount
   useEffect(() => {
@@ -392,11 +490,23 @@ export function DubVerseEditor({
   const [correctionValue, setCorrectionValue] = useState(0)
   const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
   const [editingText, setEditingText] = useState('')
-  const [previewWidth, setPreviewWidth] = useState(500)
+  const [previewWidth, setPreviewWidth] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('dubverse.editor.previewWidth')
+      return saved ? parseInt(saved, 10) : 520
+    }
+    return 520
+  })
   const [isResizingPreview, setIsResizingPreview] = useState(false)
-  const [timelineHeight, setTimelineHeight] = useState(260)
+  const [timelineHeight, setTimelineHeight] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('dubverse.editor.timelineHeight')
+      return saved ? parseInt(saved, 10) : 360
+    }
+    return 360
+  })
   const [isResizingTimeline, setIsResizingTimeline] = useState(false)
-  
+
   // QC highlight box state - default position so it shows immediately
   const [qcBoxPosition, setQcBoxPosition] = useState<{ start: number; end: number }>({ start: 1, end: 5 })
   const [qcBoxColor, setQcBoxColor] = useState<'red' | 'yellow' | 'blue' | 'green'>('green')
@@ -527,10 +637,10 @@ export function DubVerseEditor({
   // Zoom controls
   const maxZoom = 20
   const minZoom = 0.05
-  const [masterVolume, setMasterVolume] = useState(80)
-  const [audioVolume, setAudioVolume] = useState(100)
-  const [originalTextVolume, setOriginalTextVolume] = useState(100)
-  const [dubbedTextVolume, setDubbedTextVolume] = useState(100)
+  const [masterVolume, setMasterVolume] = useState(50)
+  const [audioVolume, setAudioVolume] = useState(50)
+  const [originalTextVolume, setOriginalTextVolume] = useState(50)
+  const [dubbedTextVolume, setDubbedTextVolume] = useState(50)
   const [backgroundVolume, setBackgroundVolume] = useState(50)
   const [isMuted, setIsMuted] = useState(false)
   
@@ -568,13 +678,38 @@ export function DubVerseEditor({
   
   // Initialize store
   useEffect(() => {
-    const segmentsWithFindings = initialSegments.map((seg, idx) => ({
-      ...seg,
-      id: seg.id || `segment-${idx}`,
-      index: idx,
-      status: seg.status || 'auto',
-      qc_findings: qcFindings.filter(f => f.segment_index === idx),
-    }))
+    const segmentsWithFindings = initialSegments.map((seg, idx) => {
+      // Generate mock segment-level QC data
+      const score = Math.floor(Math.random() * 40) + 60 // 60-100
+      const problems = [
+        'Spoken too fast, sounds mechanical and unnatural',
+        'Emotion doesn\'t match the source context',
+        'Timing is slightly off from lip movement',
+        'Pronunciation unclear on certain words',
+        'Delivery lacks energy and expression',
+        'Speed variation is inconsistent',
+      ]
+      const fixes = [
+        'Stretch the transcription box on the dubbed track on the timeline until the voice is more natural',
+        'Adjust emotion parameter to match source intensity',
+        'Fine-tune segment timing to align with lip-sync',
+        'Re-record with clearer pronunciation',
+        'Increase delivery intensity in the emotion controls',
+        'Smooth out speed variations using the timing correction tool',
+      ]
+      const problemIdx = Math.floor(Math.random() * problems.length)
+
+      return {
+        ...seg,
+        id: seg.id || `segment-${idx}`,
+        index: idx,
+        status: seg.status || 'auto',
+        qc_findings: qcFindings.filter(f => f.segment_index === idx),
+        qc_score: score,
+        qc_problem: problems[problemIdx],
+        qc_fix: fixes[problemIdx],
+      }
+    })
     
 // Generate 5 mock suggestions for each segment
   const mockSuggestions: Record<number, Suggestion[]> = {}
@@ -639,8 +774,9 @@ export function DubVerseEditor({
       id: `seg-${Date.now()}`,
       start_time: startTime,
       end_time: endTime,
-      speaker_id: `speaker-${(currentSegments.length % 5) + 1}`,
-      speaker_label: `Speaker ${(currentSegments.length % 5) + 1}`,
+      speaker_id: `speaker-${currentSegments.length + 1}`,
+      speaker_label: `Speaker ${currentSegments.length + 1}`,
+      speaker_gender: 'male' as const,
       source_text: newSegmentOriginal,
       target_text: newSegmentTranslation || newSegmentOriginal,
       status: 'pending',
@@ -705,8 +841,8 @@ export function DubVerseEditor({
                 id: `seg-${idx}`,
                 start_time: parseSrtTime(timeMatch[1]),
                 end_time: parseSrtTime(timeMatch[2]),
-                speaker_id: `speaker-${(idx % 5) + 1}`,
-                speaker_label: `Speaker ${(idx % 5) + 1}`,
+                speaker_id: `speaker-${idx + 1}`,
+                speaker_label: `Speaker ${idx + 1}`,
                 source_text: textLines,
                 target_text: textLines,
                 status: 'pending',
@@ -738,8 +874,8 @@ export function DubVerseEditor({
                 id: `seg-${segIdx}`,
                 start_time: parseVttTime(timeMatch[1]),
                 end_time: parseVttTime(timeMatch[2]),
-                speaker_id: `speaker-${(segIdx % 5) + 1}`,
-                speaker_label: `Speaker ${(segIdx % 5) + 1}`,
+                speaker_id: `speaker-${segIdx + 1}`,
+                speaker_label: `Speaker ${segIdx + 1}`,
                 source_text: textLines.join(' '),
                 target_text: textLines.join(' '),
                 status: 'pending',
@@ -1152,11 +1288,14 @@ export function DubVerseEditor({
       setIsResizingPreview(false)
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
+      if (!layoutLocked) {
+        localStorage.setItem('dubverse.editor.previewWidth', previewWidth.toString())
+      }
     }
     
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
-  }, [previewWidth])
+  }, [previewWidth, layoutLocked])
   
   // Handle timeline resize (vertical)
   const handleTimelineResizeStart = useCallback((e: React.MouseEvent) => {
@@ -1168,7 +1307,7 @@ export function DubVerseEditor({
     
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const delta = startY - moveEvent.clientY
-      const newHeight = Math.min(Math.max(startHeight + delta, 150), 450)
+      const newHeight = Math.min(Math.max(startHeight + delta, 150), 700)
       setTimelineHeight(newHeight)
     }
     
@@ -1176,12 +1315,30 @@ export function DubVerseEditor({
       setIsResizingTimeline(false)
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
+      if (!layoutLocked) {
+        localStorage.setItem('dubverse.editor.timelineHeight', timelineHeight.toString())
+      }
     }
     
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
-  }, [timelineHeight])
+  }, [timelineHeight, layoutLocked])
   
+  // Toggle layout lock
+  const toggleLayoutLock = useCallback(() => {
+    const next = !layoutLocked
+    setLayoutLocked(next)
+    localStorage.setItem('dubverse.editor.layoutLocked', next.toString())
+    if (!next) {
+      // When unlocking, immediately save current state
+      localStorage.setItem('dubverse.editor.previewWidth', previewWidth.toString())
+      localStorage.setItem('dubverse.editor.timelineHeight', timelineHeight.toString())
+      localStorage.setItem('dubverse.editor.zoomLevel', zoomLevel.toString())
+      const el = timelineRef.current
+      if (el) localStorage.setItem('dubverse.editor.scrollPosition', el.scrollLeft.toString())
+    }
+  }, [layoutLocked, previewWidth, timelineHeight, zoomLevel])
+
   // Handle mouse wheel zoom on timeline
   const handleTimelineWheel = useCallback((e: React.WheelEvent) => {
     // Only zoom if not holding shift (shift = horizontal scroll)
@@ -1214,11 +1371,6 @@ export function DubVerseEditor({
       const x = clientX - rect.left + scrollLeft
       const newTime = Math.max(0, Math.min(x / PIXELS_PER_SECOND, videoDuration))
       setCurrentTime(newTime)
-      if (timelineRef.current) {
-        const container = timelineRef.current
-        const playheadPx = newTime * PIXELS_PER_SECOND
-        container.scrollLeft = Math.max(0, playheadPx - container.clientWidth / 2)
-      }
 
       // Also update video position
       if (videoRef.current) {
@@ -1446,6 +1598,52 @@ export function DubVerseEditor({
     setEditingSegmentIndex(null)
     setEditingText('')
   }, [])
+
+  // Drag-to-reorder refs to avoid stale closures in mousemove
+  const dragReorderRef = useRef<{ fromIndex: number; toIndex: number | null; isDragging: boolean } | null>(null)
+
+  const handleRowDragStart = useCallback((fromIndex: number) => {
+    const state = { fromIndex, toIndex: null, isDragging: true }
+    dragReorderRef.current = state
+    setDragReorder(state)
+  }, [])
+
+  const handleRowDragMove = useCallback((clientX: number, clientY: number) => {
+    const drag = dragReorderRef.current
+    if (!drag?.isDragging) return
+    // Scan all elements under cursor to find the row
+    const els = document.elementsFromPoint(clientX, clientY)
+    const row = els.find(el => el.closest?.('[data-segment-row]')) as HTMLElement | undefined
+    if (row) {
+      const toIndex = parseInt(row.closest('[data-segment-row]')?.getAttribute('data-index') || '-1', 10)
+      if (toIndex >= 0 && toIndex !== drag.toIndex) {
+        dragReorderRef.current = { ...drag, toIndex }
+        setDragReorder(prev => prev ? { ...prev, toIndex } : null)
+      }
+    }
+  }, [])
+
+  const handleRowDragEnd = useCallback(() => {
+    const drag = dragReorderRef.current
+    if (!drag?.isDragging || drag.toIndex === null) {
+      dragReorderRef.current = null
+      setDragReorder(null)
+      return
+    }
+    const from = drag.fromIndex
+    const to = drag.toIndex
+    if (from !== to) {
+      setImportedSegments(prev => {
+        const base = prev ?? displaySegments
+        const newArr = [...base]
+        const [removed] = newArr.splice(from, 1)
+        newArr.splice(to, 0, removed)
+        return newArr
+      })
+    }
+    dragReorderRef.current = null
+    setDragReorder(null)
+  }, [displaySegments])
   
   // Get language display name
   const getLanguageName = (code: string) => {
@@ -1463,7 +1661,7 @@ export function DubVerseEditor({
     return names[code] || code
   }
   
-  const EMOTIONS = ['Excited', 'Calm', 'Angry', 'Sad', 'Professional', 'Defiant', 'Confused']
+  const EMOTIONS = ['Neutral', 'Happy', 'Excited', 'Calm', 'Sad', 'Angry', 'Fearful', 'Surprised', 'Disgusted', 'Professional', 'Casual', 'Formal', 'Intimate', 'Defiant', 'Confused', 'Whisper', 'Shout', 'Sarcastic', 'Hopeful', 'Melancholic']
 
   // Timeline constants
   const TRACK_HEIGHT = 48
@@ -1503,6 +1701,30 @@ export function DubVerseEditor({
         </div>
         
         <div className="flex items-center gap-3">
+          <Button
+            variant="ghost"
+            size="sm"
+            className={cn(
+              "text-xs gap-1.5",
+              layoutLocked
+                ? "text-amber-400 bg-amber-400/10 hover:bg-amber-400/20 hover:text-amber-300"
+                : "text-slate-400 hover:text-white"
+            )}
+            onClick={toggleLayoutLock}
+            title={layoutLocked ? "Layout locked - click to unlock" : "Click to lock layout"}
+          >
+            {layoutLocked ? (
+              <>
+                <Lock className="h-3.5 w-3.5" />
+                <span>Locked</span>
+              </>
+            ) : (
+              <>
+                <Unlock className="h-3.5 w-3.5" />
+                <span>Lock Layout</span>
+              </>
+            )}
+          </Button>
           {/* Language selector */}
           <Button variant="ghost" size="sm" className="text-slate-400">
             <Globe className="h-4 w-4 mr-1" />
@@ -1652,7 +1874,42 @@ export function DubVerseEditor({
       </div>
       
       {/* Main content */}
-      <div className="flex-1 flex min-h-0 overflow-hidden">
+      <div className="flex-1 flex min-h-0 overflow-hidden relative">
+        {/* Severity color overlay — flashes editor when a QC finding is active */}
+        {activeFinding && (
+          <div
+            className={cn(
+              'absolute inset-0 z-40 pointer-events-none transition-opacity duration-300',
+              activeFinding.severity === 'error' && 'bg-red-500/10 shadow-[inset_0_0_60px_rgba(220,38,38,0.2)]',
+              activeFinding.severity === 'warning' && 'bg-yellow-500/10 shadow-[inset_0_0_60px_rgba(234,179,8,0.2)]',
+              activeFinding.severity === 'info' && 'bg-blue-500/10 shadow-[inset_0_0_60px_rgba(59,130,246,0.2)]'
+            )}
+          >
+            {/* Dismiss overlay button */}
+            <button
+              className="absolute top-3 right-3 z-50 bg-slate-900/80 text-white text-xs px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 cursor-pointer"
+              onClick={() => {
+                setActiveFinding(null)
+                setShowCorrectionSlider(false)
+                setActiveQCCategory(null)
+              }}
+            >
+              Clear QC alert
+            </button>
+            {/* Finding info badge */}
+            <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-50 bg-slate-900/90 text-white text-xs px-3 py-1.5 rounded-full border border-slate-700 flex items-center gap-2">
+              <span className={cn(
+                'w-2 h-2 rounded-full',
+                activeFinding.severity === 'error' && 'bg-red-500',
+                activeFinding.severity === 'warning' && 'bg-yellow-500',
+                activeFinding.severity === 'info' && 'bg-blue-400'
+              )} />
+              <span className="capitalize font-medium">{activeFinding.type}:</span>
+              <span>{activeFinding.message}</span>
+            </div>
+          </div>
+        )}
+
         {/* Left sidebar - QC Tabs */}
         <div className="w-14 flex flex-col items-center py-2 border-r border-neutral-800 bg-neutral-900/70">
           {QC_TABS.map((tab, idx) => (
@@ -1740,7 +1997,134 @@ export function DubVerseEditor({
           
           {/* Transcript rows - scrollable up/down */}
           {!isTranscribing && displaySegments.length > 0 && (
-          <ScrollArea className="flex-1 overflow-auto">
+          <ScrollArea className="flex-1 overflow-auto relative">
+          {/* QC Correction Overlay - shown when a finding is selected */}
+          {activeFinding && (
+            <div className="absolute inset-0 z-30 bg-slate-900/95 backdrop-blur-sm flex items-center justify-center p-8">
+              <div className="max-w-2xl w-full bg-slate-800 border border-slate-700 rounded-xl shadow-2xl overflow-hidden">
+                {/* Header */}
+                <div className="flex items-center justify-between px-5 py-4 border-b border-slate-700 bg-slate-900">
+                  <div className="flex items-center gap-3">
+                    <div className={cn(
+                      'w-3 h-3 rounded-full',
+                      activeFinding.severity === 'error' && 'bg-red-500',
+                      activeFinding.severity === 'warning' && 'bg-yellow-500',
+                      activeFinding.severity === 'info' && 'bg-blue-500'
+                    )} />
+                    <span className="text-sm font-semibold text-white capitalize">{activeFinding.type} Issue</span>
+                    <span className={cn(
+                      'text-xs px-2 py-0.5 rounded-full font-medium uppercase',
+                      activeFinding.severity === 'error' ? 'bg-red-500/20 text-red-400' : activeFinding.severity === 'warning' ? 'bg-yellow-500/20 text-yellow-400' : 'bg-blue-500/20 text-blue-400'
+                    )}>
+                      {activeFinding.severity}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setActiveFinding(null)
+                      setShowCorrectionSlider(false)
+                      setActiveQCCategory(null)
+                    }}
+                    className="text-slate-400 hover:text-white transition-colors"
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
+                </div>
+                {/* Content */}
+                <div className="p-5 space-y-4">
+                  {/* Problem Description */}
+                  <div>
+                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Problem</h3>
+                    <p className="text-sm text-slate-200 leading-relaxed">{activeFinding.message}</p>
+                  </div>
+                  {/* Suggested Correction */}
+                  {activeFinding.suggestion && (
+                    <div>
+                      <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Suggested Correction</h3>
+                      <p className="text-sm text-emerald-300 leading-relaxed">{activeFinding.suggestion}</p>
+                    </div>
+                  )}
+                  {/* Action Buttons */}
+                  <div className="flex items-center gap-3 pt-2">
+                    <Button
+                      onClick={() => {
+                        setActiveFinding(null)
+                        setShowCorrectionSlider(false)
+                        setActiveQCCategory(null)
+                      }}
+                      variant="outline"
+                      size="sm"
+                      className="border-slate-600 hover:bg-slate-700"
+                    >
+                      Dismiss
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        const category = QC_TABS.find(t => t.qcType === activeFinding.type)?.id
+                        if (category) {
+                          setActiveQCCategory(category as QCCategory)
+                          setShowCorrectionSlider(true)
+                          setCorrectionValue(0)
+                        }
+                      }}
+                      size="sm"
+                      className="bg-amber-600 hover:bg-amber-700"
+                    >
+                      Open Correction Tool
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Segment QC Info Panel - shown when a segment is selected */}
+          {selectedSegmentIndex !== null && displaySegments[selectedSegmentIndex]?.qc_score && (
+            <div className="absolute top-4 right-4 z-20 w-80 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl overflow-hidden">
+              {/* Header */}
+              <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700 bg-slate-900">
+                <div className="flex items-center gap-2">
+                  <Gauge className="h-4 w-4 text-amber-400" />
+                  <span className="text-sm font-semibold text-white">Segment QC</span>
+                </div>
+                <button
+                  onClick={() => selectSegment(null)}
+                  className="text-slate-400 hover:text-white transition-colors"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              {/* Content */}
+              <div className="p-4 space-y-3">
+                {/* Score */}
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-slate-400">Score</span>
+                  <span className={cn(
+                    'text-lg font-bold',
+                    displaySegments[selectedSegmentIndex].qc_score! >= 80 ? 'text-emerald-400' :
+                    displaySegments[selectedSegmentIndex].qc_score! >= 60 ? 'text-yellow-400' :
+                    'text-red-400'
+                  )}>
+                    {displaySegments[selectedSegmentIndex].qc_score}
+                  </span>
+                </div>
+                {/* Problem */}
+                {displaySegments[selectedSegmentIndex].qc_problem && (
+                  <div>
+                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Problem</h3>
+                    <p className="text-xs text-slate-200 leading-relaxed">{displaySegments[selectedSegmentIndex].qc_problem}</p>
+                  </div>
+                )}
+                {/* Fix */}
+                {displaySegments[selectedSegmentIndex].qc_fix && (
+                  <div>
+                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Fix</h3>
+                    <p className="text-xs text-emerald-300 leading-relaxed">{displaySegments[selectedSegmentIndex].qc_fix}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
           {displaySegments.map((segment, index) => {
               const speakerColor = getSpeakerColor(segment.speaker_id)
               const highlightColor = getSegmentHighlightColor(segment)
@@ -1766,12 +2150,16 @@ export function DubVerseEditor({
                   onClearEmotion={(idx) => setStagedEmotions(prev => { const n = { ...prev }; delete n[idx]; return n })}
                 >
                 <div
+                  data-segment-row
+                  data-index={index}
                   className={cn(
-                    'flex items-start gap-3 px-4 py-3 border-b border-slate-800/50 transition-colors',
+                    'flex items-start gap-3 px-4 py-3 border-b border-slate-800/50 transition-colors relative',
                     selectedSegmentIndex === index && 'bg-slate-800/50',
                     highlightColor === 'red' && 'border-l-4 border-l-red-500 bg-red-500/5',
                     highlightColor === 'yellow' && 'border-l-4 border-l-yellow-500 bg-yellow-500/5',
                     highlightColor === 'green' && 'border-l-4 border-l-emerald-500/30',
+                    dragReorder?.fromIndex === index && 'opacity-50 bg-amber-500/10',
+                    dragReorder?.toIndex === index && 'border-t-2 border-t-amber-500',
                   )}
                   onClick={() => {
                     selectSegment(index)
@@ -1779,27 +2167,70 @@ export function DubVerseEditor({
                     editorContainerRef.current?.focus()
                   }}
                 >
-                  {/* Suggestion dropdown - drag to timeline */}
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className={cn(
-                          'h-7 px-2 text-xs font-medium shrink-0 min-w-[95px]',
-                          speakerColor.bg,
-                          speakerColor.text,
-                          'border-transparent hover:border-slate-600'
-                        )}
-                      >
-                        Speaker {(index % 5) + 1}
-                        <ChevronDown className="h-3 w-3 ml-1" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start" className="w-80 bg-slate-900 border-slate-700">
-                      <div className="px-2 py-1.5 text-xs text-slate-500 font-medium border-b border-slate-700 mb-1">
-                        5 Suggestions - Drag to timeline to replace
-                      </div>
+                  {/* Speaker drag handle + dropdown */}
+                  <div className="flex items-center gap-1">
+                    <div
+                      className={cn(
+                        "cursor-grab active:cursor-grabbing text-slate-600 hover:text-slate-400",
+                        dragReorder?.fromIndex === index && "text-amber-400"
+                      )}
+                      title="Drag to reorder speaker"
+                      onMouseDown={(e) => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        handleRowDragStart(index)
+                        const onMove = (ev: MouseEvent) => handleRowDragMove(ev.clientX, ev.clientY)
+                        const onUp = () => {
+                          handleRowDragEnd()
+                          document.removeEventListener('mousemove', onMove)
+                          document.removeEventListener('mouseup', onUp)
+                        }
+                        document.addEventListener('mousemove', onMove)
+                        document.addEventListener('mouseup', onUp)
+                      }}
+                    >
+                      <GripHorizontal className="h-4 w-4" />
+                    </div>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className={cn(
+                            'h-7 px-2 text-xs font-medium shrink-0 min-w-[95px]',
+                            speakerColor.bg,
+                            speakerColor.text,
+                            'border-transparent hover:border-slate-600'
+                          )}
+                        >
+                          {segment.speaker_label || `Speaker ${index + 1}`}
+                          <ChevronDown className="h-3 w-3 ml-1" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start" className="w-48 bg-slate-900 border-slate-700">
+                        <div className="px-2 py-1.5 text-xs text-slate-500 font-medium border-b border-slate-700 mb-1">
+                          Speaker Type
+                        </div>
+                        {['Male', 'Female', 'Child'].map((gender) => (
+                          <DropdownMenuItem
+                            key={gender}
+                            className="text-xs cursor-pointer"
+                            onClick={() => {
+                              setImportedSegments(prev => {
+                                const base = prev ?? displaySegments
+                                return base.map((seg, i) =>
+                                  i === index ? { ...seg, speaker_gender: gender.toLowerCase() as 'male' | 'female' | 'child' } : seg
+                                )
+                              })
+                            }}
+                          >
+                            {gender}
+                          </DropdownMenuItem>
+                        ))}
+                        <DropdownMenuSeparator className="bg-slate-700" />
+                        <div className="px-2 py-1.5 text-xs text-slate-500 font-medium border-b border-slate-700 mb-1">
+                          5 Suggestions - Drag to timeline
+                        </div>
                       {segmentSuggestions.map((sug, sugIdx) => (
                         <DropdownMenuItem
                           key={sug.id}
@@ -1840,6 +2271,7 @@ export function DubVerseEditor({
                       ))}
                     </DropdownMenuContent>
                   </DropdownMenu>
+                  </div>
                   
                   {/* Source text */}
                   <div className="flex-1 min-w-0">
@@ -2064,43 +2496,75 @@ export function DubVerseEditor({
               isResizingPreview && "bg-amber-500"
             )} />
           </div>
-          {/* Original / Translated toggle */}
-          <div className="flex items-center justify-end gap-2 px-4 py-2 border-b border-slate-800">
-            <Button
-              variant="ghost"
-              size="sm"
-              className={cn(
-                'h-7 text-xs',
-                playbackMode === 'original' ? 'text-white' : 'text-slate-500'
-              )}
-              onClick={() => setPlaybackMode('original')}
-            >
-              Original
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className={cn(
-                'h-7 text-xs px-3 rounded-full',
-                playbackMode === 'dubbed' ? 'bg-slate-700 text-white' : 'text-slate-500'
-              )}
-              onClick={() => setPlaybackMode('dubbed')}
-            >
-              Translated
-            </Button>
+          {/* Right panel tabs: Result / Quality / Studio */}
+          <div className="flex items-center justify-between gap-1 px-2 py-1.5 border-b border-slate-800 bg-neutral-900">
+            <div className="flex items-center gap-1">
+              {([
+                { id: 'result', label: 'Result' },
+                { id: 'quality', label: 'Quality' },
+                { id: 'studio', label: 'Studio' },
+              ] as const).map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => {
+                    setRightPanelTab(t.id)
+                    if (t.id === 'result') {
+                      setActiveFinding(null)
+                      setShowCorrectionSlider(false)
+                      setActiveQCCategory(null)
+                    }
+                  }}
+                  className={cn(
+                    'text-xs px-3 py-1 rounded-md transition-colors',
+                    rightPanelTab === t.id
+                      ? 'bg-slate-700 text-white'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                  )}
+                >
+                  {t.label}
+                  {t.id === 'quality' && qcReport && (qcReport.grade === 'D' || qcReport.grade === 'F') && (
+                    <span className="ml-1.5 inline-block w-1.5 h-1.5 rounded-full bg-red-500" />
+                  )}
+                </button>
+              ))}
+            </div>
+            {rightPanelTab === 'result' && (
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className={cn('h-6 text-[11px] px-2', playbackMode === 'original' ? 'text-white' : 'text-slate-500')}
+                  onClick={() => setPlaybackMode('original')}
+                >
+                  Original
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className={cn(
+                    'h-6 text-[11px] px-3 rounded-full',
+                    playbackMode === 'dubbed' ? 'bg-slate-700 text-white' : 'text-slate-500'
+                  )}
+                  onClick={() => setPlaybackMode('dubbed')}
+                >
+                  Translated
+                </Button>
+              </div>
+            )}
           </div>
-          
-{/* Video */}
-            <div className="flex-1 min-h-0 relative bg-black">
-              <video
-                ref={videoRef}
-                src={activeVideoUrl}
-                className="absolute top-0 left-0 w-full h-full object-cover"
-                onTimeUpdate={handleVideoTimeUpdate}
-                controls={false}
-              />
-            
-            {/* Subtitle overlay */}
+
+          {/* Result tab — Video (always mounted to keep ref stable; hidden when not active) */}
+          <div
+            className="flex-1 min-h-0 relative bg-black"
+            style={{ display: rightPanelTab === 'result' ? 'block' : 'none' }}
+          >
+            <video
+              ref={videoRef}
+              src={activeVideoUrl}
+              className="absolute top-0 left-0 w-full h-full object-cover"
+              onTimeUpdate={handleVideoTimeUpdate}
+              controls={false}
+            />
             {selectedSegmentIndex !== null && displaySegments[selectedSegmentIndex] && (
               <div className="absolute bottom-8 left-0 right-0 text-center">
                 <span className="bg-black/75 px-4 py-2 rounded text-white text-sm">
@@ -2108,15 +2572,60 @@ export function DubVerseEditor({
                 </span>
               </div>
             )}
-            
-            {/* Watermark */}
             <div className="absolute bottom-2 right-2 flex items-center gap-1 text-xs text-slate-500">
               <span>Video Translated by DubMaster</span>
             </div>
           </div>
+
+          {/* Quality tab — QC Monitor */}
+          {rightPanelTab === 'quality' && qcReport && (
+            <div className="flex-1 min-h-0 overflow-hidden">
+              <QCQualityPanel
+                report={qcReport}
+                onJumpToTime={(t) => {
+                  setCurrentTime(t)
+                  if (videoRef.current) videoRef.current.currentTime = t
+                  const container = timelineRef.current
+                  if (container) {
+                    const px = t * PIXELS_PER_SECOND
+                    container.scrollLeft = Math.max(0, px - container.clientWidth * 0.3)
+                  }
+                }}
+                onSelectFinding={(finding) => {
+                  setActiveFinding(finding)
+                  // Jump timeline
+                  setCurrentTime(finding.timestamp_start)
+                  if (videoRef.current) videoRef.current.currentTime = finding.timestamp_start
+                  const container = timelineRef.current
+                  if (container) {
+                    const px = finding.timestamp_start * PIXELS_PER_SECOND
+                    container.scrollLeft = Math.max(0, px - container.clientWidth * 0.3)
+                  }
+                  // Select segment
+                  if (finding.segment_index >= 0 && finding.segment_index < displaySegments.length) {
+                    selectSegment(finding.segment_index)
+                  }
+                  // Auto-open matching QC category + correction tool
+                  const category = QC_TABS.find(t => t.qcType === finding.type)?.id
+                  if (category) {
+                    setActiveQCCategory(category as QCCategory)
+                    setShowCorrectionSlider(true)
+                    setCorrectionValue(0)
+                  }
+                }}
+              />
+            </div>
+          )}
+
+          {/* Studio tab — placeholder */}
+          {rightPanelTab === 'studio' && (
+            <div className="flex-1 min-h-0 flex items-center justify-center text-slate-500 text-sm bg-neutral-950">
+              Studio coming soon
+            </div>
+          )}
         </div>
       </div>
-      
+
       {/* Slide-Rule Correction Tool - pops up above timeline */}
       {showCorrectionSlider && selectedSegmentIndex !== null && activeQCCategory && (
         <div className="absolute bottom-[280px] left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-4 duration-200">
@@ -2397,12 +2906,116 @@ export function DubVerseEditor({
         
         {/* Timeline tracks */}
         <div className="flex-1 flex overflow-hidden">
+          {/* QC Monitor - permanent fixture left of timeline tracks */}
+          <div className="shrink-0 border-r border-neutral-700 bg-neutral-950 flex flex-col overflow-hidden relative" style={{ width: qcMonitorWidth }}>
+              {/* Resize handle - right edge */}
+              <div
+                className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group"
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  const startX = e.clientX
+                  const startW = qcMonitorWidth
+                  setIsResizingQcMonitor(true)
+                  const onMove = (ev: MouseEvent) => {
+                    const delta = ev.clientX - startX
+                    const next = Math.max(200, Math.min(600, startW + delta))
+                    setQcMonitorWidth(next)
+                  }
+                  const onUp = () => {
+                    setIsResizingQcMonitor(false)
+                    localStorage.setItem('dubverse.editor.qcMonitorWidth', String(qcMonitorWidth))
+                    document.removeEventListener('mousemove', onMove)
+                    document.removeEventListener('mouseup', onUp)
+                  }
+                  document.addEventListener('mousemove', onMove)
+                  document.addEventListener('mouseup', onUp)
+                }}
+              >
+                <div className={cn(
+                  "absolute inset-y-0 right-0 w-0.5 bg-amber-500/30 group-hover:bg-amber-500",
+                  isResizingQcMonitor && "bg-amber-500"
+                )} />
+              </div>
+              {/* Header */}
+              <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800 bg-neutral-900">
+                <div className="flex items-center gap-2">
+                  <Gauge className="h-4 w-4 text-amber-400" />
+                  <span className="text-sm font-semibold text-white">QC Monitor</span>
+                  <span className={cn(
+                    'text-xs px-2 py-0.5 rounded-full border font-medium',
+                    qcReport.grade === 'A' || qcReport.grade === 'B'
+                      ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
+                      : qcReport.grade === 'C' || qcReport.grade === 'D'
+                        ? 'border-yellow-500/40 text-yellow-300 bg-yellow-500/10'
+                        : 'border-red-500/40 text-red-300 bg-red-500/10'
+                  )}>
+                    Grade {qcReport.grade} — {qcReport.overall}/100
+                  </span>
+                </div>
+              </div>
+              {/* QC Content */}
+              <div className="flex-1 overflow-y-auto">
+                <QCQualityPanel
+                  report={qcReport}
+                  onJumpToTime={(t) => {
+                    setCurrentTime(t)
+                    if (videoRef.current) videoRef.current.currentTime = t
+                    const container = timelineRef.current
+                    if (container) {
+                      const px = t * PIXELS_PER_SECOND
+                      container.scrollLeft = Math.max(0, px - container.clientWidth * 0.3)
+                    }
+                  }}
+                  onSelectFinding={(finding) => {
+                    setActiveFinding(finding)
+                    setCurrentTime(finding.timestamp_start)
+                    if (videoRef.current) videoRef.current.currentTime = finding.timestamp_start
+                    const container = timelineRef.current
+                    if (container) {
+                      const px = finding.timestamp_start * PIXELS_PER_SECOND
+                      container.scrollLeft = Math.max(0, px - container.clientWidth * 0.3)
+                    }
+                    if (finding.segment_index >= 0 && finding.segment_index < displaySegments.length) {
+                      selectSegment(finding.segment_index)
+                    }
+                    const category = QC_TABS.find(t => t.qcType === finding.type)?.id
+                    if (category) {
+                      setActiveQCCategory(category as QCCategory)
+                      setShowCorrectionSlider(true)
+                      setCorrectionValue(0)
+                    }
+                  }}
+                  onSelectSegment={(retranscriptionIndex) => {
+                    setSelectedRetranscriptionIndex(retranscriptionIndex)
+                    // Find the corresponding segment based on the re-transcription timestamp
+                    const retranscriptionItem = qcReport?.retranscription.items[retranscriptionIndex]
+                    if (retranscriptionItem) {
+                      // Find the segment that matches this timestamp
+                      const matchingSegmentIndex = displaySegments.findIndex(
+                        seg => Math.abs(seg.start_time - retranscriptionItem.start) < 0.5
+                      )
+                      if (matchingSegmentIndex >= 0) {
+                        selectSegment(matchingSegmentIndex)
+                        setCurrentTime(displaySegments[matchingSegmentIndex].start_time)
+                        if (videoRef.current) videoRef.current.currentTime = displaySegments[matchingSegmentIndex].start_time
+                        const container = timelineRef.current
+                        if (container) {
+                          const px = displaySegments[matchingSegmentIndex].start_time * PIXELS_PER_SECOND
+                          container.scrollLeft = Math.max(0, px - container.clientWidth * 0.3)
+                        }
+                      }
+                    }
+                  }}
+                  selectedRetranscriptionIndex={selectedRetranscriptionIndex ?? undefined}
+                />
+              </div>
+          </div>
           {/* Track labels - fixed left column */}
           <div className="w-28 shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col">
-            {/* Seek bar spacer */}
-            <div className="h-2 shrink-0 bg-neutral-900 border-b border-neutral-600" />
-            {/* Time ruler header spacer */}
+            {/* Clickable seek header spacer */}
             <div className="h-6 shrink-0 border-b border-neutral-800 bg-neutral-900" />
+            {/* Time ruler spacer */}
+            <div className="h-6 shrink-0 border-b border-neutral-700 bg-neutral-900" />
             {/* Track labels - equal heights */}
             <div className="h-16 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-800">
               Video
@@ -2524,9 +3137,9 @@ export function DubVerseEditor({
                 ))}
               </div>
 
-              {/* Seek bar */}
+              {/* Clickable seek header */}
               <div
-                className="h-2 shrink-0 bg-neutral-800 border-b border-neutral-600 cursor-pointer hover:bg-neutral-700 relative"
+                className="h-6 shrink-0 bg-neutral-800 border-b border-neutral-700 relative cursor-pointer hover:bg-neutral-750"
                 onClick={(e) => {
                   const rect = timelineRef.current?.getBoundingClientRect()
                   if (!rect) return
@@ -2538,44 +3151,48 @@ export function DubVerseEditor({
                 }}
               >
                 <div
-                  className="absolute top-0 bottom-0 w-0.5 bg-amber-400 pointer-events-none"
+                  className="absolute top-0 bottom-0 w-px bg-amber-400 pointer-events-none"
                   style={{ left: currentTime * PIXELS_PER_SECOND }}
                 />
               </div>
 
               {/* Time ruler */}
-              <div className="h-6 shrink-0 bg-neutral-900 border-b border-neutral-800 relative" data-timeline-track>
+              <div
+                className="h-6 shrink-0 bg-[#0a0a0f] border-b border-neutral-700 relative"
+              >
                 {Array.from({ length: Math.ceil(videoDuration) }).map((_, i) => (
                   <div
                     key={i}
                     className="absolute top-0 flex flex-col items-center"
                     style={{ left: i * PIXELS_PER_SECOND }}
                   >
-                    <div className="h-2 w-px bg-slate-600" />
-                    <span className="text-[9px] text-white bg-black/70 px-1 rounded-sm mt-0.5">{formatTime(i)}</span>
+                    <div className="h-1.5 w-px bg-slate-500" />
+                    <span className="text-[9px] text-slate-300 bg-black/50 px-0.5 rounded-sm mt-0.5">{formatTime(i)}</span>
                   </div>
                 ))}
               </div>
-              
-{/* Video track with thumbnails */}
+
+{/* Video track with thumbnails - tiled background preserves aspect ratio */}
               <div className="h-16 bg-neutral-900/30 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
                 {videoThumbnails.length > 0 ? (
-                  <div 
-                    className="absolute inset-y-1 left-1 right-1 flex rounded overflow-hidden border border-emerald-500/50"
-                  >
-                    {videoThumbnails.map((thumb, idx) => (
-                      <img
-                        key={idx}
-                        src={thumb}
-                        alt=""
-                        className="h-full object-cover flex-shrink-0"
-                        style={{ 
-                          width: `${(videoDuration / videoThumbnails.length) * PIXELS_PER_SECOND}px`,
-                          minWidth: '40px'
-                        }}
-                        draggable={false}
-                      />
-                    ))}
+                  <div className="absolute inset-y-1 left-1 right-1 rounded overflow-hidden border border-emerald-500/50 flex">
+                    {videoThumbnails.map((thumb, idx) => {
+                      const thumbDuration = videoDuration / videoThumbnails.length
+                      const thumbWidth = thumbDuration * PIXELS_PER_SECOND
+                      return (
+                        <div
+                          key={idx}
+                          className="h-full flex-shrink-0"
+                          style={{
+                            width: `${thumbWidth}px`,
+                            backgroundImage: `url(${thumb})`,
+                            backgroundSize: 'auto 100%',
+                            backgroundPosition: '0% 50%',
+                            backgroundRepeat: 'repeat-x',
+                          }}
+                        />
+                      )
+                    })}
                   </div>
                 ) : isExtractingThumbnails ? (
                   <div className="absolute inset-y-1 left-1 right-1 bg-emerald-600/20 border border-emerald-500/50 rounded flex items-center justify-center">
@@ -2900,6 +3517,7 @@ export function DubVerseEditor({
                     left: `${(qcBoxPosition.start + (isGroupLocked ? dragGroupDelta : 0)) * PIXELS_PER_SECOND}px`,
                     width: `${(qcBoxPosition.end - qcBoxPosition.start) * PIXELS_PER_SECOND}px`,
                   }}
+                  onClick={(e) => e.stopPropagation()}
                   onMouseDown={(e) => {
                     e.preventDefault()
                     e.stopPropagation()
@@ -2966,6 +3584,7 @@ export function DubVerseEditor({
                                        qcBoxColor === 'yellow' ? '#eab308' : 
                                        qcBoxColor === 'blue' ? '#3b82f6' : '#22c55e'
                     }}
+                    onClick={(e) => e.stopPropagation()}
                     onMouseDown={handleLeftNeedleDrag}
                   >
                     {/* Left needle hit area */}
@@ -3010,6 +3629,7 @@ export function DubVerseEditor({
                                        qcBoxColor === 'yellow' ? '#eab308' : 
                                        qcBoxColor === 'blue' ? '#3b82f6' : '#22c55e'
                     }}
+                    onClick={(e) => e.stopPropagation()}
                     onMouseDown={handleRightNeedleDrag}
                   >
                     {/* Right needle hit area */}
@@ -3038,9 +3658,9 @@ export function DubVerseEditor({
                 className="absolute top-0 bottom-0 z-30 pointer-events-auto"
                 style={{ left: `${currentTime * PIXELS_PER_SECOND}px` }}
               >
-                {/* Yellow triangle head in time ruler - clickable to drag */}
-                <div 
-                  className="absolute top-1 -left-[6px] cursor-ew-resize"
+                {/* Yellow triangle head - flat back flush with time ruler top */}
+                <div
+                  className="absolute top-6 -left-[6px] cursor-ew-resize"
                   onMouseDown={(e) => {
                     e.preventDefault()
                     e.stopPropagation()
@@ -3055,7 +3675,7 @@ export function DubVerseEditor({
                   }}
                 />
                 {/* Silver thin needle line - spans all tracks */}
-                <div className="absolute top-[14px] bottom-0 left-0 w-[1px] bg-gray-400 pointer-events-none" />
+                <div className="absolute top-[34px] bottom-0 left-0 w-[1px] bg-gray-400 pointer-events-none" />
               </div>
             </div>
           </div>

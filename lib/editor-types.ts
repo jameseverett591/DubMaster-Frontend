@@ -28,10 +28,14 @@ export interface Segment {
   target_text: string
   speaker_id: string
   speaker_label?: string
+  speaker_gender?: 'male' | 'female' | 'child'
   audio_url?: string
   original_audio_snapshot?: string
   locked_at?: string
   qc_findings: QCFinding[]
+  qc_score?: number
+  qc_problem?: string
+  qc_fix?: string
 }
 
 export interface QCScore {
@@ -48,6 +52,52 @@ export interface QCScore {
   errors: number
   warnings: number
   info: number
+}
+
+export interface QCReport {
+  job_id: string
+  generated_at: string
+  // Top-level grade
+  grade: 'A' | 'B' | 'C' | 'D' | 'F'
+  overall: number
+  // Sub-scores (0-100)
+  components: {
+    timing: number
+    speed: number
+    loudness: number
+    silences: number
+    emotion_variance: number
+    emotion_intensity: number
+    lip_sync: number
+    emotion_preservation: number
+  }
+  // Provider for emotion analysis
+  emotion_provider?: 'hume' | 'emotion2vec' | string
+  // Section data
+  timing: { status: 'ok' | 'warn' | 'fail'; details?: string }
+  speed: { status: 'ok' | 'warn' | 'fail'; mean: number; std_dev: number }
+  silence_gaps: {
+    unexpected_count: number
+    gaps: { start: number; end: number; duration: number }[]
+  }
+  loudness: {
+    within_spec: boolean
+    lufs: number
+    peak_db: number
+    range_lu: number
+  }
+  emotion: {
+    label: 'Calm' | 'Moderate' | 'Intense' | string
+    variance: number
+    intensity: number
+    top: { name: string; pct: number }[]
+  }
+  retranscription: {
+    segment_count: number
+    items: { start: number; text: string; confidence: number }[]
+  }
+  // Findings drive timeline markers and click-to-fix
+  findings: QCFinding[]
 }
 
 export interface EditorJob {
