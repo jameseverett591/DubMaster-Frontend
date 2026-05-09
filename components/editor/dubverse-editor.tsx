@@ -364,10 +364,6 @@ export function DubVerseEditor({
     toIndex: number | null
     isDragging: boolean
   } | null>(null)
-  const [groupedSegments, setGroupedSegments] = useState<Set<number>>(new Set())
-  const [isGroupLocked, setIsGroupLocked] = useState(false)
-  const [dragGroupDelta, setDragGroupDelta] = useState(0)
-  const groupOriginalTimesRef = useRef<Record<number, { start: number; end: number }>>({})
   const segmentAudioRef = useRef<HTMLAudioElement | null>(null)
 
   useEffect(() => {
@@ -508,12 +504,6 @@ export function DubVerseEditor({
   })
   const [isResizingTimeline, setIsResizingTimeline] = useState(false)
 
-  // QC highlight box state - default position so it shows immediately
-  const [qcBoxPosition, setQcBoxPosition] = useState<{ start: number; end: number }>({ start: 1, end: 5 })
-  const [qcBoxColor, setQcBoxColor] = useState<'red' | 'yellow' | 'blue' | 'green'>('green')
-  const [isDraggingQcBox, setIsDraggingQcBox] = useState(false)
-  const [showQcBox, setShowQcBox] = useState(true)
-  
   // Video import state
   const [importedVideoUrl, setImportedVideoUrl] = useState<string | null>(null)
   const [importedVideoFile, setImportedVideoFile] = useState<File | null>(null)
@@ -588,34 +578,6 @@ export function DubVerseEditor({
         }
       }
 
-      if (e.key === 'm' || e.key === 'M') {
-        const target = e.target as HTMLElement
-        if (
-          target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.contentEditable === 'true'
-        ) return
-
-        if (isGroupLocked) {
-          setGroupedSegments(new Set())
-          setIsGroupLocked(false)
-        } else {
-          const inside = new Set(
-            displaySegments
-              .map((s, i) => ({ s, i }))
-              .filter(({ s }) =>
-                s.start_time >= qcBoxPosition.start &&
-                s.start_time < qcBoxPosition.end
-              )
-              .map(({ i }) => i)
-          )
-          if (inside.size > 0) {
-            setGroupedSegments(inside)
-            setIsGroupLocked(true)
-          }
-        }
-      }
-
       if (e.key === 'c' || e.key === 'C') {
         if (selectedSegmentIndex === null) return
         const target = e.target as HTMLElement
@@ -629,7 +591,7 @@ export function DubVerseEditor({
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [selectedSegmentIndex, isGroupLocked, lockedPairs, displaySegments, qcBoxPosition, handleSplitAtPlayhead])
+  }, [selectedSegmentIndex, lockedPairs, displaySegments, handleSplitAtPlayhead])
 
   // Video thumbnails for timeline
   const [videoThumbnails, setVideoThumbnails] = useState<string[]>([])
@@ -1112,142 +1074,6 @@ export function DubVerseEditor({
       }
     }
   }, [activeQCCategory, segments])
-  
-  // Handle QC box drag
-  const handleQcBoxDragStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-
-    if (!qcBoxPosition) return
-
-    const timelineElement = timelineRef.current
-    if (!timelineElement) return
-
-    setIsDraggingQcBox(true)
-    const boxWidth = qcBoxPosition.end - qcBoxPosition.start
-    const startX = e.clientX
-    const startBoxStart = qcBoxPosition.start
-    const originalQcStart = qcBoxPosition.start
-    const originalQcEnd = qcBoxPosition.end
-
-    // Snapshot original segment times before drag starts
-    if (isGroupLocked && groupedSegments.size > 0) {
-      const snap: Record<number, { start: number; end: number }> = {}
-      groupedSegments.forEach(idx => {
-        const seg = displaySegments[idx]
-        if (seg) snap[idx] = { start: seg.start_time, end: seg.end_time }
-      })
-      groupOriginalTimesRef.current = snap
-    }
-
-    let currentDeltaTime = 0
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const deltaX = moveEvent.clientX - startX
-      currentDeltaTime = deltaX / PIXELS_PER_SECOND
-
-      if (isGroupLocked && groupedSegments.size > 0) {
-        // Drive both box and segments via dragGroupDelta — no setQcBoxPosition during drag
-        // to avoid useCallback recreation mid-drag. Box left is offset at render time.
-        setDragGroupDelta(currentDeltaTime)
-      } else {
-        const newStart = Math.max(0, Math.min(startBoxStart + currentDeltaTime, videoDuration - boxWidth))
-        setQcBoxPosition({ start: newStart, end: newStart + boxWidth })
-      }
-    }
-
-    const handleMouseUp = () => {
-      setIsDraggingQcBox(false)
-      if (isGroupLocked && groupedSegments.size > 0) {
-        // Commit QC box to final position
-        setQcBoxPosition({
-          start: Math.max(0, originalQcStart + currentDeltaTime),
-          end: Math.max(0, originalQcEnd + currentDeltaTime),
-        })
-        // Commit grouped segments
-        const snap = groupOriginalTimesRef.current
-        groupedSegments.forEach(idx => {
-          const orig = snap[idx]
-          if (!orig) return
-          updateSegment(idx, {
-            start_time: Math.max(0, orig.start + currentDeltaTime),
-            end_time: Math.max(0, orig.end + currentDeltaTime),
-          })
-        })
-        setImportedSegments(prev => {
-          const base = prev ?? displaySegments
-          return base.map((seg, i) => {
-            const orig = snap[i]
-            if (!orig || !groupedSegments.has(i)) return seg
-            return { ...seg, start_time: Math.max(0, orig.start + currentDeltaTime), end_time: Math.max(0, orig.end + currentDeltaTime) }
-          })
-        })
-        setDragGroupDelta(0)
-        groupOriginalTimesRef.current = {}
-      }
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-    }
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-  }, [qcBoxPosition, videoDuration, isGroupLocked, groupedSegments, displaySegments, updateSegment])
-  
-  // Handle left needle drag - resize box from left
-  const handleLeftNeedleDrag = useCallback((e: React.MouseEvent) => {
-    if (isGroupLocked) return
-    e.preventDefault()
-    e.stopPropagation()
-
-    if (!qcBoxPosition) return
-    
-    const timelineElement = timelineRef.current
-    if (!timelineElement) return
-    
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const rect = timelineElement.getBoundingClientRect()
-      const scrollLeft = timelineElement.scrollLeft
-      const x = moveEvent.clientX - rect.left + scrollLeft
-      const newStart = Math.max(0, Math.min(x / PIXELS_PER_SECOND, qcBoxPosition.end - 0.5))
-      setQcBoxPosition(prev => prev ? { ...prev, start: newStart } : null)
-    }
-    
-    const handleMouseUp = () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-    }
-    
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-  }, [qcBoxPosition])
-  
-  // Handle right needle drag - resize box from right
-  const handleRightNeedleDrag = useCallback((e: React.MouseEvent) => {
-    if (isGroupLocked) return
-    e.preventDefault()
-    e.stopPropagation()
-
-    if (!qcBoxPosition) return
-    
-    const timelineElement = timelineRef.current
-    if (!timelineElement) return
-    
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const rect = timelineElement.getBoundingClientRect()
-      const scrollLeft = timelineElement.scrollLeft
-      const x = moveEvent.clientX - rect.left + scrollLeft
-      const newEnd = Math.max(qcBoxPosition.start + 0.5, Math.min(x / PIXELS_PER_SECOND, videoDuration))
-      setQcBoxPosition(prev => prev ? { ...prev, end: newEnd } : null)
-    }
-    
-    const handleMouseUp = () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-    }
-    
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-  }, [qcBoxPosition, videoDuration])
   
   // Handle segment click when QC category is active
   const handleSegmentClickForQC = useCallback((index: number) => {
@@ -3144,11 +2970,6 @@ export function DubVerseEditor({
                   videoRef.current.currentTime = newTime
                 }
                 selectSegment(null)
-                if (isGroupLocked) {
-                  setIsGroupLocked(false)
-                  setGroupedSegments(new Set())
-                  setDragGroupDelta(0)
-                }
               }}
             >
               {/* Vertical grid lines — rendered behind all tracks */}
@@ -3304,11 +3125,10 @@ export function DubVerseEditor({
                         isDraggingThis ? 'cursor-grabbing' : 'cursor-grab'
                       )}
                       style={{
-                        left: (segment.start_time + delta + (groupedSegments.has(index) ? dragGroupDelta : 0)) * PIXELS_PER_SECOND,
+                        left: (segment.start_time + delta) * PIXELS_PER_SECOND,
                         width: (segment.end_time - segment.start_time) * PIXELS_PER_SECOND,
                       }}
                       onMouseDown={(e) => {
-                        if (isGroupLocked && groupedSegments.has(index)) return
                         e.preventDefault()
                         e.stopPropagation()
                         const startX = e.clientX
@@ -3416,7 +3236,7 @@ export function DubVerseEditor({
                           const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'dubbed'
                           const isDraggingPaired = draggingSegment?.index === index && draggingSegment?.track === 'original' && lockedPairs.has(index)
                           const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
-                          return (segment.start_time + delta + (groupedSegments.has(index) ? dragGroupDelta : 0)) * PIXELS_PER_SECOND
+                          return (segment.start_time + delta) * PIXELS_PER_SECOND
                         })(),
                         width: (() => {
                           const originalDuration = segment.end_time - segment.start_time
@@ -3433,7 +3253,6 @@ export function DubVerseEditor({
                       onMouseDown={(e) => {
                         const t = e.target as HTMLElement
                         if (t.closest('[data-resize-handle]')) return
-                        if (isGroupLocked && groupedSegments.has(index)) return
                         e.preventDefault()
                         e.stopPropagation()
                         const startX = e.clientX
@@ -3536,153 +3355,6 @@ export function DubVerseEditor({
               {/* Background track */}
               <div className="flex-1 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
               </div>
-              
-              {/* QC Highlight Box - transparent rectangle with independently draggable needles */}
-              {showQcBox && qcBoxPosition && (
-                <div
-                  className={cn(
-                    "absolute top-0 bottom-0 cursor-move",
-                    isGroupLocked ? "z-30 shadow-[0_0_12px_3px_rgba(34,197,94,0.7)] animate-pulse" : "z-25"
-                  )}
-                  style={{
-                    left: `${(qcBoxPosition.start + (isGroupLocked ? dragGroupDelta : 0)) * PIXELS_PER_SECOND}px`,
-                    width: `${(qcBoxPosition.end - qcBoxPosition.start) * PIXELS_PER_SECOND}px`,
-                  }}
-                  onClick={(e) => e.stopPropagation()}
-                  onMouseDown={(e) => {
-                    e.preventDefault()
-                    e.stopPropagation()
-
-                    const startX = e.clientX
-                    const originalQcStart = qcBoxPosition.start
-                    const originalQcEnd = qcBoxPosition.end
-                    const boxWidth = originalQcEnd - originalQcStart
-
-                    if (isGroupLocked) {
-                      const originalTimes = Object.fromEntries(
-                        [...groupedSegments].map(i => [i, {
-                          start: displaySegments[i].start_time,
-                          end: displaySegments[i].end_time
-                        }])
-                      )
-
-                      const onMove = (ev: MouseEvent) => {
-                        const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
-                        setDragGroupDelta(delta)
-                      }
-
-                      const onUp = (ev: MouseEvent) => {
-                        const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
-                        setQcBoxPosition({
-                          start: Math.max(0, originalQcStart + delta),
-                          end: Math.max(0, originalQcEnd + delta),
-                        })
-                        groupedSegments.forEach(i => {
-                          updateSegment(i, {
-                            start_time: Math.max(0, originalTimes[i].start + delta),
-                            end_time: Math.max(0, originalTimes[i].end + delta),
-                          })
-                        })
-                        setDragGroupDelta(0)
-                        document.removeEventListener('mousemove', onMove)
-                        document.removeEventListener('mouseup', onUp)
-                      }
-
-                      document.addEventListener('mousemove', onMove)
-                      document.addEventListener('mouseup', onUp)
-                    } else {
-                      const onMove = (ev: MouseEvent) => {
-                        const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
-                        const newStart = Math.max(0, Math.min(originalQcStart + delta, videoDuration - boxWidth))
-                        setQcBoxPosition({ start: newStart, end: newStart + boxWidth })
-                      }
-
-                      const onUp = () => {
-                        document.removeEventListener('mousemove', onMove)
-                        document.removeEventListener('mouseup', onUp)
-                      }
-
-                      document.addEventListener('mousemove', onMove)
-                      document.addEventListener('mouseup', onUp)
-                    }
-                  }}
-                >
-                  {/* Left needle - independently draggable */}
-                  <div 
-                    className="absolute left-0 top-0 bottom-0 w-[3px] cursor-ew-resize z-30"
-                    style={{
-                      backgroundColor: qcBoxColor === 'red' ? '#ef4444' : 
-                                       qcBoxColor === 'yellow' ? '#eab308' : 
-                                       qcBoxColor === 'blue' ? '#3b82f6' : '#22c55e'
-                    }}
-                    onClick={(e) => e.stopPropagation()}
-                    onMouseDown={handleLeftNeedleDrag}
-                  >
-                    {/* Left needle hit area */}
-                    <div className="absolute -left-2 -right-2 top-0 bottom-0" />
-                    {/* Left needle top triangle */}
-                    <div 
-                      className="absolute top-1 left-1/2 -translate-x-1/2"
-                      style={{
-                        width: 0,
-                        height: 0,
-                        borderLeft: '6px solid transparent',
-                        borderRight: '6px solid transparent',
-                        borderTop: `10px solid ${
-                          qcBoxColor === 'red' ? '#ef4444' : 
-                          qcBoxColor === 'yellow' ? '#eab308' : 
-                          qcBoxColor === 'blue' ? '#3b82f6' : '#22c55e'
-                        }`,
-                      }}
-                    />
-                  </div>
-                  
-                  {/* Transparent colored fill — pointer-events-auto always so clicks bubble to outer div drag handler */}
-                  <div
-                    className="absolute inset-x-[3px] top-[24px] bottom-0 border-t-2 border-b-2 pointer-events-auto"
-                    style={{
-                      backgroundColor: qcBoxColor === 'red' ? 'rgba(239, 68, 68, 0.2)' :
-                                       qcBoxColor === 'yellow' ? 'rgba(234, 179, 8, 0.2)' :
-                                       qcBoxColor === 'blue' ? 'rgba(59, 130, 246, 0.2)' : 'rgba(34, 197, 94, 0.2)',
-                      borderColor: qcBoxColor === 'red' ? '#ef4444' :
-                                   qcBoxColor === 'yellow' ? '#eab308' :
-                                   qcBoxColor === 'blue' ? '#3b82f6' : '#22c55e',
-                    }}
-                  />
-                  {/* Drag strip — inert, outer div handles all drag */}
-                  <div className="absolute inset-x-[3px] top-[24px] h-3 cursor-move pointer-events-none" />
-                  
-                  {/* Right needle - independently draggable */}
-                  <div 
-                    className="absolute right-0 top-0 bottom-0 w-[3px] cursor-ew-resize z-30"
-                    style={{
-                      backgroundColor: qcBoxColor === 'red' ? '#ef4444' : 
-                                       qcBoxColor === 'yellow' ? '#eab308' : 
-                                       qcBoxColor === 'blue' ? '#3b82f6' : '#22c55e'
-                    }}
-                    onClick={(e) => e.stopPropagation()}
-                    onMouseDown={handleRightNeedleDrag}
-                  >
-                    {/* Right needle hit area */}
-                    <div className="absolute -left-2 -right-2 top-0 bottom-0" />
-                    {/* Right needle top triangle */}
-                    <div 
-                      className="absolute top-1 left-1/2 -translate-x-1/2"
-                      style={{
-                        width: 0,
-                        height: 0,
-                        borderLeft: '6px solid transparent',
-                        borderRight: '6px solid transparent',
-                        borderTop: `10px solid ${
-                          qcBoxColor === 'red' ? '#ef4444' : 
-                          qcBoxColor === 'yellow' ? '#eab308' : 
-                          qcBoxColor === 'blue' ? '#3b82f6' : '#22c55e'
-                        }`,
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
               
               {/* Player needle - yellow triangle head + silver line - DRAGGABLE */}
               <div 
