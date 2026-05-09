@@ -2405,9 +2405,6 @@ export function DubVerseEditor({
               </DropdownMenuContent>
             </DropdownMenu>
             <Button variant="ghost" size="sm" className="h-8 text-xs text-slate-400">
-              Pause
-            </Button>
-            <Button variant="ghost" size="sm" className="h-8 text-xs text-slate-400">
               <Sparkles className="h-4 w-4 mr-1" />
               Ask AI
             </Button>
@@ -2906,8 +2903,8 @@ export function DubVerseEditor({
         
         {/* Timeline tracks */}
         <div className="flex-1 flex overflow-hidden">
-          {/* QC Monitor - permanent fixture left of timeline tracks */}
-          <div className="shrink-0 border-r border-neutral-700 bg-neutral-950 flex flex-col overflow-hidden relative" style={{ width: qcMonitorWidth }}>
+          {/* QC Monitor - moved to right panel Quality tab */}
+          {null && <div className="shrink-0 border-r border-neutral-700 bg-neutral-950 flex flex-col overflow-hidden relative" style={{ width: qcMonitorWidth }}>
               {/* Resize handle - right edge */}
               <div
                 className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group"
@@ -3009,7 +3006,7 @@ export function DubVerseEditor({
                   selectedRetranscriptionIndex={selectedRetranscriptionIndex ?? undefined}
                 />
               </div>
-          </div>
+          </div>}
           {/* Track labels - fixed left column */}
           <div className="w-28 shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col">
             {/* Clickable seek header spacer */}
