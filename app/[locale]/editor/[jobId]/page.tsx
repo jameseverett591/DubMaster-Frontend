@@ -1,6 +1,6 @@
 'use client'
 
-import { use, useState, useEffect } from 'react'
+import { use, useState, useEffect, useRef } from 'react'
 import { DubVerseEditor } from '@/components/editor/dubverse-editor'
 import { LoadingSpinner } from '@/components/loading-spinner'
 import { ErrorBoundary } from '@/components/error-boundary'
@@ -21,10 +21,16 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  // QC state — populated concurrently while editor loads
+  const [qcAnalysis, setQcAnalysis] = useState<any>(null)
+  const [qcLoading, setQcLoading] = useState(false)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
   useEffect(() => {
     localStorage.setItem('dubverse.lastEditorJobId', jobId)
   }, [jobId])
 
+  // Load job data
   useEffect(() => {
     async function loadJob() {
       try {
@@ -45,7 +51,6 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         const txFetch = transcriptRes.status === 'fulfilled' ? transcriptRes.value : null
         const transcript = txFetch?.ok ? await txFetch.json() : null
 
-        // Build source text lookup from transcript
         const sourceByIndex = new Map<number, string>()
         if (transcript?.segments) {
           ;(transcript.segments as Array<{ text: string }>).forEach((seg, idx) => {
@@ -53,7 +58,6 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
           })
         }
 
-        // Map API segments → editor Segment type
         const editorSegments: Segment[] = (segmentsData?.segments || []).map((seg: any, idx: number) => ({
           id: `segment-${idx}`,
           index: idx,
@@ -68,13 +72,14 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
           qc_findings: seg.qc_findings ?? [],
         }))
 
+        const targetLang = (segmentsData?.language || 'en').toLowerCase()
+
         setEditorProps({
           title: status.video_filename || `Job ${jobId.slice(0, 8)}`,
           sourceLanguage: transcript?.language || 'Source',
           targetLanguage: segmentsData?.language || 'Target',
-          // video_url from /api/status is "/api/media/{id}/video" — convert to absolute
+          targetLangCode: targetLang,
           videoUrl: toAbsoluteUrl(status.video_url || `/api/media/${jobId}/video`),
-          // dubbed_video_url is "/api/download/{id}/en" — filesystem-based, no job-in-memory needed
           dubbedVideoUrl: status.dubbed_video_url ? toAbsoluteUrl(status.dubbed_video_url) : null,
           videoDuration: segmentsData?.video_duration ?? status.video_duration ?? 0,
         })
@@ -87,6 +92,56 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     }
     loadJob()
   }, [jobId])
+
+  // QC fetch + poll — starts after job data is loaded and target language is known
+  useEffect(() => {
+    if (!editorProps) return
+
+    const lang = editorProps.targetLangCode || 'en'
+    let cancelled = false
+
+    async function checkQC() {
+      try {
+        const res = await fetch(`${API_BASE}/api/analysis/${jobId}/${lang}`)
+        if (res.ok) {
+          const data = await res.json()
+          if (data.status === 'complete' && data.analysis) {
+            if (!cancelled) {
+              setQcAnalysis(data.analysis)
+              setQcLoading(false)
+              if (pollRef.current) {
+                clearInterval(pollRef.current)
+                pollRef.current = null
+              }
+            }
+          } else if (data.status === 'running') {
+            if (!cancelled) setQcLoading(true)
+          }
+        } else if (res.status === 202) {
+          if (!cancelled) setQcLoading(true)
+        } else if (res.status === 404) {
+          // Not yet triggered — kick it off
+          try {
+            await fetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, { method: 'POST' })
+          } catch {}
+          if (!cancelled) setQcLoading(true)
+        }
+      } catch {
+        // Network error — keep polling silently
+      }
+    }
+
+    checkQC()
+    pollRef.current = setInterval(checkQC, 5000)
+
+    return () => {
+      cancelled = true
+      if (pollRef.current) {
+        clearInterval(pollRef.current)
+        pollRef.current = null
+      }
+    }
+  }, [jobId, editorProps])
 
   if (loading) {
     return (
@@ -118,6 +173,8 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         segments={segments}
         qcScore={null}
         qcFindings={[]}
+        qcAnalysis={qcAnalysis}
+        qcLoading={qcLoading}
         pointsLeft={100}
         minutesAvailable={60}
         onExport={() => {}}
