@@ -145,6 +145,9 @@ class VoiceParams(BaseModel):
 
 class RegenerateRequest(BaseModel):
     voice_id: Optional[str] = None
+    voice_key: Optional[str] = None   # canonical key e.g. "male-1", "female-1" — resolved to voice_id by backend
     speed: Optional[float] = None
+    pitch: Optional[int] = None       # semitones: -12 to +12
     text: Optional[str] = None
+    emotion: Optional[str] = None
     voice_params: Optional[VoiceParams] = None

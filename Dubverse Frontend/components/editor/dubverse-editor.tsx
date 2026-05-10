@@ -43,6 +43,10 @@ import {
   Music2,
   Languages,
   Mic2,
+  Youtube,
+  Twitter,
+  Facebook,
+  Instagram,
 } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -252,12 +256,114 @@ interface DubVerseEditorProps {
   segments: Segment[]
   qcScore?: QCScore | null
   qcFindings?: QCFinding[]
+  qcAnalysis?: any
+  qcLoading?: boolean
   pointsLeft?: number
   minutesAvailable?: number
   onExport?: () => void
   onShare?: () => void
   onGenerateSpeech?: () => void
   onTranslateAndDub?: () => void
+}
+
+function mapAnalysisToQCReport(jobId: string, analysis: any): QCReport {
+  const summary = analysis.summary ?? {}
+  const compScores = summary.component_scores ?? {}
+  const findings: QCFinding[] = []
+
+  const silences = analysis.silences ?? {}
+  ;(silences.gaps ?? []).forEach((gap: any, i: number) => {
+    findings.push({
+      id: `qc-silence-${i}`,
+      segment_index: -1,
+      type: 'timing',
+      severity: (gap.duration ?? 0) > 1.5 ? 'error' : 'warning',
+      message: `${((gap.duration ?? 0) as number).toFixed(1)}s silence gap`,
+      suggestion: 'Adjust segment timing or add filler audio',
+      timestamp_start: gap.start ?? 0,
+      timestamp_end: gap.end ?? 0,
+    })
+  })
+
+  const retrans = analysis.retranscription ?? {}
+  ;(retrans.segments ?? []).forEach((seg: any, i: number) => {
+    if ((seg.confidence ?? 1) < 0.8) {
+      findings.push({
+        id: `qc-pronun-${i}`,
+        segment_index: i,
+        type: 'pronunciation',
+        severity: (seg.confidence ?? 1) < 0.6 ? 'error' : 'warning',
+        message: `Retranscription confidence ${Math.round((seg.confidence ?? 0) * 100)}%`,
+        timestamp_start: seg.start ?? 0,
+        timestamp_end: (seg.end ?? (seg.start ?? 0) + 2),
+      })
+    }
+  })
+
+  const speedData = analysis.speed ?? {}
+  ;(speedData.anomalies ?? []).forEach((a: any, i: number) => {
+    findings.push({
+      id: `qc-speed-${i}`,
+      segment_index: a.segment_index ?? i,
+      type: 'delivery',
+      severity: 'warning',
+      message: `Speed anomaly: ${(a.speed_ratio ?? 1).toFixed(2)}x`,
+      timestamp_start: a.start ?? 0,
+      timestamp_end: a.end ?? 0,
+    })
+  })
+
+  return {
+    job_id: jobId,
+    generated_at: new Date().toISOString(),
+    grade: (summary.grade ?? 'C') as QCReport['grade'],
+    overall: summary.score ?? 50,
+    components: {
+      timing: compScores.timing ?? 75,
+      speed: compScores.speed ?? 75,
+      loudness: compScores.loudness ?? 80,
+      silences: compScores.silences ?? 80,
+      emotion_variance: compScores.emotion_variance ?? 50,
+      emotion_intensity: compScores.emotion_intensity ?? 50,
+      lip_sync: compScores.lip_sync ?? 50,
+      emotion_preservation: compScores.emotion_preservation ?? 50,
+    },
+    timing: { status: (analysis.timing?.status ?? 'ok') as 'ok' | 'warn' | 'fail' },
+    speed: {
+      status: (speedData.status ?? 'ok') as 'ok' | 'warn' | 'fail',
+      mean: speedData.speed_mean ?? 1.0,
+      std_dev: speedData.speed_std_dev ?? 0.1,
+    },
+    silence_gaps: {
+      unexpected_count: silences.unexpected_silences ?? 0,
+      gaps: (silences.gaps ?? []).map((g: any) => ({
+        start: g.start ?? 0,
+        end: g.end ?? 0,
+        duration: g.duration ?? 0,
+      })),
+    },
+    loudness: {
+      within_spec: analysis.loudness?.within_spec ?? true,
+      lufs: analysis.loudness?.integrated_lufs ?? -23,
+      peak_db: analysis.loudness?.peak_db ?? -1,
+      range_lu: analysis.loudness?.range_lu ?? 7,
+    },
+    emotion: {
+      label: analysis.emotion?.label ?? 'Calm',
+      variance: analysis.emotion?.variance ?? 50,
+      intensity: analysis.emotion?.intensity ?? 50,
+      top: analysis.emotion?.top ?? [],
+    },
+    retranscription: {
+      segment_count: (retrans.segments ?? []).length,
+      items: (retrans.segments ?? []).map((s: any) => ({
+        start: s.start ?? 0,
+        text: s.text ?? '',
+        confidence: s.confidence ?? 0.5,
+      })),
+    },
+    findings,
+  }
 }
 
 export function DubVerseEditor({
@@ -271,6 +377,8 @@ export function DubVerseEditor({
   segments: initialSegments,
   qcScore,
   qcFindings = [],
+  qcAnalysis,
+  qcLoading = false,
   pointsLeft = 6.88,
   minutesAvailable = 2.29,
   onExport,
@@ -315,8 +423,17 @@ export function DubVerseEditor({
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
   const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'studio'>('result')
 
-  // QC report — currently mocked from QC Score.txt; will be fetched from /api/qc/{jobId}
-  const [qcReport, setQcReport] = useState<QCReport | null>(() => buildMockQCReport(jobId || 'demo'))
+  // QC report — real data from /api/analysis when available, otherwise mock
+  const [qcReport, setQcReport] = useState<QCReport | null>(() =>
+    qcAnalysis ? mapAnalysisToQCReport(jobId || 'demo', qcAnalysis) : buildMockQCReport(jobId || 'demo')
+  )
+
+  // Sync real QC analysis data when it arrives from the page-level poller
+  useEffect(() => {
+    if (qcAnalysis) {
+      setQcReport(mapAnalysisToQCReport(jobId || 'demo', qcAnalysis))
+    }
+  }, [qcAnalysis, jobId])
 
   // Active finding drives the severity color overlay + auto-opens correction tool
   const [activeFinding, setActiveFinding] = useState<QCFinding | null>(null)
@@ -333,6 +450,16 @@ export function DubVerseEditor({
     return 320
   })
   const [isResizingQcMonitor, setIsResizingQcMonitor] = useState(false)
+
+  // Track label column width — resizable, persisted
+  const [trackLabelWidth, setTrackLabelWidth] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('dubverse.editor.trackLabelWidth')
+      return saved ? parseInt(saved, 10) : 112
+    }
+    return 112
+  })
+  const [isResizingTrackLabel, setIsResizingTrackLabel] = useState(false)
 
   const [activeDubbedVideoUrl, setActiveDubbedVideoUrl] = useState(dubbedVideoUrl)
   const [isRebuilding, setIsRebuilding] = useState(false)
@@ -351,8 +478,20 @@ export function DubVerseEditor({
   const [flashingPair, setFlashingPair] = useState<number | null>(null)
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [regenError, setRegenError] = useState<string | null>(null)
+  const [shareCopied, setShareCopied] = useState<'link' | 'video' | null>(null)
+  const [askAiOpen, setAskAiOpen] = useState(false)
+  const [askAiPrompt, setAskAiPrompt] = useState('')
+  const [askAiLoading, setAskAiLoading] = useState(false)
+  const [askAiResult, setAskAiResult] = useState<{ suggestion: string; explanation: string } | null>(null)
+  const [askAiPos, setAskAiPos] = useState({ x: 0, y: 0 })
   const [stagedSpeeds, setStagedSpeeds] = useState<Record<number, number>>({})
   const [stagedEmotions, setStagedEmotions] = useState<Record<number, string>>({})
+  const [stagedVoices, setStagedVoices] = useState<Record<number, string>>({})
+  const [stagedPitches, setStagedPitches] = useState<Record<number, number>>({})
+  const [draggedVoice, setDraggedVoice] = useState<string | null>(null)
+  const [voicePaletteOpen, setVoicePaletteOpen] = useState(false)
+  const [pitchPopupIndex, setPitchPopupIndex] = useState<number | null>(null)
+  const [pitchPopupPos, setPitchPopupPos] = useState({ x: 0, y: 0 })
   const [pendingDelete, setPendingDelete] = useState<number | null>(null)
   const [showRevertAllConfirm, setShowRevertAllConfirm] = useState(false)
   const [contextSegmentIndex, setContextSegmentIndex] = useState<number | null>(null)
@@ -485,6 +624,15 @@ export function DubVerseEditor({
   const [activeQCCategory, setActiveQCCategory] = useState<QCCategory | null>(null)
   const [showCorrectionSlider, setShowCorrectionSlider] = useState(false)
   const [correctionValue, setCorrectionValue] = useState(0)
+  const [correctionPanelPos, setCorrectionPanelPos] = useState({ x: 0, y: 0 })
+
+  const openCorrectionSlider = useCallback(() => {
+    setCorrectionPanelPos({
+      x: Math.max(0, window.innerWidth / 2 - 225),
+      y: Math.max(0, window.innerHeight - 380),
+    })
+    setShowCorrectionSlider(true)
+  }, [])
   const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
   const [editingText, setEditingText] = useState('')
   const [previewWidth, setPreviewWidth] = useState(() => {
@@ -1082,7 +1230,7 @@ export function DubVerseEditor({
       const segment = displaySegments[index]
       const qcType = QC_TABS.find(t => t.id === activeQCCategory)?.qcType
       if (qcType) {
-        setShowCorrectionSlider(true)
+        openCorrectionSlider()
         setCorrectionValue(0)
       }
     }
@@ -1306,6 +1454,8 @@ export function DubVerseEditor({
         text: segment.target_text,
         speed: stagedSpeeds[activeIndex] ?? 1.0,
         emotion: stagedEmotions[activeIndex],
+        voice_key: stagedVoices[activeIndex],
+        pitch: stagedPitches[activeIndex],
       })
       const filename = response.segment.path.split('/').pop() ?? ''
       const audio_url = filename
@@ -1489,12 +1639,18 @@ export function DubVerseEditor({
   }
   
   const EMOTIONS = ['Neutral', 'Happy', 'Excited', 'Calm', 'Sad', 'Angry', 'Fearful', 'Surprised', 'Disgusted', 'Professional', 'Casual', 'Formal', 'Intimate', 'Defiant', 'Confused', 'Whisper', 'Shout', 'Sarcastic', 'Hopeful', 'Melancholic']
+  const VOICE_OPTIONS = [
+    { key: 'male-1',   label: 'Male 1'   },
+    { key: 'male-2',   label: 'Male 2'   },
+    { key: 'female-1', label: 'Female 1' },
+    { key: 'child-1',  label: 'Child 1'  },
+  ]
 
   // Timeline constants
   const TRACK_HEIGHT = 48
   const PIXELS_PER_SECOND = 40 * zoomLevel
   const timelineWidth = videoDuration * PIXELS_PER_SECOND
-  
+
   // Find pending segment count
   const pendingCount = displaySegments.filter(s => 
     s.qc_findings.some(f => f.severity === 'error' || f.severity === 'warning')
@@ -1520,7 +1676,7 @@ export function DubVerseEditor({
           {/* Nav */}
           <nav className="hidden md:flex items-center gap-1 ml-4">
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/dashboard')}>Dashboard</Button>
-            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/projects')}>My Projects</Button>
+            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/dashboard?tab=projects')}>My Projects</Button>
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/collaborate')}>Collaborate</Button>
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white">Voice Library</Button>
             <Button variant="ghost" size="sm" className="bg-slate-800 text-white">Editor</Button>
@@ -1614,9 +1770,141 @@ export function DubVerseEditor({
           <Button variant="ghost" size="sm" className="h-8">
             <RefreshCw className="h-4 w-4" />
           </Button>
-          <Button variant="ghost" size="sm" className="h-8">
-            <Share2 className="h-4 w-4" />
-          </Button>
+          <Popover onOpenChange={() => setShareCopied(null)}>
+            <PopoverTrigger asChild>
+              <Button variant="ghost" size="sm" className="h-8">
+                <Share2 className="h-4 w-4" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-80 bg-slate-900 border-slate-700 p-4 space-y-4">
+              <p className="text-sm font-semibold text-white flex items-center gap-2">
+                <Share2 className="h-4 w-4 text-amber-400" />
+                Share Project
+              </p>
+
+              {/* Editor link */}
+              <div className="space-y-1.5">
+                <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">Editor link</p>
+                <div className="flex gap-2">
+                  <input
+                    readOnly
+                    aria-label="Editor link"
+                    value={typeof window !== 'undefined' ? window.location.href : ''}
+                    className="flex-1 text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 truncate focus:outline-none"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className={cn(
+                      "h-7 px-2 text-xs border-slate-700 shrink-0 transition-colors",
+                      shareCopied === 'link' ? "text-emerald-400 border-emerald-500/40" : "text-slate-300"
+                    )}
+                    onClick={() => {
+                      navigator.clipboard.writeText(window.location.href)
+                      setShareCopied('link')
+                      setTimeout(() => setShareCopied(null), 2000)
+                    }}
+                  >
+                    {shareCopied === 'link' ? <Check className="h-3 w-3" /> : <Link2 className="h-3 w-3" />}
+                  </Button>
+                </div>
+              </div>
+
+              {/* Dubbed video */}
+              {activeDubbedVideoUrl ? (
+                <div className="space-y-1.5">
+                  <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">Dubbed video</p>
+                  <div className="flex gap-2">
+                    <input
+                      readOnly
+                      aria-label="Dubbed video link"
+                      value={activeDubbedVideoUrl}
+                      className="flex-1 text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 truncate focus:outline-none"
+                    />
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className={cn(
+                        "h-7 px-2 text-xs border-slate-700 shrink-0 transition-colors",
+                        shareCopied === 'video' ? "text-emerald-400 border-emerald-500/40" : "text-slate-300"
+                      )}
+                      onClick={() => {
+                        navigator.clipboard.writeText(activeDubbedVideoUrl)
+                        setShareCopied('video')
+                        setTimeout(() => setShareCopied(null), 2000)
+                      }}
+                    >
+                      {shareCopied === 'video' ? <Check className="h-3 w-3" /> : <Link2 className="h-3 w-3" />}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2 text-xs border-slate-700 text-slate-300 shrink-0"
+                      asChild
+                    >
+                      <a href={activeDubbedVideoUrl} download title="Download dubbed video" target="_blank" rel="noreferrer">
+                        <Download className="h-3 w-3" />
+                      </a>
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-600 italic">No dubbed video yet — rebuild to generate one.</p>
+              )}
+
+              {/* Social share */}
+              <div className="space-y-1.5 pt-1 border-t border-slate-800">
+                <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">Share to</p>
+                <div className="flex gap-2">
+                  {/* Facebook */}
+                  <button
+                    type="button"
+                    title="Share to Facebook"
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#1877F2]/10 hover:bg-[#1877F2]/25 text-[#1877F2] border border-[#1877F2]/20 hover:border-[#1877F2]/50 transition-colors"
+                    onClick={() => window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}`, '_blank', 'width=600,height=400')}
+                  >
+                    <Facebook className="h-4 w-4" />
+                    <span className="text-[9px] font-medium">Facebook</span>
+                  </button>
+                  {/* Twitter / X */}
+                  <button
+                    type="button"
+                    title="Share to X (Twitter)"
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-white border border-white/10 hover:border-white/30 transition-colors"
+                    onClick={() => window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}&text=${encodeURIComponent(`Check out my dubbed video — ${title}`)}`, '_blank', 'width=600,height=400')}
+                  >
+                    <Twitter className="h-4 w-4" />
+                    <span className="text-[9px] font-medium">X / Twitter</span>
+                  </button>
+                  {/* YouTube */}
+                  <button
+                    type="button"
+                    title="Upload to YouTube"
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#FF0000]/10 hover:bg-[#FF0000]/20 text-[#FF0000] border border-[#FF0000]/20 hover:border-[#FF0000]/50 transition-colors"
+                    onClick={() => window.open('https://studio.youtube.com/channel/upload', '_blank')}
+                  >
+                    <Youtube className="h-4 w-4" />
+                    <span className="text-[9px] font-medium">YouTube</span>
+                  </button>
+                  {/* Instagram — copy link (no web API) */}
+                  <button
+                    type="button"
+                    title="Copy link for Instagram"
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#E1306C]/10 hover:bg-[#E1306C]/20 text-[#E1306C] border border-[#E1306C]/20 hover:border-[#E1306C]/50 transition-colors"
+                    onClick={() => {
+                      const url = activeDubbedVideoUrl ?? (typeof window !== 'undefined' ? window.location.href : '')
+                      navigator.clipboard.writeText(url)
+                      setShareCopied('link')
+                      setTimeout(() => setShareCopied(null), 2000)
+                    }}
+                  >
+                    <Instagram className="h-4 w-4" />
+                    <span className="text-[9px] font-medium">{shareCopied === 'link' ? 'Copied!' : 'Instagram'}</span>
+                  </button>
+                </div>
+              </div>
+            </PopoverContent>
+          </Popover>
           <Button
             size="sm"
             variant="outline"
@@ -1745,31 +2033,6 @@ export function DubVerseEditor({
           </div>
         )}
 
-        {/* Left sidebar - QC Tabs */}
-        <div className="w-14 flex flex-col items-center py-2 border-r border-neutral-800 bg-neutral-900/70">
-          {QC_TABS.map((tab, idx) => (
-            <div key={tab.id}>
-              {/* Add divider before QC-specific tabs (after 6 main tabs) */}
-              {tab.isQCTab && idx === 6 && (
-                <div className="w-8 h-px bg-slate-700 my-2" />
-              )}
-              <button
-                className={cn(
-                  'w-10 h-10 rounded-lg flex flex-col items-center justify-center mb-1 transition-colors',
-                  activeQCCategory === tab.id 
-                    ? 'bg-amber-600/20 text-amber-400 ring-1 ring-amber-500/50' 
-                    : activeSidebarTab === tab.id 
-                      ? 'bg-slate-700 text-white' 
-                      : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'
-                )}
-                onClick={() => tab.isQCTab ? handleQCCategoryClick(tab.id) : setActiveSidebarTab(tab.id as SidebarTab)}
-              >
-                <tab.icon className="h-5 w-5" />
-                <span className="text-[8px] mt-0.5">{tab.label}</span>
-              </button>
-            </div>
-          ))}
-        </div>
         
         {/* Transcript area */}
         <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
@@ -1898,7 +2161,7 @@ export function DubVerseEditor({
                         const category = QC_TABS.find(t => t.qcType === activeFinding.type)?.id
                         if (category) {
                           setActiveQCCategory(category as QCCategory)
-                          setShowCorrectionSlider(true)
+                          openCorrectionSlider()
                           setCorrectionValue(0)
                         }
                       }}
@@ -1995,11 +2258,28 @@ export function DubVerseEditor({
                     highlightColor === 'green' && 'border-l-4 border-l-emerald-500/30',
                     dragReorder?.fromIndex === index && 'opacity-50 bg-amber-500/10',
                     dragReorder?.toIndex === index && 'border-t-2 border-t-amber-500',
+                    draggedVoice !== null && 'ring-1 ring-cyan-500/40',
                   )}
                   onClick={() => {
                     selectSegment(index)
                     setCurrentTime(displaySegments[index].start_time)
                     editorContainerRef.current?.focus()
+                  }}
+                  onDragOver={(e) => { if (draggedVoice) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' } }}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    const vk = draggedVoice ?? e.dataTransfer.getData('voice_key')
+                    if (!vk) return
+                    setStagedVoices(prev => ({ ...prev, [index]: vk }))
+                    selectSegment(index)
+                    setCurrentTime(displaySegments[index].start_time)
+                    setPitchPopupPos({
+                      x: Math.max(20, window.innerWidth / 2 - 160),
+                      y: Math.max(20, window.innerHeight / 2 - 120),
+                    })
+                    setPitchPopupIndex(index)
+                    setDraggedVoice(null)
+                    setVoicePaletteOpen(false)
                   }}
                 >
                   {/* Speaker drag handle + dropdown */}
@@ -2150,31 +2430,58 @@ export function DubVerseEditor({
                         </Button>
                       </div>
                     ) : (
-                      <div 
-                        className={cn(
-                          'text-sm cursor-grab active:cursor-grabbing select-none inline-flex items-center gap-1 px-3 py-1 rounded-full border-2 text-white',
-                          lockedSegments.has(index)
-                            ? 'border-emerald-400 bg-emerald-500/20 shadow-[0_0_10px_rgba(34,197,94,0.4)]'
-                            : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {/* Emotion tag chip — shows the exact tag that will be sent to TTS */}
+                        {stagedEmotions[index] ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-300 border border-violet-500/30 font-mono cursor-pointer hover:bg-red-500/20 hover:text-red-300 hover:border-red-500/30 transition-colors group"
+                            title="Click to remove emotion"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setStagedEmotions(prev => { const n = { ...prev }; delete n[index]; return n })
+                            }}
+                          >
+                            ({stagedEmotions[index].toLowerCase()})
+                            <X className="h-2.5 w-2.5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                          </span>
+                        ) : (
+                          <span
+                            className="inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full text-slate-600 border border-slate-800 hover:text-violet-400 hover:border-violet-500/30 transition-colors cursor-pointer select-none"
+                            title="Set emotion for this segment"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              selectSegment(index)
+                            }}
+                          >
+                            <Plus className="h-2 w-2" />emotion
+                          </span>
                         )}
-                        draggable={!lockedSegments.has(index)}
-                        onDragStart={(e) => {
-                          if (lockedSegments.has(index)) {
-                            e.preventDefault()
-                            return
-                          }
-                          const mockSuggestion: Suggestion = {
-                            id: `direct-${index}`,
-                            text: segment.target_text,
-                            confidence: 1,
-                            source: 'user'
-                          }
-                          handleDragStart(e, mockSuggestion, index)
-                        }}
-                        onDoubleClick={() => !lockedSegments.has(index) && startEditing(index)}
-                      >
-                        {lockedSegments.has(index) && <Lock className="h-3 w-3 shrink-0" />}
-                        {segment.target_text}
+                        <div
+                          className={cn(
+                            'text-sm cursor-grab active:cursor-grabbing select-none inline-flex items-center gap-1 px-3 py-1 rounded-full border-2 text-white',
+                            lockedSegments.has(index)
+                              ? 'border-emerald-400 bg-emerald-500/20 shadow-[0_0_10px_rgba(34,197,94,0.4)]'
+                              : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
+                          )}
+                          draggable={!lockedSegments.has(index)}
+                          onDragStart={(e) => {
+                            if (lockedSegments.has(index)) {
+                              e.preventDefault()
+                              return
+                            }
+                            const mockSuggestion: Suggestion = {
+                              id: `direct-${index}`,
+                              text: segment.target_text,
+                              confidence: 1,
+                              source: 'user'
+                            }
+                            handleDragStart(e, mockSuggestion, index)
+                          }}
+                          onDoubleClick={() => !lockedSegments.has(index) && startEditing(index)}
+                        >
+                          {lockedSegments.has(index) && <Lock className="h-3 w-3 shrink-0" />}
+                          {segment.target_text}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -2191,10 +2498,36 @@ export function DubVerseEditor({
               <RefreshCw className="h-4 w-4 mr-1" />
               Revert to Original
             </Button>
-            <Button variant="ghost" size="sm" className="h-8 text-xs text-slate-400">
-              <Sparkles className="h-4 w-4 mr-1" />
+            {/* Change Voice — click to reveal draggable chips, drag onto a segment */}
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn("h-8 text-xs", voicePaletteOpen ? "text-cyan-400 bg-cyan-500/10" : "text-slate-400")}
+              onClick={() => setVoicePaletteOpen(p => !p)}
+            >
+              <Mic2 className="h-4 w-4 mr-1" />
               Change Voice
             </Button>
+            {voicePaletteOpen && (
+              <div className="flex items-center gap-1.5">
+                {VOICE_OPTIONS.map(v => (
+                  <div
+                    key={v.key}
+                    draggable
+                    onDragStart={(e) => {
+                      setDraggedVoice(v.key)
+                      e.dataTransfer.setData('voice_key', v.key)
+                      e.dataTransfer.effectAllowed = 'copy'
+                    }}
+                    onDragEnd={() => setDraggedVoice(null)}
+                    className="px-2 py-0.5 rounded text-[11px] font-medium bg-slate-700 text-slate-300 cursor-grab active:cursor-grabbing border border-slate-600 hover:border-cyan-500/60 hover:text-cyan-300 select-none"
+                  >
+                    {v.label}
+                  </div>
+                ))}
+                <span className="text-[10px] text-slate-600 ml-1">drag to segment</span>
+              </div>
+            )}
             <Button variant="ghost" size="sm" className="h-8 text-xs text-slate-400">
               <Sparkles className="h-4 w-4 mr-1" />
               Pronunciation
@@ -2204,29 +2537,72 @@ export function DubVerseEditor({
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="h-8 text-xs text-slate-400"
-                  disabled={selectedSegmentIndex === null}
+                  className={cn(
+                    "h-8 text-xs gap-1",
+                    selectedSegmentIndex !== null && stagedEmotions[selectedSegmentIndex]
+                      ? "text-violet-400 bg-violet-500/10"
+                      : "text-slate-400"
+                  )}
                 >
                   {selectedSegmentIndex !== null && stagedEmotions[selectedSegmentIndex]
-                    ? stagedEmotions[selectedSegmentIndex]
+                    ? <><span className="font-mono text-[10px]">({stagedEmotions[selectedSegmentIndex].toLowerCase()})</span></>
                     : 'Emotion'}
+                  {Object.keys(stagedEmotions).length > 0 && (
+                    <span className="ml-0.5 text-[9px] bg-violet-500/30 text-violet-300 rounded-full px-1">
+                      {Object.keys(stagedEmotions).length}
+                    </span>
+                  )}
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-40 bg-[#0F172A] border-slate-700">
+              <DropdownMenuContent align="start" className="w-48 bg-[#0F172A] border-slate-700 max-h-80 overflow-y-auto">
+                {selectedSegmentIndex === null && (
+                  <div className="px-2 py-1.5 text-[10px] text-slate-500">Select a segment first</div>
+                )}
                 {EMOTIONS.map((emotion) => (
                   <DropdownMenuItem
                     key={emotion}
-                    className="text-slate-300 hover:text-white hover:bg-slate-700 cursor-pointer text-xs"
+                    className={cn(
+                      "text-xs cursor-pointer",
+                      selectedSegmentIndex !== null && stagedEmotions[selectedSegmentIndex] === emotion
+                        ? "text-violet-300 bg-violet-500/20"
+                        : "text-slate-300 hover:text-white hover:bg-slate-700"
+                    )}
                     onClick={() => {
                       if (selectedSegmentIndex !== null) {
                         setStagedEmotions(prev => ({ ...prev, [selectedSegmentIndex]: emotion }))
                       }
                     }}
                   >
+                    <span className="font-mono text-[10px] text-slate-500 mr-2 w-20 shrink-0">
+                      ({emotion.toLowerCase()})
+                    </span>
                     {emotion}
                   </DropdownMenuItem>
                 ))}
                 <DropdownMenuSeparator className="bg-slate-700" />
+                {/* Batch apply to same speaker */}
+                {selectedSegmentIndex !== null && (() => {
+                  const speaker = displaySegments[selectedSegmentIndex]?.speaker_id
+                  const emotion = stagedEmotions[selectedSegmentIndex]
+                  if (!emotion || !speaker) return null
+                  const sameSpkIndices = displaySegments
+                    .map((s, i) => s.speaker_id === speaker ? i : -1)
+                    .filter(i => i !== -1)
+                  return (
+                    <DropdownMenuItem
+                      className="text-xs text-blue-400 hover:text-blue-300 hover:bg-slate-700 cursor-pointer"
+                      onClick={() => {
+                        setStagedEmotions(prev => {
+                          const next = { ...prev }
+                          sameSpkIndices.forEach(i => { next[i] = emotion })
+                          return next
+                        })
+                      }}
+                    >
+                      Apply ({emotion.toLowerCase()}) to all {displaySegments[selectedSegmentIndex]?.speaker_label ?? 'speaker'} segments
+                    </DropdownMenuItem>
+                  )
+                })()}
                 <DropdownMenuItem
                   className="text-slate-500 hover:text-slate-300 hover:bg-slate-700 cursor-pointer text-xs"
                   onClick={() => {
@@ -2235,11 +2611,32 @@ export function DubVerseEditor({
                     }
                   }}
                 >
-                  Clear
+                  Clear this segment
                 </DropdownMenuItem>
+                {Object.keys(stagedEmotions).length > 1 && (
+                  <DropdownMenuItem
+                    className="text-slate-500 hover:text-red-400 hover:bg-slate-700 cursor-pointer text-xs"
+                    onClick={() => setStagedEmotions({})}
+                  >
+                    Clear all emotions
+                  </DropdownMenuItem>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
-            <Button variant="ghost" size="sm" className="h-8 text-xs text-slate-400">
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn("h-8 text-xs", askAiOpen ? "text-amber-400 bg-amber-500/10" : "text-slate-400")}
+              onClick={() => {
+                setAskAiOpen(p => !p)
+                setAskAiResult(null)
+                setAskAiPrompt('')
+                setAskAiPos({
+                  x: Math.max(20, window.innerWidth / 2 - 220),
+                  y: Math.max(20, window.innerHeight / 2 - 180),
+                })
+              }}
+            >
               <Sparkles className="h-4 w-4 mr-1" />
               Ask AI
             </Button>
@@ -2300,6 +2697,8 @@ export function DubVerseEditor({
                   })
                   setStagedSpeeds(prev => { const n = { ...prev }; delete n[idx]; return n })
                   setStagedEmotions(prev => { const n = { ...prev }; delete n[idx]; return n })
+                  setStagedVoices(prev => { const n = { ...prev }; delete n[idx]; return n })
+                  setStagedPitches(prev => { const n = { ...prev }; delete n[idx]; return n })
                   selectSegment(null)
                   setPendingDelete(null)
                 }}>
@@ -2465,7 +2864,7 @@ export function DubVerseEditor({
                   const category = QC_TABS.find(t => t.qcType === finding.type)?.id
                   if (category) {
                     setActiveQCCategory(category as QCCategory)
-                    setShowCorrectionSlider(true)
+                    openCorrectionSlider()
                     setCorrectionValue(0)
                   }
                 }}
@@ -2482,11 +2881,263 @@ export function DubVerseEditor({
         </div>
       </div>
 
-      {/* Slide-Rule Correction Tool - pops up above timeline */}
+      {/* Ask AI — draggable floating panel */}
+      {askAiOpen && (() => {
+        const seg = selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null
+        const QUICK = [
+          'Make this sound more natural',
+          'Match the character\'s emotion',
+          'Shorten to fit lip-sync',
+          'Improve the translation',
+        ]
+        const submit = async (prompt: string) => {
+          if (!prompt.trim() || askAiLoading) return
+          setAskAiLoading(true)
+          setAskAiResult(null)
+          try {
+            const res = await apiClient.askAI({
+              prompt,
+              source_text: seg?.source_text ?? '',
+              dubbed_text: seg?.target_text ?? '',
+              source_language: sourceLanguage,
+              target_language: targetLanguage,
+              speaker_label: seg?.speaker_label ?? '',
+              speaker_gender: seg?.speaker_gender ?? 'male',
+            })
+            setAskAiResult(res)
+          } catch (e: any) {
+            setAskAiResult({ suggestion: '', explanation: `Error: ${e.message}` })
+          } finally {
+            setAskAiLoading(false)
+          }
+        }
+        return (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setAskAiOpen(false)} />
+            <div
+              className="fixed z-50 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[440px] animate-in fade-in-0 zoom-in-95 duration-150 flex flex-col"
+              style={{ left: askAiPos.x, top: askAiPos.y }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Drag handle / header */}
+              <div
+                className="flex items-center justify-between px-4 py-3 border-b border-slate-800 cursor-grab active:cursor-grabbing select-none"
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  const panel = (e.currentTarget as HTMLElement).parentElement as HTMLElement
+                  const rect = panel.getBoundingClientRect()
+                  const ox = e.clientX - rect.left, oy = e.clientY - rect.top
+                  const onMove = (ev: MouseEvent) => setAskAiPos({ x: ev.clientX - ox, y: ev.clientY - oy })
+                  const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp) }
+                  document.addEventListener('mousemove', onMove)
+                  document.addEventListener('mouseup', onUp)
+                }}
+              >
+                <span className="text-sm font-semibold text-amber-400 flex items-center gap-2">
+                  <Sparkles className="h-4 w-4" />
+                  Ask AI
+                  {seg && <span className="text-slate-500 font-normal text-xs">— Segment {selectedSegmentIndex! + 1}</span>}
+                </span>
+                <button type="button" title="Close" onClick={() => setAskAiOpen(false)} className="text-slate-500 hover:text-white">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="p-4 space-y-3">
+                {/* Segment context */}
+                {seg && (
+                  <div className="bg-slate-800 rounded-lg p-3 space-y-1.5 text-xs">
+                    <div className="flex gap-2">
+                      <span className="text-slate-500 w-14 shrink-0">Original</span>
+                      <span className="text-slate-300">{seg.source_text}</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <span className="text-slate-500 w-14 shrink-0">Dubbed</span>
+                      <span className="text-amber-300">{seg.target_text}</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Quick prompts */}
+                <div className="flex flex-wrap gap-1.5">
+                  {QUICK.map(q => (
+                    <button
+                      key={q}
+                      type="button"
+                      className="px-2 py-1 rounded-full text-[11px] bg-slate-800 hover:bg-amber-500/20 text-slate-400 hover:text-amber-300 border border-slate-700 hover:border-amber-500/40 transition-colors"
+                      onClick={() => { setAskAiPrompt(q); submit(q) }}
+                    >
+                      {q}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Custom prompt */}
+                <div className="flex gap-2">
+                  <input
+                    aria-label="Ask AI prompt"
+                    className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-amber-500/50"
+                    placeholder="Ask anything about this segment…"
+                    value={askAiPrompt}
+                    onChange={e => setAskAiPrompt(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') submit(askAiPrompt) }}
+                  />
+                  <Button
+                    size="sm"
+                    className="bg-amber-600 hover:bg-amber-700 text-white shrink-0"
+                    onClick={() => submit(askAiPrompt)}
+                    disabled={!askAiPrompt.trim() || askAiLoading}
+                  >
+                    {askAiLoading ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                  </Button>
+                </div>
+
+                {/* AI response */}
+                {askAiLoading && (
+                  <div className="flex items-center gap-2 text-xs text-slate-400 py-2">
+                    <RefreshCw className="h-3 w-3 animate-spin" />
+                    Claude is thinking…
+                  </div>
+                )}
+                {askAiResult && !askAiLoading && (
+                  <div className="bg-amber-500/10 border border-amber-500/25 rounded-lg p-3 space-y-2">
+                    <p className="text-sm text-amber-200 font-medium">"{askAiResult.suggestion}"</p>
+                    {askAiResult.explanation && (
+                      <p className="text-xs text-slate-400">{askAiResult.explanation}</p>
+                    )}
+                    {askAiResult.suggestion && selectedSegmentIndex !== null && (
+                      <Button
+                        size="sm"
+                        className="w-full mt-1 bg-amber-600 hover:bg-amber-700 text-white text-xs h-7"
+                        onClick={() => {
+                          updateSegment(selectedSegmentIndex, { target_text: askAiResult!.suggestion, status: 'edited' })
+                          setAskAiOpen(false)
+                        }}
+                      >
+                        <Check className="h-3 w-3 mr-1" />
+                        Apply suggestion
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        )
+      })()}
+
+      {/* Voice pitch popup — appears after dragging a voice onto a segment */}
+      {pitchPopupIndex !== null && (
+        <>
+          {/* Click-outside overlay */}
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => setPitchPopupIndex(null)}
+          />
+          <div
+            className="fixed z-50 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl p-5 w-72 animate-in fade-in-0 zoom-in-95 duration-150"
+            style={{ left: pitchPopupPos.x, top: pitchPopupPos.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-semibold text-cyan-400 flex items-center gap-2">
+                <Music2 className="h-4 w-4" />
+                Pitch — Segment {pitchPopupIndex + 1}
+                {stagedVoices[pitchPopupIndex] && (
+                  <span className="text-[10px] font-normal text-slate-400">
+                    ({VOICE_OPTIONS.find(v => v.key === stagedVoices[pitchPopupIndex])?.label})
+                  </span>
+                )}
+              </span>
+              <button type="button" title="Close" onClick={() => setPitchPopupIndex(null)} className="text-slate-500 hover:text-white">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {/* Big pitch display + ± buttons */}
+            <div className="flex items-center justify-center gap-4 mb-4">
+              <button
+                type="button"
+                className="h-9 w-9 rounded-full bg-slate-700 hover:bg-slate-600 text-white text-lg font-bold flex items-center justify-center transition-colors"
+                onClick={() => setPitchPopupIndex(idx => {
+                  if (idx !== null) setStagedPitches(prev => ({ ...prev, [idx]: Math.max(-6, (prev[idx] ?? 0) - 1) }))
+                  return idx
+                })}
+              >−</button>
+              <span
+                className={cn(
+                  "text-4xl font-mono w-28 text-center cursor-pointer select-none transition-colors",
+                  (stagedPitches[pitchPopupIndex] ?? 0) !== 0 ? "text-cyan-400" : "text-white"
+                )}
+                title="Click to reset"
+                onClick={() => setStagedPitches(prev => { const n = { ...prev }; delete n[pitchPopupIndex!]; return n })}
+              >
+                {(stagedPitches[pitchPopupIndex] ?? 0) > 0 ? '+' : ''}{stagedPitches[pitchPopupIndex] ?? 0}
+                <span className="text-lg ml-1 text-slate-400">st</span>
+              </span>
+              <button
+                type="button"
+                className="h-9 w-9 rounded-full bg-slate-700 hover:bg-slate-600 text-white text-lg font-bold flex items-center justify-center transition-colors"
+                onClick={() => setPitchPopupIndex(idx => {
+                  if (idx !== null) setStagedPitches(prev => ({ ...prev, [idx]: Math.min(6, (prev[idx] ?? 0) + 1) }))
+                  return idx
+                })}
+              >+</button>
+            </div>
+
+            {/* Slider */}
+            <Slider
+              value={[stagedPitches[pitchPopupIndex] ?? 0]}
+              onValueChange={([v]) => setStagedPitches(prev => ({ ...prev, [pitchPopupIndex!]: v }))}
+              min={-6}
+              max={6}
+              step={1}
+              className="w-full mb-1"
+            />
+            <div className="flex justify-between text-[10px] text-slate-600 mb-5">
+              <span>−6 st</span><span>0</span><span>+6 st</span>
+            </div>
+
+            {/* Generate */}
+            <Button
+              className="w-full bg-amber-600 hover:bg-amber-700 text-white"
+              size="sm"
+              onClick={() => { setPitchPopupIndex(null); handleGenerateSpeech() }}
+            >
+              <Sparkles className="h-4 w-4 mr-1" />
+              Generate Speech
+            </Button>
+          </div>
+        </>
+      )}
+
+      {/* Slide-Rule Correction Tool - draggable floating panel */}
       {showCorrectionSlider && selectedSegmentIndex !== null && activeQCCategory && (
-        <div className="absolute bottom-[280px] left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-4 duration-200">
+        <div
+          className="fixed z-50 animate-in slide-in-from-bottom-4 duration-200"
+          style={{ left: correctionPanelPos.x, top: correctionPanelPos.y }}
+        >
           <div className="bg-slate-800 border border-slate-700 rounded-lg p-4 shadow-2xl min-w-[450px]">
-            <div className="flex items-center justify-between mb-3">
+            <div
+              className="flex items-center justify-between mb-3 cursor-grab active:cursor-grabbing select-none"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                const panel = (e.currentTarget as HTMLElement).closest('.fixed') as HTMLElement
+                const rect = panel.getBoundingClientRect()
+                const offsetX = e.clientX - rect.left
+                const offsetY = e.clientY - rect.top
+                const onMove = (ev: MouseEvent) => {
+                  setCorrectionPanelPos({ x: ev.clientX - offsetX, y: ev.clientY - offsetY })
+                }
+                const onUp = () => {
+                  document.removeEventListener('mousemove', onMove)
+                  document.removeEventListener('mouseup', onUp)
+                }
+                document.addEventListener('mousemove', onMove)
+                document.addEventListener('mouseup', onUp)
+              }}
+            >
               <span className="text-sm font-medium text-amber-400 capitalize flex items-center gap-2">
                 {activeQCCategory === 'timing' && <Clock className="h-4 w-4" />}
                 {activeQCCategory === 'sync' && <Music2 className="h-4 w-4" />}
@@ -2495,11 +3146,12 @@ export function DubVerseEditor({
                 {activeQCCategory === 'delivery' && <Gauge className="h-4 w-4" />}
                 {activeQCCategory} Correction - Segment {selectedSegmentIndex + 1}
               </span>
-              <Button 
-                variant="ghost" 
+              <Button
+                variant="ghost"
                 size="sm"
                 onClick={() => setShowCorrectionSlider(false)}
                 className="text-slate-400 hover:text-white h-6 px-2"
+                onMouseDown={(e) => e.stopPropagation()}
               >
                 Cancel
               </Button>
@@ -2762,8 +3414,8 @@ export function DubVerseEditor({
         
         {/* Timeline tracks */}
         <div className="flex-1 flex overflow-hidden">
-          {/* QC Monitor - moved to right panel Quality tab */}
-          {null && <div className="shrink-0 border-r border-neutral-700 bg-neutral-950 flex flex-col overflow-hidden relative" style={{ width: qcMonitorWidth }}>
+          {/* QC Monitor - permanent fixture left of timeline tracks */}
+          <div className="shrink-0 border-r border-neutral-700 bg-neutral-950 flex flex-col overflow-hidden relative" style={{ width: qcMonitorWidth }}>
               {/* Resize handle - right edge */}
               <div
                 className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group"
@@ -2795,22 +3447,41 @@ export function DubVerseEditor({
               {/* Header */}
               <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800 bg-neutral-900">
                 <div className="flex items-center gap-2">
-                  <Gauge className="h-4 w-4 text-amber-400" />
+                  <Gauge className={cn("h-4 w-4", qcLoading && !qcAnalysis ? "text-slate-500 animate-pulse" : "text-amber-400")} />
                   <span className="text-sm font-semibold text-white">QC Monitor</span>
-                  <span className={cn(
-                    'text-xs px-2 py-0.5 rounded-full border font-medium',
-                    qcReport.grade === 'A' || qcReport.grade === 'B'
-                      ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
-                      : qcReport.grade === 'C' || qcReport.grade === 'D'
-                        ? 'border-yellow-500/40 text-yellow-300 bg-yellow-500/10'
-                        : 'border-red-500/40 text-red-300 bg-red-500/10'
-                  )}>
-                    Grade {qcReport.grade} — {qcReport.overall}/100
-                  </span>
+                  {qcLoading && !qcAnalysis ? (
+                    <span className="text-xs px-2 py-0.5 rounded-full border border-slate-600 text-slate-400 bg-slate-800 animate-pulse">
+                      Analyzing…
+                    </span>
+                  ) : (
+                    <span className={cn(
+                      'text-xs px-2 py-0.5 rounded-full border font-medium',
+                      qcReport.grade === 'A' || qcReport.grade === 'B'
+                        ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
+                        : qcReport.grade === 'C' || qcReport.grade === 'D'
+                          ? 'border-yellow-500/40 text-yellow-300 bg-yellow-500/10'
+                          : 'border-red-500/40 text-red-300 bg-red-500/10'
+                    )}>
+                      {qcAnalysis ? 'Live' : 'Preview'} · Grade {qcReport.grade} — {qcReport.overall}/100
+                    </span>
+                  )}
                 </div>
+                {qcLoading && qcAnalysis && (
+                  <span className="text-[10px] text-slate-500 animate-pulse">Refreshing…</span>
+                )}
               </div>
               {/* QC Content */}
               <div className="flex-1 overflow-y-auto">
+                {qcLoading && !qcAnalysis && (
+                  <div className="p-4 space-y-3">
+                    <div className="text-xs text-slate-500 text-center pb-1">Analyzing dub quality…</div>
+                    <div className="space-y-1.5"><div className="h-2.5 w-[72%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[57%] rounded-full bg-slate-800/60 animate-pulse" /></div>
+                    <div className="space-y-1.5"><div className="h-2.5 w-[88%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[73%] rounded-full bg-slate-800/60 animate-pulse" /></div>
+                    <div className="space-y-1.5"><div className="h-2.5 w-[60%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[45%] rounded-full bg-slate-800/60 animate-pulse" /></div>
+                    <div className="space-y-1.5"><div className="h-2.5 w-[80%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[65%] rounded-full bg-slate-800/60 animate-pulse" /></div>
+                    <div className="space-y-1.5"><div className="h-2.5 w-[50%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[35%] rounded-full bg-slate-800/60 animate-pulse" /></div>
+                  </div>
+                )}
                 <QCQualityPanel
                   report={qcReport}
                   onJumpToTime={(t) => {
@@ -2837,7 +3508,7 @@ export function DubVerseEditor({
                     const category = QC_TABS.find(t => t.qcType === finding.type)?.id
                     if (category) {
                       setActiveQCCategory(category as QCCategory)
-                      setShowCorrectionSlider(true)
+                      openCorrectionSlider()
                       setCorrectionValue(0)
                     }
                   }}
@@ -2865,9 +3536,37 @@ export function DubVerseEditor({
                   selectedRetranscriptionIndex={selectedRetranscriptionIndex ?? undefined}
                 />
               </div>
-          </div>}
-          {/* Track labels - fixed left column */}
-          <div className="w-28 shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col">
+          </div>
+          {/* Track labels - resizable left column */}
+          <div className="shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col relative" style={{ width: trackLabelWidth }}>
+            {/* Resize handle - right edge */}
+            <div
+              className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                const startX = e.clientX
+                const startW = trackLabelWidth
+                setIsResizingTrackLabel(true)
+                const onMove = (ev: MouseEvent) => {
+                  const delta = ev.clientX - startX
+                  const next = Math.max(60, Math.min(280, startW + delta))
+                  setTrackLabelWidth(next)
+                }
+                const onUp = () => {
+                  setIsResizingTrackLabel(false)
+                  localStorage.setItem('dubverse.editor.trackLabelWidth', String(trackLabelWidth))
+                  document.removeEventListener('mousemove', onMove)
+                  document.removeEventListener('mouseup', onUp)
+                }
+                document.addEventListener('mousemove', onMove)
+                document.addEventListener('mouseup', onUp)
+              }}
+            >
+              <div className={cn(
+                "absolute inset-y-0 right-0 w-0.5 bg-amber-500/30 group-hover:bg-amber-500",
+                isResizingTrackLabel && "bg-amber-500"
+              )} />
+            </div>
             {/* Clickable seek header spacer */}
             <div className="h-6 shrink-0 border-b border-neutral-800 bg-neutral-900" />
             {/* Time ruler spacer */}
@@ -3011,16 +3710,32 @@ export function DubVerseEditor({
               <div
                 className="h-6 shrink-0 bg-[#0a0a0f] border-b border-neutral-700 relative"
               >
-                {Array.from({ length: Math.ceil(videoDuration) }).map((_, i) => (
-                  <div
-                    key={i}
-                    className="absolute top-0 flex flex-col items-center"
-                    style={{ left: i * PIXELS_PER_SECOND }}
-                  >
-                    <div className="h-1.5 w-px bg-slate-500" />
-                    <span className="text-[9px] text-slate-300 bg-black/50 px-0.5 rounded-sm mt-0.5">{formatTime(i)}</span>
-                  </div>
-                ))}
+                {Array.from({ length: Math.ceil(videoDuration) }).map((_, i) => {
+                  const isActiveSec = activeFinding != null &&
+                    i >= Math.floor(activeFinding.timestamp_start) &&
+                    i <= Math.floor(activeFinding.timestamp_end)
+
+                  const tickColor = isActiveSec
+                    ? activeFinding!.severity === 'error' ? 'bg-red-500' : activeFinding!.severity === 'warning' ? 'bg-yellow-500' : 'bg-blue-500'
+                    : 'bg-slate-500'
+
+                  const labelColor = isActiveSec
+                    ? activeFinding!.severity === 'error' ? 'text-red-300 bg-red-500/40'
+                      : activeFinding!.severity === 'warning' ? 'text-yellow-300 bg-yellow-500/40'
+                      : 'text-blue-300 bg-blue-500/40'
+                    : 'text-slate-300 bg-black/50'
+
+                  return (
+                    <div
+                      key={i}
+                      className="absolute top-0 flex flex-col items-center"
+                      style={{ left: i * PIXELS_PER_SECOND }}
+                    >
+                      <div className={cn('h-1.5 w-px', tickColor)} />
+                      <span className={cn('text-[9px] px-0.5 rounded-sm mt-0.5 leading-none', labelColor)}>{formatTime(i)}</span>
+                    </div>
+                  )
+                })}
               </div>
 
 {/* Video track with thumbnails - tiled background preserves aspect ratio */}

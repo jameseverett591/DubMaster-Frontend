@@ -150,7 +150,9 @@ export interface DubResponse {
 export interface RegenerateSegmentRequest {
   text?: string
   voice_id?: string
+  voice_key?: string
   speed?: number
+  pitch?: number
   emotion?: string
 }
 
@@ -644,6 +646,27 @@ class DubVerseAPIClient {
       if (response.status === 404) throw new JobNotFoundError(jobId)
       const error = await response.json().catch(() => ({ detail: response.statusText }))
       throw new Error(error.detail || `Failed to rebuild video: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  async askAI(request: {
+    prompt: string
+    source_text?: string
+    dubbed_text?: string
+    source_language?: string
+    target_language?: string
+    speaker_label?: string
+    speaker_gender?: string
+  }): Promise<{ status: string; suggestion: string; explanation: string }> {
+    const response = await fetch(`${this.baseURL}/api/ask-ai`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || 'Ask AI failed')
     }
     return response.json()
   }

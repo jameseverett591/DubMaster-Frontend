@@ -1471,6 +1471,25 @@ class DubbingService:
         except Exception:
             return 0.0
     
+    # Whether ffmpeg was built with librubberband (detected once at startup).
+    _rubberband_available: Optional[bool] = None
+
+    @classmethod
+    def _check_rubberband(cls) -> bool:
+        """Return True if ffmpeg supports arubberband (librubberband linked in)."""
+        if cls._rubberband_available is not None:
+            return cls._rubberband_available
+        try:
+            probe = subprocess.run(
+                ["ffmpeg", "-filters"],
+                capture_output=True, text=True, timeout=10
+            )
+            cls._rubberband_available = "arubberband" in probe.stdout
+        except Exception:
+            cls._rubberband_available = False
+        logger.info(f"[TIME-STRETCH] rubberband={'available' if cls._rubberband_available else 'not available, using atempo'}")
+        return cls._rubberband_available
+
     def _adjust_audio_duration(
         self,
         input_path: str,
@@ -1479,59 +1498,72 @@ class DubbingService:
         min_speed: float = 0.5,
         max_speed: float = 2.0,
     ) -> bool:
+        """Time-stretch audio to fit target_duration.
+
+        Uses arubberband (formant-preserving, phase-vocoder) when available.
+        Falls back to atempo (simpler but sounds robotic above 1.3×).
+        """
         try:
             actual_duration = self._get_audio_duration(input_path)
-            
+
             if actual_duration <= 0 or target_duration <= 0:
                 return False
-            
+
             speed_factor = actual_duration / target_duration
-            
+
             if speed_factor < min_speed:
                 speed_factor = min_speed
                 logger.warning(f"Speed factor clamped to minimum: {min_speed}")
             elif speed_factor > max_speed:
                 speed_factor = max_speed
                 logger.warning(f"Speed factor clamped to maximum: {max_speed}")
-            
+
             if 0.95 <= speed_factor <= 1.05:
                 shutil.copy(input_path, output_path)
                 return True
-            
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", input_path,
-                "-filter:a", f"atempo={speed_factor}",
-                "-vn",
-                output_path
-            ]
-            
+
+            use_rubberband = self._check_rubberband()
+
+            if use_rubberband:
+                # arubberband: formant=on preserves voice resonance during stretch.
+                # smoothing=on reduces phasing artefacts at >1.3×.
+                # transients=crisp keeps consonant clarity.
+                rb_filter = (
+                    f"arubberband=tempo={speed_factor:.4f}"
+                    ":formant=on:smoothing=on:transients=crisp"
+                )
+                cmd = ["ffmpeg", "-y", "-i", input_path, "-filter:a", rb_filter, "-vn", output_path]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    logger.info(
+                        f"[RUBBERBAND] {speed_factor:.2f}× "
+                        f"({actual_duration:.2f}s → {target_duration:.2f}s)"
+                    )
+                    return True
+                # rubberband failed despite being available — fall through to atempo
+                logger.warning(f"[RUBBERBAND] failed ({result.stderr[-200:]}), falling back to atempo")
+
+            # atempo fallback — must stay in (0.5, 2.0); chain for larger ratios
             if speed_factor > 2.0:
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", input_path,
-                    "-filter:a", f"atempo=2.0,atempo={speed_factor/2.0}",
-                    "-vn",
-                    output_path
-                ]
+                atempo_filter = f"atempo=2.0,atempo={speed_factor / 2.0:.4f}"
             elif speed_factor < 0.5:
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", input_path,
-                    "-filter:a", f"atempo=0.5,atempo={speed_factor/0.5}",
-                    "-vn",
-                    output_path
-                ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
+                atempo_filter = f"atempo=0.5,atempo={speed_factor / 0.5:.4f}"
+            else:
+                atempo_filter = f"atempo={speed_factor:.4f}"
+
+            cmd = ["ffmpeg", "-y", "-i", input_path, "-filter:a", atempo_filter, "-vn", output_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
             if result.returncode != 0:
-                logger.error(f"FFmpeg tempo adjustment error: {result.stderr}")
+                logger.error(f"[ATEMPO] error: {result.stderr[-200:]}")
                 return False
-            
-            logger.info(f"Adjusted audio speed by {speed_factor:.2f}x ({actual_duration:.2f}s -> {target_duration:.2f}s)")
+
+            logger.info(
+                f"[ATEMPO] {speed_factor:.2f}× "
+                f"({actual_duration:.2f}s → {target_duration:.2f}s)"
+            )
             return os.path.exists(output_path)
-            
+
         except Exception as e:
             logger.error(f"Audio duration adjustment error: {e}")
             return False
@@ -1931,6 +1963,8 @@ class DubbingService:
         speed_ratio: Optional[float] = None,
         target_duration: Optional[float] = None,
         text: Optional[str] = None,
+        emotion: Optional[str] = None,
+        pitch: Optional[int] = None,
     ) -> Dict:
         output_dir = os.path.join(self.dubbed_dir, job_id)
         segments_path = os.path.join(output_dir, "segments.json")
@@ -1980,16 +2014,56 @@ class DubbingService:
         # regen for this segment. edit_history preserves the change record.
         audio_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen.mp3")
 
+        emotion_tag = f"({emotion.lower()})" if emotion else ""
         result = await fish_audio_tts.text_to_speech(
             text=use_text,
             voice_id=use_voice_id,
             output_path=audio_path,
             speed=use_speed,
+            emotion_tags=emotion_tag,
+            pitch=pitch,
         )
         if not result:
             raise RuntimeError(f"TTS failed for segment {segment_index} in job {job_id}")
 
-        seg["path"] = result["path"]
+        final_path = result["path"]
+
+        # Fit/trim pass — same quality treatment as the main dub pipeline.
+        # If the TTS audio overflows the segment slot, time-stretch it with
+        # rubberband (formant-preserving) so the editor regen is never worse
+        # than re-running a full dub.
+        slot_start = float(seg.get("start", 0))
+        slot_end   = float(seg.get("end", 0))
+        slot_dur   = slot_end - slot_start
+        if slot_dur > 0.2:
+            trimmed_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen_notrim.mp3")
+            trimmed_ok = await asyncio.to_thread(
+                self._trim_leading_silence, final_path, trimmed_path
+            )
+            if trimmed_ok and os.path.exists(trimmed_path):
+                silence_removed = (
+                    await asyncio.to_thread(self._get_audio_duration, final_path)
+                    - await asyncio.to_thread(self._get_audio_duration, trimmed_path)
+                )
+                if silence_removed > 0.08:
+                    final_path = trimmed_path
+
+            actual_dur = await asyncio.to_thread(self._get_audio_duration, final_path)
+            if actual_dur > slot_dur + 0.05:
+                stretched_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen_fit.mp3")
+                stretched = await asyncio.to_thread(
+                    self._adjust_audio_duration,
+                    final_path, stretched_path, slot_dur,
+                    min_speed=0.8, max_speed=1.5,
+                )
+                if stretched and os.path.exists(stretched_path):
+                    final_path = stretched_path
+                    logger.info(
+                        f"[REGEN-FIT] seg {segment_index}: "
+                        f"{actual_dur:.2f}s → {slot_dur:.2f}s slot"
+                    )
+
+        seg["path"] = final_path
         seg["voice_id"] = use_voice_id
         seg["speed"] = use_speed
         seg["text"] = use_text

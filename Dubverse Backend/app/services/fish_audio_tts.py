@@ -240,6 +240,7 @@ class FishAudioTTS:
         emotion_tags: str = "",
         speaker_references: Optional[List[Dict]] = None,
         speed: float = 1.0,
+        pitch: Optional[int] = None,
         temperature: float = 0.7,
         top_p: float = 0.7,
         language: str = "en",
@@ -299,7 +300,11 @@ class FishAudioTTS:
                 text=tagged_text,
                 speed=speed,
                 format="mp3",
+                normalize=True,   # normalise output volume — reduces harshness
+                mp3_bitrate=128,  # 128 kbps vs default 64 kbps: cleaner highs
             )
+            if pitch is not None and pitch != 0:
+                tts_kwargs["pitch"] = pitch
 
             if use_inline:
                 # Zero-shot voice cloning from original actor audio
@@ -332,7 +337,7 @@ class FishAudioTTS:
         # to Edge TTS which produces a completely different voice mid-job.
         if use_inline:
             try:
-                retry_kwargs = dict(text=tagged_text, speed=speed, format="mp3")
+                retry_kwargs = dict(text=tagged_text, speed=speed, format="mp3", normalize=True, mp3_bitrate=128)
                 if voice_id:
                     retry_kwargs["reference_id"] = voice_id
                 audio_bytes = await self._convert_with_backoff(retry_kwargs)

@@ -1,4 +1,5 @@
 from typing import Optional
+from pydantic import BaseModel
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
 from fastapi.responses import JSONResponse, FileResponse
 import uuid
@@ -2124,7 +2125,15 @@ async def process_vozo_pipeline(
                     job_id, JobStatus.COMPLETED, progress=100,
                     current_stage="Vozo dubbing complete",
                 )
-                logger.info(f"Job {job_id}: Vozo dubbing completed successfully")
+                logger.info(f"Job {job_id} Vozo dubbing completed successfully")
+
+                # Auto-trigger QC analysis concurrently — non-blocking fire-and-forget
+                try:
+                    from app.pipeline.analyze_dub import analyze_dub as _analyze_dub
+                    asyncio.create_task(asyncio.to_thread(_analyze_dub, job_id, target_lang, video_path))
+                    logger.info(f"Job {job_id}: QC analysis auto-triggered (Vozo)")
+                except Exception as _qc_err:
+                    logger.warning(f"Job {job_id}: QC auto-trigger skipped (Vozo): {_qc_err}")
                 return
 
             elif vozo_status == "failed":
@@ -2232,6 +2241,14 @@ async def process_dubbing_pipeline(
                 current_stage="Dubbing complete"
             )
             logger.info(f"Job {job_id} dubbing completed successfully")
+
+            # Auto-trigger QC analysis concurrently — non-blocking fire-and-forget
+            try:
+                from app.pipeline.analyze_dub import analyze_dub as _analyze_dub
+                asyncio.create_task(asyncio.to_thread(_analyze_dub, job_id, target_lang, video_path))
+                logger.info(f"Job {job_id}: QC analysis auto-triggered")
+            except Exception as _qc_err:
+                logger.warning(f"Job {job_id}: QC auto-trigger skipped: {_qc_err}")
         else:
             await job_manager.update_job_status(
                 job_id,
@@ -2828,6 +2845,12 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
         speed_ratio = None
         target_duration = None
 
+        # Resolve canonical voice key (e.g. "male-1") to Fish Audio reference_id
+        if body.voice_key and not voice_id:
+            resolved = fish_audio_tts.get_voice_id(body.voice_key)
+            if resolved:
+                voice_id = resolved
+
         if getattr(body, "voice_params", None):
             if body.voice_params.voice_id is not None:
                 voice_id = body.voice_params.voice_id
@@ -2844,6 +2867,8 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
             speed_ratio=speed_ratio,
             target_duration=target_duration,
             text=body.text,
+            emotion=body.emotion,
+            pitch=body.pitch,
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -2852,3 +2877,71 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"status": "ok", "segment": seg}
+
+
+class AskAIRequest(BaseModel):
+    prompt: str
+    source_text: str = ""
+    dubbed_text: str = ""
+    source_language: str = "zh"
+    target_language: str = "en"
+    speaker_label: str = ""
+    speaker_gender: str = "male"
+
+
+@router.post("/ask-ai")
+async def ask_ai(body: AskAIRequest):
+    """Ask Claude to improve a dubbed segment based on a user prompt."""
+    import httpx, re as _re
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="AI not configured")
+
+    system_prompt = (
+        "You are an expert dubbing editor and dialogue writer. "
+        "Your job is to improve dubbed dialogue so it sounds natural, "
+        "matches the character's emotion, fits lip-sync timing, and reads well when spoken aloud. "
+        "Always respond with valid JSON only — no markdown, no extra text."
+    )
+
+    user_prompt = f"""Dubbing context:
+- Source language: {body.source_language}
+- Target language: {body.target_language}
+- Speaker: {body.speaker_label or 'Unknown'} ({body.speaker_gender})
+- Original text: "{body.source_text}"
+- Current dubbed text: "{body.dubbed_text}"
+
+User request: "{body.prompt}"
+
+Respond with JSON: {{"suggestion": "<improved dubbed text>", "explanation": "<one sentence why this is better>"}}"""
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 512,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": user_prompt}],
+                },
+            )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail="AI request failed")
+
+        text = resp.json().get("content", [{}])[0].get("text", "")
+        cleaned = _re.sub(r"^```json\s*", "", text.strip())
+        cleaned = _re.sub(r"\s*```$", "", cleaned)
+        data = _json.loads(cleaned)
+        return {"status": "ok", "suggestion": data.get("suggestion", ""), "explanation": data.get("explanation", "")}
+    except _json.JSONDecodeError:
+        return {"status": "ok", "suggestion": text.strip(), "explanation": ""}
+    except Exception as e:
+        logger.error(f"[ASK-AI] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

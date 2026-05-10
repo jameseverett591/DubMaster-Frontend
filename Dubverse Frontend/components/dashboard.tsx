@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { useRouter } from "next/navigation"
+import { useRouter, useSearchParams } from "next/navigation"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { VideoUpload } from "@/components/video-upload"
 import { YouTubeIntegration } from "@/components/youtube-integration"
@@ -48,7 +48,13 @@ const tabBackgrounds: Record<string, string> = {
 
 export function Dashboard() {
   const router = useRouter()
-  const [activeTab, setActiveTab] = useState("upload")
+  const searchParams = useSearchParams()
+  const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') ?? "upload")
+
+  useEffect(() => {
+    const tab = searchParams.get('tab') ?? 'upload'
+    setActiveTab(tab)
+  }, [searchParams])
   const [selectedVideo, setSelectedVideo] = useState<VideoSource | null>(null)
   const [isWorkspaceOpen, setIsWorkspaceOpen] = useState(false)
   const [editorMode, setEditorMode] = useState<EditorMode>("automatic")
