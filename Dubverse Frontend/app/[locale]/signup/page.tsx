@@ -13,7 +13,7 @@ import { Mic2, Mail, Lock, User, Github, Check, Loader2, Eye, EyeOff } from "luc
 import Link from "next/link"
 
 export default function SignUpPage() {
-  const [selectedPlan, setSelectedPlan] = useState<"basic" | "premium" | "professional">("premium")
+  const [selectedPlan, setSelectedPlan] = useState<"basic" | "premium" | "professional">("basic")
   const [isYearly, setIsYearly] = useState(false)
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
@@ -113,15 +113,14 @@ export default function SignUpPage() {
       setError(signUpError.message)
       setLoading(false)
     } else if (data.user) {
-      // Store selected plan for post-confirmation checkout
-      sessionStorage.setItem('selectedPlan', JSON.stringify({
-        planKey: selectedPlan,
-        isYearly,
-        userId: data.user.id,
-        email: data.user.email
-      }))
-      setSuccess(true)
-      setLoading(false)
+      if (data.session) {
+        // Email confirmation not required — go straight to checkout
+        router.push(`/checkout?plan=${selectedPlan}&interval=${isYearly ? 'year' : 'month'}`)
+      } else {
+        // Email confirmation required — the email link includes plan/interval
+        setSuccess(true)
+        setLoading(false)
+      }
     }
   }
 
