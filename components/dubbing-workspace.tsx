@@ -60,22 +60,69 @@ import {
 interface DubbingWorkspaceProps {
   video: VideoSource
   onClose: () => void
+  planType?: string
 }
 
 const LANGUAGES = [
-  { code: "en", name: "English", flag: "🇺🇸" },
+  // East / Southeast Asia
+  { code: "zh", name: "Mandarin Chinese", flag: "🇨🇳" },
+  { code: "yue", name: "Cantonese", flag: "🇭🇰" },
+  { code: "ja", name: "Japanese", flag: "🇯🇵" },
+  { code: "ko", name: "Korean", flag: "🇰🇷" },
+  { code: "vi", name: "Vietnamese", flag: "🇻🇳" },
+  { code: "th", name: "Thai", flag: "🇹🇭" },
+  { code: "id", name: "Indonesian", flag: "🇮🇩" },
+  { code: "ms", name: "Malay", flag: "🇲🇾" },
+  { code: "tl", name: "Filipino", flag: "🇵🇭" },
+  { code: "km", name: "Khmer", flag: "🇰🇭" },
+  { code: "my", name: "Burmese", flag: "🇲🇲" },
+  // South Asia
+  { code: "hi", name: "Hindi", flag: "🇮🇳" },
+  { code: "bn", name: "Bengali", flag: "🇧🇩" },
+  { code: "ur", name: "Urdu", flag: "🇵🇰" },
+  { code: "ta", name: "Tamil", flag: "🇱🇰" },
+  { code: "te", name: "Telugu", flag: "🇮🇳" },
+  { code: "gu", name: "Gujarati", flag: "🇮🇳" },
+  { code: "mr", name: "Marathi", flag: "🇮🇳" },
+  { code: "si", name: "Sinhala", flag: "🇱🇰" },
+  // Middle East / Central Asia
+  { code: "ar", name: "Arabic", flag: "🇸🇦" },
+  { code: "fa", name: "Persian", flag: "🇮🇷" },
+  { code: "he", name: "Hebrew", flag: "🇮🇱" },
+  { code: "tr", name: "Turkish", flag: "🇹🇷" },
+  // Western Europe
+  { code: "en", name: "English", flag: "🇬🇧" },
   { code: "es", name: "Spanish", flag: "🇪🇸" },
   { code: "fr", name: "French", flag: "🇫🇷" },
   { code: "de", name: "German", flag: "🇩🇪" },
   { code: "it", name: "Italian", flag: "🇮🇹" },
   { code: "pt", name: "Portuguese", flag: "🇵🇹" },
-  { code: "ja", name: "Japanese", flag: "🇯🇵" },
-  { code: "ko", name: "Korean", flag: "🇰🇷" },
-  { code: "zh", name: "Chinese", flag: "🇨🇳" },
-  { code: "ar", name: "Arabic", flag: "🇸🇦" },
-  { code: "hi", name: "Hindi", flag: "🇮🇳" },
-  { code: "ru", name: "Russian", flag: "🇷🇺" },
   { code: "nl", name: "Dutch", flag: "🇳🇱" },
+  { code: "sv", name: "Swedish", flag: "🇸🇪" },
+  { code: "no", name: "Norwegian", flag: "🇳🇴" },
+  { code: "da", name: "Danish", flag: "🇩🇰" },
+  { code: "fi", name: "Finnish", flag: "🇫🇮" },
+  { code: "el", name: "Greek", flag: "🇬🇷" },
+  // Eastern Europe
+  { code: "ru", name: "Russian", flag: "🇷🇺" },
+  { code: "uk", name: "Ukrainian", flag: "🇺🇦" },
+  { code: "pl", name: "Polish", flag: "🇵🇱" },
+  { code: "cs", name: "Czech", flag: "🇨🇿" },
+  { code: "sk", name: "Slovak", flag: "🇸🇰" },
+  { code: "hu", name: "Hungarian", flag: "🇭🇺" },
+  { code: "ro", name: "Romanian", flag: "🇷🇴" },
+  { code: "bg", name: "Bulgarian", flag: "🇧🇬" },
+  { code: "hr", name: "Croatian", flag: "🇭🇷" },
+  { code: "sr", name: "Serbian", flag: "🇷🇸" },
+  // Africa
+  { code: "sw", name: "Swahili", flag: "🇰🇪" },
+  { code: "am", name: "Amharic", flag: "🇪🇹" },
+  { code: "yo", name: "Yoruba", flag: "🇳🇬" },
+  { code: "ig", name: "Igbo", flag: "🇳🇬" },
+  { code: "zu", name: "Zulu", flag: "🇿🇦" },
+  // Americas
+  { code: "pt-BR", name: "Portuguese (Brazil)", flag: "🇧🇷" },
+  { code: "es-MX", name: "Spanish (Mexico)", flag: "🇲🇽" },
 ]
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -110,7 +157,8 @@ function buildDetectedVoices(
 
 // ── Component ──────────────────────────────────────────────────────────────
 
-export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
+export function DubbingWorkspace({ video, onClose, planType }: DubbingWorkspaceProps) {
+  const isBasicPlan = (planType ?? 'basic') === 'basic'
   const [targetLanguage, setTargetLanguage] = useState("en")
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
@@ -641,7 +689,12 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
               </>
             )}
           </Button>
-          <Button variant="secondary" className="gap-2 h-8 text-sm" disabled={!dubbingComplete || !dubbedVideoUrl}>
+          <Button
+            variant="secondary"
+            className="gap-2 h-8 text-sm"
+            disabled={!dubbingComplete || !dubbedVideoUrl}
+            onClick={() => { if (dubbedVideoUrl) window.open(dubbedVideoUrl, '_blank') }}
+          >
             <Download className="h-3.5 w-3.5" />
             Export
           </Button>
@@ -777,8 +830,8 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
           </div>
         </div>
 
-        {/* Sidebar Panel — fixed width, fits in viewport */}
-        <div className="w-80 shrink-0 border-l border-border/50 bg-card/50 backdrop-blur-md flex flex-col min-h-0">
+        {/* Sidebar Panel — hidden on Basic plan */}
+        {!isBasicPlan && <div className="w-80 shrink-0 border-l border-border/50 bg-card/50 backdrop-blur-md flex flex-col min-h-0">
           <Tabs value={activeTab} onValueChange={setActiveTab} className="flex h-full flex-col min-h-0">
             <div className="mx-3 mt-3 shrink-0 space-y-1">
               <TabsList className="grid w-full grid-cols-4">
@@ -972,7 +1025,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
               </ScrollArea>
             </TabsContent>
           </Tabs>
-        </div>
+        </div>}
       </div>
     </div>
   )

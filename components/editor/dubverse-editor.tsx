@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useCallback, useState, useRef, type ReactNode } from 'react'
+import { useEffect, useCallback, useState, useRef, useMemo, type ReactNode } from 'react'
 import {
   Lock,
   Unlock,
@@ -26,7 +26,6 @@ import {
   Grid3X3,
   GripHorizontal,
   X,
-  Globe,
   Bell,
   ArrowLeft,
   Share2,
@@ -57,6 +56,8 @@ import type { Segment, QCScore, QCFinding, QCFindingType, QCReport } from '@/lib
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
 import { buildMockQCReport } from '@/lib/qc-mock-data'
 import { QCQualityPanel } from '@/components/editor/qc-quality-panel'
+import { LanguageSwitcher } from '@/components/language-switcher'
+import { createClient } from '@/lib/supabase/client'
 
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -140,6 +141,7 @@ interface SegmentContextMenuProps {
   stagedEmotions: Record<number, string>
   emotions: string[]
   onSplit: (index: number) => void
+  onSplitAtWord: (index: number) => void
   onAddAfter: (index: number) => void
   onDelete: (index: number) => void
   onToggleLock: (index: number) => void
@@ -148,6 +150,7 @@ interface SegmentContextMenuProps {
   onSetEmotion: (index: number, emotion: string) => void
   onClearEmotion: (index: number) => void
   onSelect: (index: number) => void
+  onRenameSpeaker: (index: number) => void
 }
 
 function SegmentContextMenu({
@@ -158,6 +161,7 @@ function SegmentContextMenu({
   stagedEmotions,
   emotions,
   onSplit,
+  onSplitAtWord,
   onAddAfter,
   onDelete,
   onToggleLock,
@@ -166,18 +170,23 @@ function SegmentContextMenu({
   onSetEmotion,
   onClearEmotion,
   onSelect,
+  onRenameSpeaker,
 }: SegmentContextMenuProps) {
   const [showEmotions, setShowEmotions] = useState(false)
   return (
-    <ContextMenu onOpenChange={(open) => { 
-      if (open) onSelect(index)
-      else setShowEmotions(false)
-    }}>
-      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+    <ContextMenu onOpenChange={(open) => { if (!open) setShowEmotions(false) }}>
+      <ContextMenuTrigger asChild>
+        <span style={{ display: 'contents' }} onClick={() => onSelect(index)}>
+          {children}
+        </span>
+      </ContextMenuTrigger>
       <ContextMenuContent className={cn("bg-neutral-900 border-neutral-700", showEmotions ? "w-72" : "w-52")}>
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onSplit(index) }} className="text-xs gap-2">
           ✂️ Split at Playhead
           <ContextMenuShortcut>C</ContextMenuShortcut>
+        </ContextMenuItem>
+        <ContextMenuItem onClick={(e) => { e.stopPropagation(); onSplitAtWord(index) }} className="text-xs gap-2">
+          ✂️ Split at Word…
         </ContextMenuItem>
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onAddAfter(index) }} className="text-xs gap-2">
           ➕ Add Segment After
@@ -199,6 +208,10 @@ function SegmentContextMenu({
         <ContextMenuSeparator />
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onRevert(index) }} className="text-xs gap-2">
           ↩️ Revert to Original
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={(e) => { e.stopPropagation(); onRenameSpeaker(index) }} className="text-xs gap-2 text-purple-400 focus:text-purple-400">
+          ✏️ Rename Speaker
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem className="text-xs gap-2 text-blue-400 focus:text-blue-400">
@@ -435,6 +448,19 @@ export function DubVerseEditor({
     }
   }, [qcAnalysis, jobId])
 
+  useEffect(() => {
+    createClient().auth.getUser().then(({ data: { user } }) => {
+      if (!user) return
+      const name = (user.user_metadata?.full_name as string | undefined) || user.email || ''
+      const parts = name.trim().split(/\s+/)
+      setUserInitials(
+        parts.length >= 2
+          ? (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+          : name.slice(0, 2).toUpperCase()
+      )
+    })
+  }, [])
+
   // Active finding drives the severity color overlay + auto-opens correction tool
   const [activeFinding, setActiveFinding] = useState<QCFinding | null>(null)
 
@@ -487,12 +513,19 @@ export function DubVerseEditor({
   const [stagedSpeeds, setStagedSpeeds] = useState<Record<number, number>>({})
   const [stagedEmotions, setStagedEmotions] = useState<Record<number, string>>({})
   const [stagedVoices, setStagedVoices] = useState<Record<number, string>>({})
+  const [renamingSpeakerId, setRenamingSpeakerId] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
   const [stagedPitches, setStagedPitches] = useState<Record<number, number>>({})
   const [draggedVoice, setDraggedVoice] = useState<string | null>(null)
   const [voicePaletteOpen, setVoicePaletteOpen] = useState(false)
   const [pitchPopupIndex, setPitchPopupIndex] = useState<number | null>(null)
   const [pitchPopupPos, setPitchPopupPos] = useState({ x: 0, y: 0 })
+  const [speedPopupIndex, setSpeedPopupIndex] = useState<number | null>(null)
+  const [speedPopupPos, setSpeedPopupPos] = useState({ x: 0, y: 0 })
   const [pendingDelete, setPendingDelete] = useState<number | null>(null)
+  const [splitWordMode, setSplitWordMode] = useState<number | null>(null)
+  const [inlineEmotionPicker, setInlineEmotionPicker] = useState<number | null>(null)
+  const [userInitials, setUserInitials] = useState("JA")
   const [showRevertAllConfirm, setShowRevertAllConfirm] = useState(false)
   const [contextSegmentIndex, setContextSegmentIndex] = useState<number | null>(null)
   const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
@@ -512,6 +545,10 @@ export function DubVerseEditor({
     }
     setIsSegmentPreviewing(false)
   }, [selectedSegmentIndex])
+
+  useEffect(() => {
+    if (splitWordMode !== null || selectedSegmentIndex !== null) setInlineEmotionPicker(null)
+  }, [splitWordMode, selectedSegmentIndex])
 
   // Persist / restore timeline zoom and scroll
   useEffect(() => {
@@ -669,6 +706,28 @@ export function DubVerseEditor({
   // Use imported segments if set (even if empty), otherwise use initial segments
   const displaySegments = importedSegments !== null ? importedSegments : segments
 
+  // Unique speakers across all segments — used for reassignment dropdown
+  const uniqueSpeakers = useMemo(() => {
+    const seen = new Map<string, { id: string; label: string; gender: 'male' | 'female' | 'child' }>()
+    displaySegments.forEach(seg => {
+      if (!seen.has(seg.speaker_id)) {
+        seen.set(seg.speaker_id, {
+          id: seg.speaker_id,
+          label: seg.speaker_label || seg.speaker_id,
+          gender: seg.speaker_gender || 'male',
+        })
+      }
+    })
+    return [...seen.values()]
+  }, [displaySegments])
+
+  // speaker_id → 1-based number by first appearance (diarization order)
+  const speakerNumberMap = useMemo(() => {
+    const map: Record<string, number> = {}
+    uniqueSpeakers.forEach((spk, i) => { map[spk.id] = i + 1 })
+    return map
+  }, [uniqueSpeakers])
+
   const handleSplitAtPlayhead = useCallback((index: number) => {
     const segment = displaySegments[index]
     if (!segment || currentTime <= segment.start_time || currentTime >= segment.end_time) return
@@ -681,6 +740,26 @@ export function DubVerseEditor({
       return result
     })
   }, [displaySegments, currentTime])
+
+  const handleSplitAtWord = useCallback((index: number, wordIndex: number) => {
+    const segment = displaySegments[index]
+    if (!segment || wordIndex <= 0) return
+    const words = segment.target_text.split(' ')
+    if (wordIndex >= words.length) return
+    const leftText = words.slice(0, wordIndex).join(' ')
+    const rightText = words.slice(wordIndex).join(' ')
+    const splitRatio = wordIndex / words.length
+    const splitTime = segment.start_time + splitRatio * (segment.end_time - segment.start_time)
+    const leftSegment = { ...segment, end_time: splitTime, target_text: leftText }
+    const rightSegment = { ...segment, id: `split-${Date.now()}`, start_time: splitTime, target_text: rightText }
+    setImportedSegments(prev => {
+      const base = prev ?? displaySegments
+      const result = [...base]
+      result.splice(index, 1, leftSegment, rightSegment)
+      return result
+    })
+    setSplitWordMode(null)
+  }, [displaySegments])
 
   const handleAddSegmentAfter = useCallback((index: number) => {
     const segment = displaySegments[index]
@@ -701,6 +780,18 @@ export function DubVerseEditor({
     })
     selectSegment(index + 1)
   }, [displaySegments, selectSegment])
+
+  const commitSpeakerRename = useCallback((speakerId: string, newLabel: string) => {
+    if (!newLabel.trim()) return
+    setImportedSegments(prev => {
+      const base = prev ?? displaySegments
+      return base.map(seg =>
+        seg.speaker_id === speakerId ? { ...seg, speaker_label: newLabel.trim() } : seg
+      )
+    })
+    setRenamingSpeakerId(null)
+    setRenameValue('')
+  }, [displaySegments])
 
   // Keyboard shortcuts — U: pair lock, M: QC group lock
   // Placed after displaySegments and qcBoxPosition so dep array has no TDZ
@@ -748,12 +839,14 @@ export function DubVerseEditor({
   // Zoom controls
   const maxZoom = 20
   const minZoom = 0.05
-  const [masterVolume, setMasterVolume] = useState(50)
+  const [masterVolume, setMasterVolume] = useState(100)
   const [audioVolume, setAudioVolume] = useState(50)
-  const [originalTextVolume, setOriginalTextVolume] = useState(50)
+  const [originalTextVolume, setOriginalTextVolume] = useState(100)
   const [dubbedTextVolume, setDubbedTextVolume] = useState(50)
   const [backgroundVolume, setBackgroundVolume] = useState(50)
   const [isMuted, setIsMuted] = useState(false)
+  const [isMutedOriginal, setIsMutedOriginal] = useState(false)
+  const [isMutedDubbed, setIsMutedDubbed] = useState(false)
   
   // Audio waveform data - initialize with sample data so it always renders
   const [waveformData, setWaveformData] = useState<number[]>(() => {
@@ -1149,8 +1242,10 @@ export function DubVerseEditor({
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
-    video.volume = isMuted ? 0 : Math.max(0, Math.min(1, masterVolume / 100))
-  }, [masterVolume, isMuted])
+    const trackMuted = playbackMode === 'dubbed' ? isMutedDubbed : isMutedOriginal
+    const trackVol = playbackMode === 'dubbed' ? dubbedTextVolume : originalTextVolume
+    video.volume = (isMuted || trackMuted) ? 0 : Math.max(0, Math.min(1, trackVol / 100))
+  }, [isMuted, isMutedOriginal, isMutedDubbed, originalTextVolume, dubbedTextVolume, playbackMode])
 
   useEffect(() => { setPendingDelete(null) }, [selectedSegmentIndex])
 
@@ -1159,15 +1254,18 @@ export function DubVerseEditor({
       setCurrentTime(videoRef.current.currentTime)
       if (timelineRef.current) {
         const container = timelineRef.current
-        const playheadPx = videoRef.current.currentTime * PIXELS_PER_SECOND
+        const pps = 40 * zoomLevel
+        const playheadPx = videoRef.current.currentTime * pps
+        const visibleLeft = container.scrollLeft
         const visibleRight = container.scrollLeft + container.clientWidth
-        const edgeThreshold = container.clientWidth * 0.1
-        if (playheadPx > visibleRight - edgeThreshold) {
-          container.scrollLeft = playheadPx - container.clientWidth * 0.5
+        if (playheadPx > visibleRight - container.clientWidth * 0.15) {
+          container.scrollLeft = playheadPx - container.clientWidth * 0.3
+        } else if (playheadPx < visibleLeft) {
+          container.scrollLeft = Math.max(0, playheadPx - container.clientWidth * 0.1)
         }
       }
     }
-  }, [setCurrentTime])
+  }, [setCurrentTime, zoomLevel])
   
   // Get severity color for segment based on active QC category
   const getSegmentHighlightColor = useCallback((segment: Segment) => {
@@ -1336,37 +1434,44 @@ export function DubVerseEditor({
   const handleNeedleDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
-    
+
     const timelineElement = timelineRef.current
     if (!timelineElement) return
-    
+
+    const pps = 40 * zoomLevel
+
     const updateTimeFromMouse = (clientX: number) => {
       const rect = timelineElement.getBoundingClientRect()
       const scrollLeft = timelineElement.scrollLeft
       const x = clientX - rect.left + scrollLeft
-      const newTime = Math.max(0, Math.min(x / PIXELS_PER_SECOND, videoDuration))
+      const newTime = Math.max(0, Math.min(x / pps, videoDuration))
       setCurrentTime(newTime)
+      if (videoRef.current) videoRef.current.currentTime = newTime
 
-      // Also update video position
-      if (videoRef.current) {
-        videoRef.current.currentTime = newTime
+      // Auto-scroll when dragging near edges
+      const relX = clientX - rect.left
+      const scrollZone = 60
+      if (relX < scrollZone) {
+        timelineElement.scrollLeft -= (scrollZone - relX) * 0.4
+      } else if (relX > rect.width - scrollZone) {
+        timelineElement.scrollLeft += (relX - (rect.width - scrollZone)) * 0.4
       }
     }
-    
+
     updateTimeFromMouse(e.clientX)
-    
+
     const handleMouseMove = (moveEvent: MouseEvent) => {
       updateTimeFromMouse(moveEvent.clientX)
     }
-    
+
     const handleMouseUp = () => {
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
     }
-    
+
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
-  }, [videoDuration, setCurrentTime])
+  }, [videoDuration, setCurrentTime, zoomLevel])
   
   // Handle drag start for suggestions (English translations)
   const handleDragStart = useCallback((e: React.DragEvent, suggestion: Suggestion, segmentIndex: number) => {
@@ -1709,14 +1814,11 @@ export function DubVerseEditor({
             )}
           </Button>
           {/* Language selector */}
-          <Button variant="ghost" size="sm" className="text-slate-400">
-            <Globe className="h-4 w-4 mr-1" />
-            US English
-          </Button>
+          <LanguageSwitcher />
           <Bell className="h-5 w-5 text-slate-400" />
-          <div className="w-8 h-8 rounded-full bg-amber-500 flex items-center justify-center">
-            <span className="text-sm font-medium text-white">JA</span>
-          </div>
+          <Link href="/account" className="w-8 h-8 rounded-full bg-amber-500 flex items-center justify-center hover:opacity-80 transition-opacity" title="Account">
+            <span className="text-sm font-medium text-white">{userInitials}</span>
+          </Link>
         </div>
       </header>
       
@@ -1990,9 +2092,11 @@ export function DubVerseEditor({
             <Download className="h-4 w-4 mr-1" />
             Export
           </Button>
-          <Button variant="ghost" size="sm" className="h-8">
-            <User className="h-4 w-4" />
-          </Button>
+          <Link href="/profile">
+            <Button variant="ghost" size="sm" className="h-8" title="Profile">
+              <User className="h-4 w-4" />
+            </Button>
+          </Link>
         </div>
       </div>
       
@@ -2239,6 +2343,7 @@ export function DubVerseEditor({
                   emotions={EMOTIONS}
                   onSelect={(idx) => { selectSegment(idx); setContextSegmentIndex(idx) }}
                   onSplit={handleSplitAtPlayhead}
+                  onSplitAtWord={(idx) => setSplitWordMode(idx)}
                   onAddAfter={handleAddSegmentAfter}
                   onDelete={(idx) => setPendingDelete(idx)}
                   onToggleLock={(idx) => setLockedSegments(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
@@ -2246,6 +2351,12 @@ export function DubVerseEditor({
                   onRevert={() => handleRevert()}
                   onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
                   onClearEmotion={(idx) => setStagedEmotions(prev => { const n = { ...prev }; delete n[idx]; return n })}
+                  onRenameSpeaker={(idx) => {
+                    const spkId = displaySegments[idx]?.speaker_id
+                    if (!spkId) return
+                    setRenamingSpeakerId(spkId)
+                    setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
+                  }}
                 >
                 <div
                   data-segment-row
@@ -2306,86 +2417,29 @@ export function DubVerseEditor({
                     >
                       <GripHorizontal className="h-4 w-4" />
                     </div>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className={cn(
-                            'h-7 px-2 text-xs font-medium shrink-0 min-w-[95px]',
-                            speakerColor.bg,
-                            speakerColor.text,
-                            'border-transparent hover:border-slate-600'
-                          )}
-                        >
-                          {segment.speaker_label || `Speaker ${index + 1}`}
-                          <ChevronDown className="h-3 w-3 ml-1" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start" className="w-48 bg-slate-900 border-slate-700">
-                        <div className="px-2 py-1.5 text-xs text-slate-500 font-medium border-b border-slate-700 mb-1">
-                          Speaker Type
-                        </div>
-                        {['Male', 'Female', 'Child'].map((gender) => (
-                          <DropdownMenuItem
-                            key={gender}
-                            className="text-xs cursor-pointer"
-                            onClick={() => {
-                              setImportedSegments(prev => {
-                                const base = prev ?? displaySegments
-                                return base.map((seg, i) =>
-                                  i === index ? { ...seg, speaker_gender: gender.toLowerCase() as 'male' | 'female' | 'child' } : seg
-                                )
-                              })
-                            }}
-                          >
-                            {gender}
-                          </DropdownMenuItem>
-                        ))}
-                        <DropdownMenuSeparator className="bg-slate-700" />
-                        <div className="px-2 py-1.5 text-xs text-slate-500 font-medium border-b border-slate-700 mb-1">
-                          5 Suggestions - Drag to timeline
-                        </div>
-                      {segmentSuggestions.map((sug, sugIdx) => (
-                        <DropdownMenuItem
-                          key={sug.id}
-                          className="cursor-grab text-sm p-2"
-                          draggable
-                          onDragStart={(e) => handleDragStart(e, sug, index)}
-                          onClick={() => {
-                            if (selectedSegmentIndex !== null) {
-                              updateSegmentText(selectedSegmentIndex, sug.text)
-                              setStagedEmotions(prev => ({
-                                ...prev,
-                                [selectedSegmentIndex]: inferEmotion(sug.text),
-                              }))
-                            }
+                    {/* Speaker chip — right-click → Rename Speaker to edit */}
+                    <div className={cn('flex items-center gap-1.5 pl-1 pr-2.5 py-1 rounded-full border text-xs font-medium shrink-0', speakerColor.bg, speakerColor.text, speakerColor.border)}>
+                      <span className="w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 bg-black/30">
+                        {speakerNumberMap[segment.speaker_id] ?? 1}
+                      </span>
+                      {renamingSpeakerId === segment.speaker_id ? (
+                        <input
+                          autoFocus
+                          aria-label={`Rename speaker ${speakerNumberMap[segment.speaker_id] ?? 1}`}
+                          value={renameValue}
+                          onChange={e => setRenameValue(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') commitSpeakerRename(segment.speaker_id, renameValue)
+                            if (e.key === 'Escape') { setRenamingSpeakerId(null); setRenameValue('') }
                           }}
-                        >
-                          <div className="flex items-center gap-2 w-full">
-                            <GripHorizontal className="h-4 w-4 text-slate-600 shrink-0" />
-                            <span className={cn(
-                              'w-6 h-6 rounded-full flex items-center justify-center text-xs font-medium shrink-0',
-                              sugIdx === 0 ? 'bg-emerald-500/20 text-emerald-400' :
-                              sugIdx === 1 ? 'bg-blue-500/20 text-blue-400' :
-                              sugIdx === 2 ? 'bg-purple-500/20 text-purple-400' :
-                              sugIdx === 3 ? 'bg-amber-500/20 text-amber-400' :
-                              'bg-rose-500/20 text-rose-400'
-                            )}>
-                              {sugIdx + 1}
-                            </span>
-                            <div className="flex flex-col flex-1 min-w-0">
-                              <span className="truncate">{sug.text}</span>
-                              <span className="text-[9px] text-amber-400 bg-amber-400/10 px-1.5 py-0.5 rounded-full mt-0.5 self-start">
-                                {inferEmotion(sug.text)}
-                              </span>
-                            </div>
-                            <span className="text-[10px] text-slate-500 shrink-0">{Math.round(sug.confidence * 100)}%</span>
-                          </div>
-                        </DropdownMenuItem>
-                      ))}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                          onBlur={() => commitSpeakerRename(segment.speaker_id, renameValue)}
+                          className="bg-transparent outline-none w-20 border-b border-current"
+                          onClick={e => e.stopPropagation()}
+                        />
+                      ) : (
+                        <span>{segment.speaker_label || `Speaker ${speakerNumberMap[segment.speaker_id] ?? 1}`}</span>
+                      )}
+                    </div>
                   </div>
                   
                   {/* Source text */}
@@ -2450,38 +2504,129 @@ export function DubVerseEditor({
                             title="Set emotion for this segment"
                             onClick={(e) => {
                               e.stopPropagation()
-                              selectSegment(index)
+                              selectSegment(null)
+                              setSplitWordMode(null)
+                              setInlineEmotionPicker(prev => prev === index ? null : index)
                             }}
                           >
                             <Plus className="h-2 w-2" />emotion
                           </span>
                         )}
-                        <div
+                        {inlineEmotionPicker === index && (
+                          <div
+                            className="w-full mt-1 p-2 rounded-xl border border-violet-500/40 bg-[#0d1525] shadow-lg shadow-violet-900/30"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <div className="flex flex-wrap gap-1">
+                              {EMOTIONS.map((emotion) => (
+                                <span
+                                  key={emotion}
+                                  className={cn(
+                                    'text-[9px] px-1.5 py-0.5 rounded-full cursor-pointer border transition-colors select-none font-mono',
+                                    stagedEmotions[index] === emotion
+                                      ? 'bg-violet-500/30 text-violet-200 border-violet-400'
+                                      : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-violet-500/20 hover:text-violet-300 hover:border-violet-500/40'
+                                  )}
+                                  onClick={() => {
+                                    setStagedEmotions(prev => ({ ...prev, [index]: emotion }))
+                                    setInlineEmotionPicker(null)
+                                  }}
+                                >
+                                  {emotion.toLowerCase()}
+                                </span>
+                              ))}
+                            </div>
+                            <span
+                              className="mt-1.5 text-[9px] text-slate-600 hover:text-slate-400 cursor-pointer block text-right"
+                              onClick={() => setInlineEmotionPicker(null)}
+                            >
+                              ✕ cancel
+                            </span>
+                          </div>
+                        )}
+                        {/* Speed chip */}
+                        <span
                           className={cn(
-                            'text-sm cursor-grab active:cursor-grabbing select-none inline-flex items-center gap-1 px-3 py-1 rounded-full border-2 text-white',
-                            lockedSegments.has(index)
-                              ? 'border-emerald-400 bg-emerald-500/20 shadow-[0_0_10px_rgba(34,197,94,0.4)]'
-                              : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
+                            'inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full border transition-colors cursor-pointer select-none font-mono',
+                            stagedSpeeds[index] !== undefined && stagedSpeeds[index] !== 1.0
+                              ? 'bg-orange-500/20 text-orange-300 border-orange-500/40 hover:bg-red-500/20 hover:text-red-300'
+                              : 'text-slate-600 border-slate-800 hover:text-orange-400 hover:border-orange-500/30'
                           )}
-                          draggable={!lockedSegments.has(index)}
-                          onDragStart={(e) => {
-                            if (lockedSegments.has(index)) {
-                              e.preventDefault()
-                              return
-                            }
-                            const mockSuggestion: Suggestion = {
-                              id: `direct-${index}`,
-                              text: segment.target_text,
-                              confidence: 1,
-                              source: 'user'
-                            }
-                            handleDragStart(e, mockSuggestion, index)
+                          title="Adjust segment speed"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                            setSpeedPopupPos({
+                              x: Math.min(rect.left, window.innerWidth - 300),
+                              y: Math.max(10, rect.top - 260),
+                            })
+                            setSpeedPopupIndex(prev => prev === index ? null : index)
                           }}
-                          onDoubleClick={() => !lockedSegments.has(index) && startEditing(index)}
                         >
-                          {lockedSegments.has(index) && <Lock className="h-3 w-3 shrink-0" />}
-                          {segment.target_text}
-                        </div>
+                          {stagedSpeeds[index] !== undefined && stagedSpeeds[index] !== 1.0
+                            ? `${stagedSpeeds[index].toFixed(2)}×`
+                            : <><Gauge className="h-2 w-2" />speed</>
+                          }
+                        </span>
+                        {splitWordMode === index ? (
+                          <div
+                            className="text-sm flex flex-wrap gap-x-1 gap-y-1 px-3 py-2 rounded-2xl border-2 border-amber-500 bg-amber-500/10 shadow-[0_0_10px_rgba(251,191,36,0.4)] select-none"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <span className="text-[10px] text-amber-400 font-medium w-full">✂️ Click a word to split before it</span>
+                            {segment.target_text.split(' ').map((word, wordIdx) => (
+                              <span
+                                key={wordIdx}
+                                title={wordIdx === 0 ? 'Cannot split before first word' : `Split before "${word}"`}
+                                className={cn(
+                                  'px-1 py-0.5 rounded transition-colors text-sm',
+                                  wordIdx === 0
+                                    ? 'text-slate-500 cursor-not-allowed'
+                                    : 'text-white cursor-pointer hover:bg-amber-500/40 hover:text-amber-100'
+                                )}
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  if (wordIdx > 0) handleSplitAtWord(index, wordIdx)
+                                }}
+                              >
+                                {word}
+                              </span>
+                            ))}
+                            <span
+                              className="text-[10px] text-slate-500 hover:text-slate-300 cursor-pointer ml-1 self-center"
+                              onClick={(e) => { e.stopPropagation(); setSplitWordMode(null) }}
+                            >
+                              ✕ cancel
+                            </span>
+                          </div>
+                        ) : (
+                          <div
+                            className={cn(
+                              'text-sm cursor-grab active:cursor-grabbing select-none inline-flex items-center gap-1 px-3 py-1 rounded-full border-2 text-white',
+                              lockedSegments.has(index)
+                                ? 'border-emerald-400 bg-emerald-500/20 shadow-[0_0_10px_rgba(34,197,94,0.4)]'
+                                : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
+                            )}
+                            draggable={!lockedSegments.has(index)}
+                            onDragStart={(e) => {
+                              if (lockedSegments.has(index)) {
+                                e.preventDefault()
+                                return
+                              }
+                              const mockSuggestion: Suggestion = {
+                                id: `direct-${index}`,
+                                text: segment.target_text,
+                                confidence: 1,
+                                source: 'user'
+                              }
+                              handleDragStart(e, mockSuggestion, index)
+                            }}
+                            onDoubleClick={() => !lockedSegments.has(index) && startEditing(index)}
+                          >
+                            {lockedSegments.has(index) && <Lock className="h-3 w-3 shrink-0" />}
+                            {segment.target_text}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -2760,6 +2905,7 @@ export function DubVerseEditor({
                 { id: 'studio', label: 'Studio' },
               ] as const).map((t) => (
                 <button
+                  type="button"
                   key={t.id}
                   onClick={() => {
                     setRightPanelTab(t.id)
@@ -3112,6 +3258,102 @@ export function DubVerseEditor({
         </>
       )}
 
+      {/* Speed correction popup */}
+      {speedPopupIndex !== null && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setSpeedPopupIndex(null)} />
+          <div
+            className="fixed z-50 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl p-5 w-72 animate-in fade-in-0 zoom-in-95 duration-150"
+            style={{ left: speedPopupPos.x, top: speedPopupPos.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-semibold text-orange-400 flex items-center gap-2">
+                <Gauge className="h-4 w-4" />
+                Speed — Segment {speedPopupIndex + 1}
+              </span>
+              <button type="button" title="Close" onClick={() => setSpeedPopupIndex(null)} className="text-slate-500 hover:text-white">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {/* Big speed display + ± buttons */}
+            <div className="flex items-center justify-center gap-4 mb-4">
+              <button
+                type="button"
+                className="h-9 w-9 rounded-full bg-slate-700 hover:bg-slate-600 text-white text-lg font-bold flex items-center justify-center transition-colors"
+                onClick={() => setSpeedPopupIndex(idx => {
+                  if (idx !== null) setStagedSpeeds(prev => ({ ...prev, [idx]: Math.max(0.5, parseFloat(((prev[idx] ?? 1.0) - 0.1).toFixed(2))) }))
+                  return idx
+                })}
+              >−</button>
+              <span
+                className={cn(
+                  "text-4xl font-mono w-28 text-center cursor-pointer select-none transition-colors",
+                  (stagedSpeeds[speedPopupIndex] ?? 1.0) !== 1.0 ? "text-orange-400" : "text-white"
+                )}
+                title="Click to reset"
+                onClick={() => setStagedSpeeds(prev => { const n = { ...prev }; delete n[speedPopupIndex!]; return n })}
+              >
+                {(stagedSpeeds[speedPopupIndex] ?? 1.0).toFixed(2)}
+                <span className="text-lg ml-0.5 text-slate-400">×</span>
+              </span>
+              <button
+                type="button"
+                className="h-9 w-9 rounded-full bg-slate-700 hover:bg-slate-600 text-white text-lg font-bold flex items-center justify-center transition-colors"
+                onClick={() => setSpeedPopupIndex(idx => {
+                  if (idx !== null) setStagedSpeeds(prev => ({ ...prev, [idx]: Math.min(2.0, parseFloat(((prev[idx] ?? 1.0) + 0.1).toFixed(2))) }))
+                  return idx
+                })}
+              >+</button>
+            </div>
+
+            {/* Slider */}
+            <Slider
+              value={[stagedSpeeds[speedPopupIndex] ?? 1.0]}
+              onValueChange={([v]) => setStagedSpeeds(prev => ({ ...prev, [speedPopupIndex!]: v }))}
+              min={0.5}
+              max={2.0}
+              step={0.05}
+              className="w-full mb-1"
+            />
+            <div className="flex justify-between text-[10px] text-slate-600 mb-5">
+              <span>0.5× slow</span><span>1.0× normal</span><span>2.0× fast</span>
+            </div>
+
+            {/* Preset buttons */}
+            <div className="flex gap-1.5 mb-4 justify-center">
+              {[0.5, 0.75, 1.0, 1.25, 1.5].map(preset => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => setStagedSpeeds(prev => ({ ...prev, [speedPopupIndex!]: preset }))}
+                  className={cn(
+                    'text-[10px] px-2 py-1 rounded-md border transition-colors font-mono',
+                    (stagedSpeeds[speedPopupIndex] ?? 1.0) === preset
+                      ? 'bg-orange-500/20 text-orange-300 border-orange-500/40'
+                      : 'bg-slate-700 text-slate-400 border-slate-600 hover:bg-slate-600'
+                  )}
+                >
+                  {preset}×
+                </button>
+              ))}
+            </div>
+
+            {/* Generate */}
+            <Button
+              className="w-full bg-amber-600 hover:bg-amber-700 text-white"
+              size="sm"
+              onClick={() => { setSpeedPopupIndex(null); handleGenerateSpeech() }}
+            >
+              <Sparkles className="h-4 w-4 mr-1" />
+              Generate Speech
+            </Button>
+          </div>
+        </>
+      )}
+
       {/* Slide-Rule Correction Tool - draggable floating panel */}
       {showCorrectionSlider && selectedSegmentIndex !== null && activeQCCategory && (
         <div
@@ -3268,7 +3510,9 @@ export function DubVerseEditor({
                 <span className="text-xs text-amber-400 font-medium capitalize">
                   Showing: {activeQCCategory}
                 </span>
-                <button 
+                <button
+                  type="button"
+                  title="Clear filter"
                   onClick={() => { setActiveQCCategory(null); setShowCorrectionSlider(false); }}
                   className="text-amber-400 hover:text-amber-300"
                 >
@@ -3356,6 +3600,7 @@ export function DubVerseEditor({
                   const absUrl = rawUrl.startsWith('http') ? rawUrl : apiClient.getAudioFileUrl(jobId, filename)
                   const audio = new Audio(absUrl)
                   audio.playbackRate = stagedSpeeds[selectedSegmentIndex] ?? 1.0
+                  audio.volume = isMutedDubbed ? 0 : Math.max(0, Math.min(1, (masterVolume / 100) * (dubbedTextVolume / 100)))
                   audio.onended = () => {
                     setIsSegmentPreviewing(false)
                     selectSegment(null)
@@ -3447,10 +3692,10 @@ export function DubVerseEditor({
               {/* Header */}
               <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800 bg-neutral-900">
                 <div className="flex items-center gap-2">
-                  <Gauge className={cn("h-4 w-4", qcLoading && !qcAnalysis ? "text-slate-500 animate-pulse" : "text-amber-400")} />
+                  <Gauge className={cn("h-4 w-4", qcLoading && !qcAnalysis ? "text-amber-400 animate-pulse" : "text-amber-400")} />
                   <span className="text-sm font-semibold text-white">QC Monitor</span>
                   {qcLoading && !qcAnalysis ? (
-                    <span className="text-xs px-2 py-0.5 rounded-full border border-slate-600 text-slate-400 bg-slate-800 animate-pulse">
+                    <span className="text-xs px-2 py-0.5 rounded-full border border-amber-500 text-white bg-amber-500/10 animate-pulse">
                       Analyzing…
                     </span>
                   ) : (
@@ -3474,7 +3719,7 @@ export function DubVerseEditor({
               <div className="flex-1 overflow-y-auto">
                 {qcLoading && !qcAnalysis && (
                   <div className="p-4 space-y-3">
-                    <div className="text-xs text-slate-500 text-center pb-1">Analyzing dub quality…</div>
+                    <div className="text-xs text-white text-center pb-1">Analyzing dub quality…</div>
                     <div className="space-y-1.5"><div className="h-2.5 w-[72%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[57%] rounded-full bg-slate-800/60 animate-pulse" /></div>
                     <div className="space-y-1.5"><div className="h-2.5 w-[88%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[73%] rounded-full bg-slate-800/60 animate-pulse" /></div>
                     <div className="space-y-1.5"><div className="h-2.5 w-[60%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[45%] rounded-full bg-slate-800/60 animate-pulse" /></div>
@@ -3538,7 +3783,7 @@ export function DubVerseEditor({
               </div>
           </div>
           {/* Track labels - resizable left column */}
-          <div className="shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col relative" style={{ width: trackLabelWidth }}>
+          <div className="shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col relative overflow-hidden" style={{ width: trackLabelWidth }}>
             {/* Resize handle - right edge */}
             <div
               className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group"
@@ -3567,46 +3812,27 @@ export function DubVerseEditor({
                 isResizingTrackLabel && "bg-amber-500"
               )} />
             </div>
-            {/* Clickable seek header spacer */}
+            {/* Each spacer/label MUST match its track height exactly */}
             <div className="h-6 shrink-0 border-b border-neutral-800 bg-neutral-900" />
-            {/* Time ruler spacer */}
-            <div className="h-6 shrink-0 border-b border-neutral-700 bg-neutral-900" />
-            {/* Track labels - equal heights */}
-            <div className="h-16 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-800">
-              Video
+            <div className="h-10 shrink-0 border-b border-neutral-700 bg-neutral-900" />
+            <div className="h-16 shrink-0 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-800">Video</div>
+            <div className="h-12 shrink-0 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-700 gap-1">
+              <Waves className="h-3 w-3 text-cyan-400" />
+              <span className="font-mono text-cyan-400">L</span>
             </div>
-            <div className="h-12 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-700 gap-1">
-              <div className="flex items-center gap-1">
-                <Waves className="h-3 w-3 text-cyan-400" />
-                <span className="font-mono text-cyan-400">L</span>
-              </div>
-              <Slider
-                value={[audioVolume]}
-                onValueChange={(v) => setAudioVolume(v[0])}
-                max={100}
-                step={1}
-                thumbless
-                className="w-full h-1"
-              />
+            <div className="h-12 shrink-0 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-600 gap-1">
+              <Waves className="h-3 w-3 text-cyan-400" />
+              <span className="font-mono text-cyan-400">R</span>
             </div>
-            <div className="h-12 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-600 gap-1">
-              <div className="flex items-center gap-1">
-                <Waves className="h-3 w-3 text-cyan-400" />
-                <span className="font-mono text-cyan-400">R</span>
-              </div>
-              <Slider
-                value={[audioVolume]}
-                onValueChange={(v) => setAudioVolume(v[0])}
-                max={100}
-                step={1}
-                thumbless
-                className="w-full h-1"
-              />
-            </div>
-            <div className="flex-1 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
-              <div className="flex items-center">
-                <Volume2 className="h-3 w-3 mr-1 text-blue-400" />
-                <span className="truncate">Original</span>
+            <div className="h-14 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1">
+                  <button type="button" onClick={() => setIsMutedOriginal(v => !v)} className="flex-shrink-0">
+                    {isMutedOriginal ? <VolumeX className="h-3 w-3 text-red-400" /> : <Volume2 className="h-3 w-3 text-blue-400" />}
+                  </button>
+                  <span className="truncate">Original</span>
+                </div>
+                <span className="font-mono text-neutral-500 text-[10px]">{originalTextVolume}</span>
               </div>
               <Slider
                 value={[originalTextVolume]}
@@ -3617,10 +3843,15 @@ export function DubVerseEditor({
                 className="w-full h-1"
               />
             </div>
-            <div className="flex-1 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
-              <div className="flex items-center">
-                <Volume2 className="h-3 w-3 mr-1 text-amber-400" />
-                <span className="truncate">Dubbed</span>
+            <div className="h-14 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1">
+                  <button type="button" onClick={() => setIsMutedDubbed(v => !v)} className="flex-shrink-0">
+                    {isMutedDubbed ? <VolumeX className="h-3 w-3 text-red-400" /> : <Volume2 className="h-3 w-3 text-amber-400" />}
+                  </button>
+                  <span className="truncate">Dubbed</span>
+                </div>
+                <span className="font-mono text-neutral-500 text-[10px]">{dubbedTextVolume}</span>
               </div>
               <Slider
                 value={[dubbedTextVolume]}
@@ -3631,10 +3862,13 @@ export function DubVerseEditor({
                 className="w-full h-1"
               />
             </div>
-            <div className="flex-1 flex flex-col justify-center px-2 text-xs text-neutral-400 gap-1">
-              <div className="flex items-center">
-                <Music2 className="h-3 w-3 mr-1 text-purple-400" />
-                <span>BG</span>
+            <div className="h-14 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1">
+                  <Music2 className="h-3 w-3 text-purple-400" />
+                  <span className="ml-1">BG Music</span>
+                </div>
+                <span className="font-mono text-neutral-500 text-[10px]">{backgroundVolume}</span>
               </div>
               <Slider
                 value={[backgroundVolume]}
@@ -3645,8 +3879,11 @@ export function DubVerseEditor({
                 className="w-full h-1"
               />
             </div>
+            {/* Filler + bottom ruler spacer */}
+            <div className="flex-1 bg-neutral-900/50 border-b border-neutral-800" />
+            <div className="h-5 shrink-0 bg-neutral-900 border-t border-neutral-700" />
           </div>
-          
+
           {/* Scrollable timeline */}
           <div 
             ref={timelineRef} 
@@ -3671,21 +3908,17 @@ export function DubVerseEditor({
                 selectSegment(null)
               }}
             >
-              {/* Vertical grid lines — rendered behind all tracks */}
-              <div className="absolute inset-0 pointer-events-none">
-                {Array.from({ length: Math.ceil(videoDuration) + 1 }).map((_, i) => (
-                  <div
-                    key={i}
-                    className="absolute top-0 bottom-0 w-px"
-                    style={{
-                      left: i * PIXELS_PER_SECOND,
-                      backgroundColor: i % 5 === 0
-                        ? 'rgba(255,255,255,0.15)'
-                        : 'rgba(255,255,255,0.06)',
-                    }}
-                  />
-                ))}
-              </div>
+              {/* Infinite repeating grid — 3 levels: 10s / 5s / 1s — always continuous */}
+              <div
+                className="absolute inset-0 pointer-events-none z-20"
+                style={{
+                  backgroundImage: [
+                    `repeating-linear-gradient(to right, rgba(255,255,255,0.18) 0px, rgba(255,255,255,0.18) 1px, transparent 1px, transparent ${PIXELS_PER_SECOND * 10}px)`,
+                    `repeating-linear-gradient(to right, rgba(255,255,255,0.10) 0px, rgba(255,255,255,0.10) 1px, transparent 1px, transparent ${PIXELS_PER_SECOND * 5}px)`,
+                    `repeating-linear-gradient(to right, rgba(255,255,255,0.04) 0px, rgba(255,255,255,0.04) 1px, transparent 1px, transparent ${PIXELS_PER_SECOND}px)`,
+                  ].join(', '),
+                }}
+              />
 
               {/* Clickable seek header */}
               <div
@@ -3700,46 +3933,50 @@ export function DubVerseEditor({
                   if (videoRef.current) videoRef.current.currentTime = newTime
                 }}
               >
-                <div
-                  className="absolute top-0 bottom-0 w-px bg-amber-400 pointer-events-none"
-                  style={{ left: currentTime * PIXELS_PER_SECOND }}
-                />
               </div>
 
-              {/* Time ruler */}
-              <div
-                className="h-6 shrink-0 bg-[#0a0a0f] border-b border-neutral-700 relative"
-              >
-                {Array.from({ length: Math.ceil(videoDuration) }).map((_, i) => {
-                  const isActiveSec = activeFinding != null &&
+              {/* Time ruler — taller, 3-level ticks matching Vegas style */}
+              <div className="h-10 shrink-0 bg-[#0d1018] border-b border-neutral-700/80 relative z-10 select-none">
+                {Array.from({ length: Math.ceil(videoDuration) + 1 }).map((_, i) => {
+                  const isMajor = i % 10 === 0
+                  const isMid = i % 5 === 0 && !isMajor
+                  const isMinor = !isMajor && !isMid
+
+                  const isActive = activeFinding != null &&
                     i >= Math.floor(activeFinding.timestamp_start) &&
                     i <= Math.floor(activeFinding.timestamp_end)
 
-                  const tickColor = isActiveSec
-                    ? activeFinding!.severity === 'error' ? 'bg-red-500' : activeFinding!.severity === 'warning' ? 'bg-yellow-500' : 'bg-blue-500'
-                    : 'bg-slate-500'
-
-                  const labelColor = isActiveSec
-                    ? activeFinding!.severity === 'error' ? 'text-red-300 bg-red-500/40'
-                      : activeFinding!.severity === 'warning' ? 'text-yellow-300 bg-yellow-500/40'
-                      : 'text-blue-300 bg-blue-500/40'
-                    : 'text-slate-300 bg-black/50'
+                  const tickH = isMajor ? 'h-4' : isMid ? 'h-3' : 'h-1.5'
+                  const tickColor = isActive
+                    ? activeFinding!.severity === 'error' ? 'bg-red-400' : 'bg-yellow-400'
+                    : isMajor ? 'bg-slate-300' : isMid ? 'bg-slate-500' : 'bg-slate-700'
 
                   return (
                     <div
                       key={i}
-                      className="absolute top-0 flex flex-col items-center"
+                      className="absolute bottom-0 flex flex-col-reverse items-start"
                       style={{ left: i * PIXELS_PER_SECOND }}
                     >
-                      <div className={cn('h-1.5 w-px', tickColor)} />
-                      <span className={cn('text-[9px] px-0.5 rounded-sm mt-0.5 leading-none', labelColor)}>{formatTime(i)}</span>
+                      <div className={cn('w-px', tickH, tickColor)} />
+                      {(isMajor || isMid) && (
+                        <span
+                          className={cn(
+                            'text-[9px] font-mono leading-none mb-1 ml-0.5 whitespace-nowrap',
+                            isActive
+                              ? activeFinding!.severity === 'error' ? 'text-red-300' : 'text-yellow-300'
+                              : isMajor ? 'text-slate-300' : 'text-slate-500'
+                          )}
+                        >
+                          {formatTime(i)}
+                        </span>
+                      )}
                     </div>
                   )
                 })}
               </div>
 
 {/* Video track with thumbnails - tiled background preserves aspect ratio */}
-              <div className="h-16 bg-neutral-900/30 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+              <div className="h-16 shrink-0 bg-neutral-900/30 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
                 {videoThumbnails.length > 0 ? (
                   <div className="absolute inset-y-1 left-1 right-1 rounded overflow-hidden border border-emerald-500/50 flex">
                     {videoThumbnails.map((thumb, idx) => {
@@ -3767,8 +4004,9 @@ export function DubVerseEditor({
                 ) : null}
               </div>
               
+
               {/* Audio L channel track */}
-              <div className="h-12 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+              <div className="h-12 shrink-0 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
                 {waveformReady ? (
                   <canvas ref={waveformCanvasLRef} className="absolute bottom-0 left-0" />
                 ) : (
@@ -3788,7 +4026,7 @@ export function DubVerseEditor({
               </div>
 
               {/* Audio R channel track */}
-              <div className="h-12 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+              <div className="h-12 shrink-0 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
                 {waveformReady ? (
                   <canvas ref={waveformCanvasRRef} className="absolute bottom-0 left-0" />
                 ) : (
@@ -3808,7 +4046,7 @@ export function DubVerseEditor({
               </div>
 
               {/* Original audio track */}
-              <div className="flex-1 bg-neutral-900/20 border-b border-neutral-700 relative" data-timeline-track>
+              <div className="h-14 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative" data-timeline-track>
                 {displaySegments.map((segment, index) => {
                   const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'original'
                   const isDraggingPaired = draggingSegment?.index === index && draggingSegment?.track === 'dubbed' && lockedPairs.has(index)
@@ -3823,6 +4061,7 @@ export function DubVerseEditor({
                       emotions={EMOTIONS}
                       onSelect={(idx) => { selectSegment(idx); setContextSegmentIndex(idx) }}
                       onSplit={handleSplitAtPlayhead}
+                      onSplitAtWord={(idx) => setSplitWordMode(idx)}
                       onAddAfter={handleAddSegmentAfter}
                       onDelete={(idx) => setPendingDelete(idx)}
                       onToggleLock={(idx) => setLockedSegments(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
@@ -3833,7 +4072,7 @@ export function DubVerseEditor({
                     >
                     <div
                       className={cn(
-                        'absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded',
+                        'absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded group',
                         selectedSegmentIndex === index && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                         flashingPair === index && 'ring-1 ring-amber-400',
                         lockedPairs.has(index) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
@@ -3844,6 +4083,8 @@ export function DubVerseEditor({
                         width: (segment.end_time - segment.start_time) * PIXELS_PER_SECOND,
                       }}
                       onMouseDown={(e) => {
+                        const t = e.target as HTMLElement
+                        if (t.closest('[data-resize-handle]')) return
                         e.preventDefault()
                         e.stopPropagation()
                         const startX = e.clientX
@@ -3882,11 +4123,67 @@ export function DubVerseEditor({
                         document.addEventListener('mouseup', onMouseUp)
                       }}
                     >
+                      {/* Left handle — drag to move start_time */}
+                      <div
+                        data-resize-handle={true}
+                        className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-l"
+                        onMouseDown={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          const startX = e.clientX
+                          const originalStart = segment.start_time
+                          const onMouseMove = (ev: MouseEvent) => {
+                            const dx = ev.clientX - startX
+                            const newStart = Math.max(0, Math.min(segment.end_time - 0.1, originalStart + dx / PIXELS_PER_SECOND))
+                            setImportedSegments(prev => {
+                              const base = prev ?? displaySegments
+                              return base.map((seg, i) => i === index ? { ...seg, start_time: newStart } : seg)
+                            })
+                          }
+                          const onMouseUp = () => {
+                            document.removeEventListener('mousemove', onMouseMove)
+                            document.removeEventListener('mouseup', onMouseUp)
+                          }
+                          document.addEventListener('mousemove', onMouseMove)
+                          document.addEventListener('mouseup', onMouseUp)
+                        }}
+                      >
+                        <GripHorizontal className="h-3 w-3 rotate-90" />
+                      </div>
+
                       {lockedPairs.has(index) && (
                         <Link2 className="absolute top-0.5 right-0.5 h-2.5 w-2.5 text-amber-400 opacity-80" />
                       )}
                       <div className="px-2 truncate text-[10px] h-full flex items-center text-blue-200/80">
                         {segment.source_text}
+                      </div>
+
+                      {/* Right handle — drag to move end_time */}
+                      <div
+                        data-resize-handle={true}
+                        className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-r"
+                        onMouseDown={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          const startX = e.clientX
+                          const originalEnd = segment.end_time
+                          const onMouseMove = (ev: MouseEvent) => {
+                            const dx = ev.clientX - startX
+                            const newEnd = Math.max(segment.start_time + 0.1, originalEnd + dx / PIXELS_PER_SECOND)
+                            setImportedSegments(prev => {
+                              const base = prev ?? displaySegments
+                              return base.map((seg, i) => i === index ? { ...seg, end_time: newEnd } : seg)
+                            })
+                          }
+                          const onMouseUp = () => {
+                            document.removeEventListener('mousemove', onMouseMove)
+                            document.removeEventListener('mouseup', onMouseUp)
+                          }
+                          document.addEventListener('mousemove', onMouseMove)
+                          document.addEventListener('mouseup', onMouseUp)
+                        }}
+                      >
+                        <GripHorizontal className="h-3 w-3 rotate-90" />
                       </div>
                     </div>
                     </SegmentContextMenu>
@@ -3897,7 +4194,7 @@ export function DubVerseEditor({
 {/* Dubbed audio track with stretch/squeeze handles */}
               <div
                 className={cn(
-                  "flex-1 bg-neutral-900/20 border-b border-neutral-700 relative",
+                  "h-14 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative",
                   draggedTranslation && "bg-amber-500/10 border-amber-500/30"
                 )}
                 data-timeline-track
@@ -3929,6 +4226,7 @@ export function DubVerseEditor({
                       emotions={EMOTIONS}
                       onSelect={(idx) => { selectSegment(idx); setContextSegmentIndex(idx) }}
                       onSplit={handleSplitAtPlayhead}
+                      onSplitAtWord={(idx) => setSplitWordMode(idx)}
                       onAddAfter={handleAddSegmentAfter}
                       onDelete={(idx) => setPendingDelete(idx)}
                       onToggleLock={(idx) => setLockedSegments(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
@@ -4067,18 +4365,57 @@ export function DubVerseEditor({
                 })}
               </div>
 
-              {/* Background track */}
-              <div className="flex-1 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
+              {/* BG Music track */}
+              <div className="h-14 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
               </div>
-              
+
+              {/* Filler — fills remaining height, shows grid + bottom ruler */}
+              <div className="flex-1 relative bg-[#07090f] flex flex-col">
+                {/* Filler grid — same 3-level gradient as main timeline */}
+                <div
+                  className="absolute inset-0 bottom-6 pointer-events-none"
+                  style={{
+                    backgroundImage: [
+                      `repeating-linear-gradient(to right, rgba(255,255,255,0.18) 0px, rgba(255,255,255,0.18) 1px, transparent 1px, transparent ${PIXELS_PER_SECOND * 10}px)`,
+                      `repeating-linear-gradient(to right, rgba(255,255,255,0.10) 0px, rgba(255,255,255,0.10) 1px, transparent 1px, transparent ${PIXELS_PER_SECOND * 5}px)`,
+                      `repeating-linear-gradient(to right, rgba(255,255,255,0.04) 0px, rgba(255,255,255,0.04) 1px, transparent 1px, transparent ${PIXELS_PER_SECOND}px)`,
+                    ].join(', '),
+                  }}
+                />
+                {/* Grid filler body */}
+                <div className="flex-1" />
+                {/* Bottom ruler — half height of top (h-5), major ticks only */}
+                <div className="h-5 shrink-0 bg-[#0d1018] border-t border-neutral-700/80 relative select-none">
+                  {Array.from({ length: Math.ceil(videoDuration) + 1 }).map((_, i) => {
+                    const isMajor = i % 10 === 0
+                    const isMid = i % 5 === 0 && !isMajor
+                    if (!isMajor && !isMid) return null
+                    return (
+                      <div
+                        key={i}
+                        className="absolute top-0 flex flex-col items-start"
+                        style={{ left: i * PIXELS_PER_SECOND }}
+                      >
+                        <div className={cn('w-px', isMajor ? 'h-2 bg-slate-400' : 'h-1.5 bg-slate-600')} />
+                        {isMajor && (
+                          <span className="text-[8px] font-mono leading-none mt-0.5 ml-0.5 text-slate-500 whitespace-nowrap">
+                            {formatTime(i)}
+                          </span>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
               {/* Player needle - yellow triangle head + silver line - DRAGGABLE */}
-              <div 
-                className="absolute top-0 bottom-0 z-30 pointer-events-auto"
+              <div
+                className="absolute top-0 bottom-0 z-50 pointer-events-auto"
                 style={{ left: `${currentTime * PIXELS_PER_SECOND}px` }}
               >
-                {/* Yellow triangle head - flat back flush with time ruler top */}
+                {/* Yellow triangle head - positioned below combined seek+ruler (24px+40px=64px) */}
                 <div
-                  className="absolute top-6 -left-[6px] cursor-ew-resize"
+                  className="absolute top-16 -left-[6px] cursor-ew-resize"
                   onMouseDown={(e) => {
                     e.preventDefault()
                     e.stopPropagation()
@@ -4092,8 +4429,8 @@ export function DubVerseEditor({
                     borderTop: '10px solid #fbbf24',
                   }}
                 />
-                {/* Silver thin needle line - spans all tracks */}
-                <div className="absolute top-[34px] bottom-0 left-0 w-[1px] bg-gray-400 pointer-events-none" />
+                {/* Needle line — full height, sits on top of ruler and all tracks */}
+                <div className="absolute top-0 bottom-0 left-0 w-[1px] bg-amber-400/60 pointer-events-none" />
               </div>
             </div>
           </div>

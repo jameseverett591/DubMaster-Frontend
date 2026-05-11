@@ -180,7 +180,7 @@ export function Dashboard() {
               onExport={() => {}}
             />
           ) : (
-            <DubbingWorkspace video={selectedVideo} onClose={handleCloseWorkspace} />
+            <DubbingWorkspace video={selectedVideo} onClose={handleCloseWorkspace} planType={planType} />
           )
         ) : (
           <main className="relative z-10 flex items-center justify-center px-4" style={{ minHeight: 'calc(100vh - 256px)', paddingTop: '220px', paddingBottom: '160px' }}>

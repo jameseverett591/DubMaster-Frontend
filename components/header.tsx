@@ -166,7 +166,7 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
                   </div>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator className="bg-[#A855F7]/20" />
-                <DropdownMenuItem onClick={() => router.push("/account")} className="cursor-pointer text-[#94A3B8] hover:text-[#C084FC] hover:bg-[#A855F7]/10">
+                <DropdownMenuItem onClick={() => router.push("/profile")} className="cursor-pointer text-[#94A3B8] hover:text-[#C084FC] hover:bg-[#A855F7]/10">
                   <User className="mr-2 h-4 w-4" />
                   {t('profile')}
                 </DropdownMenuItem>
