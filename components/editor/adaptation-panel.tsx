@@ -1,5 +1,6 @@
 'use client'
 
+import { useEffect } from 'react'
 import { useEditorStore } from '@/lib/editor-store'
 import {
   VARIANT_LABELS,
@@ -28,6 +29,7 @@ export function AdaptationPanel() {
     jobId,
     setAdaptationVariants,
     setAdaptationLoading,
+    updateSegmentText,
   } = useEditorStore()
 
   const segment = selectedSegmentIndex !== null ? segments[selectedSegmentIndex] : null
@@ -86,6 +88,18 @@ export function AdaptationPanel() {
     }
   }
 
+  function handleSelectVariant(vtype: VariantType, text: string) {
+    if (!segment) return
+    setSelectedVariant(segment.id, vtype)
+    updateSegmentText(segments.indexOf(segment), text)
+  }
+
+  // Auto-load variants when segment changes and none exist yet
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (segment && !adapted && !isAdaptationLoading) handleGenerate()
+  }, [segment?.id])
+
   // -------------------------------------------------------------------------
   // Render states
   // -------------------------------------------------------------------------
@@ -101,19 +115,7 @@ export function AdaptationPanel() {
   }
 
   if (!adapted) {
-    return (
-      <div className="flex flex-col gap-4 p-4">
-        <p className="text-sm text-slate-400">
-          No variants generated yet for this segment.
-        </p>
-        <button
-          onClick={handleGenerate}
-          className="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500 transition-colors"
-        >
-          Generate variants
-        </button>
-      </div>
-    )
+    return <EmptyState message="Generating variants…" />
   }
 
   const variantOrder: VariantType[] = ['faithful', 'performable', 'syncFit']
@@ -148,7 +150,7 @@ export function AdaptationPanel() {
               variant={variant}
               isSelected={adapted.selectedVariant === vtype}
               isRecommended={adapted.recommended === vtype}
-              onSelect={() => setSelectedVariant(segment.id, vtype)}
+              onSelect={() => handleSelectVariant(vtype, variant.text)}
             />
           )
         })}
