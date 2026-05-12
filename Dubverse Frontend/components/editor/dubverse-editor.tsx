@@ -56,6 +56,7 @@ import type { Segment, QCScore, QCFinding, QCFindingType, QCReport } from '@/lib
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
 import { buildMockQCReport } from '@/lib/qc-mock-data'
 import { QCQualityPanel } from '@/components/editor/qc-quality-panel'
+import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { createClient } from '@/lib/supabase/client'
 
@@ -434,7 +435,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'studio'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'studio' | 'adaptation'>('result')
 
   // QC report — real data from /api/analysis when available, otherwise mock
   const [qcReport, setQcReport] = useState<QCReport | null>(() =>
@@ -2903,6 +2904,7 @@ export function DubVerseEditor({
                 { id: 'result', label: 'Result' },
                 { id: 'quality', label: 'Quality' },
                 { id: 'studio', label: 'Studio' },
+                { id: 'adaptation', label: 'Adaptation' },
               ] as const).map((t) => (
                 <button
                   type="button"
@@ -3022,6 +3024,13 @@ export function DubVerseEditor({
           {rightPanelTab === 'studio' && (
             <div className="flex-1 min-h-0 flex items-center justify-center text-slate-500 text-sm bg-neutral-950">
               Studio coming soon
+            </div>
+          )}
+
+          {/* Adaptation tab */}
+          {rightPanelTab === 'adaptation' && (
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              <AdaptationPanel />
             </div>
           )}
         </div>
