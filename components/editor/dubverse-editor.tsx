@@ -57,6 +57,7 @@ import { formatTime, getSpeakerColor } from '@/lib/editor-types'
 import { buildMockQCReport } from '@/lib/qc-mock-data'
 import { QCQualityPanel } from '@/components/editor/qc-quality-panel'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
+import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { createClient } from '@/lib/supabase/client'
 
@@ -274,6 +275,8 @@ interface DubVerseEditorProps {
   qcLoading?: boolean
   pointsLeft?: number
   minutesAvailable?: number
+  speakerGenders?: Record<string, string>
+  voiceMapping?: Record<string, string>
   onExport?: () => void
   onShare?: () => void
   onGenerateSpeech?: () => void
@@ -395,6 +398,8 @@ export function DubVerseEditor({
   qcLoading = false,
   pointsLeft = 6.88,
   minutesAvailable = 2.29,
+  speakerGenders,
+  voiceMapping: initialVoiceMapping,
   onExport,
   onShare,
   onGenerateSpeech,
@@ -425,6 +430,8 @@ export function DubVerseEditor({
     setZoomLevel,
     updateSegmentText,
     updateSegment,
+    speakerVoiceMap,
+    setSpeakerVoiceMap,
   } = useEditorStore()
 
   const [layoutLocked, setLayoutLocked] = useState(() => {
@@ -435,7 +442,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'studio' | 'adaptation'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'studio' | 'adaptation' | 'speakers'>('result')
 
   // QC report — real data from /api/analysis when available, otherwise mock
   const [qcReport, setQcReport] = useState<QCReport | null>(() =>
@@ -941,7 +948,32 @@ export function DubVerseEditor({
       qcScore,
       qcFindings,
     })
-  }, [jobId, title, sourceLanguage, targetLanguage, videoUrl, dubbedVideoUrl, videoDuration, initialSegments, qcScore, qcFindings, setJobData])
+
+    // Initialise speaker voice map from persisted mapping or compute gender defaults
+    if (initialVoiceMapping && Object.keys(initialVoiceMapping).length > 0) {
+      setSpeakerVoiceMap(initialVoiceMapping)
+    } else {
+      const genders = speakerGenders ?? {}
+      const voicesByGender: Record<string, string[]> = {
+        male:   ['male-1',   'male-2',   'male-3',   'male-4'],
+        female: ['female-1', 'female-2', 'female-3', 'female-4'],
+        child:  ['child-1',  'child-2',  'child-3'],
+      }
+      const seen = new Set<string>()
+      const usage: Record<string, number> = {}
+      const defaultMap: Record<string, string> = {}
+      for (const seg of segmentsWithFindings) {
+        if (seen.has(seg.speaker_id)) continue
+        seen.add(seg.speaker_id)
+        const gender = (genders[seg.speaker_id] ?? seg.speaker_gender ?? 'male') as string
+        const pool = voicesByGender[gender] ?? voicesByGender.male
+        const idx = usage[gender] ?? 0
+        defaultMap[seg.speaker_id] = pool[idx % pool.length]
+        usage[gender] = idx + 1
+      }
+      setSpeakerVoiceMap(defaultMap)
+    }
+  }, [jobId, title, sourceLanguage, targetLanguage, videoUrl, dubbedVideoUrl, videoDuration, initialSegments, qcScore, qcFindings, setJobData, setSpeakerVoiceMap, speakerGenders, initialVoiceMapping])
   
   // Handle video import and automatic transcription
   const handleVideoImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1560,7 +1592,7 @@ export function DubVerseEditor({
         text: segment.target_text,
         speed: stagedSpeeds[activeIndex] ?? 1.0,
         emotion: stagedEmotions[activeIndex],
-        voice_key: stagedVoices[activeIndex],
+        voice_key: stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id],
         pitch: stagedPitches[activeIndex],
       })
       const filename = response.segment.path.split('/').pop() ?? ''
@@ -2905,6 +2937,7 @@ export function DubVerseEditor({
                 { id: 'quality', label: 'Quality' },
                 { id: 'studio', label: 'Studio' },
                 { id: 'adaptation', label: 'Adaptation' },
+                { id: 'speakers', label: 'Speakers' },
               ] as const).map((t) => (
                 <button
                   type="button"
@@ -3031,6 +3064,13 @@ export function DubVerseEditor({
           {rightPanelTab === 'adaptation' && (
             <div className="flex-1 min-h-0 overflow-y-auto">
               <AdaptationPanel />
+            </div>
+          )}
+
+          {/* Speakers tab */}
+          {rightPanelTab === 'speakers' && (
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              <SpeakerVoicePanel />
             </div>
           )}
         </div>

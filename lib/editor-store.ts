@@ -46,6 +46,9 @@ interface EditorState {
   adaptationVariants: Record<string, AdaptedSegment>
   isAdaptationLoading: boolean
 
+  // Speaker voice assignments: speaker_id → voice key (e.g. "speaker-1" → "male-2")
+  speakerVoiceMap: Record<string, string>
+
   // Actions
   setJobData: (data: {
     jobId: string
@@ -103,6 +106,10 @@ interface EditorState {
   applyRecommendedToAll: () => void
   setAdaptationLoading: (loading: boolean) => void
 
+  // Speaker voice actions
+  setSpeakerVoiceMap: (map: Record<string, string>) => void
+  updateSpeakerVoice: (speakerId: string, voiceKey: string) => void
+
   // Computed / helpers
   getFilteredFindings: () => QCFinding[]
   getCurrentSegment: () => Segment | null
@@ -134,6 +141,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   activeCorrectionTool: null,
   adaptationVariants: {},
   isAdaptationLoading: false,
+  speakerVoiceMap: {},
 
   // Set job data
   setJobData: (data) => set({
@@ -300,6 +308,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   })),
 
   setAdaptationLoading: (loading) => set({ isAdaptationLoading: loading }),
+
+  setSpeakerVoiceMap: (map) => set({ speakerVoiceMap: map }),
+  updateSpeakerVoice: (speakerId, voiceKey) => set((state) => ({
+    speakerVoiceMap: { ...state.speakerVoiceMap, [speakerId]: voiceKey },
+  })),
 
   // Computed helpers
   getFilteredFindings: () => {

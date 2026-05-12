@@ -4,7 +4,7 @@
  * Handles all communication with the FastAPI backend
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 // ============================================================================
 // CUSTOM ERRORS
@@ -72,6 +72,7 @@ export interface JobStatus {
   tts_engine: string | null
   segment_tts_engines: (string | null)[] | null
   speaker_genders: Record<string, string> | null
+  voice_mapping: Record<string, string> | null
   error_message: string | null
   created_at: string
   updated_at: string
@@ -669,6 +670,14 @@ class DubVerseAPIClient {
       throw new Error(error.detail || 'Ask AI failed')
     }
     return response.json()
+  }
+
+  async updateVoiceMapping(jobId: string, voiceMapping: Record<string, string>): Promise<void> {
+    await fetch(`${this.baseURL}/api/jobs/${jobId}/voice-mapping`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(voiceMapping),
+    })
   }
 
   toAbsoluteUrl(url: string): string {

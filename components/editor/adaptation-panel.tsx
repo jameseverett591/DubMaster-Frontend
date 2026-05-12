@@ -2,6 +2,7 @@
 
 import { useEffect } from 'react'
 import { useEditorStore } from '@/lib/editor-store'
+import { API_BASE_URL } from '@/lib/api-client'
 import {
   VARIANT_LABELS,
   VARIANT_TYPE_FROM_API,
@@ -59,7 +60,7 @@ export function AdaptationPanel() {
           },
         ],
       }
-      const res = await fetch('/api/proxy/adapt', {
+      const res = await fetch(`${API_BASE_URL}/api/adapt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
