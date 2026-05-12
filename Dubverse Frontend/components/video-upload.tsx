@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Upload, FileVideo, X, CheckCircle2, AlertCircle, Languages } from "lucide-react"
+import { Upload, FileVideo, X, CheckCircle2, AlertCircle, Languages, Users } from "lucide-react"
 import type { VideoSource } from "@/components/dashboard"
 import { apiClient, isTerminalStatus, JobNotFoundError, type JobStatusValue } from "@/lib/api-client"
 import PipelineMonitor from "@/components/pipeline-monitor"
@@ -72,6 +72,8 @@ export function VideoUpload({
 }: VideoUploadProps) {
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
   const [sourceLanguage, setSourceLanguage] = useState<string>("auto")
+  const [numSpeakers, setNumSpeakers] = useState<string>("auto")
+  const numSpeakersRef = useRef<string>("auto")
   // Ref mirror so the dropzone callback (created once) always sees the
   // current selection without forcing the dropzone to be re-created.
   const sourceLanguageRef = useRef<string>("auto")
@@ -92,6 +94,10 @@ export function VideoUpload({
     sourceLanguageRef.current = sourceLanguage
     localStorage.setItem(SOURCE_LANG_STORAGE_KEY, sourceLanguage)
   }, [sourceLanguage])
+
+  useEffect(() => {
+    numSpeakersRef.current = numSpeakers
+  }, [numSpeakers])
 
   // Restore persisted jobs on mount and verify their status
   useEffect(() => {
@@ -149,11 +155,12 @@ export function VideoUpload({
 
     setUploadedFiles((prev) => [...prev, ...newFiles])
 
-    // Snapshot the language for this upload batch so subsequent UI changes
-    // don't affect in-flight uploads.
+    // Snapshot language + speaker count for this batch so UI changes mid-upload
+    // don't affect in-flight requests.
     const langForBatch = sourceLanguageRef.current
+    const speakersForBatch = numSpeakersRef.current
     newFiles.forEach((uploadedFile) => {
-      startUpload(uploadedFile.id, uploadedFile.file, langForBatch)
+      startUpload(uploadedFile.id, uploadedFile.file, langForBatch, speakersForBatch)
     })
   }, [])
 
@@ -167,9 +174,11 @@ export function VideoUpload({
     return `${mins}:${secs.toString().padStart(2, "0")}`
   }
 
-  const startUpload = async (tempId: string, file: File, langOverride?: string) => {
+  const startUpload = async (tempId: string, file: File, langOverride?: string, speakersOverride?: string) => {
     try {
       const lang = langOverride ?? sourceLanguageRef.current
+      const spkRaw = speakersOverride ?? numSpeakersRef.current
+      const numSpk = spkRaw && spkRaw !== 'auto' ? parseInt(spkRaw, 10) : undefined
       const response = await apiClient.uploadVideo(
         file,
         (progress) => {
@@ -177,7 +186,8 @@ export function VideoUpload({
             prev.map((f) => (f.id === tempId ? { ...f, progress } : f))
           )
         },
-        lang
+        lang,
+        numSpk,
       )
 
       // Upload received by backend — now it's processing
@@ -369,28 +379,49 @@ export function VideoUpload({
           </p>
         </div>
 
-        {/* Source language selector — must be set BEFORE upload because
-            transcription runs immediately on the backend. Choosing the
-            correct language (e.g. Cantonese) prevents Whisper from
-            mis-detecting the audio as Mandarin and producing garbled output. */}
-        <div className="mb-4 flex items-center justify-center gap-3">
-          <label className="text-sm text-[#94A3B8] font-medium">
-            Source language:
-          </label>
-          <Select value={sourceLanguage} onValueChange={setSourceLanguage}>
-            <SelectTrigger className="w-[200px] h-9 text-sm bg-[#0F172A]/60 border-[#A855F7]/30">
-              <Languages className="mr-2 h-3.5 w-3.5 text-[#A855F7]" />
-              <SelectValue placeholder="Auto-detect" />
-            </SelectTrigger>
-            <SelectContent>
-              {SOURCE_LANGUAGES.map((lang) => (
-                <SelectItem key={lang.code} value={lang.code}>
-                  <span className="mr-2">{lang.flag}</span>
-                  {lang.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+        {/* Source language + speaker count — must be set BEFORE upload because
+            transcription and diarization run immediately on the backend. */}
+        <div className="mb-4 flex flex-wrap items-center justify-center gap-4">
+          <div className="flex items-center gap-2">
+            <label className="text-sm text-[#94A3B8] font-medium whitespace-nowrap">
+              Source language:
+            </label>
+            <Select value={sourceLanguage} onValueChange={setSourceLanguage}>
+              <SelectTrigger className="w-[180px] h-9 text-sm bg-[#0F172A]/60 border-[#A855F7]/30">
+                <Languages className="mr-2 h-3.5 w-3.5 text-[#A855F7]" />
+                <SelectValue placeholder="Auto-detect" />
+              </SelectTrigger>
+              <SelectContent>
+                {SOURCE_LANGUAGES.map((lang) => (
+                  <SelectItem key={lang.code} value={lang.code}>
+                    <span className="mr-2">{lang.flag}</span>
+                    {lang.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <label className="text-sm text-[#94A3B8] font-medium whitespace-nowrap">
+              Speakers:
+            </label>
+            <Select value={numSpeakers} onValueChange={setNumSpeakers}>
+              <SelectTrigger className="w-[140px] h-9 text-sm bg-[#0F172A]/60 border-[#A855F7]/30">
+                <Users className="mr-2 h-3.5 w-3.5 text-[#A855F7]" />
+                <SelectValue placeholder="Auto-detect" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Auto-detect</SelectItem>
+                <SelectItem value="1">1 speaker</SelectItem>
+                <SelectItem value="2">2 speakers</SelectItem>
+                <SelectItem value="3">3 speakers</SelectItem>
+                <SelectItem value="4">4 speakers</SelectItem>
+                <SelectItem value="5">5 speakers</SelectItem>
+                <SelectItem value="6">6 speakers</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
 
         <div

@@ -147,8 +147,8 @@ def diarize_audio(extract_result: Dict[str, Any], job_id: str | None = None) -> 
         # DIARIZATION_MIN_SPEAKERS and DIARIZATION_MAX_SPEAKERS to N in .env
         # (e.g. =3) so pyannote is forced to find exactly 3 clusters instead
         # of collapsing similar-sounding speakers.
-        min_speakers = int(os.getenv("DIARIZATION_MIN_SPEAKERS", "3"))
-        max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "5"))
+        min_speakers = int(os.getenv("DIARIZATION_MIN_SPEAKERS", "1"))
+        max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "6"))
 
         # Ensure audio is float32 mono [1, samples] as pyannote expects
         import torch

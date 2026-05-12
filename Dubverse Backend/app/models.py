@@ -59,7 +59,7 @@ class Job(BaseModel):
     video_path: str
     video_duration: Optional[float] = None
     video_size: int
-    expected_speakers: int = 3
+    expected_speakers: int = 2
     source_language: Optional[str] = None  # ISO code (e.g. "yue", "en") or None for auto-detect
     
     chunks: List[VideoChunk] = []
@@ -104,6 +104,7 @@ class StatusResponse(BaseModel):
     dubbed_video_url: Optional[str] = None
     tts_engine: Optional[str] = None
     segment_tts_engines: Optional[List[Optional[str]]] = None
+    expected_speakers: int = 2
     speaker_genders: Optional[Dict[str, str]] = None
     voice_mapping: Optional[Dict[str, str]] = None
     error_message: Optional[str]

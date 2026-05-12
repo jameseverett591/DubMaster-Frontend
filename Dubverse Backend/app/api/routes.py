@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Dict
 from pydantic import BaseModel
 import fastapi
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Request, Body
@@ -539,6 +539,104 @@ def _merge_close_transcript_segments(
 
     return merged
 
+def _f0_split_speakers(segments, video_path: str, n_speakers: int, job_id: str):
+    """
+    Fallback when pyannote collapses all segments to 1 speaker:
+    extract per-segment median F0 from vocals and cluster into n_speakers groups
+    using k-means on pitch. Child voices (F0>220Hz) are trivially separated from
+    adults; same-gender adults are split by relative pitch ordering.
+    """
+    import math
+    try:
+        from app.pipeline.extract_audio import extract_audio
+        from app.pipeline.separate_audio import separate_audio
+    except ImportError:
+        return segments
+
+    vocals_path = None
+    try:
+        sep = separate_audio(video_path, job_id=job_id)
+        if sep.get("status") == "ok":
+            vocals_path = sep.get("vocals_path")
+    except Exception:
+        pass
+
+    try:
+        src = extract_audio(vocals_path or video_path)
+    except Exception:
+        return segments
+
+    if src.get("status") != "ok":
+        return segments
+
+    audio = src["audio"]
+    sample_rate = src["sample_rate"]
+
+    import torch, torchaudio
+    pitches = []
+    for seg in segments:
+        s_t = seg.start if hasattr(seg, "start") else seg.get("start", 0.0)
+        e_t = seg.end   if hasattr(seg, "end")   else seg.get("end",   0.0)
+        dur = e_t - s_t
+        if dur < 0.2:
+            pitches.append(None)
+            continue
+        s_i = int(s_t * sample_rate)
+        e_i = min(int(e_t * sample_rate), audio.shape[-1])
+        chunk = audio[..., s_i:e_i]
+        if chunk.dtype != torch.float32:
+            chunk = chunk.float()
+        if chunk.dim() == 1:
+            chunk = chunk.unsqueeze(0)
+        try:
+            ph = torchaudio.functional.detect_pitch_frequency(chunk, sample_rate, freq_low=70, freq_high=450)
+            ph = ph.squeeze(0)
+            voiced = ph[(ph > 70) & (ph < 450)]
+            pitches.append(float(voiced.median()) if voiced.numel() > 0 else None)
+        except Exception:
+            pitches.append(None)
+
+    # Fill missing pitches with global median
+    valid = [p for p in pitches if p is not None]
+    if not valid:
+        return segments
+    global_median = sorted(valid)[len(valid) // 2]
+    filled = [p if p is not None else global_median for p in pitches]
+
+    # K-means on 1D pitch with n_speakers clusters, initialised by percentile
+    k = min(n_speakers, len(set(round(p) for p in filled)))
+    cents = [filled[int(i * len(filled) / k)] for i in range(k)]
+
+    for _ in range(20):
+        assigns = [min(range(k), key=lambda ci, p=p: abs(p - cents[ci])) for p in filled]
+        new_cents = []
+        for ci in range(k):
+            grp = [filled[i] for i, a in enumerate(assigns) if a == ci]
+            new_cents.append(sum(grp) / len(grp) if grp else cents[ci])
+        if new_cents == cents:
+            break
+        cents = new_cents
+
+    label_map = {ci: f"SPEAKER_{ci:02d}" for ci in range(k)}
+    out = []
+    for seg, cluster in zip(segments, assigns):
+        spk = label_map[cluster]
+        if hasattr(seg, "speaker"):
+            from copy import copy
+            seg = copy(seg)
+            seg.speaker = spk
+        else:
+            seg = dict(seg)
+            seg["speaker"] = spk
+        out.append(seg)
+
+    unique = set(label_map[a] for a in assigns)
+    logger.info(f"[F0-SPLIT] job={job_id} pitched {len(segments)} segs into {len(unique)} speakers: {sorted(unique)}")
+    out2 = _smooth_speaker_assignments(out)
+    out3 = _normalize_speaker_labels(out2)
+    return out3
+
+
 def _estimate_speakers_from_segments(raw_segments) -> int:
     """
     Best-effort estimate of number of speakers using timing gaps when
@@ -696,8 +794,17 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             f"Job {job_id}: using per-job source_language={job_source_lang!r} "
             f"(overrides WHISPER_LANGUAGE env var)"
         )
-    min_speakers = int(os.getenv("DIARIZATION_MIN_SPEAKERS", "2"))
-    max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "4"))
+    # If the user specified an exact speaker count, use it as a hard constraint.
+    # Otherwise fall back to env var range (wide range = let pyannote decide).
+    _job_for_spk = await job_manager.get_job(job_id)
+    _expected_spk = (_job_for_spk.expected_speakers if _job_for_spk else None) or 0
+    if _expected_spk and 1 <= _expected_spk <= 10:
+        min_speakers = _expected_spk
+        max_speakers = _expected_spk
+        logger.info(f"Job {job_id}: exact speaker count={_expected_spk} — clamping pyannote to min=max={_expected_spk}")
+    else:
+        min_speakers = int(os.getenv("DIARIZATION_MIN_SPEAKERS", "1"))
+        max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "6"))
 
     # Cantonese quality defaults for GPU worker:
     # - Prefer Whisper large-v3 for yue
@@ -908,6 +1015,24 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             reassigned = _normalize_speaker_labels(reassigned)
             if reassigned:
                 segments = reassigned
+
+    # F0 fallback: if pyannote collapsed everything to 1 speaker but the user
+    # told us there are N > 1 speakers, split using pitch-based k-means.
+    _job_for_f0 = await job_manager.get_job(job_id)
+    _exp_spk_f0 = (_job_for_f0.expected_speakers if _job_for_f0 else 0) or 0
+    if _exp_spk_f0 > 1 and segments:
+        _current_spk = set((s.speaker if isinstance(s, TranscriptSegment) else s.get("speaker", "")) for s in segments)
+        if len(_current_spk) <= 1:
+            try:
+                logger.info(
+                    f"Job {job_id}: pyannote returned 1 speaker but expected {_exp_spk_f0} — "
+                    "applying F0 k-means fallback"
+                )
+                segments = await asyncio.to_thread(
+                    _f0_split_speakers, segments, video_path, _exp_spk_f0, job_id
+                )
+            except Exception as _f0_err:
+                logger.warning(f"Job {job_id}: F0 fallback failed: {_f0_err}")
 
     # Quality gate: some worker versions can return an empty transcript (0
     # segments) even though the job ran. For Cantonese jobs, fall back to local
@@ -1410,8 +1535,15 @@ async def process_video_pipeline(job_id: str, video_path: str):
 
                 diarization_segments = []
                 diarization_timeout_sec = int(os.getenv("DIARIZATION_TIMEOUT_SEC", "600"))
-                min_speakers = int(os.getenv("DIARIZATION_MIN_SPEAKERS", "2"))
-                max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "4"))
+                _job_spk = await job_manager.get_job(job_id)
+                _exp_spk = (_job_spk.expected_speakers if _job_spk else 0) or 0
+                if _exp_spk and 1 <= _exp_spk <= 10:
+                    min_speakers = _exp_spk
+                    max_speakers = _exp_spk
+                    logger.info(f"Job {job_id}: local diarize exact count={_exp_spk}")
+                else:
+                    min_speakers = int(os.getenv("DIARIZATION_MIN_SPEAKERS", "1"))
+                    max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "6"))
 
                 # Use separated vocals for diarization when available —
                 # the original mix has fight SFX / music that confuse pyannote.
@@ -1573,6 +1705,7 @@ async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     source_language: Optional[str] = Form(None),
+    num_speakers: Optional[int] = Form(None),
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
@@ -1613,13 +1746,17 @@ async def upload_video(
             video_size=0
         )
 
-        # Persist explicit source language hint (e.g. "yue") so the
-        # transcription stage can override the global WHISPER_LANGUAGE env var.
-        if src_lang:
+        # Persist source language and expected speaker count on the job so
+        # the transcription and diarization stages can use them.
+        if src_lang or (num_speakers is not None and 1 <= num_speakers <= 10):
             job_for_lang = await job_manager.get_job(job_id)
             if job_for_lang:
-                job_for_lang.source_language = src_lang
-                logger.info(f"Job {job_id}: source_language set to {src_lang!r} from upload request")
+                if src_lang:
+                    job_for_lang.source_language = src_lang
+                    logger.info(f"Job {job_id}: source_language set to {src_lang!r} from upload request")
+                if num_speakers is not None and 1 <= num_speakers <= 10:
+                    job_for_lang.expected_speakers = num_speakers
+                    logger.info(f"Job {job_id}: expected_speakers set to {num_speakers} from upload request")
         
         await job_manager.update_job_status(
             job_id,
@@ -1688,6 +1825,7 @@ async def get_job_status(job_id: str):
         dubbed_video_url=job.dubbed_video_url,
         tts_engine=job.tts_engine,
         segment_tts_engines=job.segment_tts_engines,
+        expected_speakers=getattr(job, "expected_speakers", 2),
         speaker_genders=job.speaker_genders,
         voice_mapping=job.voice_mapping,
         error_message=job.error_message,

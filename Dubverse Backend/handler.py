@@ -1,15 +1,28 @@
+import sys
+print("handler.py: starting...", flush=True)
+
 import logging
 import asyncio
 import json
 import os
 import time
 
-import runpod
+try:
+    import runpod
+    print(f"handler.py: runpod {getattr(runpod, '__version__', 'unknown')} OK", flush=True)
+except Exception as _e:
+    print(f"handler.py FATAL (runpod import): {_e}", file=sys.stderr, flush=True)
+    sys.exit(1)
 
-from app.pipeline.extract_audio import extract_audio
-from app.pipeline.separate_audio import separate_audio
-from app.pipeline.transcribe_audio import transcribe_audio
-from app.pipeline.diarize_audio import diarize_audio
+try:
+    from app.pipeline.extract_audio import extract_audio
+    from app.pipeline.separate_audio import separate_audio
+    from app.pipeline.transcribe_audio import transcribe_audio
+    from app.pipeline.diarize_audio import diarize_audio
+    print("handler.py: pipeline imports OK", flush=True)
+except Exception as _e:
+    print(f"handler.py FATAL (pipeline import): {_e}", file=sys.stderr, flush=True)
+    sys.exit(1)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -52,6 +65,8 @@ def handler(event):
     language       = job_input.get("language", job_input.get("source_language", "yue"))
     min_speakers   = int(job_input.get("min_speakers", 1))
     max_speakers   = int(job_input.get("max_speakers", 6))
+    # When caller specifies an exact count (min==max), honour it strictly.
+    _exact_speakers = min_speakers if min_speakers == max_speakers and min_speakers > 0 else None
     job_id         = job_input.get("job_id", event.get("id", "local"))
     steps          = job_input.get("steps", ["separate", "transcribe", "diarize"])
 
@@ -161,7 +176,15 @@ def handler(event):
 
         if diarize_result.get("status") == "ok":
             diarization_segments = diarize_result.get("segments", [])
-            logger.info(f"Diarization complete in {timings['diarize']}s: {len(diarization_segments)} speaker turns")
+            unique_diar = len(set(d.get("speaker") for d in diarization_segments))
+            logger.info(f"Diarization complete in {timings['diarize']}s: {len(diarization_segments)} turns, {unique_diar} speakers")
+            # If user specified an exact count but pyannote returned fewer,
+            # log a warning — the F0 fallback on the local backend will handle it.
+            if _exact_speakers and unique_diar < _exact_speakers:
+                logger.warning(
+                    f"[DIARIZE] pyannote found {unique_diar} speaker(s) but expected {_exact_speakers} — "
+                    "local backend F0 fallback will attempt re-split"
+                )
         else:
             logger.warning(f"Diarization skipped: {diarize_result.get('reason')} — all segments will use SPEAKER_00")
 
