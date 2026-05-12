@@ -125,6 +125,27 @@ class DubRequest(BaseModel):
     source_language: Optional[str] = None
     dubbing_engine: Optional[str] = None  # "dubmaster" (default) or "vozo"
     vozo_user_prompt: Optional[str] = None  # translation guidance for Vozo
+    adaptation_selections: Optional[Dict[str, str]] = None  # segment_id → "faithful"|"performable"|"sync_fit"
+
+
+class AdaptVariant(BaseModel):
+    variant_type: str
+    text: str
+    rationale: str
+    estimated_duration_ratio: float
+    syllable_count: int
+
+
+class AdaptRequest(BaseModel):
+    job_id: str
+    segments: List[Dict[str, Any]]
+    scene_context: Optional[str] = None
+
+
+class AdaptResponse(BaseModel):
+    job_id: str
+    fallback: bool = False
+    adapted_segments: List[Dict[str, Any]]
 
 
 class DubResponse(BaseModel):

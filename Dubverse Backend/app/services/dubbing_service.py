@@ -547,6 +547,7 @@ class DubbingService:
         voice_settings: Optional[Dict[str, Dict[str, float]]] = None,
         source_language: str = "en",
         speaker_genders: Optional[Dict[str, str]] = None,
+        adaptation_selections: Optional[Dict[str, str]] = None,
     ) -> Optional[Dict[str, str]]:
         logger.info(f"Starting dubbing for job {job_id}")
         logger.info(f"Voice mapping received: {voice_mapping}")
@@ -647,6 +648,12 @@ class DubbingService:
                     f"target={target_language} -> {target_norm}"
                 )
 
+            # Stamp stable segment IDs before translation so we can track each
+            # segment through drops and re-indexing.
+            for _i, _seg in enumerate(transcript):
+                _seg["segment_id"] = str(_i)
+                _seg["source_text"] = _seg.get("text", "")
+
             if source_norm != target_norm:
                 logger.info(f"Translating transcript from {source_norm} to {target_norm}")
                 transcript = await translation_service.translate_segments(
@@ -675,7 +682,40 @@ class DubbingService:
                     logger.info(
                         f"[CLEAN] Dropped {before_drop - len(transcript)} post-translation noise segment(s)"
                     )
-            
+
+            # --- ADAPTATION STEP ---
+            # Generate 3 text variants per segment (faithful / performable / sync_fit).
+            # Falls back gracefully to raw translated text if LLM is unavailable.
+            adapted_map: Dict[str, object] = {}
+            try:
+                from app.services.adaptation_engine import adapt_batch
+                _adapt_inputs = [
+                    {
+                        "segment_id": seg.get("segment_id", str(idx)),
+                        "source_text": seg.get("source_text", ""),
+                        "target_text": seg.get("text", ""),
+                        "source_language": source_norm,
+                        "target_language": target_norm,
+                        "source_duration": max(
+                            0.3, float(seg.get("end", 0)) - float(seg.get("start", 0))
+                        ),
+                        "speaker_id": seg.get("speaker", "speaker-1"),
+                        "speaker_gender": (speaker_genders or {}).get(
+                            seg.get("speaker", "speaker-1"), "male"
+                        ),
+                    }
+                    for idx, seg in enumerate(transcript)
+                ]
+                _adapted_list = await adapt_batch(
+                    segments=_adapt_inputs,
+                    target_language=target_norm,
+                    scene_context=None,
+                )
+                adapted_map = {a.segment_id: a for a in _adapted_list}
+                logger.info(f"[ADAPTATION] Generated variants for {len(adapted_map)} segments")
+            except Exception as _adapt_err:
+                logger.warning(f"[ADAPTATION] Skipped — will use raw translation: {_adapt_err}")
+
             tts_engines: List[str] = []
             segment_engines: List[Optional[str]] = [None for _ in transcript]
 
@@ -697,7 +737,14 @@ class DubbingService:
             # ------------------------------------------------------------------
 
             async def _synthesise_one(i: int, segment: Dict) -> Optional[Dict]:
-                text = segment.get("text", "")
+                # Resolve adapted variant text, falling back to raw translated text.
+                seg_id = segment.get("segment_id", str(i))
+                _adapted = adapted_map.get(seg_id)
+                if _adapted is not None:
+                    _variant_type = (adaptation_selections or {}).get(seg_id, "performable")
+                    text = _adapted.get_variant(_variant_type).text or segment.get("text", "")
+                else:
+                    text = segment.get("text", "")
                 speaker = segment.get("speaker", "speaker-1")
 
                 if not text.strip():

@@ -18,6 +18,8 @@ from app.models import (
     JobStatus,
     DubRequest,
     DubResponse,
+    AdaptRequest,
+    AdaptResponse,
     Transcript,
     TranscriptSegment,
     RegenerateRequest,
@@ -2166,6 +2168,7 @@ async def process_dubbing_pipeline(
     voice_mapping: dict,
     voice_settings: dict | None,
     speaker_genders: dict | None = None,
+    adaptation_selections: dict | None = None,
 ):
     try:
         if source_lang != target_lang:
@@ -2192,6 +2195,7 @@ async def process_dubbing_pipeline(
             voice_settings=voice_settings,
             source_language=source_lang,
             speaker_genders=speaker_genders,
+            adaptation_selections=adaptation_selections,
         )
 
         if dubbed_video:
@@ -2262,6 +2266,42 @@ async def process_dubbing_pipeline(
             JobStatus.FAILED,
             error_message=str(e)
         )
+
+
+@router.post("/adapt", response_model=AdaptResponse)
+async def run_adaptation(request: AdaptRequest):
+    """
+    On-demand: generate 3 adaptation variants (faithful / performable / sync_fit)
+    for the provided segments. Called by the editor when the Adaptation Panel is
+    opened. Does NOT trigger TTS — variants are stored in editor state only.
+    Always returns HTTP 200; sets fallback=True if the LLM was unavailable.
+    """
+    from dataclasses import asdict
+    from app.services.adaptation_engine import adapt_batch
+
+    fallback = False
+    try:
+        if not request.segments:
+            return AdaptResponse(job_id=request.job_id, fallback=False, adapted_segments=[])
+
+        target_language = request.segments[0].get("target_language", "en")
+        adapted = await adapt_batch(
+            segments=request.segments,
+            target_language=target_language,
+            scene_context=request.scene_context,
+        )
+        # Detect whether all variants are fallbacks (LLM unavailable)
+        if adapted and adapted[0].variants and adapted[0].variants[0].rationale.startswith("Fallback"):
+            fallback = True
+
+        return AdaptResponse(
+            job_id=request.job_id,
+            fallback=fallback,
+            adapted_segments=[asdict(a) for a in adapted],
+        )
+    except Exception as e:
+        logger.error(f"[ADAPT ROUTE] Unexpected error: {e}", exc_info=True)
+        return AdaptResponse(job_id=request.job_id, fallback=True, adapted_segments=[])
 
 
 @router.post("/dub", response_model=DubResponse)
@@ -2377,6 +2417,7 @@ async def dub_video(request: DubRequest, background_tasks: BackgroundTasks):
         voice_mapping=request.voice_mapping,
         voice_settings=request.voice_settings,
         speaker_genders=job.speaker_genders,
+        adaptation_selections=request.adaptation_selections,
     )
 
     return DubResponse(

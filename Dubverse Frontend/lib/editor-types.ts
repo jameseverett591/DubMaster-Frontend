@@ -2,6 +2,8 @@
 
 export type SegmentStatus = 'auto' | 'edited' | 'locked'
 
+export type SidebarTab = 'speech' | 'subtitles' | 'brand' | 'lip-sync' | 'qc' | 'adaptation'
+
 export type QCFindingType = 'timing' | 'translation' | 'delivery' | 'sync' | 'pronunciation'
 
 export type QCSeverity = 'error' | 'warning' | 'info'
