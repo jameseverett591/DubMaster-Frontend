@@ -58,19 +58,27 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
           })
         }
 
-        const editorSegments: Segment[] = (segmentsData?.segments || []).map((seg: any, idx: number) => ({
-          id: `segment-${idx}`,
-          index: idx,
-          status: seg.locked ? 'locked' : 'auto',
-          start_time: seg.start ?? 0,
-          end_time: seg.end ?? 0,
-          source_text: sourceByIndex.get(seg.transcript_index ?? idx) ?? '',
-          target_text: seg.text ?? '',
-          speaker_id: `speaker-${String(seg.speaker ?? '').replace(/\D/g, '') || '1'}`,
-          speaker_label: seg.speaker ?? 'Speaker 1',
-          audio_url: seg.path,
-          qc_findings: seg.qc_findings ?? [],
-        }))
+        const speakerGenders: Record<string, string> = status.speaker_genders ?? {}
+        const persistedVoiceMapping: Record<string, string> | undefined = status.voice_mapping ?? undefined
+
+        const editorSegments: Segment[] = (segmentsData?.segments || []).map((seg: any, idx: number) => {
+          const speakerId = `speaker-${String(seg.speaker ?? '').replace(/\D/g, '') || '1'}`
+          const gender = speakerGenders[speakerId] as 'male' | 'female' | 'child' | undefined
+          return {
+            id: `segment-${idx}`,
+            index: idx,
+            status: seg.locked ? 'locked' : 'auto',
+            start_time: seg.start ?? 0,
+            end_time: seg.end ?? 0,
+            source_text: sourceByIndex.get(seg.transcript_index ?? idx) ?? '',
+            target_text: seg.text ?? '',
+            speaker_id: speakerId,
+            speaker_label: seg.speaker ?? 'Speaker 1',
+            speaker_gender: gender,
+            audio_url: seg.path,
+            qc_findings: seg.qc_findings ?? [],
+          }
+        })
 
         const targetLang = (segmentsData?.language || 'en').toLowerCase()
 
@@ -82,6 +90,8 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
           videoUrl: toAbsoluteUrl(status.video_url || `/api/media/${jobId}/video`),
           dubbedVideoUrl: status.dubbed_video_url ? toAbsoluteUrl(status.dubbed_video_url) : null,
           videoDuration: segmentsData?.video_duration ?? status.video_duration ?? 0,
+          speakerGenders,
+          voiceMapping: persistedVoiceMapping,
         })
         setSegments(editorSegments)
       } catch (e: any) {
@@ -177,6 +187,8 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         qcLoading={qcLoading}
         pointsLeft={100}
         minutesAvailable={60}
+        speakerGenders={editorProps.speakerGenders}
+        voiceMapping={editorProps.voiceMapping}
         onExport={() => {}}
         onShare={() => {}}
         onGenerateSpeech={() => {}}

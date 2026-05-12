@@ -1,6 +1,7 @@
 from typing import Optional
 from pydantic import BaseModel
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
+import fastapi
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Request, Body
 from fastapi.responses import JSONResponse, FileResponse
 import uuid
 import os
@@ -1688,6 +1689,7 @@ async def get_job_status(job_id: str):
         tts_engine=job.tts_engine,
         segment_tts_engines=job.segment_tts_engines,
         speaker_genders=job.speaker_genders,
+        voice_mapping=job.voice_mapping,
         error_message=job.error_message,
         created_at=job.created_at,
         updated_at=job.updated_at
@@ -1865,6 +1867,16 @@ async def delete_job(job_id: str):
             pass
 
     return {"message": f"Job {job_id} deleted successfully"}
+
+
+@router.patch("/jobs/{job_id}/voice-mapping", status_code=204)
+async def update_voice_mapping(job_id: str, body: Dict[str, str] = Body(...)):
+    """Persist a speaker_id → voice_key mapping for this job."""
+    job = await _get_or_rehydrate_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job.voice_mapping = body
+    logger.info(f"[VOICE MAP] Job {job_id} voice mapping updated: {body}")
 
 
 @router.post("/jobs/{job_id}/cancel")

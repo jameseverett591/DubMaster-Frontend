@@ -369,25 +369,15 @@ class DubbingService:
             unmatched = [s for s in unique_speakers if s not in speaker_to_voice]
 
         # ------------------------------------------------------------------ #
-        # Pass 3: last-resort fallback — distribute provided voice values     #
-        # round-robin so speakers don't all collapse to one voice.            #
+        # Pass 3: no gender data — cycle through male pool so each speaker   #
+        # gets a distinct voice instead of all collapsing to one default.    #
         # ------------------------------------------------------------------ #
         if unmatched:
-            voice_values: List[str] = []
-            if voice_mapping:
-                seen: set = set()
-                for value in voice_mapping.values():
-                    if value and value not in seen:
-                        seen.add(value)
-                        voice_values.append(value)
-
+            male_pool = _VOICES_BY_GENDER["male"]
             for i, speaker in enumerate(unmatched):
-                if voice_values:
-                    fallback = voice_values[i % len(voice_values)]
-                else:
-                    fallback = "pNInz6obpgDQGcFmaJgB"  # Adam (male)
-                speaker_to_voice[speaker] = fallback
-                logger.info(f"[VOICE MAP] {speaker} fallback round-robin -> {fallback}")
+                voice = male_pool[i % len(male_pool)]
+                speaker_to_voice[speaker] = voice
+                logger.info(f"[VOICE MAP] {speaker} fallback pool -> {voice} (no gender data)")
 
         return speaker_to_voice
 

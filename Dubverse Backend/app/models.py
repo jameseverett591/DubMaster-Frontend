@@ -68,6 +68,7 @@ class Job(BaseModel):
     
     transcript: Optional[Transcript] = None
     speaker_genders: Optional[Dict[str, str]] = None   # e.g. {"speaker-1": "male", "speaker-2": "female"}
+    voice_mapping: Optional[Dict[str, str]] = None     # e.g. {"speaker-1": "male-2", "speaker-2": "female-1"}
 
     dubbed_video_url: Optional[str] = None
     tts_engine: Optional[str] = None
@@ -104,6 +105,7 @@ class StatusResponse(BaseModel):
     tts_engine: Optional[str] = None
     segment_tts_engines: Optional[List[Optional[str]]] = None
     speaker_genders: Optional[Dict[str, str]] = None
+    voice_mapping: Optional[Dict[str, str]] = None
     error_message: Optional[str]
     created_at: datetime
     updated_at: datetime
