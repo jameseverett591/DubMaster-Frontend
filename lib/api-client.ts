@@ -368,7 +368,8 @@ class DubVerseAPIClient {
   async uploadVideo(
     file: File,
     onProgress?: (progress: number) => void,
-    sourceLanguage?: string
+    sourceLanguage?: string,
+    numSpeakers?: number,
   ): Promise<UploadResponse> {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
@@ -376,6 +377,9 @@ class DubVerseAPIClient {
       formData.append('file', file)
       if (sourceLanguage && sourceLanguage !== 'auto') {
         formData.append('source_language', sourceLanguage)
+      }
+      if (numSpeakers && numSpeakers >= 1 && numSpeakers <= 10) {
+        formData.append('num_speakers', String(numSpeakers))
       }
 
       xhr.upload.addEventListener('progress', (e) => {
