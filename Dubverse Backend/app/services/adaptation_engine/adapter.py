@@ -28,10 +28,8 @@ async def adapt_batch(
     if not segments:
         return []
 
-    from app.services import azure_openai_service
-
-    if not azure_openai_service.is_enabled():
-        logger.warning("[ADAPTATION] Azure OpenAI not configured — using fallback variants")
+    if not os.getenv("ANTHROPIC_API_KEY", "").strip():
+        logger.warning("[ADAPTATION] ANTHROPIC_API_KEY not set — using fallback variants")
         return _fallback_variants(segments)
 
     source_language = segments[0].get("source_language", "zh")
@@ -56,32 +54,28 @@ async def adapt_batch(
 
 
 async def _call_llm(user_prompt: str) -> Optional[str]:
-    """Call Azure OpenAI GPT-4 with the adaptation prompt."""
-    config = _get_azure_config()
-    if not config:
+    """Call Claude via Anthropic API with the adaptation prompt."""
+    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
         return None
 
-    try:
-        from openai import AzureOpenAI
+    model = os.getenv("ADAPTATION_MODEL", "claude-haiku-4-5-20251001")
 
-        client = AzureOpenAI(
-            azure_endpoint=config["endpoint"],
-            api_key=config["key"],
-            api_version="2024-06-01",
-        )
+    try:
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=api_key)
 
         response = await asyncio.to_thread(
-            client.chat.completions.create,
-            model=config["deployment"],
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.3,
+            client.messages.create,
+            model=model,
             max_tokens=6000,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+            temperature=0.3,
         )
 
-        content = response.choices[0].message.content
+        content = response.content[0].text if response.content else None
         if not content:
             return None
 
@@ -93,15 +87,6 @@ async def _call_llm(user_prompt: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"[ADAPTATION] LLM call failed: {e}", exc_info=True)
         return None
-
-
-def _get_azure_config() -> Optional[Dict[str, str]]:
-    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
-    key = os.getenv("AZURE_OPENAI_KEY", "").strip()
-    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "").strip()
-    if endpoint and key and deployment:
-        return {"endpoint": endpoint, "key": key, "deployment": deployment}
-    return None
 
 
 def _parse_llm_response(raw_json: str, segments: List[Dict]) -> List[AdaptedSegment]:
