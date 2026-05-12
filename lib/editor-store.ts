@@ -1,7 +1,8 @@
 import { create } from 'zustand'
-import type { Segment, QCFinding, QCScore, QCSeverity, QCFindingType } from './editor-types'
+import type { Segment, QCFinding, QCScore, QCSeverity, QCFindingType, SidebarTab } from './editor-types'
+import type { AdaptedSegment, VariantType } from './adaptation-types'
 
-export type SidebarTab = 'speech' | 'subtitles' | 'brand' | 'lip-sync' | 'qc'
+export type { SidebarTab }
 
 interface EditorState {
   // Job data
@@ -40,7 +41,11 @@ interface EditorState {
   
   // Correction tool
   activeCorrectionTool: 'timing' | 'translation' | 'voice' | 'sync' | null
-  
+
+  // Adaptation variants
+  adaptationVariants: Record<string, AdaptedSegment>
+  isAdaptationLoading: boolean
+
   // Actions
   setJobData: (data: {
     jobId: string
@@ -91,7 +96,13 @@ interface EditorState {
   jumpToNextFinding: () => void
   jumpToPrevFinding: () => void
   jumpToFinding: (findingId: string) => void
-  
+
+  // Adaptation actions
+  setAdaptationVariants: (variants: AdaptedSegment[]) => void
+  setSelectedVariant: (segmentId: string, variant: VariantType) => void
+  applyRecommendedToAll: () => void
+  setAdaptationLoading: (loading: boolean) => void
+
   // Computed / helpers
   getFilteredFindings: () => QCFinding[]
   getCurrentSegment: () => Segment | null
@@ -121,7 +132,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   selectedFindingId: null,
   activeSidebarTab: 'qc',
   activeCorrectionTool: null,
-  
+  adaptationVariants: {},
+  isAdaptationLoading: false,
+
   // Set job data
   setJobData: (data) => set({
     jobId: data.jobId,
@@ -258,6 +271,36 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
   },
   
+  // Adaptation actions
+  setAdaptationVariants: (variants) => set((state) => ({
+    adaptationVariants: {
+      ...state.adaptationVariants,
+      ...Object.fromEntries(variants.map((v) => [v.segmentId, v])),
+    },
+  })),
+
+  setSelectedVariant: (segmentId, variant) => set((state) => {
+    const existing = state.adaptationVariants[segmentId]
+    if (!existing) return state
+    return {
+      adaptationVariants: {
+        ...state.adaptationVariants,
+        [segmentId]: { ...existing, selectedVariant: variant },
+      },
+    }
+  }),
+
+  applyRecommendedToAll: () => set((state) => ({
+    adaptationVariants: Object.fromEntries(
+      Object.entries(state.adaptationVariants).map(([id, seg]) => [
+        id,
+        { ...seg, selectedVariant: seg.recommended },
+      ])
+    ),
+  })),
+
+  setAdaptationLoading: (loading) => set({ isAdaptationLoading: loading }),
+
   // Computed helpers
   getFilteredFindings: () => {
     const state = get()
