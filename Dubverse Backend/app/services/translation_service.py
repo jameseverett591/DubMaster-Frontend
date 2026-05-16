@@ -8,256 +8,26 @@ logger = logging.getLogger(__name__)
 
 from app.config import get_settings
 from app.utils.language import normalize_language_code, LANGUAGE_NAMES
-
-# Glossary: maps source terms to their correct English translations.
-# These are protected from machine translation via placeholder tokens.
-GLOSSARY: Dict[str, str] = {
-    # Character names (including common Whisper mishearings)
-    "叶问": "Ip Man",
-    "葉問": "Ip Man",
-    "熱吻": "Ip Man",        # Whisper mishearing of 葉問
-    "叶师傅": "Master Ip",
-    "葉師傅": "Master Ip",
-    "金師傅": "Master Shin",
-    "金师傅": "Master Shin",
-    "金師父": "Master Shin",    # 父 variant (Whisper sometimes outputs 父 instead of 傅)
-    "金师父": "Master Shin",
-    "甘師傅": "Master Shin",    # Whisper mishearing: 甘 (gam) instead of 金 (gam) — homophones in Cantonese
-    "甘师傅": "Master Shin",
-    "甘師父": "Master Shin",
-    "甘师父": "Master Shin",
-    "甘師":   "Master Shin",    # Shortened variant Whisper sometimes produces
-    "金山找": "Master Shin",
-    # Additional phonetic variants Whisper produces for "Shin" (xīn/xìn sounds)
-    "心師傅": "Master Shin",    # xīn — most common "Xin" variant
-    "心师傅": "Master Shin",
-    "心師父": "Master Shin",
-    "心师父": "Master Shin",
-    "新師傅": "Master Shin",    # xīn — "new" character
-    "新师傅": "Master Shin",
-    "新師父": "Master Shin",
-    "新师父": "Master Shin",
-    "辛師傅": "Master Shin",    # xīn — "bitter" character
-    "辛师傅": "Master Shin",
-    "辛師父": "Master Shin",
-    "辛师父": "Master Shin",
-    "信師傅": "Master Shin",    # xìn — "trust" character
-    "信师傅": "Master Shin",
-    "信師父": "Master Shin",
-    "信师父": "Master Shin",
-    "星師傅": "Master Shin",    # xīng — "star" character (Whisper mishearing)
-    "星师傅": "Master Shin",
-    "星師父": "Master Shin",
-    "星师父": "Master Shin",
-    "陳師父": "Master Chin",    # Traditional: father variant
-    "陳師傅": "Master Chin",    # Traditional: teacher variant
-    "陈师父": "Master Chin",    # Simplified: father variant
-    "陈师傅": "Master Chin",    # Simplified: teacher variant
-    "阿俊":   "Ah Jun",         # The kid
-    "三浦": "Miura",
-    "武痴林": "Lam",
-    "李钊": "Li Zhao",
-    # Family/address terms
-    "大哥": "Big brother",
-    "臭小子": "You little brat",
-    "沒事": "I'm fine",
-    "没事": "I'm fine",
-    "老婆大人": "My dear wife",
-    "老婆": "Honey",
-    "老公": "Honey",
-    "親愛的": "Darling",
-    "亲爱的": "Darling",
-    # Martial arts terms
-    "榮春": "Wing Chun",      # Whisper mishearing of 詠春
-    "永春": "Wing Chun",
-    "詠春": "Wing Chun",
-    "咏春拳": "Wing Chun",
-    "詠春拳": "Wing Chun",
-    "龄春": "Wing Chun",
-    "龄春, 燕文": "Wing Chun, Ip Man",
-    "看別人而已": "It's up to you.",
-    "看别人而已": "It's up to you.",
-    "看別人": "It's on you",
-    "打開吧": "",
-    "好的功夫是不分男女路友": "Good kung fu doesn't discriminate between men and women",
-    "套牌": "I'll pay",        # Whisper mishears 我付 (I'll pay) as 套牌
-    "藍北拳": "Northern Fist",   # Whisper mishearing: 藍 (laam) prepended to 北拳
-    "北拳": "Northern Fist",
-    "北權": "Northern Fist",    # Whisper mishearing
-    "南拳": "Southern Fist",
-    "南方權": "Southern Fist",  # Whisper mishearing
-    "输给南拳": "lost to Southern Fist",   # Simplified variant
-    "輸給了南拳": "lost to Southern Fist", # With 了 particle
-    "木人桩": "wooden dummy",
-    "木人樁": "wooden dummy",
-    "黐手": "chi sau",
-    "太极": "Tai Chi",
-    "太極": "Tai Chi",
-    "武术": "martial arts",
-    "武術": "martial arts",
-    "功夫": "kung fu",
-    "师傅": "master",
-    "師傅": "master",
-    "师父": "master",
-    "師父": "master",
-    # Idiomatic expressions
-    "不用說了": "That's enough",
-    "不用说了": "That's enough",
-    "小心你的嘴": "Mind your language",
-    "小心你的嘴巴": "Mind your language",
-    "看人家的": "It's up to you",
-    "看人家": "It's up to you",
-    "我付": "I'll pay",
-    "我來付": "I'll pay",
-    "我来付": "I'll pay",
-    "我埋單": "I'll pay",
-    "我埋单": "I'll pay",
-    "我付錢": "I'll pay",
-    "我付钱": "I'll pay",
-    "我請客": "It's my treat",
-    "我请客": "It's my treat",
-    # Whisper transcription artifacts and fight-scene mishearings
-    "男女路友": "male and female",   # 路友 is Whisper noise; real phrase is 男女的
-    "路友": "",                       # Remove stray 路友 artifact
-    "男女老友": "men and women",     # 老友 is Whisper mishearing; real phrase is 男女老幼
-    "我賠": "",                       # Fight grunt misheard — drop
-    "我赔": "",
-    "你跑": "",                       # Fight grunt misheard — drop
-    "我陪你": "",                     # Fight grunt misheard — full phrase drop (prevents "你" residue)
-    "我陪": "",                       # Fight grunt misheard — drop
-    "老闆": "",                       # CJK hallucination during table-break silence — drop
-    "老板": "",                       # Simplified variant
-    "看人的": "It's up to you",      # Whisper drops 家 → 看人的 instead of 看人家的
-    # Short expressions
-    "好呀": "Okay.",
-    "好了": "Alright.",
-    "好啊": "Okay.",
-    "请": "Please",
-    "請": "Please",
-    "爸爸": "Daddy",
-    "妈妈": "Mommy",
-    "媽媽": "Mommy",
-    "够了": "That's enough",
-    "夠了": "That's enough",
-    # Standalone phrases that free translation gets wrong
-    "看人家": "It's up to you.",
-    "看人家的": "It's up to you.",
-    "至於打成怎樣你一會兒就會知道": "You'll see how it goes in a moment.",
-    "至于打成怎样你一会儿就会知道": "You'll see how it goes in a moment.",
-    "我劈": "I'll fight you.",
-    "我告訴你再不出門的話": "I'm telling you, if you don't leave the house,",
-    "我告诉你再不出门的话": "I'm telling you, if you don't leave the house,",
-    "家裡的東西就會壞掉了": "everything in the house will be ruined.",
-    "家里的东西就会坏掉了": "everything in the house will be ruined.",
-    "家裡的東西就會爛了": "everything in the house will be ruined.",
-    "大哥没事吧": "Brother, are you okay?",
-    "大哥沒事吧": "Brother, are you okay?",
-    "金師傅沒事吧": "Master Shin, are you okay?",
-    "金师傅没事吧": "Master Shin, are you okay?",
-    "你没事吧": "Are you okay?",
-    "你沒事吧": "Are you okay?",
-    "厉害": "He's better",
-    "厲害": "He's better",
-    # Adjacent glossary concatenation fix (Wing Chun + Ip Man)
-    "榮春葉問": "Wing Chun, Ip Man",
-    "荣春叶问": "Wing Chun, Ip Man",
-    "詠春葉問": "Wing Chun, Ip Man",
-    "咏春叶问": "Wing Chun, Ip Man",
-    # Full phrase overrides (must appear before shorter substrings)
-    # Child's line: Whisper hears 出门/烂 but actual dialogue is about fighting.
-    # Combined form (if segments are merged):
-    "爸爸妈妈说你再不出门的话家里的东西就会烂了": "Mom said start fighting, or everything in the house will be broken",
-    "爸爸媽媽說你再不出門的話家裡的東西就會爛了": "Mom said start fighting, or everything in the house will be broken",
-    "妈妈说你再不出手的话家里的东西都要被打烂了": "Mom said start fighting, or everything in the house will be broken",
-    # Split form (individual Whisper segments):
-    "爸爸妈妈说你再不出门的话": "Mom said start fighting",
-    "爸爸媽媽說你再不出門的話": "Mom said start fighting",
-    "家里的东西就会烂了": "or everything in the house will be broken",
-    "家裡的東西就會爛了": "or everything in the house will be broken",
-    "好功夫是不會分男女路友的": "Kung fu doesn't discriminate between male and female",
-    "好功夫是不会分男女路友的": "Kung fu doesn't discriminate between male and female",
-    "金師傅 沒事吧": "Master Shin, are you okay?",
-    "金师傅 没事吧": "Master Shin, are you okay?",
-    "金師傅沒事吧": "Master Shin, are you okay?",
-    "金师傅没事吧": "Master Shin, are you okay?",
-    # Mixed traditional/simplified variants (Whisper vocal recovery mixes scripts)
-    "金師傅没事吧": "Master Shin, are you okay?",
-    "金师傅沒事吧": "Master Shin, are you okay?",
-    "金師傅 没事吧": "Master Shin, are you okay?",
-    "金师傅 沒事吧": "Master Shin, are you okay?",
-    # 師父 (father) variants — Whisper vocal recovery often outputs 父 instead of 傅
-    "金師父沒事吧": "Master Shin, are you okay?",
-    "金师父没事吧": "Master Shin, are you okay?",
-    "金師父 沒事吧": "Master Shin, are you okay?",
-    "金师父 没事吧": "Master Shin, are you okay?",
-    "金師父没事吧": "Master Shin, are you okay?",
-    "金师父沒事吧": "Master Shin, are you okay?",
-    # 甘 (Whisper mishearing of 金) variants
-    "甘師傅沒事吧": "Master Shin, are you okay?",
-    "甘师傅没事吧": "Master Shin, are you okay?",
-    "甘師父沒事吧": "Master Shin, are you okay?",
-    "甘师父没事吧": "Master Shin, are you okay?",
-    "甘師傅 沒事吧": "Master Shin, are you okay?",
-    "甘师傅 没事吧": "Master Shin, are you okay?",
-    "甘師父 沒事吧": "Master Shin, are you okay?",
-    "甘师父 没事吧": "Master Shin, are you okay?",
-    "甘師傅没事吧": "Master Shin, are you okay?",
-    "甘师傅沒事吧": "Master Shin, are you okay?",
-    "甘師父没事吧": "Master Shin, are you okay?",
-    "甘师父沒事吧": "Master Shin, are you okay?",
-    "怎麼樣 金師傅": "Master Shin, are you alright?",
-    "怎么样 金师傅": "Master Shin, are you alright?",
-    "怎麼樣金師傅": "Master Shin, are you alright?",
-    "怎么样金师傅": "Master Shin, are you alright?",
-    "怎麼樣金師傅沒事吧": "How's it going? Master Shin, are you okay?",
-    "怎么样金师傅没事吧": "How's it going? Master Shin, are you okay?",
-    # End section dialogue
-    "今天北拳": "Today, Northern Fist",
-    "今天被放權": "Today, Northern Fist",    # Whisper mishearing
-    "輸給南拳": "lost to Southern Fist",
-    "輸給南方權": "lost to Southern Fist",  # Whisper mishearing
-    "不是南北拳的問題": "It's not about Northern or Southern Fist",
-    "不是南北權的問題": "It's not about Northern or Southern Fist",  # Whisper mishearing
-    # Cantonese-specific final section (local Whisper outputs Cantonese, not Mandarin)
-    "點下金師父": "Master Shin, was my kung fu any good?",
-    "點下金師傅": "Master Shin, was my kung fu any good?",
-    "我啲功夫橫可以": "My kung fu's not bad, right?",
-    "唔用數啦": "That's enough.",
-    "唔用數": "That's enough.",
-    "今天北方拳": "Today, Northern Fist",
-    "輸俾南方拳": "lost to Southern Fist",
-    "輸俾南拳": "lost to Southern Fist",
-    "唔系南北拳㗎嘛": "It's not about Northern or Southern Fist",
-    "唔係南北拳㗎嘛": "It's not about Northern or Southern Fist",
-    "唔系南北拳": "It's not about Northern or Southern Fist",
-    "唔係南北拳": "It's not about Northern or Southern Fist",
-    "係你㗎笨": "It's your problem.",
-    "係你嘅問題": "It's your problem.",
-    "錯錯錯": "Wrong.",
-    # Cantonese deduplication
-    "大哥 大哥 大哥": "Big brother",
-    "大哥大哥大哥": "Big brother",
-    # Cantonese fight grunts (local Whisper catches these separately)
-    "我賠，": "",
-    "我赔，": "",
-    "行，": "",
-    # Phonetic-English identity entries — if Whisper outputs a romanized name
-    # instead of CJK (e.g. because initial_prompt didn't fully suppress it),
-    # these prevent DeepL from "translating" proper nouns into something wrong.
-    "Ip Man": "Ip Man",
-    "Wing Chun": "Wing Chun",
-    "Ip man": "Ip Man",
-    "wing chun": "Wing Chun",
-}
-
+from app.services.glossary import get_glossary
+from app.services.adaptation_engine.policy import (
+    DUBBING_SYSTEM_PROMPT,
+    NO_HALLUCINATION_GUARDS,
+    get_character_profile,
+    detect_character_from_text,
+    protect_entities,
+    restore_entities,
+    build_name_mapping_prompt,
+    fix_translation_names,
+)
 
 class TranslationService:
     def __init__(self):
         settings = get_settings()
         self.deepl_api_key = settings.DEEPL_API_KEY
         self.google_api_key = os.getenv("GOOGLE_TRANSLATE_API_KEY")
-        # Sort glossary by length descending so longer matches take priority
-        self._glossary_sorted = sorted(GLOSSARY.items(), key=lambda kv: len(kv[0]), reverse=True)
+        # Glossary is loaded dynamically per source language in translate_segments.
+        # Initialise with the Cantonese glossary as a safe default.
+        self._glossary_sorted = sorted(get_glossary("yue").items(), key=lambda kv: len(kv[0]), reverse=True)
 
     def _apply_glossary_pre(self, text: str) -> Tuple[str, List[Tuple[str, str]]]:
         """Replace glossary source terms with placeholder tokens before translation."""
@@ -282,6 +52,11 @@ class TranslationService:
                 placeholder = f"XGLO{i:03d}X"
                 text = text.replace(src_collapsed, placeholder)
                 replacements.append((placeholder, tgt_term))
+        # Insert a space between any two adjacent XGLO tokens so that when they
+        # are restored the word-boundary check in _apply_glossary_post always has
+        # a gap character — prevents "Brother Wenmy master" when 文哥 and 我師父
+        # are adjacent in the source and both get replaced.
+        text = re.sub(r'(XGLO\d{3}X)(?=XGLO\d{3}X)', r'\1 ', text)
         return text, replacements
 
     def _apply_glossary_post(self, text: str, replacements: List[Tuple[str, str]]) -> str:
@@ -345,10 +120,33 @@ class TranslationService:
             "It's not a matter of Northern or Southern Fist": "It's not about Northern or Southern Fist",
             "Brother Quan":  "Master Chin",   # observed LLM hallucination for 陳師父
             "Master Quan":   "Master Chin",   # LLM romanization of 陳 (Chan → Quan)
+            # 武痴林 romanization variants — catch slipthrough after glossary
+            "Wu Cilin":      "Lam",
+            "Wu Zilin":      "Lam",
+            "Wu Ci Lin":     "Lam",
+            "Wu Zi Lin":     "Lam",
+            # Plural agreement: these keys are intentionally REMOVED from plain-string
+            # replacement — using regex below instead (word-boundary prevents double-s
+            # when the translation already returns "masters").
+            # DO NOT add "so many master" / "plenty of master" / "many master" here.
+            # Ah Jun capitalization/spelling variants
+            "ah June":       "Ah Jun",
+            "Ah June":       "Ah Jun",
+            "ah jun":        "Ah Jun",
+            "Uncle Man":     "Uncle Ip",
+            "uncle man":     "Uncle Ip",
+            "Uncle IP":      "Uncle Ip",   # LLM/adaptation caps both letters
+            "uncle ip":      "Uncle Ip",
         }
         for wrong, correct in _POST_FIXES.items():
             if wrong in text:
                 text = text.replace(wrong, correct)
+        # Plural fix — word-boundary regex prevents "masters" → "masterss" double-s
+        # when the translation engine already pluralised correctly.
+        text = re.sub(r'\b(so many|plenty of|many) master\b', r'\1 masters', text)
+        # Strip timing budget values echoed from the prompt (e.g. "1.2s, " or "1.2S, " at start).
+        # Claude sometimes repeats the (Xs) hint despite being told not to.
+        text = re.sub(r'^\d+\.?\d*[sS][,.]?\s*', '', text).strip()
         # Strip leading discourse-particle prefixes that LLMs sometimes emit
         # when Cantonese 講/gong opens a line (e.g. "Kong, I really want to see"
         # or "Gong, today Northern Fist lost...").  These are NOT character names.
@@ -360,6 +158,15 @@ class TranslationService:
         # Drop YouTube outro / promotional content hallucinated by Whisper
         if re.search(r'like.*subscribe|subscribe.*bell|hit the bell|tip tip', text, re.IGNORECASE):
             return ""
+        # Drop LLM meta-commentary that sometimes appears as a final "segment"
+        if re.search(r'^(summariz|in summary|summary|to summarize|closing|in conclusion)', text, re.IGNORECASE):
+            return ""
+        # Strip [[word]] bracket artifacts left by Claude over-applying the [[ENTITY:n]] pattern.
+        # By this point all real [[ENTITY:n]] tokens are already restored, so any remaining
+        # [[...]] brackets are LLM noise and should be unwrapped.
+        # Also strip empty [[]] brackets (Claude hallucinated a name placeholder with no content).
+        text = re.sub(r'\[\[\s*\]\]', '', text).strip()
+        text = re.sub(r'\[\[([^\]]+)\]\]', r'\1', text).strip()
         return text
     
     async def translate_segments(
@@ -368,6 +175,16 @@ class TranslationService:
         source_language: str,
         target_language: str
     ) -> List[Dict]:
+        # Load the glossary for the incoming source language so every downstream
+        # call to _apply_glossary_pre/_post uses the correct language-specific terms.
+        self._glossary_sorted = sorted(
+            get_glossary(source_language).items(), key=lambda kv: len(kv[0]), reverse=True
+        )
+        logger.info(
+            f"[TRANSLATE] Loaded glossary for source_language='{source_language}' "
+            f"({len(self._glossary_sorted)} entries)"
+        )
+
         source_norm = normalize_language_code(source_language, allow_auto=True)
         target_norm = normalize_language_code(target_language)
 
@@ -505,10 +322,13 @@ class TranslationService:
         texts = [seg.get("text", "") for seg in segments]
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
+        entity_replacements_per_seg: List[List[Tuple[str, str]]] = []
         for t in texts:
             p, r = self._apply_glossary_pre(t)
-            protected.append(p)
+            p2, r2 = protect_entities(p)
+            protected.append(p2)
             replacements_per_seg.append(r)
+            entity_replacements_per_seg.append(r2)
 
         def _slot(seg: Dict) -> str:
             start = float(seg.get("start", 0))
@@ -516,35 +336,52 @@ class TranslationService:
             return f"{round(max(0.3, end - start), 1)}s"
 
         numbered_lines = "\n".join(
-            f"{i+1}. [{_slot(segments[i])}] {p}"
+            f"{i+1}. ({_slot(segments[i])}) {p}"
             for i, p in enumerate(protected)
         )
 
-        system_prompt = (
-            f"You are a professional dubbing translator specializing in {lang_name} "
-            f"martial arts film dialogue. Translate the following {lang_name} dialogue "
-            f"lines into natural spoken {target_name} suitable for voice dubbing.\n\n"
-            f"IMPORTANT RULES:\n"
-            f"- These are SPOKEN {lang_name} lines, not Standard Written Chinese\n"
-            f"- Preserve the emotional tone (anger, calm authority, concern, urgency, humor)\n"
-            f"- Each line has a timing slot in [Xs] — your translation MUST fit that duration.\n"
-            f"  A 0.8s slot fits ~3 syllables. A 2s slot fits ~7 syllables. Match this strictly.\n"
-            f"- Short exclamations (好啊, 沒事) must stay short: 'Sure.' / 'I'm fine.' — not sentences\n"
-            f"- CRITICAL: each input line is a SEPARATE utterance by a DIFFERENT speaker or moment — "
-            f"NEVER combine two numbered lines into one answer, even if they seem related\n"
-            f"- Character names are PROPER NOUNS — output them EXACTLY as they appear in the input. "
-            f"NEVER romanize or translate them differently. "
-            f"'Ip Man' stays 'Ip Man', 'Master Shin' stays 'Master Shin', 'Master Chin' stays 'Master Chin', 'Ah Jun' stays 'Ah Jun', 'Wing Chun' stays 'Wing Chun'.\n"
-            f"- Terms like XGLO###X are protected placeholders — keep them unchanged\n"
-            f"- Return EXACTLY one numbered translation per input line — same count, same order\n"
-            f"- Do NOT include the timing slot in your output. Do NOT add explanations or notes\n"
-            f"- Do NOT prefix any translation with a character name, speaker label, or address "
-            f"term (e.g. NEVER start a line with 'Kong, ...' or 'Ip Man: ...' or 'Master Shin, ...')\n"
-            f"- Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) that open a line are fillers — "
-            f"drop them entirely, do NOT render them as 'Come', 'Kong', 'Kami', 'Wai', 'Hai', or any English word\n"
-        )
+        # Build centralized system prompt from policy layer
+        system_prompt_parts = [DUBBING_SYSTEM_PROMPT]
 
-        user_prompt = f"Translate these {lang_name} dialogue lines to {target_name}:\n\n{numbered_lines}"
+        detected_profile = detect_character_from_text("\n".join(texts))
+        if detected_profile:
+            system_prompt_parts.append("")
+            system_prompt_parts.append(detected_profile.to_prompt())
+
+        name_mapping = build_name_mapping_prompt(texts)
+        if name_mapping:
+            system_prompt_parts.append("")
+            system_prompt_parts.append(name_mapping)
+
+        system_prompt_parts.append("")
+        system_prompt_parts.append("DOMAIN-SPECIFIC RULES:")
+        system_prompt_parts.append("- These are SPOKEN Cantonese martial arts film dialogue lines.")
+        system_prompt_parts.append("- Each line has a timing budget (Xs) — choose words that fit naturally in that time.")
+        system_prompt_parts.append("- Short exclamations must stay short (1-3 syllables).")
+        system_prompt_parts.append("- NEVER combine two numbered lines into one answer.")
+        system_prompt_parts.append("- Do NOT echo or repeat the timing value (Xs) in your answer.")
+        system_prompt_parts.append("- Do NOT prefix with speaker names (e.g. NEVER 'Ip Man: ...').")
+        system_prompt_parts.append("- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.")
+        system_prompt_parts.append("- [[ENTITY:n]] tokens are PROTECTED placeholders — keep them EXACTLY.")
+        system_prompt_parts.append("")
+        system_prompt_parts.append("TONE AND EMOTIONAL STANCE:")
+        system_prompt_parts.append("- This is a classic period martial arts film. Characters speak with dignity, restraint, and warmth.")
+        system_prompt_parts.append("- PRESERVE the speaker's emotional stance. If a character is being self-deprecating or humble, the translation MUST reflect that.")
+        system_prompt_parts.append("- NEVER make a humble, self-deprecating line sound like a criticism of another character.")
+        system_prompt_parts.append("- Do NOT optimise for a 'clever' English line at the cost of faithfulness. A plain faithful translation beats a witty unfaithful one.")
+        system_prompt_parts.append("- Calm, friendly exchanges between friends must stay calm and friendly.")
+        system_prompt_parts.append("- NEVER add condescension, sarcasm, or aggressive subtext not present in the source.")
+        system_prompt_parts.append("")
+        system_prompt_parts.append(NO_HALLUCINATION_GUARDS)
+
+        system_prompt = "\n".join(system_prompt_parts)
+
+        user_prompt = (
+            f"Translate these spoken {lang_name} dialogue lines to natural {target_name} for voice actors.\n\n"
+            f"Preserve meaning, emotion, and character voice. "
+            f"Use colloquial spoken English — not formal or written style.\n\n"
+            f"{numbered_lines}"
+        )
 
         try:
             logger.info(
@@ -554,7 +391,7 @@ class TranslationService:
 
             payload = {
                 "model": "claude-sonnet-4-6",
-                "max_tokens": 4096,
+                "max_tokens": 8192,
                 "temperature": 0.3,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": user_prompt}],
@@ -597,19 +434,34 @@ class TranslationService:
             for i, seg in enumerate(segments):
                 if i < len(gpt_lines):
                     raw = gpt_lines[i]
+                    # Restore protected entities first, then fix hallucinations, then glossary
+                    raw = restore_entities(raw, entity_replacements_per_seg[i])
+                    raw = fix_translation_names(raw)
                     final = self._apply_glossary_post(raw, replacements_per_seg[i])
                     if raw.strip() != protected[i].strip():
                         changed += 1
                 else:
                     # Claude returned fewer lines than segments — mark for retry
                     # rather than padding with raw CJK (which would go to TTS verbatim)
+                    raw = restore_entities(protected[i], entity_replacements_per_seg[i])
+                    raw = fix_translation_names(raw)
                     final = self._apply_glossary_post(
-                        protected[i], replacements_per_seg[i]
+                        raw, replacements_per_seg[i]
                     )
                     retry_indices.append(i)
                 result.append({
                     **seg, "original_text": seg.get("text", ""), "text": final,
                 })
+
+            # CJK leak guard — flag any segment that still contains CJK after translation.
+            # This catches cases where Claude echoed the source instead of translating it.
+            _cjk_leak_re = re.compile(r'[一-鿿぀-ゟ゠-ヿ]')
+            for i, seg_result in enumerate(result):
+                if i not in retry_indices and _cjk_leak_re.search(seg_result.get("text", "")):
+                    logger.warning(
+                        f"[TRANSLATE] CJK leak in seg {i}: '{seg_result['text'][:60]}' — queuing retry"
+                    )
+                    retry_indices.append(i)
 
             # Retry segments that didn't get a Claude translation by translating
             # them individually via _translate_text (uses DeepL/Google/Claude single).
@@ -689,10 +541,13 @@ class TranslationService:
         texts = [seg.get("text", "") for seg in segments]
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
+        entity_replacements_per_seg: List[List[Tuple[str, str]]] = []
         for t in texts:
             p, r = self._apply_glossary_pre(t)
-            protected.append(p)
+            p2, r2 = protect_entities(p)
+            protected.append(p2)
             replacements_per_seg.append(r)
+            entity_replacements_per_seg.append(r2)
 
         # Build a single prompt with all segments + their timing slot.
         # GPT uses the duration to choose words that fit the on-screen moment —
@@ -704,35 +559,52 @@ class TranslationService:
             return f"{dur}s"
 
         numbered_lines = "\n".join(
-            f"{i+1}. [{_slot(segments[i])}] {p}"
+            f"{i+1}. ({_slot(segments[i])}) {p}"
             for i, p in enumerate(protected)
         )
 
-        system_prompt = (
-            f"You are a professional dubbing translator specializing in {lang_name} "
-            f"martial arts film dialogue. Translate the following {lang_name} dialogue "
-            f"lines into natural spoken {target_name} suitable for voice dubbing.\n\n"
-            f"IMPORTANT RULES:\n"
-            f"- These are SPOKEN {lang_name} lines, not Standard Written Chinese\n"
-            f"- Preserve the emotional tone (anger, calm authority, concern, urgency, humor)\n"
-            f"- Each line has a timing slot in [Xs] — your translation MUST fit that duration.\n"
-            f"  A 0.8s slot fits ~3 syllables. A 2s slot fits ~7 syllables. Match this strictly.\n"
-            f"- Short exclamations (好啊, 沒事) must stay short: 'Sure.' / 'I'm fine.' — not sentences\n"
-            f"- CRITICAL: each input line is a SEPARATE utterance by a DIFFERENT speaker or moment — "
-            f"NEVER combine two numbered lines into one answer, even if they seem related\n"
-            f"- Character names are PROPER NOUNS — output them EXACTLY as they appear in the input. "
-            f"NEVER romanize or translate them differently. "
-            f"'Ip Man' stays 'Ip Man', 'Master Shin' stays 'Master Shin', 'Master Chin' stays 'Master Chin', 'Ah Jun' stays 'Ah Jun', 'Wing Chun' stays 'Wing Chun'.\n"
-            f"- Terms like XGLO###X are protected placeholders — keep them unchanged\n"
-            f"- Return EXACTLY one numbered translation per input line — same count, same order\n"
-            f"- Do NOT include the timing slot in your output. Do NOT add explanations or notes\n"
-            f"- Do NOT prefix any translation with a character name, speaker label, or address "
-            f"term (e.g. NEVER start a line with 'Kong, ...' or 'Ip Man: ...' or 'Master Shin, ...')\n"
-            f"- Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) that open a line are fillers — "
-            f"drop them entirely, do NOT render them as 'Come', 'Kong', 'Kami', 'Wai', 'Hai', or any English word\n"
-        )
+        # Build centralized system prompt from policy layer
+        system_prompt_parts = [DUBBING_SYSTEM_PROMPT]
 
-        user_prompt = f"Translate these {lang_name} dialogue lines to {target_name}:\n\n{numbered_lines}"
+        detected_profile = detect_character_from_text("\n".join(texts))
+        if detected_profile:
+            system_prompt_parts.append("")
+            system_prompt_parts.append(detected_profile.to_prompt())
+
+        name_mapping = build_name_mapping_prompt(texts)
+        if name_mapping:
+            system_prompt_parts.append("")
+            system_prompt_parts.append(name_mapping)
+
+        system_prompt_parts.append("")
+        system_prompt_parts.append("DOMAIN-SPECIFIC RULES:")
+        system_prompt_parts.append("- These are SPOKEN Cantonese martial arts film dialogue lines.")
+        system_prompt_parts.append("- Each line has a timing budget (Xs) — choose words that fit naturally in that time.")
+        system_prompt_parts.append("- Short exclamations must stay short (1-3 syllables).")
+        system_prompt_parts.append("- NEVER combine two numbered lines into one answer.")
+        system_prompt_parts.append("- Do NOT echo or repeat the timing value (Xs) in your answer.")
+        system_prompt_parts.append("- Do NOT prefix with speaker names (e.g. NEVER 'Ip Man: ...').")
+        system_prompt_parts.append("- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.")
+        system_prompt_parts.append("- [[ENTITY:n]] tokens are PROTECTED placeholders — keep them EXACTLY.")
+        system_prompt_parts.append("")
+        system_prompt_parts.append("TONE AND EMOTIONAL STANCE:")
+        system_prompt_parts.append("- This is a classic period martial arts film. Characters speak with dignity, restraint, and warmth.")
+        system_prompt_parts.append("- PRESERVE the speaker's emotional stance. If a character is being self-deprecating or humble, the translation MUST reflect that.")
+        system_prompt_parts.append("- NEVER make a humble, self-deprecating line sound like a criticism of another character.")
+        system_prompt_parts.append("- Do NOT optimise for a 'clever' English line at the cost of faithfulness. A plain faithful translation beats a witty unfaithful one.")
+        system_prompt_parts.append("- Calm, friendly exchanges between friends must stay calm and friendly.")
+        system_prompt_parts.append("- NEVER add condescension, sarcasm, or aggressive subtext not present in the source.")
+        system_prompt_parts.append("")
+        system_prompt_parts.append(NO_HALLUCINATION_GUARDS)
+
+        system_prompt = "\n".join(system_prompt_parts)
+
+        user_prompt = (
+            f"Translate these spoken {lang_name} dialogue lines to natural {target_name} for voice actors.\n\n"
+            f"Preserve meaning, emotion, and character voice. "
+            f"Use colloquial spoken English — not formal or written style.\n\n"
+            f"{numbered_lines}"
+        )
 
         try:
             if use_azure:
@@ -755,7 +627,7 @@ class TranslationService:
                     {"role": "user", "content": user_prompt},
                 ],
                 "temperature": 0.3,
-                "max_tokens": 4096,
+                "max_tokens": 8192,
             }
             if use_openai:
                 payload["model"] = "gpt-4o"
@@ -797,12 +669,17 @@ class TranslationService:
             for i, seg in enumerate(segments):
                 if i < len(gpt_lines):
                     raw = gpt_lines[i]
+                    # Restore protected entities first, then fix hallucinations, then glossary
+                    raw = restore_entities(raw, entity_replacements_per_seg[i])
+                    raw = fix_translation_names(raw)
                     final = self._apply_glossary_post(raw, replacements_per_seg[i])
                     if raw.strip() != protected[i].strip():
                         changed += 1
                 else:
+                    raw = restore_entities(protected[i], entity_replacements_per_seg[i])
+                    raw = fix_translation_names(raw)
                     final = self._apply_glossary_post(
-                        protected[i], replacements_per_seg[i]
+                        raw, replacements_per_seg[i]
                     )
                 result.append({
                     **seg,

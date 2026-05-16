@@ -315,38 +315,42 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, **
         if len(slices) < 2:
             return []
 
-        # Distribute text across slices by duration, respecting sentence boundaries.
-        # Split into sentences first so we never cut mid-sentence across speakers.
-        import re as _re
-        sentences = _re.split(r'(?<=[.!?])\s+', seg_text.strip())
-        sentences = [s for s in sentences if s]
+        # Distribute text across slices using diarization boundary timestamps.
+        # For each slice boundary, calculate the proportional character position
+        # in the text and snap to the nearest sentence-ending punctuation.
+        # This handles both ASCII (.!?) and CJK (。！？) sentence endings —
+        # the old sentence-count approach treated all CJK text as one sentence
+        # because the regex only matched ASCII punctuation.
+        _SENT_ENDS = frozenset('.!?。！？')
 
-        if not sentences:
-            for sl in slices:
-                sl["text"] = ""
-        elif len(sentences) == 1:
-            # Only one sentence — assign to the dominant speaker slice by duration.
-            total = sum(sl["dur"] for sl in slices) or 1.0
-            dominant = max(slices, key=lambda x: x["dur"])
-            for sl in slices:
-                sl["text"] = seg_text.strip() if sl is dominant else ""
-        else:
-            total = sum(sl["dur"] for sl in slices) or seg_dur
-            n = len(sentences)
-            idx = 0
-            for j, sl in enumerate(slices):
-                remaining = n - idx
-                if remaining <= 0:
-                    sl["text"] = ""
-                    continue
-                if j == len(slices) - 1:
-                    take = remaining
-                else:
-                    ratio = (sl["dur"] / total) if total > 0 else (1.0 / len(slices))
-                    take = max(1, int(round(ratio * n)))
-                    take = min(take, remaining)
-                sl["text"] = " ".join(sentences[idx: idx + take]).strip()
-                idx += take
+        def _snap_to_boundary(text, target_char):
+            """Index just after the nearest sentence-ending char to target_char."""
+            best_idx = target_char
+            best_dist = len(text) + 1
+            for ci, ch in enumerate(text):
+                if ch in _SENT_ENDS:
+                    idx = ci + 1
+                    dist = abs(idx - target_char)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_idx = idx
+            return best_idx
+
+        n_chars = len(seg_text)
+        total_slice_dur = sum(sl["dur"] for sl in slices) or seg_dur
+        cum_dur = 0.0
+        split_points = []
+        for sl in slices[:-1]:
+            cum_dur += sl["dur"]
+            rel = cum_dur / total_slice_dur if total_slice_dur > 0 else (slices.index(sl) + 1) / len(slices)
+            target = int(rel * n_chars)
+            split_points.append(_snap_to_boundary(seg_text, target))
+
+        prev = 0
+        for j, sl in enumerate(slices):
+            end = split_points[j] if j < len(split_points) else n_chars
+            sl["text"] = seg_text[prev:end].strip()
+            prev = end
 
         out = []
         for sl in slices:
@@ -1033,6 +1037,41 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
                 )
             except Exception as _f0_err:
                 logger.warning(f"Job {job_id}: F0 fallback failed: {_f0_err}")
+
+            # Re-classify genders immediately with the new speaker labels so
+            # stale SPEAKER_00-only data never reaches the status response.
+            _post_split_spk = set(
+                (s.speaker if isinstance(s, TranscriptSegment) else s.get("speaker", ""))
+                for s in segments
+            )
+            if len(_post_split_spk) > 1:
+                try:
+                    _f0_extract = await asyncio.to_thread(extract_audio, video_path)
+                    if _f0_extract and _f0_extract.get("status") == "ok":
+                        _f0_segs = [
+                            {
+                                "speaker": s.speaker if isinstance(s, TranscriptSegment) else s.get("speaker"),
+                                "start": s.start if isinstance(s, TranscriptSegment) else s.get("start"),
+                                "end": s.end if isinstance(s, TranscriptSegment) else s.get("end"),
+                            }
+                            for s in segments
+                        ]
+                        _new_genders = await asyncio.to_thread(
+                            classify_speakers,
+                            _f0_extract["audio"],
+                            _f0_extract["sample_rate"],
+                            _f0_segs,
+                        )
+                        if _new_genders:
+                            speaker_genders = _new_genders
+                            await job_manager.update_job_speaker_genders(job_id, _new_genders)
+                            logger.info(
+                                f"Job {job_id}: re-classified genders after F0 split: {_new_genders}"
+                            )
+                except Exception as _rcls_err:
+                    logger.warning(
+                        f"Job {job_id}: gender re-classification after F0 split failed: {_rcls_err}"
+                    )
 
     # Quality gate: some worker versions can return an empty transcript (0
     # segments) even though the job ran. For Cantonese jobs, fall back to local
@@ -2015,6 +2054,33 @@ async def update_voice_mapping(job_id: str, body: Dict[str, str] = Body(...)):
         raise HTTPException(status_code=404, detail="Job not found")
     job.voice_mapping = body
     logger.info(f"[VOICE MAP] Job {job_id} voice mapping updated: {body}")
+
+
+@router.patch("/jobs/{job_id}/speaker-reassign", status_code=204)
+async def reassign_segment_speaker(job_id: str, body: dict = Body(...)):
+    """Reassign a single transcript segment to a different speaker."""
+    job = await _get_or_rehydrate_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    segment_index = body.get("segment_index")
+    new_speaker_id = body.get("new_speaker_id")
+
+    if segment_index is None or new_speaker_id is None:
+        raise HTTPException(status_code=422, detail="segment_index and new_speaker_id required")
+
+    if not job.transcript or not job.transcript.segments:
+        raise HTTPException(status_code=422, detail="No transcript segments found")
+
+    if segment_index < 0 or segment_index >= len(job.transcript.segments):
+        raise HTTPException(status_code=422, detail="Invalid segment_index")
+
+    old_speaker = job.transcript.segments[segment_index].speaker
+    job.transcript.segments[segment_index].speaker = new_speaker_id
+    logger.info(f"[SPEAKER REASSIGN] Job {job_id} segment {segment_index}: {old_speaker} -> {new_speaker_id}")
+
+    # Persist updated transcript to disk
+    await job_manager.update_job_transcript(job_id, job.transcript)
 
 
 @router.post("/jobs/{job_id}/cancel")

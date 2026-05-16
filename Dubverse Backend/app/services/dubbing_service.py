@@ -804,6 +804,7 @@ class DubbingService:
                 stability        = override.get("stability",        emotion_defaults["stability"])
                 similarity_boost = override.get("similarity_boost", emotion_defaults["similarity_boost"])
                 style            = override.get("style",            emotion_defaults["style"])
+                pitch_shift      = float(override.get("pitch", 0.0))
 
                 tts_kwargs: Optional[Dict] = dict(
                     text=tts_text,
@@ -834,7 +835,7 @@ class DubbingService:
                             f"[CHILD-VOICE] seg {i} speaker={speaker}: no Fish child preset — Edge TTS fallback"
                         )
                         child_result = await elevenlabs_tts._fallback_tts(
-                            tts_text, audio_path, target_norm, voice_key, "child"
+                            tts_text, audio_path, target_norm, voice_key, "child", pitch_shift
                         )
                         if child_result:
                             result = {"path": child_result, "engine": "edge-tts-child"}
@@ -864,6 +865,9 @@ class DubbingService:
                         f"voice_id={voice_id!r} text={text[:60]!r}"
                     )
                 elif tts_kwargs is not None:
+                    # ElevenLabs path: pass through user pitch_shift for SSML / post-processing
+                    if pitch_shift != 0:
+                        tts_kwargs["pitch_shift"] = pitch_shift
                     logger.info(
                         f"[EMOTION] seg {i} speaker={speaker} "
                         f"stability={stability} style={style} text={text[:60]!r}"
@@ -871,6 +875,16 @@ class DubbingService:
 
                 if tts_kwargs is not None:
                     result = await tts_provider.text_to_speech(**tts_kwargs)
+
+                # Post-process: apply pitch shift to ElevenLabs-generated audio
+                if result and pitch_shift != 0:
+                    pitched_path = os.path.join(output_dir, f"segment_{i:04d}_pitched.mp3")
+                    ok = await asyncio.to_thread(
+                        self._apply_pitch_shift, result["path"], pitched_path, pitch_shift
+                    )
+                    if ok and os.path.exists(pitched_path):
+                        result["path"] = pitched_path
+                        logger.info(f"[PITCH] seg {i}: shifted {pitch_shift:+.0f} semitones")
 
                 if result:
                     actual_engine = result.get("engine", provider_name)
@@ -931,9 +945,19 @@ class DubbingService:
                 segment_engines[i] = result.get("engine", "unknown")
 
                 if next_start is not None:
-                    target_duration = max(0.2, next_start - start_time - 0.05)
+                    segment_duration = end_time - start_time
+                    gap_to_next = next_start - end_time  # natural silence in original film
+                    # Level 1 — comfortable slot: original duration + up to 150ms for
+                    # translation length growth.  Natural pause is preserved here.
+                    expansion = min(0.15, gap_to_next * 0.5) if gap_to_next > 0 else 0.0
+                    comfortable_duration = max(0.2, segment_duration + expansion)
+                    # Level 2 — hard ceiling: never overflow into the next segment.
+                    max_slot = max(0.2, next_start - start_time - 0.05)
+                    target_duration = comfortable_duration
                 else:
-                    target_duration = max(0.2, end_time - start_time)
+                    max_slot = max(0.2, end_time - start_time)
+                    comfortable_duration = max_slot
+                    target_duration = max_slot
 
                 final_path = result["path"]
 
@@ -953,6 +977,13 @@ class DubbingService:
 
                 adjusted_audio_path = os.path.join(output_dir, f"segment_{i:04d}_adjusted.mp3")
                 actual_duration = await asyncio.to_thread(self._get_audio_duration, final_path)
+
+                # Two-level slot expansion: if TTS overflows the comfortable slot
+                # but still fits within the hard ceiling, expand silently rather
+                # than trimming — preserves breathing room for short speech, avoids
+                # cut-offs for translations that run long.
+                if actual_duration > target_duration:
+                    target_duration = min(actual_duration, max_slot)
 
                 # --- Hard-fit: TTS audio NEVER overflows into the next segment ---
                 #
@@ -1437,6 +1468,39 @@ class DubbingService:
         except Exception as e:
             logger.error(f"Failed to get audio duration: {e}")
             return 0.0
+
+    @staticmethod
+    def _apply_pitch_shift(input_path: str, output_path: str, n_steps: float) -> bool:
+        """Shift audio pitch by n_steps semitones using librosa.
+
+        Preserves duration.  Falls back to ffmpeg rubberband if librosa
+        is not available.  Returns True on success.
+        """
+        try:
+            import librosa
+            import soundfile as sf
+
+            y, sr = librosa.load(input_path, sr=None, mono=True)
+            y_shifted = librosa.effects.pitch_shift(y, sr=sr, n_steps=n_steps)
+            sf.write(output_path, y_shifted, sr, format="MP3")
+            return True
+        except ImportError:
+            logger.warning("librosa not available for pitch shift; trying ffmpeg rubberband")
+        except Exception as e:
+            logger.warning(f"librosa pitch shift failed: {e}")
+
+        # Fallback: ffmpeg arubberband (formant-preserving pitch shift)
+        try:
+            # rubberband transpose=semitones
+            rb_filter = f"arubberband=pitch={n_steps:.1f}:formant=on"
+            cmd = ["ffmpeg", "-y", "-i", input_path, "-filter:a", rb_filter, "-vn", output_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                return True
+            logger.warning(f"ffmpeg rubberband pitch shift failed: {result.stderr[-200:]}")
+        except Exception as e:
+            logger.warning(f"ffmpeg pitch shift fallback failed: {e}")
+        return False
 
     @staticmethod
     def _mp3_duration_fast(path: str) -> float:

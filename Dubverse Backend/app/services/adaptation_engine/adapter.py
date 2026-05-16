@@ -3,16 +3,49 @@ import json
 import logging
 import os
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .prompts import SYSTEM_PROMPT, build_batch_adapt_prompt
 from .types import VARIANT_ORDER, AdaptationVariant, AdaptedSegment
+from .policy import (
+    restore_entities,
+    validate_adaptation,
+    get_variant_config,
+    DEFAULT_VALIDATION_RULES,
+    PROTECTED_ENTITIES,
+)
 
 logger = logging.getLogger(__name__)
 
 _SYLLABLES_PER_SECOND_EN = 3.5
 _SYLLABLES_PER_SECOND_CJK = 4.0
 _CJK_LANGS = {"zh", "yue", "ja", "ko", "cmn", "zho"}
+
+
+def _force_entity_preservation(original_text: str, adapted_text: str) -> str:
+    """Detect and correct modified protected names in adapted text.
+
+    If the LLM changed e.g. 'Master Chin' → 'Master Qin', this tries
+    to find the mutated version and swap it back to the original.
+    """
+    result = adapted_text
+    for entity in PROTECTED_ENTITIES:
+        if entity.lower() not in original_text.lower():
+            continue
+        if entity.lower() in result.lower():
+            continue
+        words = entity.split()
+        if len(words) >= 2:
+            # Heuristic: first word preserved, second word mutated?
+            pattern = re.compile(
+                rf"\b{re.escape(words[0])}\s+([A-Za-z]+)", re.IGNORECASE
+            )
+            for match in pattern.finditer(result):
+                candidate = match.group(0)
+                if candidate.lower() != entity.lower():
+                    result = result[: match.start()] + entity + result[match.end() :]
+                    break
+    return result
 
 
 async def adapt_batch(
@@ -35,7 +68,7 @@ async def adapt_batch(
     source_language = segments[0].get("source_language", "zh")
 
     try:
-        user_prompt = build_batch_adapt_prompt(
+        user_prompt, entity_map = build_batch_adapt_prompt(
             segments=segments,
             source_language=source_language,
             target_language=target_language,
@@ -46,7 +79,7 @@ async def adapt_batch(
             logger.warning("[ADAPTATION] LLM returned None — using fallback")
             return _fallback_variants(segments)
 
-        return _parse_llm_response(raw, segments)
+        return _parse_llm_response(raw, segments, entity_map)
 
     except Exception as e:
         logger.error(f"[ADAPTATION] adapt_batch failed: {e}", exc_info=True)
@@ -54,7 +87,9 @@ async def adapt_batch(
 
 
 async def _call_llm(user_prompt: str) -> Optional[str]:
-    """Call Claude via Anthropic API with the adaptation prompt."""
+    """Call Claude via Anthropic API with the adaptation prompt.
+    Uses temperature=0.3 and top_p=0.7 for all variants (Claude does not support
+    per-message temperature, so we use the performable default here)."""
     api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
         return None
@@ -66,6 +101,7 @@ async def _call_llm(user_prompt: str) -> Optional[str]:
 
         client = anthropic.Anthropic(api_key=api_key)
 
+        # Use the centralized system prompt from policy.py
         response = await asyncio.to_thread(
             client.messages.create,
             model=model,
@@ -73,6 +109,7 @@ async def _call_llm(user_prompt: str) -> Optional[str]:
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
             temperature=0.3,
+            top_p=0.7,
         )
 
         content = response.content[0].text if response.content else None
@@ -89,10 +126,15 @@ async def _call_llm(user_prompt: str) -> Optional[str]:
         return None
 
 
-def _parse_llm_response(raw_json: str, segments: List[Dict]) -> List[AdaptedSegment]:
+def _parse_llm_response(
+    raw_json: str,
+    segments: List[Dict],
+    entity_map: Dict[str, List[Tuple[str, str]]],
+) -> List[AdaptedSegment]:
     """
-    Parse GPT-4 JSON. If any segment is missing or malformed, substitute a
-    fallback for that segment only — never raise.
+    Parse LLM JSON response. Restore protected entities, validate each variant,
+    and substitute a fallback for any segment that fails validation or is missing.
+    Never raises.
     """
     seg_index = {s["segment_id"]: s for s in segments}
     result_map: Dict[str, AdaptedSegment] = {}
@@ -114,11 +156,46 @@ def _parse_llm_response(raw_json: str, segments: List[Dict]) -> List[AdaptedSegm
         variants: List[AdaptationVariant] = []
         seen_types = set()
 
+        seg_replacements = entity_map.get(seg_id, [])
+
         for vr in variants_raw:
             vtype = vr.get("type", "")
             if vtype not in VARIANT_ORDER:
                 continue
-            text = (vr.get("text") or "").strip() or orig.get("target_text", "")
+            raw_text = (vr.get("text") or "").strip() or orig.get("target_text", "")
+
+            # Restore protected entities
+            text = restore_entities(raw_text, seg_replacements) if seg_replacements else raw_text
+            # Strip empty [[]] and [[word]] bracket artifacts.
+            text = re.sub(r'\[\[\s*\]\]', '', text).strip()
+            text = re.sub(r'\[\[([^\]]+)\]\]', r'\1', text).strip()
+            # Try to recover entities the LLM mutated (e.g. Master Qin → Master Chin)
+            text = _force_entity_preservation(
+                orig.get("target_text", ""), text
+            )
+            # Plural fix — word-boundary regex is safe even if translation already
+            # returned "masters" (avoids "masterss" double-s).
+            text = re.sub(r'\b(so many|plenty of|many) master\b', r'\1 masters', text)
+            # Uncle IP capitalisation from adaptation LLM
+            text = re.sub(r'\bUncle IP\b', 'Uncle Ip', text)
+
+            # Lightweight validation
+            validation = validate_adaptation(
+                source_text=orig.get("target_text", ""),
+                adapted_text=text,
+                target_duration=orig.get("source_duration", 2.0),
+                rules=DEFAULT_VALIDATION_RULES,
+                protected_replacements=seg_replacements,
+            )
+            if not validation.valid:
+                logger.warning(
+                    f"[ADAPTATION] Variant '{vtype}' for segment {seg_id} failed validation: "
+                    f"{validation.reason} (severity={validation.severity})"
+                )
+                if validation.severity == "fail":
+                    # Fall back to target_text for this variant
+                    text = orig.get("target_text", "")
+
             syllables = int(vr.get("syllable_count") or 0) or _estimate_syllables(
                 text, orig.get("target_language", "en")
             )
