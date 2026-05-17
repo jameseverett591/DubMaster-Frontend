@@ -2027,7 +2027,25 @@ async def clear_all_jobs(force: bool = False):
 
 @router.delete("/job/{job_id}")
 @router.delete("/jobs/{job_id}")
-async def delete_job(job_id: str):
+async def delete_job(job_id: str, request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+
+    # Verify ownership before deleting
+    job = await job_manager.get_job(job_id)
+    if job and job.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Delete from Supabase (CASCADE removes segments + job_speakers)
+    try:
+        from app.services.supabase_client import supabase
+        supabase.table("jobs").delete().eq(
+            "job_id", job_id
+        ).eq("user_id", user_id).execute()
+    except Exception as exc:
+        logger.warning(f"Job {job_id}: Supabase delete failed: {exc}")
+
     # Mark as deleted FIRST to prevent rehydration race
     await job_manager.delete_job(job_id)
 
