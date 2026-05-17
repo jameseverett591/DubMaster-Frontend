@@ -469,6 +469,34 @@ export function DubVerseEditor({
     }
   }, [qcAnalysis, jobId])
 
+  // Merge QC findings from report into individual segment objects
+  useEffect(() => {
+    if (!qcReport?.findings?.length) return
+    const findingsBySegment = new Map<number, QCFinding[]>()
+    for (const f of qcReport.findings) {
+      if (f.segment_index == null) continue
+      const arr = findingsBySegment.get(f.segment_index) ?? []
+      arr.push(f)
+      findingsBySegment.set(f.segment_index, arr)
+    }
+    findingsBySegment.forEach((findings, segIdx) => {
+      const sorted = [...findings].sort((a, b) => {
+        const rank: Record<string, number> = { error: 0, warning: 1, info: 2 }
+        return (rank[a.severity] ?? 2) - (rank[b.severity] ?? 2)
+      })
+      const worst = sorted[0]
+      const errors = findings.filter(f => f.severity === 'error').length
+      const warnings = findings.filter(f => f.severity === 'warning').length
+      const score = Math.max(0, 100 - errors * 25 - warnings * 10)
+      updateSegment(segIdx, {
+        qc_findings: findings,
+        qc_score: score,
+        qc_problem: worst.message,
+        qc_fix: worst.suggestion,
+      })
+    })
+  }, [qcReport, updateSegment])
+
   useEffect(() => {
     createClient().auth.getUser().then(({ data: { user } }) => {
       if (!user) return
@@ -2196,7 +2224,17 @@ export function DubVerseEditor({
               <QCTicker
                 segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
                 onApplyFix={() => {
-                  console.log('Apply fix for segment', selectedSegmentIndex)
+                  if (selectedSegmentIndex === null) return
+                  const seg = displaySegments[selectedSegmentIndex]
+                  if (!seg?.qc_findings?.length) return
+                  const worst = [...seg.qc_findings].sort((a, b) => {
+                    const rank: Record<string, number> = { error: 0, warning: 1, info: 2 }
+                    return (rank[a.severity] ?? 2) - (rank[b.severity] ?? 2)
+                  })[0]
+                  if (worst) {
+                    setCurrentTime(worst.timestamp_start)
+                    setRightPanelTab('quality')
+                  }
                 }}
               />
             </div>
