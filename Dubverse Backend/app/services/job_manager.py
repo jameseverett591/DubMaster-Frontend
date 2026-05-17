@@ -3,6 +3,7 @@ from datetime import datetime
 import asyncio
 import logging
 import json
+import os
 from pathlib import Path
 
 from app.models import Job, JobStatus
@@ -14,6 +15,8 @@ async def _upsert_job(job) -> None:
     """Fire-and-forget upsert of job state to Supabase. Never raises."""
     try:
         from app.services.supabase_client import supabase
+        if os.environ.get("PERSIST_JOBS", "1") != "1":
+            return
         payload = {
             "job_id": job.job_id,
             "user_id": job.user_id,

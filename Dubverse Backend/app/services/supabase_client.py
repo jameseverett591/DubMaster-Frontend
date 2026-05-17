@@ -39,6 +39,8 @@ def verify_jwt(token: str) -> str:
 async def upsert_segments(job_id: str, segments: list) -> None:
     """Upsert all segments for a job to Supabase. Never raises."""
     try:
+        if os.environ.get("PERSIST_JOBS", "1") != "1":
+            return
         rows = []
         for i, seg in enumerate(segments):
             rows.append({
@@ -71,6 +73,8 @@ async def upsert_job_speakers(
 ) -> None:
     """Upsert speaker rows for a job to Supabase. Never raises."""
     try:
+        if os.environ.get("PERSIST_JOBS", "1") != "1":
+            return
         rows = []
         for label, gender in (speaker_genders or {}).items():
             rows.append({
