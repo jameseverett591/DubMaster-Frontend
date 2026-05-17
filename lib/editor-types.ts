@@ -28,6 +28,11 @@ export interface Segment {
   end_time: number
   source_text: string
   target_text: string
+  active_text?: string
+  variant_text?: string
+  isUserEdited?: boolean
+  preview_text?: string | null
+  isPreviewing?: boolean
   speaker_id: string
   speaker_label?: string
   speaker_gender?: 'male' | 'female' | 'child'
@@ -38,6 +43,7 @@ export interface Segment {
   qc_score?: number
   qc_problem?: string
   qc_fix?: string
+  emotionalCurve?: EmotionalCurve
 }
 
 export interface QCScore {
@@ -100,6 +106,24 @@ export interface QCReport {
   }
   // Findings drive timeline markers and click-to-fix
   findings: QCFinding[]
+}
+
+// ── Emotional Curve ──────────────────────────────────────────────
+export interface EmotionalCurvePoint {
+  x: number // normalized time 0–1 within the segment
+  y: number // emotional intensity 0–1
+  cp1?: { x: number; y: number } // Bezier handle 1
+  cp2?: { x: number; y: number } // Bezier handle 2
+}
+
+export interface EmotionalCurve {
+  combined: EmotionalCurvePoint[]
+  locked: boolean
+  analysis: {
+    facial: number[] // sampled 0–1 values
+    vocal: number[]
+    scene: number[]
+  }
 }
 
 export interface EditorJob {
