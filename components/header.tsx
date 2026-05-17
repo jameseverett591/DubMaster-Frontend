@@ -71,7 +71,7 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
 
   const handleNavClick = (tab: string) => {
     const routes: Record<string, string> = {
-      dashboard: "/dashboard?tab=upload",
+      dashboard: "/dashboard",
       projects: "/dashboard?tab=projects",
       collaborate: "/collaborate",
       studio: "/studio",
