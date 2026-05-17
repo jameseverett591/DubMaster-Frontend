@@ -56,6 +56,9 @@ import type { Segment, QCScore, QCFinding, QCFindingType, QCReport } from '@/lib
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
 import { buildMockQCReport } from '@/lib/qc-mock-data'
 import { QCQualityPanel } from '@/components/editor/qc-quality-panel'
+import { SegmentQCPanel } from '@/components/editor/segment-qc-panel'
+import { QCTicker } from '@/components/editor/qc-ticker'
+import { EmotionalCurveTrack } from '@/components/editor/emotional-curve-track'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { LanguageSwitcher } from '@/components/language-switcher'
@@ -430,8 +433,18 @@ export function DubVerseEditor({
     setZoomLevel,
     updateSegmentText,
     updateSegment,
+    updateSegmentSpeaker,
+    setPreviewText,
+    commitPreview,
+    cancelPreview,
     speakerVoiceMap,
     setSpeakerVoiceMap,
+    speakerPitchMap,
+    updateCombinedCurve,
+    toggleCurveLock,
+    sampleEmotionalCurve,
+    resetEmotionalCurve,
+    revertToOriginal,
   } = useEditorStore()
 
   const [layoutLocked, setLayoutLocked] = useState(() => {
@@ -468,9 +481,6 @@ export function DubVerseEditor({
       )
     })
   }, [])
-
-  // Active finding drives the severity color overlay + auto-opens correction tool
-  const [activeFinding, setActiveFinding] = useState<QCFinding | null>(null)
 
   // Selected re-transcription index for highlighting in QC monitor
   const [selectedRetranscriptionIndex, setSelectedRetranscriptionIndex] = useState<number | null>(null)
@@ -666,18 +676,8 @@ export function DubVerseEditor({
     drawChannel(waveformCanvasLRef, leftPeaks)
     drawChannel(waveformCanvasRRef, rightPeaks)
   }, [waveformReady, zoomLevel, videoDuration])
-  const [activeQCCategory, setActiveQCCategory] = useState<QCCategory | null>(null)
-  const [showCorrectionSlider, setShowCorrectionSlider] = useState(false)
-  const [correctionValue, setCorrectionValue] = useState(0)
-  const [correctionPanelPos, setCorrectionPanelPos] = useState({ x: 0, y: 0 })
-
-  const openCorrectionSlider = useCallback(() => {
-    setCorrectionPanelPos({
-      x: Math.max(0, window.innerWidth / 2 - 225),
-      y: Math.max(0, window.innerHeight - 380),
-    })
-    setShowCorrectionSlider(true)
-  }, [])
+  // Selected finding for the docked QC panel (no floating UI)
+  const [selectedQCFinding, setSelectedQCFinding] = useState<QCFinding | null>(null)
   const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
   const [editingText, setEditingText] = useState('')
   const [previewWidth, setPreviewWidth] = useState(() => {
@@ -877,6 +877,7 @@ export function DubVerseEditor({
   
   // Locked segments (after Generate Speech)
   const [lockedSegments, setLockedSegments] = useState<Set<number>>(new Set())
+  const [groupedSegments, setGroupedSegments] = useState<Set<number>>(new Set())
   
   // Add segment modal state
   const [showAddSegment, setShowAddSegment] = useState(false)
@@ -920,6 +921,18 @@ export function DubVerseEditor({
         qc_score: score,
         qc_problem: problems[problemIdx],
         qc_fix: fixes[problemIdx],
+        emotionalCurve: seg.emotionalCurve || {
+          combined: [
+            { x: 0, y: 0.5 },
+            { x: 1, y: 0.5 }
+          ],
+          locked: false,
+          analysis: {
+            facial: [],
+            vocal: [],
+            scene: []
+          }
+        },
       }
     })
     
@@ -927,11 +940,11 @@ export function DubVerseEditor({
   const mockSuggestions: Record<number, Suggestion[]> = {}
   segmentsWithFindings.forEach((seg, idx) => {
   mockSuggestions[idx] = [
-  { id: `sug-${idx}-1`, text: seg.target_text, confidence: 0.95, source: 'ai' },
-  { id: `sug-${idx}-2`, text: `${seg.target_text} [casual]`, confidence: 0.88, source: 'ai' },
-  { id: `sug-${idx}-3`, text: `[Formal] ${seg.target_text}`, confidence: 0.82, source: 'ai' },
-  { id: `sug-${idx}-4`, text: seg.target_text.split(' ').slice(0, 3).join(' ') + '...', confidence: 0.72, source: 'memory' },
-  { id: `sug-${idx}-5`, text: `Alt: ${seg.target_text.split(' ').reverse().join(' ')}`, confidence: 0.58, source: 'memory' },
+  { id: `sug-${idx}-1`, text: seg.preview_text ?? seg.active_text ?? seg.target_text, confidence: 0.95, source: 'ai' },
+  { id: `sug-${idx}-2`, text: `${seg.preview_text ?? seg.active_text ?? seg.target_text} [casual]`, confidence: 0.88, source: 'ai' },
+  { id: `sug-${idx}-3`, text: `[Formal] ${seg.preview_text ?? seg.active_text ?? seg.target_text}`, confidence: 0.82, source: 'ai' },
+  { id: `sug-${idx}-4`, text: (seg.preview_text ?? seg.active_text ?? seg.target_text).split(' ').slice(0, 3).join(' ') + '...', confidence: 0.72, source: 'memory' },
+  { id: `sug-${idx}-5`, text: `Alt: ${(seg.preview_text ?? seg.active_text ?? seg.target_text).split(' ').reverse().join(' ')}`, confidence: 0.58, source: 'memory' },
   ]
   })
   setSuggestions(mockSuggestions)
@@ -1009,6 +1022,7 @@ export function DubVerseEditor({
     const currentSegments = importedSegments ?? []
     const newSegment: Segment = {
       id: `seg-${Date.now()}`,
+      index: currentSegments.length,
       start_time: startTime,
       end_time: endTime,
       speaker_id: `speaker-${currentSegments.length + 1}`,
@@ -1016,8 +1030,23 @@ export function DubVerseEditor({
       speaker_gender: 'male' as const,
       source_text: newSegmentOriginal,
       target_text: newSegmentTranslation || newSegmentOriginal,
-      status: 'pending',
-      qc_findings: []
+      active_text: newSegmentTranslation || newSegmentOriginal,
+      preview_text: null,
+      isPreviewing: false,
+      status: 'auto',
+      qc_findings: [],
+      emotionalCurve: {
+        combined: [
+          { x: 0, y: 0.5 },
+          { x: 1, y: 0.5 }
+        ],
+        locked: false,
+        analysis: {
+          facial: [],
+          vocal: [],
+          scene: []
+        }
+      }
     }
     
     // Sort segments by start time
@@ -1076,13 +1105,17 @@ export function DubVerseEditor({
             if (timeMatch) {
               newSegments.push({
                 id: `seg-${idx}`,
+                index: idx,
                 start_time: parseSrtTime(timeMatch[1]),
                 end_time: parseSrtTime(timeMatch[2]),
                 speaker_id: `speaker-${idx + 1}`,
                 speaker_label: `Speaker ${idx + 1}`,
                 source_text: textLines,
                 target_text: textLines,
-                status: 'pending',
+                active_text: textLines,
+                preview_text: null,
+                isPreviewing: false,
+                status: 'auto',
                 qc_findings: []
               })
             }
@@ -1109,13 +1142,17 @@ export function DubVerseEditor({
             if (textLines.length > 0) {
               newSegments.push({
                 id: `seg-${segIdx}`,
+                index: segIdx,
                 start_time: parseVttTime(timeMatch[1]),
                 end_time: parseVttTime(timeMatch[2]),
                 speaker_id: `speaker-${segIdx + 1}`,
                 speaker_label: `Speaker ${segIdx + 1}`,
                 source_text: textLines.join(' '),
                 target_text: textLines.join(' '),
-                status: 'pending',
+                active_text: textLines.join(' '),
+                preview_text: null,
+                isPreviewing: false,
+                status: 'auto',
                 qc_findings: []
               })
               segIdx++
@@ -1300,81 +1337,10 @@ export function DubVerseEditor({
     }
   }, [setCurrentTime, zoomLevel])
   
-  // Get severity color for segment based on active QC category
-  const getSegmentHighlightColor = useCallback((segment: Segment) => {
-    if (!activeQCCategory) return null
-    
-    const activeQCType = QC_TABS.find(t => t.id === activeQCCategory)?.qcType
-    if (!activeQCType) return null
-    
-    const relevantFindings = segment.qc_findings.filter(f => f.type === activeQCType)
-    if (relevantFindings.length === 0) return 'green'
-    
-    const hasError = relevantFindings.some(f => f.severity === 'error')
-    const hasWarning = relevantFindings.some(f => f.severity === 'warning')
-    
-    if (hasError) return 'red'
-    if (hasWarning) return 'yellow'
-    return 'green'
-  }, [activeQCCategory])
-  
-// Handle QC category click - toggle highlighting and show QC box
-  const handleQCCategoryClick = useCallback((category: QCCategory) => {
-    if (activeQCCategory === category) {
-      setActiveQCCategory(null)
-      setShowCorrectionSlider(false)
-    } else {
-      setActiveQCCategory(category)
-      
-      // Find the first segment with issues of this type and position QC box
-      const qcType = QC_TABS.find(t => t.id === category)?.qcType
-      if (qcType) {
-        const segmentWithIssue = displaySegments.find(seg => 
-          seg.qc_findings.some(f => f.type === qcType)
-        )
-        
-        if (segmentWithIssue) {
-          setQcBoxPosition({
-            start: segmentWithIssue.start_time,
-            end: segmentWithIssue.end_time
-          })
-          
-          // Determine color based on severity
-          const findings = segmentWithIssue.qc_findings.filter(f => f.type === qcType)
-          const hasError = findings.some(f => f.severity === 'error')
-          const hasWarning = findings.some(f => f.severity === 'warning')
-          const hasInfo = findings.some(f => f.severity === 'info')
-          
-          if (hasError) setQcBoxColor('red')
-          else if (hasWarning) setQcBoxColor('yellow')
-          else if (hasInfo) setQcBoxColor('blue')
-          else setQcBoxColor('green')
-        }
-      }
-    }
-  }, [activeQCCategory, segments])
-  
-  // Handle segment click when QC category is active
-  const handleSegmentClickForQC = useCallback((index: number) => {
+  // Segment click — always just select; QC is shown in the docked right panel
+  const handleSegmentClick = useCallback((index: number) => {
     selectSegment(index)
-    if (activeQCCategory) {
-      const segment = displaySegments[index]
-      const qcType = QC_TABS.find(t => t.id === activeQCCategory)?.qcType
-      if (qcType) {
-        openCorrectionSlider()
-        setCorrectionValue(0)
-      }
-    }
-  }, [activeQCCategory, segments, selectSegment])
-  
-  // Apply correction from slider
-  const applyCorrection = useCallback(() => {
-    if (selectedSegmentIndex === null) return
-    // In a real app, this would call the API to stretch/adjust the segment
-    console.log('Applying correction:', correctionValue, 'to segment', selectedSegmentIndex)
-    setShowCorrectionSlider(false)
-    setCorrectionValue(0)
-  }, [selectedSegmentIndex, correctionValue])
+  }, [selectSegment])
   
   // Handle preview panel resize
   const handlePreviewResizeStart = useCallback((e: React.MouseEvent) => {
@@ -1588,19 +1554,20 @@ export function DubVerseEditor({
     setRegenError(null)
     setIsRegenerating(true)
     try {
+      const emotionIntensity = sampleEmotionalCurve(activeIndex, 0.5)
       const response = await apiClient.regenerateSegment(jobId, activeIndex, {
-        text: segment.target_text,
+        text: segment.preview_text ?? segment.active_text ?? segment.target_text,
         speed: stagedSpeeds[activeIndex] ?? 1.0,
         emotion: stagedEmotions[activeIndex],
         voice_key: stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id],
-        pitch: stagedPitches[activeIndex],
+        pitch: stagedPitches[activeIndex] ?? speakerPitchMap[segment.speaker_id] ?? 0,
+        emotionIntensity,
       })
       const filename = response.segment.path.split('/').pop() ?? ''
       const audio_url = filename
         ? apiClient.getAudioFileUrl(jobId, filename)
         : segment.audio_url
       updateSegment(activeIndex, {
-        target_text: response.segment.text,
         audio_url,
         status: 'locked',
       })
@@ -1623,7 +1590,58 @@ export function DubVerseEditor({
       setIsRegenerating(false)
     }
   }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds, lockedSegments, selectSegment])
-  
+
+  // Preview speech — non-destructive TTS preview using preview_text
+  const handlePreviewSpeech = useCallback(async (index: number) => {
+    if (isRegenerating) return
+    const segment = displaySegments[index]
+    if (!segment) return
+
+    const text = segment.preview_text?.trim() || segment.active_text?.trim() || segment.target_text?.trim() || ''
+    if (!text) {
+      console.warn('No text available for TTS preview')
+      return
+    }
+
+    setRegenError(null)
+    setIsRegenerating(true)
+    try {
+      const response = await apiClient.regenerateSegment(jobId, index, {
+        text,
+        speed: stagedSpeeds[index] ?? 1.0,
+        emotion: stagedEmotions[index],
+        voice_key: stagedVoices[index] ?? speakerVoiceMap[segment.speaker_id],
+        pitch: stagedPitches[index] ?? speakerPitchMap[segment.speaker_id] ?? 0,
+      })
+      const filename = response.segment.path.split('/').pop() ?? ''
+      const absUrl = filename
+        ? apiClient.getAudioFileUrl(jobId, filename)
+        : segment.audio_url
+      if (!absUrl) return
+
+      if (segmentAudioRef.current) {
+        segmentAudioRef.current.pause()
+        segmentAudioRef.current = null
+      }
+
+      const audio = new Audio(absUrl)
+      audio.playbackRate = stagedSpeeds[index] ?? 1.0
+      audio.volume = isMutedDubbed ? 0 : Math.max(0, Math.min(1, (masterVolume / 100) * (dubbedTextVolume / 100)))
+      audio.onended = () => {
+        setIsSegmentPreviewing(false)
+        segmentAudioRef.current = null
+      }
+      segmentAudioRef.current = audio
+      setIsSegmentPreviewing(true)
+      audio.play()
+    } catch (err: any) {
+      console.error('[Preview Speech] Failed:', err.message)
+      setRegenError('Preview generation failed — please try again')
+    } finally {
+      setIsRegenerating(false)
+    }
+  }, [displaySegments, jobId, stagedSpeeds, stagedEmotions, stagedVoices, stagedPitches, speakerVoiceMap, speakerPitchMap, isMutedDubbed, masterVolume, dubbedTextVolume, isRegenerating])
+
   // Handle Revert to Original — restores text and audio from the initial load snapshot
   const handleRevert = useCallback(() => {
     if (selectedSegmentIndex === null) return
@@ -1635,6 +1653,11 @@ export function DubVerseEditor({
 
     updateSegment(selectedSegmentIndex, {
       target_text: original.target_text,
+      active_text: original.target_text,
+      variant_text: original.target_text,
+      preview_text: null,
+      isPreviewing: false,
+      isUserEdited: false,
       audio_url,
       status: 'auto',
     })
@@ -1686,28 +1709,37 @@ export function DubVerseEditor({
     e.dataTransfer.dropEffect = 'copy'
   }, [])
   
-  // Start editing a segment
+  // Start editing a segment — immediately enters preview mode
   const startEditing = useCallback((index: number) => {
+    const currentText = displaySegments[index]?.active_text ?? displaySegments[index]?.target_text ?? ''
     setEditingSegmentIndex(index)
-    setEditingText(displaySegments[index]?.target_text || '')
-  }, [displaySegments])
-  
-  // Save editing
+    setEditingText(currentText)
+    // Immediately activate preview so the orange chip + Commit/Cancel appear
+    setPreviewText(index, currentText)
+    setImportedSegments(prev => {
+      const base = prev ?? displaySegments
+      return base.map((seg, i) =>
+        i === index ? { ...seg, preview_text: currentText, isPreviewing: true } : seg
+      )
+    })
+  }, [displaySegments, setPreviewText])
+
+  // Save editing — updates preview text while keeping preview mode active
   const saveEditing = useCallback(() => {
     if (editingSegmentIndex !== null) {
       const idx = editingSegmentIndex
       const text = editingText
-      updateSegmentText(idx, text)
+      setPreviewText(idx, text)
       setImportedSegments(prev => {
         const base = prev ?? displaySegments
         return base.map((seg, i) =>
-          i === idx ? { ...seg, target_text: text, status: seg.status === 'locked' ? 'locked' : 'edited' } : seg
+          i === idx ? { ...seg, preview_text: text } : seg
         )
       })
       setEditingSegmentIndex(null)
     }
-  }, [editingSegmentIndex, editingText, updateSegmentText, displaySegments])
-  
+  }, [editingSegmentIndex, editingText, setPreviewText, displaySegments])
+
   // Cancel editing
   const cancelEditing = useCallback(() => {
     setEditingSegmentIndex(null)
@@ -1814,7 +1846,7 @@ export function DubVerseEditor({
           {/* Nav */}
           <nav className="hidden md:flex items-center gap-1 ml-4">
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/dashboard')}>Dashboard</Button>
-            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/dashboard?tab=projects')}>My Projects</Button>
+            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/studio?tab=projects')}>My Projects</Button>
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/collaborate')}>Collaborate</Button>
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white">Voice Library</Button>
             <Button variant="ghost" size="sm" className="bg-slate-800 text-white">Editor</Button>
@@ -2135,42 +2167,6 @@ export function DubVerseEditor({
       
       {/* Main content */}
       <div className="flex-1 flex min-h-0 overflow-hidden relative">
-        {/* Severity color overlay — flashes editor when a QC finding is active */}
-        {activeFinding && (
-          <div
-            className={cn(
-              'absolute inset-0 z-40 pointer-events-none transition-opacity duration-300',
-              activeFinding.severity === 'error' && 'bg-red-500/10 shadow-[inset_0_0_60px_rgba(220,38,38,0.2)]',
-              activeFinding.severity === 'warning' && 'bg-yellow-500/10 shadow-[inset_0_0_60px_rgba(234,179,8,0.2)]',
-              activeFinding.severity === 'info' && 'bg-blue-500/10 shadow-[inset_0_0_60px_rgba(59,130,246,0.2)]'
-            )}
-          >
-            {/* Dismiss overlay button */}
-            <button
-              className="absolute top-3 right-3 z-50 bg-slate-900/80 text-white text-xs px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 cursor-pointer"
-              onClick={() => {
-                setActiveFinding(null)
-                setShowCorrectionSlider(false)
-                setActiveQCCategory(null)
-              }}
-            >
-              Clear QC alert
-            </button>
-            {/* Finding info badge */}
-            <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-50 bg-slate-900/90 text-white text-xs px-3 py-1.5 rounded-full border border-slate-700 flex items-center gap-2">
-              <span className={cn(
-                'w-2 h-2 rounded-full',
-                activeFinding.severity === 'error' && 'bg-red-500',
-                activeFinding.severity === 'warning' && 'bg-yellow-500',
-                activeFinding.severity === 'info' && 'bg-blue-400'
-              )} />
-              <span className="capitalize font-medium">{activeFinding.type}:</span>
-              <span>{activeFinding.message}</span>
-            </div>
-          </div>
-        )}
-
-        
         {/* Transcript area */}
         <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
           {/* Pending alert */}
@@ -2196,7 +2192,14 @@ export function DubVerseEditor({
               </SelectContent>
             </Select>
             <div className="text-sm font-medium text-slate-300">{getLanguageName(sourceLanguage)}</div>
-            <div className="flex-1" />
+            <div className="flex-1 flex items-center justify-center min-w-0">
+              <QCTicker
+                segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
+                onApplyFix={() => {
+                  console.log('Apply fix for segment', selectedSegmentIndex)
+                }}
+              />
+            </div>
             <div className="text-sm font-medium text-slate-300">{getLanguageName(targetLanguage)}</div>
           </div>
           
@@ -2233,137 +2236,10 @@ export function DubVerseEditor({
           {/* Transcript rows - scrollable up/down */}
           {!isTranscribing && displaySegments.length > 0 && (
           <ScrollArea className="flex-1 overflow-auto relative">
-          {/* QC Correction Overlay - shown when a finding is selected */}
-          {activeFinding && (
-            <div className="absolute inset-0 z-30 bg-slate-900/95 backdrop-blur-sm flex items-center justify-center p-8">
-              <div className="max-w-2xl w-full bg-slate-800 border border-slate-700 rounded-xl shadow-2xl overflow-hidden">
-                {/* Header */}
-                <div className="flex items-center justify-between px-5 py-4 border-b border-slate-700 bg-slate-900">
-                  <div className="flex items-center gap-3">
-                    <div className={cn(
-                      'w-3 h-3 rounded-full',
-                      activeFinding.severity === 'error' && 'bg-red-500',
-                      activeFinding.severity === 'warning' && 'bg-yellow-500',
-                      activeFinding.severity === 'info' && 'bg-blue-500'
-                    )} />
-                    <span className="text-sm font-semibold text-white capitalize">{activeFinding.type} Issue</span>
-                    <span className={cn(
-                      'text-xs px-2 py-0.5 rounded-full font-medium uppercase',
-                      activeFinding.severity === 'error' ? 'bg-red-500/20 text-red-400' : activeFinding.severity === 'warning' ? 'bg-yellow-500/20 text-yellow-400' : 'bg-blue-500/20 text-blue-400'
-                    )}>
-                      {activeFinding.severity}
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => {
-                      setActiveFinding(null)
-                      setShowCorrectionSlider(false)
-                      setActiveQCCategory(null)
-                    }}
-                    className="text-slate-400 hover:text-white transition-colors"
-                  >
-                    <X className="h-5 w-5" />
-                  </button>
-                </div>
-                {/* Content */}
-                <div className="p-5 space-y-4">
-                  {/* Problem Description */}
-                  <div>
-                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Problem</h3>
-                    <p className="text-sm text-slate-200 leading-relaxed">{activeFinding.message}</p>
-                  </div>
-                  {/* Suggested Correction */}
-                  {activeFinding.suggestion && (
-                    <div>
-                      <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Suggested Correction</h3>
-                      <p className="text-sm text-emerald-300 leading-relaxed">{activeFinding.suggestion}</p>
-                    </div>
-                  )}
-                  {/* Action Buttons */}
-                  <div className="flex items-center gap-3 pt-2">
-                    <Button
-                      onClick={() => {
-                        setActiveFinding(null)
-                        setShowCorrectionSlider(false)
-                        setActiveQCCategory(null)
-                      }}
-                      variant="outline"
-                      size="sm"
-                      className="border-slate-600 hover:bg-slate-700"
-                    >
-                      Dismiss
-                    </Button>
-                    <Button
-                      onClick={() => {
-                        const category = QC_TABS.find(t => t.qcType === activeFinding.type)?.id
-                        if (category) {
-                          setActiveQCCategory(category as QCCategory)
-                          openCorrectionSlider()
-                          setCorrectionValue(0)
-                        }
-                      }}
-                      size="sm"
-                      className="bg-amber-600 hover:bg-amber-700"
-                    >
-                      Open Correction Tool
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Segment QC Info Panel - shown when a segment is selected */}
-          {selectedSegmentIndex !== null && displaySegments[selectedSegmentIndex]?.qc_score && (
-            <div className="absolute top-4 right-4 z-20 w-80 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl overflow-hidden">
-              {/* Header */}
-              <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700 bg-slate-900">
-                <div className="flex items-center gap-2">
-                  <Gauge className="h-4 w-4 text-amber-400" />
-                  <span className="text-sm font-semibold text-white">Segment QC</span>
-                </div>
-                <button
-                  onClick={() => selectSegment(null)}
-                  className="text-slate-400 hover:text-white transition-colors"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-              {/* Content */}
-              <div className="p-4 space-y-3">
-                {/* Score */}
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-slate-400">Score</span>
-                  <span className={cn(
-                    'text-lg font-bold',
-                    displaySegments[selectedSegmentIndex].qc_score! >= 80 ? 'text-emerald-400' :
-                    displaySegments[selectedSegmentIndex].qc_score! >= 60 ? 'text-yellow-400' :
-                    'text-red-400'
-                  )}>
-                    {displaySegments[selectedSegmentIndex].qc_score}
-                  </span>
-                </div>
-                {/* Problem */}
-                {displaySegments[selectedSegmentIndex].qc_problem && (
-                  <div>
-                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Problem</h3>
-                    <p className="text-xs text-slate-200 leading-relaxed">{displaySegments[selectedSegmentIndex].qc_problem}</p>
-                  </div>
-                )}
-                {/* Fix */}
-                {displaySegments[selectedSegmentIndex].qc_fix && (
-                  <div>
-                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Fix</h3>
-                    <p className="text-xs text-emerald-300 leading-relaxed">{displaySegments[selectedSegmentIndex].qc_fix}</p>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
           {displaySegments.map((segment, index) => {
               const speakerColor = getSpeakerColor(segment.speaker_id)
-              const highlightColor = getSegmentHighlightColor(segment)
               const isEditing = editingSegmentIndex === index
+              const hasQCFindings = segment.qc_findings.length > 0
               const segmentSuggestions = suggestions[index] || []
               
               return (
@@ -2395,11 +2271,8 @@ export function DubVerseEditor({
                   data-segment-row
                   data-index={index}
                   className={cn(
-                    'flex items-start gap-3 px-4 py-3 border-b border-slate-800/50 transition-colors relative',
+                    'flex items-start gap-3 px-4 py-3 border-b border-slate-800/50 transition-colors relative group',
                     selectedSegmentIndex === index && 'bg-slate-800/50 ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
-                    highlightColor === 'red' && 'border-l-4 border-l-red-500 bg-red-500/5',
-                    highlightColor === 'yellow' && 'border-l-4 border-l-yellow-500 bg-yellow-500/5',
-                    highlightColor === 'green' && 'border-l-4 border-l-emerald-500/30',
                     dragReorder?.fromIndex === index && 'opacity-50 bg-amber-500/10',
                     dragReorder?.toIndex === index && 'border-t-2 border-t-amber-500',
                     draggedVoice !== null && 'ring-1 ring-cyan-500/40',
@@ -2450,12 +2323,12 @@ export function DubVerseEditor({
                     >
                       <GripHorizontal className="h-4 w-4" />
                     </div>
-                    {/* Speaker chip — right-click → Rename Speaker to edit */}
-                    <div className={cn('flex items-center gap-1.5 pl-1 pr-2.5 py-1 rounded-full border text-xs font-medium shrink-0', speakerColor.bg, speakerColor.text, speakerColor.border)}>
-                      <span className="w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 bg-black/30">
-                        {speakerNumberMap[segment.speaker_id] ?? 1}
-                      </span>
-                      {renamingSpeakerId === segment.speaker_id ? (
+                    {/* Speaker chip / dropdown — click to reassign */}
+                    {renamingSpeakerId === segment.speaker_id ? (
+                      <div className={cn('flex items-center gap-1.5 pl-1 pr-4 py-1 rounded-full border text-xs font-medium shrink-0', speakerColor.bg, speakerColor.text, speakerColor.border)}>
+                        <span className="w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 bg-black/30">
+                          {speakerNumberMap[segment.speaker_id] ?? 1}
+                        </span>
                         <input
                           autoFocus
                           aria-label={`Rename speaker ${speakerNumberMap[segment.speaker_id] ?? 1}`}
@@ -2469,10 +2342,57 @@ export function DubVerseEditor({
                           className="bg-transparent outline-none w-20 border-b border-current"
                           onClick={e => e.stopPropagation()}
                         />
-                      ) : (
-                        <span>{segment.speaker_label || `Speaker ${speakerNumberMap[segment.speaker_id] ?? 1}`}</span>
-                      )}
-                    </div>
+                      </div>
+                    ) : (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <div
+                            className={cn('flex items-center gap-1.5 pl-1 pr-4 py-1 rounded-full border text-xs font-medium shrink-0 cursor-pointer', speakerColor.bg, speakerColor.text, speakerColor.border)}
+                            onClick={(e) => e.stopPropagation()}
+                            title="Click to reassign speaker"
+                          >
+                            <span className="w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 bg-black/30">
+                              {speakerNumberMap[segment.speaker_id] ?? 1}
+                            </span>
+                            <span>{segment.speaker_label || `Speaker ${speakerNumberMap[segment.speaker_id] ?? 1}`}</span>
+                          </div>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start" className="w-44 bg-slate-900 border-slate-700">
+                          {[1, 2, 3, 4, 5].map(n => {
+                            const spkId = `speaker-${n}`
+                            const spkColor = getSpeakerColor(spkId)
+                            const existing = uniqueSpeakers.find(s => s.id === spkId)
+                            const label = existing?.label || `Speaker ${n}`
+                            return (
+                              <DropdownMenuItem
+                                key={spkId}
+                                onClick={() => {
+                                  if (spkId === segment.speaker_id) return
+                                  const newLabel = existing?.label || `Speaker ${n}`
+                                  updateSegmentSpeaker(index, spkId, newLabel)
+                                  if (importedSegments !== null) {
+                                    setImportedSegments(prev => {
+                                      if (!prev) return prev
+                                      const next = [...prev]
+                                      next[index] = { ...next[index], speaker_id: spkId, speaker_label: newLabel }
+                                      return next
+                                    })
+                                  }
+                                  apiClient.reassignSpeaker(jobId, index, spkId).catch(() => {})
+                                }}
+                                className={cn(
+                                  'cursor-pointer text-slate-200 focus:bg-slate-700 focus:text-white',
+                                  spkId === segment.speaker_id && 'bg-slate-700/50'
+                                )}
+                              >
+                                <span className={cn('w-2.5 h-2.5 rounded-full border shrink-0', spkColor.bg, spkColor.border)} />
+                                <span>{label}</span>
+                              </DropdownMenuItem>
+                            )
+                          })}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
                   </div>
                   
                   {/* Source text */}
@@ -2481,7 +2401,7 @@ export function DubVerseEditor({
                   </div>
                   
                   {/* Target text (editable) */}
-                  <div className="flex-1 min-w-0">
+                  <div className="flex-1 min-w-0 flex items-center gap-1.5">
                     {isEditing ? (
                       <div
                         className="flex items-center gap-2 rounded-lg p-1.5 border-2 border-amber-400/80 bg-amber-500/10 shadow-[0_0_0_3px_rgba(251,191,36,0.15),0_0_20px_rgba(251,191,36,0.35)]"
@@ -2510,14 +2430,13 @@ export function DubVerseEditor({
                         }}>
                           <RefreshCw className="h-4 w-4" />
                         </Button>
-                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => {
-                          // Play preview
-                        }}>
+                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => handlePreviewSpeech(index)}>
                           <Play className="h-4 w-4" />
                         </Button>
                       </div>
                     ) : (
-                      <div className="flex items-center gap-1.5 flex-wrap">
+                      <>
+                        <div className="flex items-center gap-1.5 flex-wrap">
                         {/* Emotion tag chip — shows the exact tag that will be sent to TTS */}
                         {stagedEmotions[index] ? (
                           <span
@@ -2607,7 +2526,7 @@ export function DubVerseEditor({
                             onClick={(e) => e.stopPropagation()}
                           >
                             <span className="text-[10px] text-amber-400 font-medium w-full">✂️ Click a word to split before it</span>
-                            {segment.target_text.split(' ').map((word, wordIdx) => (
+                            {(segment.preview_text ?? segment.active_text ?? segment.target_text).split(' ').map((word, wordIdx) => (
                               <span
                                 key={wordIdx}
                                 title={wordIdx === 0 ? 'Cannot split before first word' : `Split before "${word}"`}
@@ -2638,7 +2557,9 @@ export function DubVerseEditor({
                               'text-sm cursor-grab active:cursor-grabbing select-none inline-flex items-center gap-1 px-3 py-1 rounded-full border-2 text-white',
                               lockedSegments.has(index)
                                 ? 'border-emerald-400 bg-emerald-500/20 shadow-[0_0_10px_rgba(34,197,94,0.4)]'
-                                : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
+                                : segment.isPreviewing
+                                  ? 'border-orange-400 bg-orange-500/10 shadow-[0_0_8px_rgba(251,146,60,0.3)]'
+                                  : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
                             )}
                             draggable={!lockedSegments.has(index)}
                             onDragStart={(e) => {
@@ -2648,19 +2569,89 @@ export function DubVerseEditor({
                               }
                               const mockSuggestion: Suggestion = {
                                 id: `direct-${index}`,
-                                text: segment.target_text,
+                                text: segment.preview_text ?? segment.active_text ?? segment.target_text,
                                 confidence: 1,
                                 source: 'user'
                               }
                               handleDragStart(e, mockSuggestion, index)
                             }}
-                            onDoubleClick={() => !lockedSegments.has(index) && startEditing(index)}
+                            onDoubleClick={() => !lockedSegments.has(index) && !segment.isPreviewing && startEditing(index)}
                           >
                             {lockedSegments.has(index) && <Lock className="h-3 w-3 shrink-0" />}
-                            {segment.target_text}
+                            {segment.preview_text ?? segment.active_text ?? segment.target_text}
                           </div>
                         )}
-                      </div>
+                        {/* Subtle QC icon on hover — clicking selects segment and opens Quality tab */}
+                        {hasQCFindings && (
+                          <button
+                            className="opacity-0 group-hover:opacity-100 transition-opacity ml-1 text-slate-500 hover:text-amber-400"
+                            title="View QC details"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              selectSegment(index)
+                              setRightPanelTab('quality')
+                            }}
+                          >
+                            <Gauge className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        </div>
+                        {segment.isPreviewing && (
+                          <div className="flex items-center gap-1.5 pointer-events-auto cursor-pointer shrink-0 select-none">
+                            <button
+                              className="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/30 font-medium select-none pointer-events-auto cursor-pointer hover:bg-orange-500/30 transition-colors"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                handlePreviewSpeech(index)
+                              }}
+                            >
+                              Preview
+                            </button>
+                            <button
+                              className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors pointer-events-auto cursor-pointer select-none"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                commitPreview(index)
+                                setImportedSegments(prev => {
+                                  const base = prev ?? displaySegments
+                                  return base.map((seg, i) =>
+                                    i === index
+                                      ? {
+                                          ...seg,
+                                          active_text: seg.preview_text ?? seg.active_text ?? seg.target_text,
+                                          target_text: seg.preview_text ?? seg.target_text,
+                                          variant_text: seg.preview_text ?? seg.variant_text ?? seg.target_text,
+                                          isUserEdited: true,
+                                          preview_text: null,
+                                          isPreviewing: false,
+                                        }
+                                      : seg
+                                  )
+                                })
+                                setEditingSegmentIndex(null)
+                              }}
+                            >
+                              Commit
+                            </button>
+                            <button
+                              className="text-[10px] px-2 py-0.5 rounded bg-slate-700 text-slate-400 border border-slate-600 hover:bg-slate-600 hover:text-slate-300 transition-colors pointer-events-auto cursor-pointer select-none"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                cancelPreview(index)
+                                setImportedSegments(prev => {
+                                  const base = prev ?? displaySegments
+                                  return base.map((seg, i) =>
+                                    i === index ? { ...seg, preview_text: null, isPreviewing: false } : seg
+                                  )
+                                })
+                                setEditingSegmentIndex(null)
+                              }}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
@@ -2944,11 +2935,6 @@ export function DubVerseEditor({
                   key={t.id}
                   onClick={() => {
                     setRightPanelTab(t.id)
-                    if (t.id === 'result') {
-                      setActiveFinding(null)
-                      setShowCorrectionSlider(false)
-                      setActiveQCCategory(null)
-                    }
                   }}
                   className={cn(
                     'text-xs px-3 py-1 rounded-md transition-colors',
@@ -3004,7 +2990,7 @@ export function DubVerseEditor({
             {selectedSegmentIndex !== null && displaySegments[selectedSegmentIndex] && (
               <div className="absolute bottom-8 left-0 right-0 text-center">
                 <span className="bg-black/75 px-4 py-2 rounded text-white text-sm">
-                  {displaySegments[selectedSegmentIndex].target_text}
+                  {displaySegments[selectedSegmentIndex].preview_text ?? displaySegments[selectedSegmentIndex].active_text ?? displaySegments[selectedSegmentIndex].target_text}
                 </span>
               </div>
             )}
@@ -3013,41 +2999,19 @@ export function DubVerseEditor({
             </div>
           </div>
 
-          {/* Quality tab — QC Monitor */}
-          {rightPanelTab === 'quality' && qcReport && (
+          {/* Quality tab — Docked Segment QC Panel */}
+          {rightPanelTab === 'quality' && (
             <div className="flex-1 min-h-0 overflow-hidden">
-              <QCQualityPanel
+              <SegmentQCPanel
+                segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
                 report={qcReport}
-                onJumpToTime={(t) => {
-                  setCurrentTime(t)
-                  if (videoRef.current) videoRef.current.currentTime = t
-                  const container = timelineRef.current
-                  if (container) {
-                    const px = t * PIXELS_PER_SECOND
-                    container.scrollLeft = Math.max(0, px - container.clientWidth * 0.3)
-                  }
+                onRecalculate={() => {
+                  // Placeholder: trigger QC recalculation
+                  console.log('Recalculate QC for segment', selectedSegmentIndex)
                 }}
-                onSelectFinding={(finding) => {
-                  setActiveFinding(finding)
-                  // Jump timeline
-                  setCurrentTime(finding.timestamp_start)
-                  if (videoRef.current) videoRef.current.currentTime = finding.timestamp_start
-                  const container = timelineRef.current
-                  if (container) {
-                    const px = finding.timestamp_start * PIXELS_PER_SECOND
-                    container.scrollLeft = Math.max(0, px - container.clientWidth * 0.3)
-                  }
-                  // Select segment
-                  if (finding.segment_index >= 0 && finding.segment_index < displaySegments.length) {
-                    selectSegment(finding.segment_index)
-                  }
-                  // Auto-open matching QC category + correction tool
-                  const category = QC_TABS.find(t => t.qcType === finding.type)?.id
-                  if (category) {
-                    setActiveQCCategory(category as QCCategory)
-                    openCorrectionSlider()
-                    setCorrectionValue(0)
-                  }
+                onAutoFix={() => {
+                  // Placeholder: trigger auto-fix
+                  console.log('Auto-fix segment', selectedSegmentIndex)
                 }}
               />
             </div>
@@ -3093,7 +3057,7 @@ export function DubVerseEditor({
             const res = await apiClient.askAI({
               prompt,
               source_text: seg?.source_text ?? '',
-              dubbed_text: seg?.target_text ?? '',
+              dubbed_text: seg?.preview_text ?? seg?.active_text ?? seg?.target_text ?? '',
               source_language: sourceLanguage,
               target_language: targetLanguage,
               speaker_label: seg?.speaker_label ?? '',
@@ -3148,7 +3112,7 @@ export function DubVerseEditor({
                     </div>
                     <div className="flex gap-2">
                       <span className="text-slate-500 w-14 shrink-0">Dubbed</span>
-                      <span className="text-amber-300">{seg.target_text}</span>
+                      <span className="text-amber-300">{seg.preview_text ?? seg.active_text ?? seg.target_text}</span>
                     </div>
                   </div>
                 )}
@@ -3205,7 +3169,7 @@ export function DubVerseEditor({
                         size="sm"
                         className="w-full mt-1 bg-amber-600 hover:bg-amber-700 text-white text-xs h-7"
                         onClick={() => {
-                          updateSegment(selectedSegmentIndex, { target_text: askAiResult!.suggestion, status: 'edited' })
+                          updateSegment(selectedSegmentIndex, { target_text: askAiResult!.suggestion, active_text: askAiResult!.suggestion, variant_text: askAiResult!.suggestion, preview_text: null, isPreviewing: false, isUserEdited: false, status: 'edited' })
                           setAskAiOpen(false)
                         }}
                       >
@@ -3403,137 +3367,6 @@ export function DubVerseEditor({
         </>
       )}
 
-      {/* Slide-Rule Correction Tool - draggable floating panel */}
-      {showCorrectionSlider && selectedSegmentIndex !== null && activeQCCategory && (
-        <div
-          className="fixed z-50 animate-in slide-in-from-bottom-4 duration-200"
-          style={{ left: correctionPanelPos.x, top: correctionPanelPos.y }}
-        >
-          <div className="bg-slate-800 border border-slate-700 rounded-lg p-4 shadow-2xl min-w-[450px]">
-            <div
-              className="flex items-center justify-between mb-3 cursor-grab active:cursor-grabbing select-none"
-              onMouseDown={(e) => {
-                e.preventDefault()
-                const panel = (e.currentTarget as HTMLElement).closest('.fixed') as HTMLElement
-                const rect = panel.getBoundingClientRect()
-                const offsetX = e.clientX - rect.left
-                const offsetY = e.clientY - rect.top
-                const onMove = (ev: MouseEvent) => {
-                  setCorrectionPanelPos({ x: ev.clientX - offsetX, y: ev.clientY - offsetY })
-                }
-                const onUp = () => {
-                  document.removeEventListener('mousemove', onMove)
-                  document.removeEventListener('mouseup', onUp)
-                }
-                document.addEventListener('mousemove', onMove)
-                document.addEventListener('mouseup', onUp)
-              }}
-            >
-              <span className="text-sm font-medium text-amber-400 capitalize flex items-center gap-2">
-                {activeQCCategory === 'timing' && <Clock className="h-4 w-4" />}
-                {activeQCCategory === 'sync' && <Music2 className="h-4 w-4" />}
-                {activeQCCategory === 'pronunciation' && <Mic2 className="h-4 w-4" />}
-                {activeQCCategory === 'translation' && <Languages className="h-4 w-4" />}
-                {activeQCCategory === 'delivery' && <Gauge className="h-4 w-4" />}
-                {activeQCCategory} Correction - Segment {selectedSegmentIndex + 1}
-              </span>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowCorrectionSlider(false)}
-                className="text-slate-400 hover:text-white h-6 px-2"
-                onMouseDown={(e) => e.stopPropagation()}
-              >
-                Cancel
-              </Button>
-            </div>
-            
-            {/* Slide Rule Visualization */}
-            <div className="relative mb-4">
-              <div className="flex justify-between text-xs text-slate-500 mb-2">
-                <span>{activeQCCategory === 'timing' ? 'Squeeze -50%' : 'Earlier -500ms'}</span>
-                <span className="text-amber-400 font-medium">Center</span>
-                <span>{activeQCCategory === 'timing' ? 'Stretch +50%' : 'Later +500ms'}</span>
-              </div>
-              
-              {/* Ruler marks */}
-              <div className="relative h-10 bg-slate-700/50 rounded border border-slate-600 mb-2 overflow-hidden">
-                <div className="absolute inset-0 flex items-center justify-between px-2">
-                  {Array.from({ length: 21 }).map((_, i) => (
-                    <div 
-                      key={i} 
-                      className={cn(
-                        'w-px',
-                        i === 10 ? 'h-8 bg-amber-500' : i % 5 === 0 ? 'h-5 bg-slate-400' : 'h-3 bg-slate-600'
-                      )}
-                    />
-                  ))}
-                </div>
-                {/* Current value indicator */}
-                <div 
-                  className="absolute top-0 bottom-0 w-1 bg-amber-400 transition-all"
-                  style={{ 
-                    left: `${50 + (correctionValue / (activeQCCategory === 'timing' ? 1 : 10))}%`,
-                    transform: 'translateX(-50%)'
-                  }}
-                />
-              </div>
-              
-              <Slider
-                value={[correctionValue]}
-                onValueChange={([v]) => setCorrectionValue(v)}
-                min={activeQCCategory === 'timing' ? -50 : -500}
-                max={activeQCCategory === 'timing' ? 50 : 500}
-                step={activeQCCategory === 'timing' ? 1 : 10}
-                className="w-full"
-              />
-              
-              <div className="text-center mt-3 text-2xl font-mono text-white">
-                {activeQCCategory === 'timing' 
-                  ? `${correctionValue > 0 ? '+' : ''}${correctionValue}%`
-                  : `${correctionValue > 0 ? '+' : ''}${correctionValue}ms`
-                }
-              </div>
-            </div>
-            
-            <div className="flex justify-between gap-2">
-              <div className="flex gap-2">
-                <Button 
-                  variant="outline" 
-                  size="sm" 
-                  onClick={() => setCorrectionValue(activeQCCategory === 'timing' ? -10 : -100)}
-                  className="text-xs"
-                >
-                  -{activeQCCategory === 'timing' ? '10%' : '100ms'}
-                </Button>
-                <Button 
-                  variant="outline" 
-                  size="sm" 
-                  onClick={() => setCorrectionValue(0)}
-                  className="text-xs"
-                >
-                  Reset
-                </Button>
-                <Button 
-                  variant="outline" 
-                  size="sm" 
-                  onClick={() => setCorrectionValue(activeQCCategory === 'timing' ? 10 : 100)}
-                  className="text-xs"
-                >
-                  +{activeQCCategory === 'timing' ? '10%' : '100ms'}
-                </Button>
-              </div>
-              <Button 
-                size="sm" 
-                className="bg-amber-600 hover:bg-amber-700 text-white"
-                onClick={applyCorrection}
-              >
-                Apply Correction
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
       
       {/* Timeline - Resizable with 4 tracks */}
       <div 
@@ -3553,22 +3386,6 @@ export function DubVerseEditor({
         {/* Timeline toolbar */}
         <div className="flex items-center justify-between px-4 py-2 border-b border-slate-800">
           <div className="flex items-center gap-3">
-            {/* Active QC filter indicator */}
-            {activeQCCategory && (
-              <div className="flex items-center gap-2 bg-amber-600/20 border border-amber-600/40 rounded-full px-3 py-1">
-                <span className="text-xs text-amber-400 font-medium capitalize">
-                  Showing: {activeQCCategory}
-                </span>
-                <button
-                  type="button"
-                  title="Clear filter"
-                  onClick={() => { setActiveQCCategory(null); setShowCorrectionSlider(false); }}
-                  className="text-amber-400 hover:text-amber-300"
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </div>
-            )}
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
                 <RefreshCw className="h-4 w-4" />
@@ -3788,7 +3605,7 @@ export function DubVerseEditor({
                     }
                   }}
                   onSelectFinding={(finding) => {
-                    setActiveFinding(finding)
+                    setSelectedQCFinding(finding)
                     setCurrentTime(finding.timestamp_start)
                     if (videoRef.current) videoRef.current.currentTime = finding.timestamp_start
                     const container = timelineRef.current
@@ -3798,12 +3615,6 @@ export function DubVerseEditor({
                     }
                     if (finding.segment_index >= 0 && finding.segment_index < displaySegments.length) {
                       selectSegment(finding.segment_index)
-                    }
-                    const category = QC_TABS.find(t => t.qcType === finding.type)?.id
-                    if (category) {
-                      setActiveQCCategory(category as QCCategory)
-                      openCorrectionSlider()
-                      setCorrectionValue(0)
                     }
                   }}
                   onSelectSegment={(retranscriptionIndex) => {
@@ -3928,6 +3739,13 @@ export function DubVerseEditor({
                 className="w-full h-1"
               />
             </div>
+            {/* Emotional curve track label */}
+            <div className="h-24 shrink-0 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-700 gap-1 bg-neutral-900/30">
+              <div className="flex items-center gap-1.5">
+                <div className="w-2 h-2 rounded-full bg-amber-400" />
+                <span>Emotion</span>
+              </div>
+            </div>
             {/* Filler + bottom ruler spacer */}
             <div className="flex-1 bg-neutral-900/50 border-b border-neutral-800" />
             <div className="h-5 shrink-0 bg-neutral-900 border-t border-neutral-700" />
@@ -3991,14 +3809,8 @@ export function DubVerseEditor({
                   const isMid = i % 5 === 0 && !isMajor
                   const isMinor = !isMajor && !isMid
 
-                  const isActive = activeFinding != null &&
-                    i >= Math.floor(activeFinding.timestamp_start) &&
-                    i <= Math.floor(activeFinding.timestamp_end)
-
                   const tickH = isMajor ? 'h-4' : isMid ? 'h-3' : 'h-1.5'
-                  const tickColor = isActive
-                    ? activeFinding!.severity === 'error' ? 'bg-red-400' : 'bg-yellow-400'
-                    : isMajor ? 'bg-slate-300' : isMid ? 'bg-slate-500' : 'bg-slate-700'
+                  const tickColor = isMajor ? 'bg-slate-300' : isMid ? 'bg-slate-500' : 'bg-slate-700'
 
                   return (
                     <div
@@ -4011,9 +3823,7 @@ export function DubVerseEditor({
                         <span
                           className={cn(
                             'text-[9px] font-mono leading-none mb-1 ml-0.5 whitespace-nowrap',
-                            isActive
-                              ? activeFinding!.severity === 'error' ? 'text-red-300' : 'text-yellow-300'
-                              : isMajor ? 'text-slate-300' : 'text-slate-500'
+                            isMajor ? 'text-slate-300' : 'text-slate-500'
                           )}
                         >
                           {formatTime(i)}
@@ -4115,9 +3925,15 @@ export function DubVerseEditor({
                       onDelete={(idx) => setPendingDelete(idx)}
                       onToggleLock={(idx) => setLockedSegments(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
                       onTogglePair={(idx) => setLockedPairs(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
-                      onRevert={() => handleRevert()}
+                      onRevert={revertToOriginal}
                       onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
                       onClearEmotion={(idx) => setStagedEmotions(prev => { const n = { ...prev }; delete n[idx]; return n })}
+                      onRenameSpeaker={(idx) => {
+                        const spkId = displaySegments[idx]?.speaker_id
+                        if (!spkId) return
+                        setRenamingSpeakerId(spkId)
+                        setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
+                      }}
                     >
                     <div
                       className={cn(
@@ -4251,18 +4067,11 @@ export function DubVerseEditor({
                 onDrop={handleDubbedTrackDrop}
               >
                 {displaySegments.map((segment, index) => {
-                  const highlightColor = getSegmentHighlightColor(segment)
                   const droppedTranslation = droppedTranslations.find(t => t.segmentIndex === index)
                   const hasDroppedTranslation = !!droppedTranslation
-                  
+
                   const bgColor = hasDroppedTranslation
                     ? 'bg-amber-500/40 border-amber-400 ring-2 ring-amber-400/50'
-                    : highlightColor === 'red'
-                    ? 'bg-red-500/40 border-red-500 animate-pulse'
-                    : highlightColor === 'yellow'
-                    ? 'bg-yellow-500/40 border-yellow-500'
-                    : highlightColor === 'green'
-                    ? 'bg-emerald-500/30 border-emerald-500/50'
                     : 'bg-amber-500/30 border-amber-500/50'
                   
                   return (
@@ -4280,9 +4089,15 @@ export function DubVerseEditor({
                       onDelete={(idx) => setPendingDelete(idx)}
                       onToggleLock={(idx) => setLockedSegments(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
                       onTogglePair={(idx) => setLockedPairs(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
-                      onRevert={() => handleRevert()}
+                      onRevert={revertToOriginal}
                       onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
                       onClearEmotion={(idx) => setStagedEmotions(prev => { const n = { ...prev }; delete n[idx]; return n })}
+                      onRenameSpeaker={(idx) => {
+                        const spkId = displaySegments[idx]?.speaker_id
+                        if (!spkId) return
+                        setRenamingSpeakerId(spkId)
+                        setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
+                      }}
                     >
                     <div
                       className={cn(
@@ -4309,7 +4124,7 @@ export function DubVerseEditor({
                         })(),
                       }}
                       data-segment-block={true}
-                      onClick={() => handleSegmentClickForQC(index)}
+                      onClick={() => handleSegmentClick(index)}
                       onDrop={(e) => handleTimelineDrop(e, index)}
                       onDragOver={handleTimelineDragOver}
                       onMouseDown={(e) => {
@@ -4370,10 +4185,10 @@ export function DubVerseEditor({
                         ) : stagedSpeeds[index] !== undefined ? (
                           <>
                             <span className="text-amber-400 font-mono shrink-0">{stagedSpeeds[index].toFixed(2)}x</span>
-                            <span className="truncate">{segment.target_text}</span>
+                            <span className="truncate">{segment.preview_text ?? segment.active_text ?? segment.target_text}</span>
                           </>
                         ) : (
-                          segment.target_text
+                          segment.preview_text ?? segment.active_text ?? segment.target_text
                         )}
                       </div>
 
@@ -4418,6 +4233,33 @@ export function DubVerseEditor({
               <div className="h-14 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
               </div>
 
+              {/* Emotional curve track */}
+              <div className="h-24 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+                {displaySegments.map((segment, index) => {
+                  const segWidth = (segment.end_time - segment.start_time) * PIXELS_PER_SECOND
+                  return (
+                    <div
+                      key={`emotion-${segment.id}`}
+                      className="absolute top-0 bottom-0"
+                      style={{
+                        left: segment.start_time * PIXELS_PER_SECOND,
+                        width: segWidth,
+                      }}
+                    >
+                      <EmotionalCurveTrack
+                        segment={segment}
+                        segmentIndex={index}
+                        zoom={zoomLevel}
+                        width={segWidth}
+                        onUpdateCurve={updateCombinedCurve}
+                        onToggleLock={toggleCurveLock}
+                        onResetCurve={resetEmotionalCurve}
+                      />
+                    </div>
+                  )
+                })}
+              </div>
+
               {/* Filler — fills remaining height, shows grid + bottom ruler */}
               <div className="flex-1 relative bg-[#07090f] flex flex-col">
                 {/* Filler grid — same 3-level gradient as main timeline */}
@@ -4459,12 +4301,12 @@ export function DubVerseEditor({
 
               {/* Player needle - yellow triangle head + silver line - DRAGGABLE */}
               <div
-                className="absolute top-0 bottom-0 z-50 pointer-events-auto"
+                className="absolute top-0 bottom-0 z-50 pointer-events-none"
                 style={{ left: `${currentTime * PIXELS_PER_SECOND}px` }}
               >
                 {/* Yellow triangle head - positioned below combined seek+ruler (24px+40px=64px) */}
                 <div
-                  className="absolute top-16 -left-[6px] cursor-ew-resize"
+                  className="absolute top-16 -left-[6px] cursor-ew-resize pointer-events-auto"
                   onMouseDown={(e) => {
                     e.preventDefault()
                     e.stopPropagation()
