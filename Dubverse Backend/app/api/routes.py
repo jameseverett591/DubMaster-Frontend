@@ -1947,13 +1947,17 @@ async def get_transcript(job_id: str):
 
 
 @router.delete("/jobs/clear-all")
-async def clear_all_jobs(force: bool = False):
-    """Delete all jobs and their data files.
+async def clear_all_jobs(request: Request, force: bool = False):
+    """Delete all jobs belonging to the authenticated user.
 
-    Safety: by default this only clears jobs/files that are older than a
-    minimum age window, to avoid accidentally wiping a freshly completed job.
-    Pass force=true to preserve the old destructive behavior.
+    By default only clears jobs older than CLEAR_ALL_MIN_AGE_MINUTES.
+    Pass force=true to clear all immediately.
+    Disk cleanup is per-job — no other user's files are touched.
     """
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+
     import shutil
     import time
 
@@ -1961,13 +1965,17 @@ async def clear_all_jobs(force: bool = False):
     now = time.time()
     cutoff = now - (min_age_minutes * 60)
 
-    # Clear in-memory jobs (respect age window unless forced)
+    # Clear in-memory jobs — user-scoped only
     cleared_ids: list[str] = []
     if force:
-        cleared_ids = list(job_manager._jobs.keys())
-        job_manager._jobs.clear()
+        for jid, job in list(job_manager._jobs.items()):
+            if job.user_id == user_id:
+                cleared_ids.append(jid)
+                job_manager._jobs.pop(jid, None)
     else:
         for jid, job in list(job_manager._jobs.items()):
+            if job.user_id != user_id:
+                continue
             try:
                 updated = getattr(job, "updated_at", None)
                 created = getattr(job, "created_at", None)
@@ -1979,48 +1987,50 @@ async def clear_all_jobs(force: bool = False):
                 if ts is not None and ts >= cutoff:
                     continue
             except Exception:
-                # If we can't determine age, keep it.
                 continue
             cleared_ids.append(jid)
             job_manager._jobs.pop(jid, None)
 
-    # Clear data directories (respect age window unless forced)
-    data_dirs = [
-        "data/uploads", "data/separated", "data/transcripts",
-        "data/diarization", "data/chunks", "data/processed", "data/output",
-    ]
+    # Delete from Supabase — scoped to this user (CASCADE removes segments + speakers)
+    if cleared_ids:
+        try:
+            from app.services.supabase_client import supabase
+            for jid in cleared_ids:
+                supabase.table("jobs").delete().eq(
+                    "job_id", jid
+                ).eq("user_id", user_id).execute()
+        except Exception as exc:
+            logger.warning(f"[CLEAR-ALL] Supabase delete failed: {exc}")
+
+    # Clean up disk artifacts per job — safe for multi-tenant
+    import glob as _glob
     files_removed = 0
-    kept_recent = 0
-    for d in data_dirs:
-        p = Path(d)
-        if not p.exists():
-            continue
-        for child in p.iterdir():
+    for jid in cleared_ids:
+        try:
+            storage.delete_job_files(jid)
+            files_removed += 1
+        except Exception:
+            pass
+        dubbed_dir = os.path.join(settings.DUBBED_DIR, jid)
+        if os.path.isdir(dubbed_dir):
+            shutil.rmtree(dubbed_dir, ignore_errors=True)
+        for sep_file in _glob.glob(
+            os.path.join("data/separated", f"{jid}_*")
+        ):
             try:
-                if not force:
-                    mtime = child.stat().st_mtime
-                    if mtime >= cutoff:
-                        kept_recent += 1
-                        continue
-                if child.is_dir():
-                    shutil.rmtree(child, ignore_errors=True)
-                else:
-                    child.unlink(missing_ok=True)
-                files_removed += 1
-            except Exception:
-                # Best-effort cleanup
-                continue
+                os.remove(sep_file)
+            except OSError:
+                pass
 
     logger.info(
-        f"[CLEAR-ALL] force={force} min_age_minutes={min_age_minutes} "
-        f"cleared_jobs={len(cleared_ids)} removed={files_removed} kept_recent={kept_recent}"
+        f"[CLEAR-ALL] user={user_id} force={force} "
+        f"cleared_jobs={len(cleared_ids)} files_removed={files_removed}"
     )
     return {
         "force": force,
         "min_age_minutes": min_age_minutes,
         "cleared_jobs": len(cleared_ids),
         "files_removed": files_removed,
-        "kept_recent": kept_recent,
         "job_ids": cleared_ids,
     }
 
