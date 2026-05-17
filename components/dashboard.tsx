@@ -15,6 +15,7 @@ import { Upload, Youtube, Film, Clapperboard, Mic2, AlertTriangle } from "lucide
 import { RecentProjects } from "@/components/recent-projects"
 import { BonusMinutesDialog } from "@/components/bonus-minutes-dialog"
 import { createClient } from "@/lib/supabase/client"
+import { apiClient } from "@/lib/api-client"
 
 export type VideoSource = {
   id: string
@@ -74,8 +75,10 @@ export function Dashboard() {
     async function fetchUsageData() {
       setLoadingUsage(true)
       try {
-        const { data: { user } } = await supabase.auth.getUser()
-        if (!user) return
+        const { data: { session } } = await supabase.auth.getSession()
+        if (!session) return
+        const user = session.user
+        apiClient.setToken(session.access_token)
 
         // Fetch subscription info
         const { data: subData } = await supabase
@@ -131,6 +134,16 @@ export function Dashboard() {
     }
 
     fetchUsageData()
+  }, [])
+
+  // Keep API client token in sync with Supabase auth state
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        apiClient.setToken(session?.access_token ?? null)
+      }
+    )
+    return () => subscription.unsubscribe()
   }, [])
 
   const handleVideoSelect = (video: VideoSource) => {
