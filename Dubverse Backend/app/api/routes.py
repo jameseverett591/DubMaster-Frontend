@@ -28,6 +28,7 @@ from app.models import (
 from app.config import get_settings
 from app.storage.manager import StorageManager
 from app.services.job_manager import job_manager
+from app.services.supabase_client import verify_jwt
 from app.pipeline.chunk_video import VideoChunker
 from app.pipeline.extract_audio import extract_audio
 from app.pipeline.diarize_audio import diarize_audio
@@ -1741,11 +1742,16 @@ async def process_video_pipeline(job_id: str, video_path: str):
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_video(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     source_language: Optional[str] = Form(None),
     num_speakers: Optional[int] = Form(None),
 ):
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
@@ -1782,7 +1788,8 @@ async def upload_video(
             job_id=job_id,
             video_filename=file.filename,
             video_path=video_path,
-            video_size=0
+            video_size=0,
+            user_id=user_id,
         )
 
         # Persist source language and expected speaker count on the job so
@@ -2125,7 +2132,11 @@ async def cancel_job(job_id: str):
 
 
 @router.get("/jobs")
-async def list_all_jobs():
+async def list_all_jobs(request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+
     if os.getenv("REHYDRATE_JOBS", "0") == "1":
         # Rehydrate only the most recent jobs from disk (by folder mtime), skip old stale ones
         uploads_dir = settings.UPLOAD_DIR
@@ -2144,7 +2155,7 @@ async def list_all_jobs():
                 if not existing:
                     await _rehydrate_job(job_id)
 
-    jobs = await job_manager.list_jobs()
+    jobs = await job_manager.list_jobs(user_id=user_id)
     # Sort by most recently updated, newest first
     jobs.sort(key=lambda j: j.updated_at or j.created_at, reverse=True)
     # Filter out stale rehydrated jobs that have no transcript (processing/50%)
