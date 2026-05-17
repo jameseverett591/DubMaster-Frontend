@@ -158,7 +158,9 @@ export function SpeakerVoicePanel() {
   const handlePreview = useCallback(async (voiceId: string) => {
     setPreviewingId(voiceId)
     try {
-      const audio = new Audio(`${API_BASE_URL}/api/voice-preview/${voiceId}`)
+      const found = voices.find(v => v.voice_id === voiceId)
+      const src = found?.preview_url || `${API_BASE_URL}/api/voice-preview/${voiceId}`
+      const audio = new Audio(src)
       audio.onended = () => setPreviewingId(null)
       audio.onerror = () => setPreviewingId(null)
       await audio.play()
@@ -392,7 +394,7 @@ export function SpeakerVoicePanel() {
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-slate-400">Pitch</span>
                   <span className="text-[10px] text-slate-300">
-                    {speakerPitchMap[spk.speaker_id] ?? 0 > 0 ? '+' : ''}
+                    {(speakerPitchMap[spk.speaker_id] ?? 0) > 0 ? '+' : ''}
                     {speakerPitchMap[spk.speaker_id] ?? 0} semitones
                   </span>
                 </div>
