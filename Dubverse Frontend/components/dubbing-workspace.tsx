@@ -56,6 +56,7 @@ import {
   type Voice,
   type JobStatus,
 } from "@/lib/api-client"
+import { useEditorStore } from "@/lib/editor-store"
 
 interface DubbingWorkspaceProps {
   video: VideoSource
@@ -127,6 +128,12 @@ const LANGUAGES = [
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+const VOICES_BY_GENDER: Record<string, string[]> = {
+  male:   ['male-1', 'male-2', 'male-3', 'male-4'],
+  female: ['female-1', 'female-2', 'female-3', 'female-4'],
+  child:  ['child-1', 'child-2', 'child-3'],
+}
+
 function buildDetectedVoices(
   transcript: Transcript,
   speakerGenders?: Record<string, string> | null
@@ -137,6 +144,8 @@ function buildDetectedVoices(
     map[seg.speaker].push({ start: seg.start, end: seg.end })
   }
 
+  const genderUsage: Record<string, number> = {}
+
   return Object.entries(map).map(([speakerId, timeRanges]) => {
     const gender = speakerGenders?.[speakerId]
     const type: DetectedVoice["type"] =
@@ -144,7 +153,10 @@ function buildDetectedVoices(
     const label =
       speakerId.charAt(0).toUpperCase() +
       speakerId.slice(1).replace(/-/g, " ").replace(/_/g, " ")
-    const defaultVoice = type === "female" ? "female-1" : type === "child" ? "child-1" : "male-1"
+    const pool = VOICES_BY_GENDER[type] ?? VOICES_BY_GENDER.male
+    const idx = genderUsage[type] ?? 0
+    const defaultVoice = pool[idx % pool.length]
+    genderUsage[type] = idx + 1
     return {
       id: speakerId,
       type,
@@ -515,9 +527,15 @@ export function DubbingWorkspace({ video, onClose, planType }: DubbingWorkspaceP
     }
 
     try {
+      // Merge workspace detectedVoices with editor store speakerVoiceMap
+      // Editor store takes priority because the Speaker Voice Panel is the
+      // canonical voice assignment UI.
+      const { speakerVoiceMap, speakerPitchMap } = useEditorStore.getState()
+
       const voiceMapping: Record<string, string> = {}
       for (const v of detectedVoices) {
-        voiceMapping[v.id] = v.selectedVoice
+        // Prefer editor store assignment; fall back to workspace default
+        voiceMapping[v.id] = speakerVoiceMap[v.id] || v.selectedVoice
       }
 
       const transcriptSegments = transcript
@@ -531,14 +549,28 @@ export function DubbingWorkspace({ video, onClose, planType }: DubbingWorkspaceP
             }))
           )
 
-      // Convert UI pitch/speed settings to backend voice_settings format.
-      // pitch -> style (0=flat, 100=expressive), speed is handled by TTS provider.
+      // Build voice_settings from editor store speakerPitchMap.
+      // Keys in voice_settings must match speaker IDs so the backend
+      // can look up per-speaker overrides.
       const voiceSettings: Record<string, Record<string, number>> = {}
+      for (const [speakerId, pitch] of Object.entries(speakerPitchMap)) {
+        if (pitch !== 0) {
+          voiceSettings[speakerId] = {
+            pitch,
+            stability: 0.3,
+            similarity_boost: 0.9,
+            style: 0.5,
+          }
+        }
+      }
+      // Also merge workspace voiceSettingsMap (legacy path) for backward compat
       for (const [voiceId, settings] of Object.entries(voiceSettingsMap)) {
-        voiceSettings[voiceId] = {
-          style: settings.pitch / 100,
-          stability: 1 - (settings.pitch / 100) * 0.5,  // higher pitch variance = lower stability
-          similarity_boost: 0.9,
+        if (!voiceSettings[voiceId]) {
+          voiceSettings[voiceId] = {
+            style: settings.pitch / 100,
+            stability: 1 - (settings.pitch / 100) * 0.5,
+            similarity_boost: 0.9,
+          }
         }
       }
 
