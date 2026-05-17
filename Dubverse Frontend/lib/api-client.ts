@@ -73,6 +73,7 @@ export interface JobStatus {
   segment_tts_engines: (string | null)[] | null
   speaker_genders: Record<string, string> | null
   voice_mapping: Record<string, string> | null
+  source_language: string | null
   error_message: string | null
   created_at: string
   updated_at: string
