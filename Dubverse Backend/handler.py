@@ -18,11 +18,16 @@ try:
     from app.pipeline.extract_audio import extract_audio
     from app.pipeline.separate_audio import separate_audio
     from app.pipeline.transcribe_audio import transcribe_audio
+    from app.pipeline.transcribe_cantonese import transcribe_cantonese
     from app.pipeline.diarize_audio import diarize_audio
     print("handler.py: pipeline imports OK", flush=True)
 except Exception as _e:
     print(f"handler.py FATAL (pipeline import): {_e}", file=sys.stderr, flush=True)
     sys.exit(1)
+
+# Languages that use the multi-engine Cantonese ASR pipeline
+_CJK_LANGS = {"zh", "yue", "cmn", "zho", "ja", "ko",
+               "zh-cn", "zh-tw", "zh-hk", "yue-hk", "zh-yue"}
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,7 +60,7 @@ def handler(event):
     Translation and TTS happen locally (not in RunPod) so the local
     backend can do per-speaker voice routing.
     """
-    logger.info("RunPod handler v28 invoked")
+    logger.info("RunPod handler v29 invoked")
     timings = {}
     t0 = time.time()
 
@@ -126,12 +131,23 @@ def handler(event):
         logger.info(f"[3b/4] Transcribing (language={language})")
         t_tr = time.time()
 
-        # Set language env var so transcribe_audio picks it up
+        # Set language env var so both transcribe_audio and transcribe_cantonese pick it up
         prev_lang = os.environ.get("WHISPER_LANGUAGE")
         if language:
             os.environ["WHISPER_LANGUAGE"] = language
 
-        transcript_result = transcribe_audio(transcription_source, job_id=job_id)
+        _lang_norm = (language or "").lower().strip()
+        if _lang_norm in _CJK_LANGS:
+            # Multi-engine pipeline: Tencent → Paraformer → Whisper (with merge)
+            # Passes separated vocals so Tencent/Paraformer get the cleanest signal
+            logger.info(f"[TRANSCRIBE] CJK language '{language}' — using multi-engine Cantonese pipeline")
+            transcript_result = transcribe_cantonese(
+                transcription_source,
+                vocals_path=vocals_audio_path,
+                job_id=job_id,
+            )
+        else:
+            transcript_result = transcribe_audio(transcription_source, job_id=job_id)
 
         if prev_lang is None:
             os.environ.pop("WHISPER_LANGUAGE", None)
