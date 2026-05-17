@@ -207,6 +207,7 @@ class ElevenLabsTTS:
         style: float = 0.5,
         use_speaker_boost: bool = True,
         language: str = "en",
+        pitch_shift: float = 0.0,
     ) -> Optional[Dict[str, str]]:
         logger.info(f"TTS Request: voice_id={voice_id}, model={model_id}, language={language}, text={text[:50]}...")
 
@@ -216,7 +217,7 @@ class ElevenLabsTTS:
         edge_primary = os.getenv("EDGE_TTS_PRIMARY", default_edge) == "1"
         if edge_primary and self.edge_tts_available:
             gender = await self._resolve_voice_gender(voice_id)
-            fallback_path = await self._fallback_tts(text, output_path, language, voice_id, gender)
+            fallback_path = await self._fallback_tts(text, output_path, language, voice_id, gender, pitch_shift)
             if fallback_path:
                 return {"path": fallback_path, "engine": "edge-tts"}
             if not self.enabled:
@@ -226,7 +227,7 @@ class ElevenLabsTTS:
         if not self.enabled:
             logger.warning("ElevenLabs API key missing; using Edge TTS fallback.")
             gender = await self._resolve_voice_gender(voice_id)
-            fallback_path = await self._fallback_tts(text, output_path, language, voice_id, gender)
+            fallback_path = await self._fallback_tts(text, output_path, language, voice_id, gender, pitch_shift)
             if fallback_path:
                 return {"path": fallback_path, "engine": "edge-tts"}
             return None
@@ -274,7 +275,7 @@ class ElevenLabsTTS:
                         logger.warning(f"ElevenLabs FAILED: {response.status_code} - {error_text}")
                         logger.info("Falling back to Edge TTS...")
                     gender = await self._resolve_voice_gender(voice_id)
-                    fallback_path = await self._fallback_tts(text, output_path, language, voice_id, gender)
+                    fallback_path = await self._fallback_tts(text, output_path, language, voice_id, gender, pitch_shift)
                     if fallback_path:
                         return {"path": fallback_path, "engine": "edge-tts"}
                     return None
@@ -283,7 +284,7 @@ class ElevenLabsTTS:
             logger.error(f"TTS error: {e}")
             logger.info("Falling back to Edge TTS...")
             gender = await self._resolve_voice_gender(voice_id)
-            fallback_path = await self._fallback_tts(text, output_path, language, voice_id, gender)
+            fallback_path = await self._fallback_tts(text, output_path, language, voice_id, gender, pitch_shift)
             if fallback_path:
                 return {"path": fallback_path, "engine": "edge-tts"}
             return None
@@ -295,6 +296,7 @@ class ElevenLabsTTS:
         language: str = "en",
         voice_id: str = "",
         gender: str = "male",
+        pitch_shift: float = 0.0,
     ) -> Optional[str]:
         try:
             if not self.edge_tts_available:
@@ -307,14 +309,22 @@ class ElevenLabsTTS:
             # Slightly slower rate for more natural delivery (Edge TTS
             # defaults are fast and robotic).  Children get a faster rate.
             rate = "+15%" if gender == "child" else "-5%"
-            pitch = "+50Hz" if gender == "child" else None
+            # Base pitch from gender + additional user pitch_shift
+            base_pitch = "+50Hz" if gender == "child" else "+0Hz"
+            # Apply SSML pitch shift if user specified a non-zero value
+            if pitch_shift != 0:
+                # Convert semitones to SSML pitch string (e.g., +8st or -4st)
+                pitch_steps = f"{pitch_shift:+.0f}st"
+                # Wrap text in SSML prosody tag for pitch control
+                text = f'<speak><prosody pitch="{pitch_steps}">{text}</prosody></speak>'
 
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             kwargs = {}
             if rate:
                 kwargs["rate"] = rate
-            if pitch:
-                kwargs["pitch"] = pitch
+            # Only pass base pitch if no explicit pitch_shift (SSML handles it otherwise)
+            if pitch_shift == 0 and base_pitch != "+0Hz":
+                kwargs["pitch"] = base_pitch
             communicate = edge_tts.Communicate(text, edge_voice, **kwargs)
             await asyncio.wait_for(communicate.save(output_path), timeout=90)
             # Edge-TTS silently creates an empty file when the voice can't speak
