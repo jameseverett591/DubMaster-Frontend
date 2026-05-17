@@ -50,6 +50,7 @@ class Transcript(BaseModel):
 
 class Job(BaseModel):
     job_id: str
+    user_id: str
     status: JobStatus
     progress: int = Field(ge=0, le=100, default=0)
     current_stage: Optional[str] = None
