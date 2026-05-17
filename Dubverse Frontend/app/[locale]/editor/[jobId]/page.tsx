@@ -72,11 +72,26 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             end_time: seg.end ?? 0,
             source_text: sourceByIndex.get(seg.transcript_index ?? idx) ?? '',
             target_text: seg.text ?? '',
+            active_text: seg.text ?? '',
+            preview_text: null,
+            isPreviewing: false,
             speaker_id: speakerId,
             speaker_label: seg.speaker ?? 'Speaker 1',
             speaker_gender: gender,
             audio_url: seg.path,
             qc_findings: seg.qc_findings ?? [],
+            emotionalCurve: {
+              combined: [
+                { x: 0, y: 0.5 },
+                { x: 1, y: 0.5 }
+              ],
+              locked: false,
+              analysis: {
+                facial: [],
+                vocal: [],
+                scene: []
+              }
+            },
           }
         })
 
