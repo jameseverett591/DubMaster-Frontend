@@ -1,6 +1,0 @@
-{
-  "version": 3,
-  "sources": [],
-  "sections": [
-    {"offset": {"line": 14, "column": 0}, "map": {"version":3,"sources":["file:///C:/DEV/Dubverse/Dubverse%20Frontend/app/page.tsx"],"sourcesContent":["import { Suspense } from \"react\"\nimport { Dashboard } from \"@/components/dashboard\"\nimport { LoadingSpinner } from \"@/components/loading-spinner\"\n\nexport default function Home() {\n  return (\n    <Suspense fallback={<LoadingSpinner />}>\n      <Dashboard />\n    </Suspense>\n  )\n}\n"],"names":[],"mappings":";;;;;AAAA;;;;;;;;;;;;;;;AAIe,SAAS;IACtB,qBACE,8OAAC,iNAAQ;QAAC,wBAAU,8OAAC;;;;;kBACnB,cAAA,8OAAC;;;;;;;;;;AAGP"}}]
-}
