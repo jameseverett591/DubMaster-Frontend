@@ -2137,24 +2137,6 @@ async def list_all_jobs(request: Request):
     token = auth_header.removeprefix("Bearer ").strip()
     user_id = verify_jwt(token)
 
-    if os.getenv("REHYDRATE_JOBS", "0") == "1":
-        # Rehydrate only the most recent jobs from disk (by folder mtime), skip old stale ones
-        uploads_dir = settings.UPLOAD_DIR
-        if os.path.isdir(uploads_dir):
-            entries = []
-            for entry in os.scandir(uploads_dir):
-                if entry.is_dir():
-                    try:
-                        entries.append((entry.stat().st_mtime, entry.name))
-                    except OSError:
-                        pass
-            # Only rehydrate the 10 most recently modified job folders
-            entries.sort(reverse=True)
-            for _, job_id in entries[:10]:
-                existing = await job_manager.get_job(job_id)
-                if not existing:
-                    await _rehydrate_job(job_id)
-
     jobs = await job_manager.list_jobs(user_id=user_id)
     # Sort by most recently updated, newest first
     jobs.sort(key=lambda j: j.updated_at or j.created_at, reverse=True)
