@@ -133,7 +133,12 @@ export interface DubRequest {
   target_language: string
   transcript: TranscriptSegment[]
   voice_mapping: Record<string, string>
-  voice_settings?: Record<string, Record<string, number>>
+  voice_settings?: Record<string, {
+    stability?: number
+    similarity_boost?: number
+    style?: number
+    pitch?: number  // semitone shift, e.g. +8 for child-like voice
+  }>
   source_language?: string
   dubbing_engine?: 'dubmaster' | 'vozo'
   vozo_user_prompt?: string
@@ -155,6 +160,7 @@ export interface RegenerateSegmentRequest {
   speed?: number
   pitch?: number
   emotion?: string
+  emotionIntensity?: number
 }
 
 export interface RegenerateSegmentResponse {
@@ -353,6 +359,17 @@ export interface AnalysisResponse {
 
 class DubVerseAPIClient {
   private baseURL: string
+  private _token: string | null = null
+
+  setToken(token: string | null): void {
+    this._token = token
+  }
+
+  private _authHeaders(): Record<string, string> {
+    return this._token
+      ? { Authorization: `Bearer ${this._token}` }
+      : {}
+  }
 
   constructor(baseURL: string = API_BASE_URL) {
     this.baseURL = baseURL
@@ -410,6 +427,9 @@ class DubVerseAPIClient {
       xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')))
 
       xhr.open('POST', `${this.baseURL}/api/upload`)
+      if (this._token) {
+        xhr.setRequestHeader('Authorization', `Bearer ${this._token}`)
+      }
       xhr.send(formData)
     })
   }
@@ -556,7 +576,9 @@ class DubVerseAPIClient {
    * List all jobs
    */
   async listJobs(): Promise<JobStatus[]> {
-    const response = await fetch(`${this.baseURL}/api/jobs`)
+    const response = await fetch(`${this.baseURL}/api/jobs`, {
+      headers: this._authHeaders(),
+    })
     if (!response.ok) {
       throw new Error(`Failed to list jobs: ${response.statusText}`)
     }
@@ -681,6 +703,14 @@ class DubVerseAPIClient {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(voiceMapping),
+    })
+  }
+
+  async reassignSpeaker(jobId: string, segmentIndex: number, newSpeakerId: string): Promise<void> {
+    await fetch(`${this.baseURL}/api/jobs/${jobId}/speaker-reassign`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ segment_index: segmentIndex, new_speaker_id: newSpeakerId }),
     })
   }
 
