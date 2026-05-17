@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Segment, QCFinding, QCScore, QCSeverity, QCFindingType, SidebarTab } from './editor-types'
+import type { Segment, QCFinding, QCScore, QCSeverity, QCFindingType, SidebarTab, EmotionalCurve, EmotionalCurvePoint } from './editor-types'
 import type { AdaptedSegment, VariantType } from './adaptation-types'
 
 export type { SidebarTab }
@@ -49,6 +49,9 @@ interface EditorState {
   // Speaker voice assignments: speaker_id → voice key (e.g. "speaker-1" → "male-2")
   speakerVoiceMap: Record<string, string>
 
+  // Speaker pitch shifts: speaker_id → semitone offset (e.g. "speaker-1" → 8)
+  speakerPitchMap: Record<string, number>
+
   // Actions
   setJobData: (data: {
     jobId: string
@@ -90,10 +93,14 @@ interface EditorState {
   
   // Segment actions
   updateSegment: (index: number, updates: Partial<Segment>) => void
+  updateSegmentSpeaker: (index: number, speakerId: string, speakerLabel?: string) => void
   lockSegment: (index: number) => void
   unlockSegment: (index: number) => void
   updateSegmentText: (index: number, text: string) => void
   updateSegmentTiming: (index: number, startTime: number, endTime: number) => void
+  setPreviewText: (index: number, text: string) => void
+  commitPreview: (index: number) => void
+  cancelPreview: (index: number) => void
   
   // QC navigation
   jumpToNextFinding: () => void
@@ -109,6 +116,16 @@ interface EditorState {
   // Speaker voice actions
   setSpeakerVoiceMap: (map: Record<string, string>) => void
   updateSpeakerVoice: (speakerId: string, voiceKey: string) => void
+  setSpeakerPitchMap: (map: Record<string, number>) => void
+  updateSpeakerPitch: (speakerId: string, pitch: number) => void
+
+  // Emotional curve actions
+  setEmotionalCurve: (index: number, curve: EmotionalCurve) => void
+  updateCombinedCurve: (index: number, points: EmotionalCurvePoint[]) => void
+  toggleCurveLock: (index: number) => void
+  sampleEmotionalCurve: (index: number, t: number) => number
+  resetEmotionalCurve: (index: number) => void
+  revertToOriginal: (index: number) => void
 
   // Computed / helpers
   getFilteredFindings: () => QCFinding[]
@@ -142,6 +159,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   adaptationVariants: {},
   isAdaptationLoading: false,
   speakerVoiceMap: {},
+  speakerPitchMap: {},
 
   // Set job data
   setJobData: (data) => set({
@@ -203,7 +221,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       i === index ? { ...seg, ...updates, status: seg.status === 'locked' ? 'locked' : 'edited' } : seg
     )
   })),
-  
+
+  updateSegmentSpeaker: (index, speakerId, speakerLabel) => set((state) => ({
+    segments: state.segments.map((seg, i) =>
+      i === index
+        ? { ...seg, speaker_id: speakerId, speaker_label: speakerLabel || seg.speaker_label, status: seg.status === 'locked' ? 'locked' : 'edited' }
+        : seg
+    )
+  })),
+
   lockSegment: (index) => set((state) => ({
     segments: state.segments.map((seg, i) => 
       i === index ? { 
@@ -223,13 +249,41 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   
   updateSegmentText: (index, text) => set((state) => ({
     segments: state.segments.map((seg, i) => 
-      i === index ? { ...seg, target_text: text, status: seg.status === 'locked' ? 'locked' : 'edited' } : seg
+      i === index ? { ...seg, target_text: text, active_text: text, variant_text: text, isUserEdited: true, status: seg.status === 'locked' ? 'locked' : 'edited' } : seg
     )
   })),
   
   updateSegmentTiming: (index, startTime, endTime) => set((state) => ({
     segments: state.segments.map((seg, i) => 
       i === index ? { ...seg, start_time: startTime, end_time: endTime, status: seg.status === 'locked' ? 'locked' : 'edited' } : seg
+    )
+  })),
+
+  setPreviewText: (index, text) => set((state) => ({
+    segments: state.segments.map((seg, i) =>
+      i === index ? { ...seg, preview_text: text, isPreviewing: true } : seg
+    )
+  })),
+
+  commitPreview: (index) => set((state) => ({
+    segments: state.segments.map((seg, i) =>
+      i === index
+        ? {
+            ...seg,
+            target_text: seg.preview_text ?? seg.target_text,
+            active_text: seg.preview_text ?? seg.active_text ?? seg.target_text,
+            variant_text: seg.preview_text ?? seg.variant_text ?? seg.target_text,
+            isUserEdited: true,
+            preview_text: null,
+            isPreviewing: false,
+          }
+        : seg
+    )
+  })),
+
+  cancelPreview: (index) => set((state) => ({
+    segments: state.segments.map((seg, i) =>
+      i === index ? { ...seg, preview_text: null, isPreviewing: false } : seg
     )
   })),
   
@@ -313,6 +367,127 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   updateSpeakerVoice: (speakerId, voiceKey) => set((state) => ({
     speakerVoiceMap: { ...state.speakerVoiceMap, [speakerId]: voiceKey },
   })),
+  setSpeakerPitchMap: (map) => set({ speakerPitchMap: map }),
+  updateSpeakerPitch: (speakerId, pitch) => set((state) => ({
+    speakerPitchMap: { ...state.speakerPitchMap, [speakerId]: pitch },
+  })),
+
+  // Emotional curve actions
+  setEmotionalCurve: (index, curve) => set((state) => ({
+    segments: state.segments.map((seg, i) =>
+      i === index ? { ...seg, emotionalCurve: curve } : seg
+    ),
+  })),
+
+  updateCombinedCurve: (index, points) => set((state) => ({
+    segments: state.segments.map((seg, i) =>
+      i === index
+        ? {
+            ...seg,
+            emotionalCurve: {
+              ...seg.emotionalCurve,
+              combined: points,
+              locked: seg.emotionalCurve?.locked ?? false,
+              analysis: seg.emotionalCurve?.analysis ?? { facial: [], vocal: [], scene: [] },
+            } as EmotionalCurve,
+          }
+        : seg
+    ),
+  })),
+
+  toggleCurveLock: (index) => set((state) => ({
+    segments: state.segments.map((seg, i) =>
+      i === index
+        ? {
+            ...seg,
+            emotionalCurve: {
+              ...seg.emotionalCurve,
+              combined: seg.emotionalCurve?.combined ?? [],
+              locked: !seg.emotionalCurve?.locked,
+              analysis: seg.emotionalCurve?.analysis ?? { facial: [], vocal: [], scene: [] },
+            } as EmotionalCurve,
+          }
+        : seg
+    ),
+  })),
+
+  sampleEmotionalCurve: (index, t) => {
+    const state = get()
+    const seg = state.segments[index]
+    const curve = seg?.emotionalCurve?.combined
+    if (!curve || curve.length === 0) return 0.5
+
+    // Sort by x
+    const sorted = [...curve].sort((a, b) => a.x - b.x)
+    if (t <= sorted[0].x) return sorted[0].y
+    if (t >= sorted[sorted.length - 1].x) return sorted[sorted.length - 1].y
+
+    // Find surrounding points and interpolate with Bezier
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const p0 = sorted[i]
+      const p1 = sorted[i + 1]
+      if (t >= p0.x && t <= p1.x) {
+        const range = p1.x - p0.x
+        if (range === 0) return p0.y
+        const localT = (t - p0.x) / range
+
+        if (p0.cp2 && p1.cp1) {
+          // Cubic Bezier
+          const cp1x = p0.x + (p0.cp2?.x ?? 0) * range
+          const cp1y = p0.y + (p0.cp2?.y ?? 0) * (p1.y - p0.y)
+          const cp2x = p1.x - (p1.cp1?.x ?? 0) * range
+          const cp2y = p1.y - (p1.cp1?.y ?? 0) * (p1.y - p0.y)
+          const mt = 1 - localT
+          return (
+            mt * mt * mt * p0.y +
+            3 * mt * mt * localT * cp1y +
+            3 * mt * localT * localT * cp2y +
+            localT * localT * localT * p1.y
+          )
+        }
+
+        // Linear fallback
+        return p0.y + (p1.y - p0.y) * localT
+      }
+    }
+    return 0.5
+  },
+
+  resetEmotionalCurve: (index) => set((state) => ({
+    segments: state.segments.map((seg, i) =>
+      i === index
+        ? {
+            ...seg,
+            emotionalCurve: {
+              ...seg.emotionalCurve,
+              combined: [
+                { x: 0, y: 0.5 },
+                { x: 1, y: 0.5 }
+              ],
+              locked: false,
+              analysis: seg.emotionalCurve?.analysis ?? { facial: [], vocal: [], scene: [] },
+            } as EmotionalCurve,
+          }
+        : seg
+    ),
+  })),
+
+  revertToOriginal: (index) => set((state) => {
+    const seg = state.segments[index]
+    if (!seg) return state
+    return {
+      segments: state.segments.map((s, i) =>
+        i === index
+          ? {
+              ...s,
+              preview_text: seg.source_text,
+              active_text: seg.source_text,
+              target_text: seg.source_text,
+            }
+          : s
+      ),
+    }
+  }),
 
   // Computed helpers
   getFilteredFindings: () => {
