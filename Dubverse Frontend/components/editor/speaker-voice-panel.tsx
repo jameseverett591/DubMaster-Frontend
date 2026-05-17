@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { useEditorStore } from '@/lib/editor-store'
 import { apiClient, API_BASE_URL, type Voice } from '@/lib/api-client'
 
@@ -43,6 +43,9 @@ export function SpeakerVoicePanel() {
     speakerVoiceMap,
     setSpeakerVoiceMap,
     updateSpeakerVoice,
+    speakerPitchMap,
+    updateSpeakerPitch,
+    setSpeakerPitchMap,
   } = useEditorStore()
 
   const [voices, setVoices] = useState<Voice[]>([])
@@ -51,9 +54,14 @@ export function SpeakerVoicePanel() {
   const [previewingId, setPreviewingId] = useState<string | null>(null)
   // Track which speakers have been manually overridden
   const [manualOverrides, setManualOverrides] = useState<Set<string>>(new Set())
+  // Pending voice selections (not yet applied)
+  const [pendingVoiceMap, setPendingVoiceMap] = useState<Record<string, string>>({})
+  // Brief "Applied" confirmation per speaker
+  const [justApplied, setJustApplied] = useState<Set<string>>(new Set())
+  const [applyLoading, setApplyLoading] = useState<Set<string>>(new Set())
 
   // Derive unique speakers + their gender/sample from segments
-  const speakerData = (() => {
+  const speakerData = useMemo(() => {
     const seen = new Set<string>()
     const speakers: Array<{
       speaker_id: string
@@ -73,7 +81,7 @@ export function SpeakerVoicePanel() {
       })
     }
     return speakers
-  })()
+  }, [segments])
 
   // Load voices once on mount
   useEffect(() => {
@@ -84,19 +92,56 @@ export function SpeakerVoicePanel() {
       .finally(() => setVoicesLoading(false))
   }, [])
 
-  const handleVoiceChange = useCallback(async (speakerId: string, voiceKey: string) => {
-    setManualOverrides(prev => new Set([...prev, speakerId]))
+  // Sync pending map when speakerVoiceMap changes from outside
+  useEffect(() => {
+    setPendingVoiceMap(prev => {
+      const next = { ...prev }
+      for (const spk of speakerData) {
+        const applied = speakerVoiceMap[spk.speaker_id]
+        if (applied && next[spk.speaker_id] === undefined) {
+          next[spk.speaker_id] = applied
+        }
+      }
+      return next
+    })
+  }, [speakerVoiceMap, speakerData])
+
+  const handleApplyVoice = useCallback(async (speakerId: string, voiceKey: string) => {
+    setApplyLoading(prev => new Set([...prev, speakerId]))
     updateSpeakerVoice(speakerId, voiceKey)
+    setManualOverrides(prev => new Set([...prev, speakerId]))
     if (jobId) {
       const next = { ...speakerVoiceMap, [speakerId]: voiceKey }
-      await apiClient.updateVoiceMapping(jobId, next)
+      try {
+        await apiClient.updateVoiceMapping(jobId, next)
+      } catch {
+        // swallow — UI already updated optimistically
+      }
     }
+    setApplyLoading(prev => {
+      const n = new Set(prev)
+      n.delete(speakerId)
+      return n
+    })
+    setJustApplied(prev => new Set([...prev, speakerId]))
+    setTimeout(() => {
+      setJustApplied(prev => {
+        const n = new Set(prev)
+        n.delete(speakerId)
+        return n
+      })
+    }, 2000)
   }, [jobId, speakerVoiceMap, updateSpeakerVoice])
 
   const handleResetToAuto = useCallback(async (speakerId: string, gender: string) => {
     setManualOverrides(prev => {
       const next = new Set(prev)
       next.delete(speakerId)
+      return next
+    })
+    setPendingVoiceMap(prev => {
+      const next = { ...prev }
+      delete next[speakerId]
       return next
     })
     const uniqueIds = speakerData.map(s => s.speaker_id)
@@ -121,6 +166,10 @@ export function SpeakerVoicePanel() {
       setPreviewingId(null)
     }
   }, [])
+
+  const handlePitchChange = useCallback((speakerId: string, nSteps: number) => {
+    updateSpeakerPitch(speakerId, nSteps)
+  }, [updateSpeakerPitch])
 
   if (segments.length === 0) {
     return (
@@ -175,13 +224,36 @@ export function SpeakerVoicePanel() {
             unknown: '? Unknown',
           }[spk.detected_gender]
 
-          // Sort voices: gender-matching first, then others
-          const matchGender = spk.detected_gender === 'unknown' ? 'male' : spk.detected_gender
-          const sortedVoices = [...voices].sort((a, b) => {
-            const aMatch = (a.labels?.gender ?? '') === matchGender ? 0 : 1
-            const bMatch = (b.labels?.gender ?? '') === matchGender ? 0 : 1
-            return aMatch - bMatch
-          })
+          // Group voices by gender/age — matching first, then others under a divider
+          const childVoices = voices.filter(v => v.labels?.age === 'child')
+          const femaleVoices = voices.filter(v => v.labels?.gender === 'female' && v.labels?.age !== 'child')
+          const maleVoices = voices.filter(v => v.labels?.gender === 'male' && v.labels?.age !== 'child')
+
+          let primaryVoices: Voice[] = []
+          let otherVoices: Voice[] = []
+          let fallbackNote: string | null = null
+
+          if (spk.detected_gender === 'child') {
+            primaryVoices = childVoices
+            otherVoices = voices.filter(v => v.labels?.age !== 'child')
+            if (childVoices.length === 0) {
+              fallbackNote = 'No child voices available — select from other groups below'
+            }
+          } else if (spk.detected_gender === 'female') {
+            primaryVoices = femaleVoices
+            otherVoices = voices.filter(v => !(v.labels?.gender === 'female' && v.labels?.age !== 'child'))
+            if (femaleVoices.length === 0) {
+              fallbackNote = 'No female voices available — select from other groups below'
+            }
+          } else if (spk.detected_gender === 'male') {
+            primaryVoices = maleVoices
+            otherVoices = voices.filter(v => !(v.labels?.gender === 'male' && v.labels?.age !== 'child'))
+            if (maleVoices.length === 0) {
+              fallbackNote = 'No male voices available — select from other groups below'
+            }
+          } else {
+            otherVoices = voices
+          }
 
           return (
             <div
@@ -205,6 +277,13 @@ export function SpeakerVoicePanel() {
               {/* Gender */}
               <span className={`text-xs ${genderColor}`}>{genderLabel} · F0-detected</span>
 
+              {/* Fallback warning */}
+              {fallbackNote && (
+                <span className="text-[10px] text-amber-400/80">
+                  ⚠ {fallbackNote}
+                </span>
+              )}
+
               {/* Sample line */}
               {spk.sample_line && (
                 <p className="text-xs text-slate-500 leading-relaxed line-clamp-2">
@@ -212,27 +291,43 @@ export function SpeakerVoicePanel() {
                 </p>
               )}
 
-              {/* Voice selector + preview */}
+              {/* Voice selector + preview + apply */}
               <div className="flex items-center gap-2">
                 {voicesLoading ? (
                   <div className="flex-1 h-7 rounded bg-slate-700 animate-pulse" />
                 ) : voices.length > 0 ? (
                   <select
-                    value={currentVoice}
-                    onChange={(e) => handleVoiceChange(spk.speaker_id, e.target.value)}
+                    value={pendingVoiceMap[spk.speaker_id] ?? currentVoice}
+                    onChange={(e) => setPendingVoiceMap(prev => ({ ...prev, [spk.speaker_id]: e.target.value }))}
                     className="flex-1 rounded bg-slate-700 border border-slate-600 px-2 py-1 text-xs text-slate-100 focus:outline-none focus:border-blue-500"
                   >
-                    {sortedVoices.map((v) => (
-                      <option key={v.voice_id} value={v.voice_id}>
-                        {v.name}
-                        {v.labels?.gender ? ` (${v.labels.gender})` : ''}
-                      </option>
-                    ))}
+                    {primaryVoices.length > 0 && (
+                      <optgroup label="Matching Voices">
+                        {primaryVoices.map((v) => (
+                          <option key={v.voice_id} value={v.voice_id}>
+                            {v.name}
+                            {v.labels?.gender ? ` (${v.labels.gender})` : ''}
+                            {v.labels?.age && v.labels.age !== 'young' && v.labels.age !== 'middle aged' ? ` · ${v.labels.age}` : ''}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {otherVoices.length > 0 && (
+                      <optgroup label={primaryVoices.length > 0 ? 'Other Voices' : 'All Voices'}>
+                        {otherVoices.map((v) => (
+                          <option key={v.voice_id} value={v.voice_id}>
+                            {v.name}
+                            {v.labels?.gender ? ` (${v.labels.gender})` : ''}
+                            {v.labels?.age && v.labels.age !== 'young' && v.labels.age !== 'middle aged' ? ` · ${v.labels.age}` : ''}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
                   </select>
                 ) : (
                   <select
-                    value={currentVoice}
-                    onChange={(e) => handleVoiceChange(spk.speaker_id, e.target.value)}
+                    value={pendingVoiceMap[spk.speaker_id] ?? currentVoice}
+                    onChange={(e) => setPendingVoiceMap(prev => ({ ...prev, [spk.speaker_id]: e.target.value }))}
                     className="flex-1 rounded bg-slate-700 border border-slate-600 px-2 py-1 text-xs text-slate-100 focus:outline-none focus:border-blue-500"
                   >
                     {['male-1','male-2','male-3','male-4','female-1','female-2','female-3','female-4','child-1','child-2','child-3'].map(k => (
@@ -241,13 +336,75 @@ export function SpeakerVoicePanel() {
                   </select>
                 )}
                 <button
-                  onClick={() => handlePreview(currentVoice)}
-                  disabled={previewingId === currentVoice}
+                  onClick={() => handlePreview(pendingVoiceMap[spk.speaker_id] ?? currentVoice)}
+                  disabled={previewingId === (pendingVoiceMap[spk.speaker_id] ?? currentVoice)}
                   className="shrink-0 rounded border border-slate-600 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700 disabled:opacity-50 transition-colors"
                   title="Preview voice"
                 >
-                  {previewingId === currentVoice ? '▶ …' : '▶'}
+                  {previewingId === (pendingVoiceMap[spk.speaker_id] ?? currentVoice) ? '▶ …' : '▶'}
                 </button>
+                {/* Apply button */}
+                {(() => {
+                  const selectedVoice = pendingVoiceMap[spk.speaker_id] ?? currentVoice
+                  const isChanged = selectedVoice !== currentVoice
+                  const voiceMeta = voices.find(v => v.voice_id === selectedVoice)
+                  const isGenderMatch = (() => {
+                    if (!voiceMeta) return true
+                    const g = spk.detected_gender
+                    if (g === 'child') return voiceMeta.labels?.age === 'child'
+                    if (g === 'female') return voiceMeta.labels?.gender === 'female' && voiceMeta.labels?.age !== 'child'
+                    if (g === 'male') return voiceMeta.labels?.gender === 'male' && voiceMeta.labels?.age !== 'child'
+                    return true
+                  })()
+                  const isLoading = applyLoading.has(spk.speaker_id)
+                  const isJustApplied = justApplied.has(spk.speaker_id)
+
+                  if (isJustApplied) {
+                    return (
+                      <span className="shrink-0 flex items-center gap-1 text-[10px] text-emerald-400 font-medium">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                        Applied
+                      </span>
+                    )
+                  }
+
+                  return (
+                    <button
+                      onClick={() => handleApplyVoice(spk.speaker_id, selectedVoice)}
+                      disabled={!isChanged || isLoading}
+                      className={`shrink-0 rounded px-2 py-1 text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                        isChanged
+                          ? isGenderMatch
+                            ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                            : 'bg-amber-600 hover:bg-amber-700 text-white'
+                          : 'bg-slate-700 text-slate-400'
+                      }`}
+                      title={isChanged ? (isGenderMatch ? 'Apply this voice to all segments for this speaker' : 'Apply this voice (gender mismatch)') : 'Already applied'}
+                    >
+                      {isLoading ? '…' : 'Apply'}
+                    </button>
+                  )
+                })()}
+              </div>
+
+              {/* Pitch shift slider */}
+              <div className="flex flex-col gap-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-slate-400">Pitch</span>
+                  <span className="text-[10px] text-slate-300">
+                    {speakerPitchMap[spk.speaker_id] ?? 0 > 0 ? '+' : ''}
+                    {speakerPitchMap[spk.speaker_id] ?? 0} semitones
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={-12}
+                  max={12}
+                  step={1}
+                  value={speakerPitchMap[spk.speaker_id] ?? 0}
+                  onChange={(e) => handlePitchChange(spk.speaker_id, parseInt(e.target.value, 10))}
+                  className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                />
               </div>
 
               {/* Reset to auto */}
