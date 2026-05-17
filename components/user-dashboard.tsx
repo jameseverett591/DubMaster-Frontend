@@ -233,7 +233,7 @@ export function UserDashboard() {
       <div className="fixed inset-0 z-0 bg-[radial-gradient(ellipse_at_bottom,_rgba(34,211,238,0.05)_0%,_transparent_50%)]" />
 
       <div className="relative z-10">
-        <Header activeTab="upload" />
+        <Header activeTab="dashboard" />
 
         <main className="max-w-5xl mx-auto px-4 py-10">
           <div className="mb-8">
