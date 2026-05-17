@@ -2192,6 +2192,14 @@ class DubbingService:
         with open(segments_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
+        try:
+            from app.services.supabase_client import upsert_segments
+            asyncio.create_task(upsert_segments(job_id, data["segments"]))
+        except Exception as exc:
+            logger.warning(
+                f"Job {job_id}: segment {segment_index} upsert failed: {exc}"
+            )
+
         logger.info(f"[SEGMENTS] Regenerated segment {segment_index} for job {job_id}")
         return seg
 
