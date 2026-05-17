@@ -2054,6 +2054,12 @@ class DubbingService:
             json.dump(payload, f, indent=2, ensure_ascii=False)
         shutil.copy2(path, snapshot_path)
         logger.info(f"[SEGMENTS] Wrote {len(audio_segments)} segments to {path}")
+        try:
+            from app.services.supabase_client import upsert_segments
+            loop = asyncio.get_running_loop()
+            loop.create_task(upsert_segments(job_id, payload["segments"]))
+        except RuntimeError:
+            pass  # No running event loop — skip Supabase upsert
 
     async def regenerate_segment(
         self,
