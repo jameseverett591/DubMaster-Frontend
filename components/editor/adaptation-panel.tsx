@@ -3,6 +3,7 @@
 import { useEffect } from 'react'
 import { useEditorStore } from '@/lib/editor-store'
 import { API_BASE_URL } from '@/lib/api-client'
+import { cn } from '@/lib/utils'
 import {
   VARIANT_LABELS,
   VARIANT_TYPE_FROM_API,
@@ -96,9 +97,10 @@ export function AdaptationPanel() {
   }
 
   // Auto-load variants when segment changes and none exist yet
+  // Skip auto-generation if user has manually edited or is previewing
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (segment && !adapted && !isAdaptationLoading) handleGenerate()
+    if (segment && !adapted && !isAdaptationLoading && !segment.isUserEdited && !segment.isPreviewing) handleGenerate()
   }, [segment?.id])
 
   // -------------------------------------------------------------------------
@@ -128,15 +130,37 @@ export function AdaptationPanel() {
         <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
           Adaptation Variants
         </span>
-        <span className="text-xs text-slate-500">
-          Seg {(selectedSegmentIndex ?? 0) + 1} · {segment.speaker_label ?? segment.speaker_id}
-        </span>
+        <div className="flex items-center gap-2">
+          {segment.isPreviewing && (
+            <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-orange-500/20 text-orange-400 border border-orange-500/30 font-medium">
+              Previewing
+            </span>
+          )}
+          {(segment.isUserEdited || segment.isPreviewing) && (
+            <button
+              onClick={handleGenerate}
+              disabled={isAdaptationLoading}
+              className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+            >
+              {isAdaptationLoading ? 'Generating…' : 'Regenerate'}
+            </button>
+          )}
+          <span className="text-xs text-slate-500">
+            Seg {(selectedSegmentIndex ?? 0) + 1} · {segment.speaker_label ?? segment.speaker_id}
+          </span>
+        </div>
       </div>
 
       {/* Context notes */}
       {adapted.contextNotes && (
         <p className="rounded bg-slate-800 px-2 py-1.5 text-xs text-slate-300 leading-relaxed">
           {adapted.contextNotes}
+        </p>
+      )}
+      {/* Preview text */}
+      {segment.isPreviewing && segment.preview_text && (
+        <p className="rounded bg-orange-500/10 border border-orange-500/20 px-2 py-1.5 text-xs text-orange-200 leading-relaxed">
+          <span className="text-orange-400 font-medium">Preview:</span> {segment.preview_text}
         </p>
       )}
 
@@ -151,6 +175,8 @@ export function AdaptationPanel() {
               variant={variant}
               isSelected={adapted.selectedVariant === vtype}
               isRecommended={adapted.recommended === vtype}
+              isUserEdited={segment.isUserEdited ?? false}
+              isPreviewing={segment.isPreviewing ?? false}
               onSelect={() => handleSelectVariant(vtype, variant.text)}
             />
           )
@@ -178,11 +204,15 @@ function VariantCard({
   variant,
   isSelected,
   isRecommended,
+  isUserEdited,
+  isPreviewing,
   onSelect,
 }: {
   variant: AdaptationVariant
   isSelected: boolean
   isRecommended: boolean
+  isUserEdited: boolean
+  isPreviewing: boolean
   onSelect: () => void
 }) {
   const meta = VARIANT_LABELS[variant.type]
@@ -206,7 +236,14 @@ function VariantCard({
           </span>
         )}
         {isSelected && (
-          <span className="ml-auto rounded-full bg-blue-500/20 px-1.5 py-0.5 text-[10px] font-medium text-blue-400">
+          <span className={cn(
+            'ml-auto rounded-full px-1.5 py-0.5 text-[10px] font-medium',
+            isPreviewing
+              ? 'bg-orange-500/20 text-orange-400 ring-1 ring-orange-500/30'
+              : isUserEdited
+                ? 'bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/30'
+                : 'bg-blue-500/20 text-blue-400'
+          )}>
             Active
           </span>
         )}
