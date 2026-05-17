@@ -41,7 +41,7 @@ RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
 COPY requirements.gpu.txt .
 
 RUN pip install --no-cache-dir -r requirements.gpu.txt && \
-    pip install --no-cache-dir runpod>=1.6.0
+    pip install --no-cache-dir "runpod>=1.6.0,<2.0.0"
 
 # ============================================
 # APPLICATION
