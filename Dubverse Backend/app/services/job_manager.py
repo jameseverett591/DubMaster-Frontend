@@ -50,6 +50,19 @@ async def _upsert_job(job) -> None:
         logger.warning(f"Job {job.job_id}: Supabase upsert failed: {exc}")
 
 
+async def _upsert_job_speakers(
+    job_id: str,
+    speaker_genders: dict,
+    voice_mapping: dict | None,
+) -> None:
+    """Fire-and-forget upsert of speaker rows to Supabase. Never raises."""
+    try:
+        from app.services.supabase_client import upsert_job_speakers
+        await upsert_job_speakers(job_id, speaker_genders, voice_mapping)
+    except Exception as exc:
+        logger.warning(f"Job {job_id}: job_speakers upsert failed: {exc}")
+
+
 class JobManager:
     def __init__(self):
         self._jobs: Dict[str, Job] = {}
@@ -179,6 +192,9 @@ class JobManager:
                 job.speaker_genders = speaker_genders
                 job.updated_at = datetime.now()
                 asyncio.create_task(_upsert_job(job))
+                asyncio.create_task(
+                    _upsert_job_speakers(job_id, speaker_genders, job.voice_mapping)
+                )
                 logger.info(f"Job {job_id} speaker genders updated: {speaker_genders}")
 
     async def update_job_dubbing_result(
