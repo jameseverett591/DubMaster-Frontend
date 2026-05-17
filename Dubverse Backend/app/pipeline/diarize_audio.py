@@ -50,6 +50,14 @@ def _get_pipeline(job_id: str | None = None):
         return None
 
     try:
+        # PyTorch 2.x weights_only=True blocks TorchVersion by default — allowlist it
+        # so pyannote's checkpoint (which serializes TorchVersion) can be loaded safely.
+        try:
+            import torch as _torch
+            _torch.serialization.add_safe_globals([_torch.torch_version.TorchVersion])
+        except Exception:
+            pass
+
         _PIPELINE = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
         _PIPELINE_LOAD_ERROR = None
         import torch
