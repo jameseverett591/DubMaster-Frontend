@@ -72,7 +72,7 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
   const handleNavClick = (tab: string) => {
     const routes: Record<string, string> = {
       dashboard: "/dashboard",
-      projects: "/dashboard?tab=projects",
+      projects: "/studio?tab=projects",
       collaborate: "/collaborate",
       studio: "/studio",
     }
@@ -109,13 +109,13 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
           <nav className="hidden items-center gap-6 md:flex">
             <button
               onClick={() => handleNavClick("dashboard")}
-              className={`text-sm font-medium transition-colors ${activeTab === "upload" ? "text-[#C084FC]" : "text-[#94A3B8] hover:text-[#C084FC]"}`}
+              className={`text-sm font-medium transition-colors ${activeTab === "dashboard" ? "text-[#C084FC]" : "text-[#94A3B8] hover:text-[#C084FC]"}`}
             >
               {t('dashboard')}
             </button>
             <button
               onClick={() => handleNavClick("studio")}
-              className={`text-sm font-medium transition-colors ${activeTab === "studio" ? "text-[#C084FC]" : "text-[#94A3B8] hover:text-[#C084FC]"}`}
+              className={`text-sm font-medium transition-colors ${activeTab === "studio" || activeTab === "upload" ? "text-[#C084FC]" : "text-[#94A3B8] hover:text-[#C084FC]"}`}
             >
               Studio
             </button>
@@ -199,13 +199,13 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
             <nav className="flex flex-col gap-4">
               <button
                 onClick={() => handleNavClick("dashboard")}
-                className={`text-sm font-medium text-left ${activeTab === "upload" ? "text-[#C084FC]" : "text-[#94A3B8]"}`}
+                className={`text-sm font-medium text-left ${activeTab === "dashboard" ? "text-[#C084FC]" : "text-[#94A3B8]"}`}
               >
                 {t('dashboard')}
               </button>
               <button
                 onClick={() => handleNavClick("studio")}
-                className={`text-sm font-medium text-left ${activeTab === "studio" ? "text-[#C084FC]" : "text-[#94A3B8]"}`}
+                className={`text-sm font-medium text-left ${activeTab === "studio" || activeTab === "upload" ? "text-[#C084FC]" : "text-[#94A3B8]"}`}
               >
                 Studio
               </button>
