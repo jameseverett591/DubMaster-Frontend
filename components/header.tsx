@@ -114,6 +114,12 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
               {t('dashboard')}
             </button>
             <button
+              onClick={() => handleNavClick("studio")}
+              className={`text-sm font-medium transition-colors ${activeTab === "studio" ? "text-[#C084FC]" : "text-[#94A3B8] hover:text-[#C084FC]"}`}
+            >
+              Studio
+            </button>
+            <button
               onClick={() => handleNavClick("projects")}
               className={`text-sm font-medium transition-colors ${activeTab === "projects" ? "text-[#C084FC]" : "text-[#94A3B8] hover:text-[#C084FC]"}`}
             >
@@ -196,6 +202,12 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
                 className={`text-sm font-medium text-left ${activeTab === "upload" ? "text-[#C084FC]" : "text-[#94A3B8]"}`}
               >
                 {t('dashboard')}
+              </button>
+              <button
+                onClick={() => handleNavClick("studio")}
+                className={`text-sm font-medium text-left ${activeTab === "studio" ? "text-[#C084FC]" : "text-[#94A3B8]"}`}
+              >
+                Studio
               </button>
               <button
                 onClick={() => handleNavClick("projects")}
