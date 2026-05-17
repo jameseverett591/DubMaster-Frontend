@@ -10,6 +10,46 @@ from app.models import Job, JobStatus
 logger = logging.getLogger(__name__)
 
 
+async def _upsert_job(job) -> None:
+    """Fire-and-forget upsert of job state to Supabase. Never raises."""
+    try:
+        from app.services.supabase_client import supabase
+        payload = {
+            "job_id": job.job_id,
+            "user_id": job.user_id,
+            "status": job.status.value,
+            "progress": job.progress,
+            "current_stage": job.current_stage,
+            "runpod_job_id": job.runpod_job_id,
+            "video_filename": job.video_filename,
+            "video_path": job.video_path,
+            "video_duration": job.video_duration,
+            "video_size": job.video_size,
+            "expected_speakers": job.expected_speakers,
+            "source_language": job.source_language,
+            "total_chunks": job.total_chunks,
+            "processed_chunks": job.processed_chunks,
+            "chunks": [c.model_dump() for c in job.chunks],
+            "speaker_genders": job.speaker_genders,
+            "voice_mapping": job.voice_mapping,
+            "transcript_language": job.transcript.language if job.transcript else None,
+            "transcript_duration": job.transcript.duration if job.transcript else None,
+            "transcript_text": job.transcript.text if job.transcript else None,
+            "speaker_profiles": job.transcript.speaker_profiles if job.transcript else None,
+            "dubbed_video_url": job.dubbed_video_url,
+            "tts_engine": job.tts_engine,
+            "segment_tts_engines": job.segment_tts_engines,
+            "dubbing_engine": job.dubbing_engine,
+            "error_message": job.error_message,
+            "created_at": job.created_at.isoformat(),
+            "updated_at": job.updated_at.isoformat(),
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        }
+        supabase.table("jobs").upsert(payload).execute()
+    except Exception as exc:
+        logger.warning(f"Job {job.job_id}: Supabase upsert failed: {exc}")
+
+
 class JobManager:
     def __init__(self):
         self._jobs: Dict[str, Job] = {}
@@ -24,11 +64,13 @@ class JobManager:
         job_id: str,
         video_filename: str,
         video_path: str,
-        video_size: int
+        video_size: int,
+        user_id: str = ""
     ) -> Job:
         async with self._lock:
             job = Job(
                 job_id=job_id,
+                user_id=user_id,
                 status=JobStatus.PENDING,
                 progress=0,
                 video_filename=video_filename,
@@ -39,6 +81,7 @@ class JobManager:
             )
             self._jobs[job_id] = job
             logger.info(f"Created job {job_id} for file {video_filename}")
+            asyncio.create_task(_upsert_job(job))
             return job
     
     async def get_job(self, job_id: str) -> Job:
@@ -72,7 +115,8 @@ class JobManager:
             if status == JobStatus.COMPLETED:
                 job.completed_at = datetime.now()
                 job.progress = 100
-            
+
+            asyncio.create_task(_upsert_job(job))
             logger.info(f"Job {job_id} updated: status={status}, progress={progress}%")
     
     async def update_job_chunks(self, job_id: str, chunks: list):
@@ -82,6 +126,7 @@ class JobManager:
                 job.chunks = chunks
                 job.total_chunks = len(chunks)
                 job.updated_at = datetime.now()
+                asyncio.create_task(_upsert_job(job))
     
     async def update_chunk_processed(self, job_id: str):
         async with self._lock:
@@ -89,6 +134,7 @@ class JobManager:
             if job:
                 job.processed_chunks += 1
                 job.updated_at = datetime.now()
+                asyncio.create_task(_upsert_job(job))
     
     async def update_job_transcript(self, job_id: str, transcript):
         async with self._lock:
@@ -96,6 +142,7 @@ class JobManager:
             if job:
                 job.transcript = transcript
                 job.updated_at = datetime.now()
+                asyncio.create_task(_upsert_job(job))
                 logger.info(f"Job {job_id} transcript updated with {len(transcript.segments) if transcript else 0} segments")
 
                 if transcript:
@@ -131,6 +178,7 @@ class JobManager:
             if job:
                 job.speaker_genders = speaker_genders
                 job.updated_at = datetime.now()
+                asyncio.create_task(_upsert_job(job))
                 logger.info(f"Job {job_id} speaker genders updated: {speaker_genders}")
 
     async def update_job_dubbing_result(
@@ -148,6 +196,7 @@ class JobManager:
                 if segment_tts_engines is not None:
                     job.segment_tts_engines = segment_tts_engines
                 job.updated_at = datetime.now()
+                asyncio.create_task(_upsert_job(job))
                 logger.info(f"Job {job_id} dubbing result updated: url={dubbed_video_url}, engine={tts_engine}")
 
     async def delete_job(self, job_id: str) -> bool:
@@ -160,9 +209,9 @@ class JobManager:
             logger.info(f"Marked job {job_id} as deleted (was not in memory)")
             return True
     
-    async def list_jobs(self) -> list[Job]:
+    async def list_jobs(self, user_id: str = "") -> list[Job]:
         async with self._lock:
-            return list(self._jobs.values())
+            return [j for j in self._jobs.values() if j.user_id == user_id]
 
 
 job_manager = JobManager()
