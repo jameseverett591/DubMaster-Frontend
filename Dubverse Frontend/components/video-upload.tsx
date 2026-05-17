@@ -525,12 +525,13 @@ export function VideoUpload({
               size="sm"
               className="text-red-400 border-red-400/30 hover:bg-red-400/10 hover:text-red-300"
               onClick={async () => {
+                // Always clear UI first so the user can re-upload even if the backend call fails
+                setUploadedFiles([])
+                localStorage.removeItem(STORAGE_KEY)
                 try {
                   await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/jobs/clear-all?force=true`, { method: "DELETE" })
-                  setUploadedFiles([])
-                  localStorage.removeItem(STORAGE_KEY)
                 } catch (e) {
-                  console.error("Failed to clear jobs:", e)
+                  console.error("Failed to clear jobs on backend:", e)
                 }
               }}
             >
