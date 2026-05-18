@@ -1206,7 +1206,7 @@ export function DubVerseEditor({
   }, [])
   
   // Get the actual video URL to use (imported or original)
-  const activeVideoUrl = importedVideoUrl || (playbackMode === 'dubbed' && activeDubbedVideoUrl ? activeDubbedVideoUrl : videoUrl)
+  const activeVideoUrl = importedVideoUrl || ((playbackMode === 'dubbed' || playbackMode === 'preview') && activeDubbedVideoUrl ? activeDubbedVideoUrl : videoUrl)
   
   // Track which URL we've already extracted thumbnails for
   const lastExtractedUrlRef = useRef<string | null>(null)
@@ -1344,8 +1344,8 @@ export function DubVerseEditor({
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
-    const trackMuted = playbackMode === 'dubbed' ? isMutedDubbed : isMutedOriginal
-    const trackVol = playbackMode === 'dubbed' ? dubbedTextVolume : originalTextVolume
+    const trackMuted = playbackMode === 'preview' ? true : (playbackMode === 'dubbed' ? isMutedDubbed : isMutedOriginal)
+    const trackVol = playbackMode === 'preview' ? 0 : (playbackMode === 'dubbed' ? dubbedTextVolume : originalTextVolume)
     video.volume = (isMuted || trackMuted) ? 0 : Math.max(0, Math.min(1, trackVol / 100))
   }, [isMuted, isMutedOriginal, isMutedDubbed, originalTextVolume, dubbedTextVolume, playbackMode])
 
@@ -3012,6 +3012,19 @@ export function DubVerseEditor({
                   onClick={() => setPlaybackMode('dubbed')}
                 >
                   Translated
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className={cn(
+                    'h-6 text-[11px] px-3 rounded-full',
+                    playbackMode === 'preview'
+                      ? 'bg-amber-600/40 text-amber-300 ring-1 ring-amber-500/50'
+                      : 'text-slate-500'
+                  )}
+                  onClick={() => setPlaybackMode('preview')}
+                >
+                  Preview
                 </Button>
               </div>
             )}
