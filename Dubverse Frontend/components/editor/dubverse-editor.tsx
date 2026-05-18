@@ -2269,16 +2269,6 @@ export function DubVerseEditor({
       <div className="flex-1 flex min-h-0 overflow-hidden relative">
         {/* Transcript area */}
         <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
-          {/* Pending alert */}
-          {pendingCount > 0 && (
-            <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 flex items-center gap-2">
-              <Sparkles className="h-4 w-4 text-amber-400" />
-              <span className="text-sm text-amber-200">
-                Dubbing for {pendingCount} translated segment{pendingCount > 1 ? 's' : ''} needs to be generated.
-              </span>
-            </div>
-          )}
-          
           {/* Transcript header */}
           <div className="flex items-center gap-4 px-4 py-3 border-b border-slate-800">
             <Select defaultValue="all">
