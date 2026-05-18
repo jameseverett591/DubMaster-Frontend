@@ -3095,7 +3095,28 @@ async def get_analysis(job_id: str, language: str):
 
 
 @router.post("/dub/remix/{job_id}")
-async def remix_dub(job_id: str):
+async def remix_dub(job_id: str, request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+
+    # Sync committed segment manifest from Supabase to disk
+    # before remix pipeline reads segments.json
+    try:
+        from app.services.supabase_client import sync_committed_segments_to_disk
+        from app.config import get_settings as _get_settings
+        _settings = _get_settings()
+        segments_path = os.path.join(
+            _settings.DUBBED_DIR, job_id, "segments.json"
+        )
+        await sync_committed_segments_to_disk(
+            job_id=job_id,
+            segments_path=segments_path,
+            dubbed_dir=_settings.DUBBED_DIR,
+        )
+    except Exception as _exc:
+        logger.warning(f"Job {job_id}: pre-remix sync failed: {_exc}")
+
     try:
         result = await dubbing_service.remix_dub(job_id)
     except FileNotFoundError as e:
