@@ -4,6 +4,10 @@ export type SegmentStatus = 'auto' | 'edited' | 'locked'
 
 export type SidebarTab = 'speech' | 'subtitles' | 'brand' | 'lip-sync' | 'qc' | 'adaptation'
 
+export type PlaybackMode = 'original' | 'dubbed' | 'preview'
+
+export type RebuildStatus = 'idle' | 'processing' | 'complete' | 'error'
+
 export type QCFindingType = 'timing' | 'translation' | 'delivery' | 'sync' | 'pronunciation'
 
 export type QCSeverity = 'error' | 'warning' | 'info'
@@ -43,6 +47,16 @@ export interface Segment {
   qc_score?: number
   qc_problem?: string
   qc_fix?: string
+  rpt_dirty?: boolean
+  committed_voice_id?: string
+  committed_pitch?: number
+  committed_emotion?: string
+  committed_speed?: number
+  committed_audio_url?: string
+  committed_start_time?: number
+  committed_end_time?: number
+  committed_adapted_text?: string
+  committed_at?: string
   emotionalCurve?: EmotionalCurve
 }
 
