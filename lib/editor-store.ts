@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Segment, QCFinding, QCScore, QCSeverity, QCFindingType, SidebarTab, EmotionalCurve, EmotionalCurvePoint } from './editor-types'
+import type { Segment, QCFinding, QCScore, QCSeverity, QCFindingType, SidebarTab, EmotionalCurve, EmotionalCurvePoint, PlaybackMode, RebuildStatus } from './editor-types'
 import type { AdaptedSegment, VariantType } from './adaptation-types'
 
 export type { SidebarTab }
@@ -26,7 +26,7 @@ interface EditorState {
   // Playback
   currentTime: number
   isPlaying: boolean
-  playbackMode: 'original' | 'dubbed'
+  playbackMode: PlaybackMode
   
   // Timeline
   zoomLevel: number // 1 = 100%, 0.5 = 50%, 2 = 200%
@@ -52,6 +52,10 @@ interface EditorState {
   // Speaker pitch shifts: speaker_id → semitone offset (e.g. "speaker-1" → 8)
   speakerPitchMap: Record<string, number>
 
+  // RPT state
+  rebuildStatus: RebuildStatus
+  rptStitching: boolean
+
   // Actions
   setJobData: (data: {
     jobId: string
@@ -70,7 +74,12 @@ interface EditorState {
   setCurrentTime: (time: number) => void
   setIsPlaying: (playing: boolean) => void
   togglePlayback: () => void
-  setPlaybackMode: (mode: 'original' | 'dubbed') => void
+  setPlaybackMode: (mode: PlaybackMode) => void
+  setRebuildStatus: (status: RebuildStatus) => void
+  setRptStitching: (stitching: boolean) => void
+  commitSegmentChanges: (index: number, changes: Partial<Segment>) => void
+  markSegmentDirty: (index: number) => void
+  clearAllDirty: () => void
   
   // Timeline actions
   setZoomLevel: (zoom: number) => void
@@ -150,6 +159,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   currentTime: 0,
   isPlaying: false,
   playbackMode: 'dubbed',
+  rebuildStatus: 'idle',
+  rptStitching: false,
   zoomLevel: 1,
   scrollPosition: 0,
   selectedSegmentIndex: null,
@@ -180,7 +191,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setIsPlaying: (playing) => set({ isPlaying: playing }),
   togglePlayback: () => set((state) => ({ isPlaying: !state.isPlaying })),
   setPlaybackMode: (mode) => set({ playbackMode: mode }),
-  
+  setRebuildStatus: (status) => set({ rebuildStatus: status }),
+  setRptStitching: (stitching) => set({ rptStitching: stitching }),
+  commitSegmentChanges: (index, changes) => set((state) => ({
+    segments: state.segments.map((seg, i) =>
+      i === index
+        ? { ...seg, ...changes, rpt_dirty: true, committed_at: new Date().toISOString() }
+        : seg
+    ),
+  })),
+  markSegmentDirty: (index) => set((state) => ({
+    segments: state.segments.map((seg, i) =>
+      i === index ? { ...seg, rpt_dirty: true } : seg
+    ),
+  })),
+  clearAllDirty: () => set((state) => ({
+    segments: state.segments.map((seg) => ({ ...seg, rpt_dirty: false })),
+  })),
+
   // Timeline
   setZoomLevel: (zoom) => set({ zoomLevel: Math.max(0.25, Math.min(4, zoom)) }),
   setScrollPosition: (position) => set({ scrollPosition: position }),
