@@ -61,7 +61,7 @@ import { QCTicker } from '@/components/editor/qc-ticker'
 import { EmotionalCurveTrack } from '@/components/editor/emotional-curve-track'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
-import { requestRPTStitch, invalidateCache } from '@/lib/rpt-engine'
+import { requestRPTStitch, invalidateCache, scheduleRPTPlayback } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { createClient } from '@/lib/supabase/client'
 
@@ -887,6 +887,9 @@ export function DubVerseEditor({
   const [dubbedTextVolume, setDubbedTextVolume] = useState(50)
   const [backgroundVolume, setBackgroundVolume] = useState(50)
   const audioContextRef = useRef<AudioContext | null>(null)
+  const rptBufferRef = useRef<AudioBuffer | null>(null)
+  const rptSourceRef = useRef<AudioBufferSourceNode | null>(null)
+  const rptGainRef = useRef<GainNode | null>(null)
   const [isMutedRPT, setIsMutedRPT] = useState(false)
   const [rptVolume, setRptVolume] = useState(80)
   const [isMuted, setIsMuted] = useState(false)
@@ -1325,17 +1328,57 @@ export function DubVerseEditor({
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
-    
+
     if (isPlaying) {
       video.play().catch((err) => {
         console.log('[v0] Video play failed:', err)
         setIsPlaying(false)
       })
+      // Start RPT audio in preview mode
+      if (playbackMode === 'preview' && rptBufferRef.current && audioContextRef.current) {
+        const ctx = audioContextRef.current
+        if (ctx.state === 'suspended') ctx.resume()
+        if (rptSourceRef.current) {
+          try { rptSourceRef.current.stop() } catch {}
+          rptSourceRef.current = null
+        }
+        if (!rptGainRef.current) {
+          rptGainRef.current = ctx.createGain()
+          rptGainRef.current.connect(ctx.destination)
+        }
+        rptGainRef.current.gain.value = isMutedRPT ? 0 : rptVolume / 100
+        rptSourceRef.current = scheduleRPTPlayback(
+          rptBufferRef.current,
+          video.currentTime,
+          ctx,
+          rptGainRef.current
+        )
+        rptSourceRef.current.onended = () => { rptSourceRef.current = null }
+      }
     } else {
       video.pause()
+      // Stop RPT audio
+      if (rptSourceRef.current) {
+        try { rptSourceRef.current.stop() } catch {}
+        rptSourceRef.current = null
+      }
     }
-  }, [isPlaying, setIsPlaying])
-  
+  }, [isPlaying, setIsPlaying, playbackMode, isMutedRPT, rptVolume])
+
+  // Cleanup RPT audio resources on unmount
+  useEffect(() => {
+    return () => {
+      if (rptSourceRef.current) {
+        try { rptSourceRef.current.stop() } catch {}
+        rptSourceRef.current = null
+      }
+      if (audioContextRef.current) {
+        audioContextRef.current.close().catch(() => {})
+        audioContextRef.current = null
+      }
+    }
+  }, [])
+
   // Sync video time when user seeks (not during playback)
   useEffect(() => {
     const video = videoRef.current
@@ -1624,7 +1667,9 @@ export function DubVerseEditor({
           return audioContextRef.current
         })(),
         () => {},
-        () => {},
+        (result) => {
+          if (result) rptBufferRef.current = result.buffer
+        },
       )
       setLockedSegments(prev => new Set([...prev, activeIndex]))
       if (!droppedTranslations.some(t => t.segmentIndex === activeIndex)) {
