@@ -3829,7 +3829,7 @@ export function DubVerseEditor({
                 className="w-full h-1"
               />
             </div>
-            <div className="h-14 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
+            <div className="h-20 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1">
                   <button type="button" onClick={() => setIsMutedDubbed(v => !v)} className="flex-shrink-0">
@@ -3847,20 +3847,18 @@ export function DubVerseEditor({
                 thumbless
                 className="w-full h-1"
               />
-            </div>
-            {/* BG Vol — compact row, no dedicated track */}
-            <div className="h-8 shrink-0 flex items-center px-2 gap-2 text-xs text-neutral-400 border-b border-neutral-800">
-              <Music2 className="h-3 w-3 text-purple-400 shrink-0" />
-              <span className="shrink-0">BG Vol</span>
-              <Slider
-                value={[backgroundVolume]}
-                onValueChange={(v) => setBackgroundVolume(v[0])}
-                max={100}
-                step={1}
-                thumbless
-                className="flex-1 h-1"
-              />
-              <span className="font-mono text-neutral-500 text-[10px] shrink-0 w-6 text-right">{backgroundVolume}</span>
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <Music2 className="h-2.5 w-2.5 text-purple-400 shrink-0" />
+                <Slider
+                  value={[backgroundVolume]}
+                  onValueChange={(v) => setBackgroundVolume(v[0])}
+                  max={100}
+                  step={1}
+                  thumbless
+                  className="flex-1 h-1"
+                />
+                <span className="font-mono text-neutral-500 text-[10px] shrink-0 w-5 text-right">{backgroundVolume}</span>
+              </div>
             </div>
             {/* RPT Audio label */}
             <div className="h-14 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
@@ -4211,7 +4209,7 @@ export function DubVerseEditor({
 {/* Dubbed audio track with stretch/squeeze handles */}
               <div
                 className={cn(
-                  "h-14 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative",
+                  "h-20 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative",
                   draggedTranslation && "bg-amber-500/10 border-amber-500/30"
                 )}
                 data-timeline-track
