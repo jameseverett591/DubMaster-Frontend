@@ -1334,36 +1334,50 @@ export function DubVerseEditor({
         console.log('[v0] Video play failed:', err)
         setIsPlaying(false)
       })
-      // Start RPT audio in preview mode
-      if (playbackMode === 'preview' && rptBufferRef.current && audioContextRef.current) {
-        const ctx = audioContextRef.current
-        if (ctx.state === 'suspended') ctx.resume()
-        if (rptSourceRef.current) {
-          try { rptSourceRef.current.stop() } catch {}
-          rptSourceRef.current = null
-        }
-        if (!rptGainRef.current) {
-          rptGainRef.current = ctx.createGain()
-          rptGainRef.current.connect(ctx.destination)
-        }
-        rptGainRef.current.gain.value = isMutedRPT ? 0 : rptVolume / 100
-        rptSourceRef.current = scheduleRPTPlayback(
-          rptBufferRef.current,
-          video.currentTime,
-          ctx,
-          rptGainRef.current
-        )
-        rptSourceRef.current.onended = () => { rptSourceRef.current = null }
-      }
     } else {
       video.pause()
-      // Stop RPT audio
+    }
+  }, [isPlaying, setIsPlaying])
+
+  // RPT audio playback — separate effect to avoid hook rules violation
+  useEffect(() => {
+    const video = videoRef.current
+    if (playbackMode !== 'preview') {
+      // Stop RPT audio when leaving preview mode
+      if (rptSourceRef.current) {
+        try { rptSourceRef.current.stop() } catch {}
+        rptSourceRef.current = null
+      }
+      return
+    }
+    if (!rptBufferRef.current || !audioContextRef.current) return
+
+    if (isPlaying) {
+      const ctx = audioContextRef.current
+      if (ctx.state === 'suspended') ctx.resume()
+      if (rptSourceRef.current) {
+        try { rptSourceRef.current.stop() } catch {}
+        rptSourceRef.current = null
+      }
+      if (!rptGainRef.current) {
+        rptGainRef.current = ctx.createGain()
+        rptGainRef.current.connect(ctx.destination)
+      }
+      rptGainRef.current.gain.value = isMutedRPT ? 0 : rptVolume / 100
+      rptSourceRef.current = scheduleRPTPlayback(
+        rptBufferRef.current,
+        video?.currentTime ?? 0,
+        ctx,
+        rptGainRef.current
+      )
+      rptSourceRef.current.onended = () => { rptSourceRef.current = null }
+    } else {
       if (rptSourceRef.current) {
         try { rptSourceRef.current.stop() } catch {}
         rptSourceRef.current = null
       }
     }
-  }, [isPlaying, setIsPlaying, playbackMode, isMutedRPT, rptVolume])
+  }, [isPlaying, playbackMode, isMutedRPT, rptVolume])
 
   // Cleanup RPT audio resources on unmount
   useEffect(() => {
