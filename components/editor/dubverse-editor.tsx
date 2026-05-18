@@ -1673,15 +1673,21 @@ export function DubVerseEditor({
         committed_emotion: stagedEmotions[activeIndex],
       })
       requestRPTStitch(
-        displaySegments.map(seg => ({
-          ...seg,
-          audio_url: seg.audio_url
-            ? apiClient.toAbsoluteUrl(seg.audio_url)
-            : undefined,
-          committed_audio_url: seg.committed_audio_url
-            ? apiClient.toAbsoluteUrl(seg.committed_audio_url)
-            : undefined,
-        })),
+        displaySegments.map(seg => {
+          const resolveAudioUrl = (url: string | undefined) => {
+            if (!url || !jobId) return url
+            // If already absolute, return as-is
+            if (url.startsWith('http')) return url
+            // Extract filename from disk path and build API URL
+            const filename = url.split('/').pop()
+            return filename ? apiClient.getAudioFileUrl(jobId, filename) : url
+          }
+          return {
+            ...seg,
+            audio_url: resolveAudioUrl(seg.audio_url),
+            committed_audio_url: resolveAudioUrl(seg.committed_audio_url),
+          }
+        }),
         videoDuration,
         (() => {
           if (!audioContextRef.current) {
