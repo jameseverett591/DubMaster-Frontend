@@ -450,6 +450,7 @@ export function DubVerseEditor({
     rebuildStatus,
     setRebuildStatus,
     clearAllDirty,
+    commitSegmentChanges,
   } = useEditorStore()
 
   const [layoutLocked, setLayoutLocked] = useState(() => {
@@ -885,6 +886,7 @@ export function DubVerseEditor({
   const [originalTextVolume, setOriginalTextVolume] = useState(100)
   const [dubbedTextVolume, setDubbedTextVolume] = useState(50)
   const [backgroundVolume, setBackgroundVolume] = useState(50)
+  const audioContextRef = useRef<AudioContext | null>(null)
   const [isMutedRPT, setIsMutedRPT] = useState(false)
   const [rptVolume, setRptVolume] = useState(80)
   const [isMuted, setIsMuted] = useState(false)
@@ -1606,6 +1608,24 @@ export function DubVerseEditor({
         audio_url,
         status: 'locked',
       })
+      commitSegmentChanges(activeIndex, {
+        committed_audio_url: audio_url,
+        committed_voice_id: stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id],
+        committed_speed: stagedSpeeds[activeIndex] ?? 1.0,
+        committed_emotion: stagedEmotions[activeIndex],
+      })
+      requestRPTStitch(
+        displaySegments,
+        videoDuration,
+        (() => {
+          if (!audioContextRef.current) {
+            audioContextRef.current = new AudioContext()
+          }
+          return audioContextRef.current
+        })(),
+        () => {},
+        () => {},
+      )
       setLockedSegments(prev => new Set([...prev, activeIndex]))
       if (!droppedTranslations.some(t => t.segmentIndex === activeIndex)) {
         setDroppedTranslations(prev => [
@@ -2702,6 +2722,9 @@ export function DubVerseEditor({
                               onClick={(e) => {
                                 e.stopPropagation()
                                 commitPreview(index)
+                                commitSegmentChanges(index, {
+                                  committed_adapted_text: displaySegments[index]?.preview_text ?? undefined,
+                                })
                                 setImportedSegments(prev => {
                                   const base = prev ?? displaySegments
                                   return base.map((seg, i) =>
@@ -4091,6 +4114,10 @@ export function DubVerseEditor({
                             start_time: Math.max(0, originalStart + deltaTime),
                             end_time: Math.max(0, originalEnd + deltaTime),
                           })
+                          commitSegmentChanges(index, {
+                            committed_start_time: Math.max(0, originalStart + deltaTime),
+                            committed_end_time: Math.max(0, originalEnd + deltaTime),
+                          })
                           if (lockedPairs.has(index)) {
                             updateSegment(index, {
                               start_time: Math.max(0, originalStart + deltaTime),
@@ -4270,6 +4297,10 @@ export function DubVerseEditor({
                           updateSegment(index, {
                             start_time: Math.max(0, originalStart + deltaTime),
                             end_time: Math.max(0, originalEnd + deltaTime),
+                          })
+                          commitSegmentChanges(index, {
+                            committed_start_time: Math.max(0, originalStart + deltaTime),
+                            committed_end_time: Math.max(0, originalEnd + deltaTime),
                           })
                           if (lockedPairs.has(index)) {
                             updateSegment(index, {
