@@ -46,6 +46,7 @@ export function SpeakerVoicePanel() {
     speakerPitchMap,
     updateSpeakerPitch,
     setSpeakerPitchMap,
+    commitSegmentChanges,
   } = useEditorStore()
 
   const [voices, setVoices] = useState<Voice[]>([])
@@ -118,6 +119,16 @@ export function SpeakerVoicePanel() {
         // swallow — UI already updated optimistically
       }
     }
+    // Commit voice change to RPT manifest for all segments
+    // belonging to this speaker
+    segments.forEach((seg, idx) => {
+      if (seg.speaker_id === speakerId) {
+        commitSegmentChanges(idx, {
+          committed_voice_id: voiceKey,
+          committed_pitch: speakerPitchMap[speakerId] ?? 0,
+        })
+      }
+    })
     setApplyLoading(prev => {
       const n = new Set(prev)
       n.delete(speakerId)
