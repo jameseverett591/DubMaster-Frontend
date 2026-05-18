@@ -1673,7 +1673,15 @@ export function DubVerseEditor({
         committed_emotion: stagedEmotions[activeIndex],
       })
       requestRPTStitch(
-        displaySegments,
+        displaySegments.map(seg => ({
+          ...seg,
+          audio_url: seg.audio_url
+            ? apiClient.toAbsoluteUrl(seg.audio_url)
+            : undefined,
+          committed_audio_url: seg.committed_audio_url
+            ? apiClient.toAbsoluteUrl(seg.committed_audio_url)
+            : undefined,
+        })),
         videoDuration,
         (() => {
           if (!audioContextRef.current) {
