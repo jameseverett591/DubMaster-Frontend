@@ -61,6 +61,7 @@ import { QCTicker } from '@/components/editor/qc-ticker'
 import { EmotionalCurveTrack } from '@/components/editor/emotional-curve-track'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
+import { requestRPTStitch, invalidateCache } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { createClient } from '@/lib/supabase/client'
 
@@ -445,6 +446,7 @@ export function DubVerseEditor({
     sampleEmotionalCurve,
     resetEmotionalCurve,
     revertToOriginal,
+    rptStitching,
   } = useEditorStore()
 
   const [layoutLocked, setLayoutLocked] = useState(() => {
@@ -880,6 +882,8 @@ export function DubVerseEditor({
   const [originalTextVolume, setOriginalTextVolume] = useState(100)
   const [dubbedTextVolume, setDubbedTextVolume] = useState(50)
   const [backgroundVolume, setBackgroundVolume] = useState(50)
+  const [isMutedRPT, setIsMutedRPT] = useState(false)
+  const [rptVolume, setRptVolume] = useState(80)
   const [isMuted, setIsMuted] = useState(false)
   const [isMutedOriginal, setIsMutedOriginal] = useState(false)
   const [isMutedDubbed, setIsMutedDubbed] = useState(false)
@@ -3760,22 +3764,44 @@ export function DubVerseEditor({
                 className="w-full h-1"
               />
             </div>
-            <div className="h-14 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1">
-                  <Music2 className="h-3 w-3 text-purple-400" />
-                  <span className="ml-1">BG Music</span>
-                </div>
-                <span className="font-mono text-neutral-500 text-[10px]">{backgroundVolume}</span>
-              </div>
+            {/* BG Vol — compact row, no dedicated track */}
+            <div className="h-8 shrink-0 flex items-center px-2 gap-2 text-xs text-neutral-400 border-b border-neutral-800">
+              <Music2 className="h-3 w-3 text-purple-400 shrink-0" />
+              <span className="shrink-0">BG Vol</span>
               <Slider
                 value={[backgroundVolume]}
                 onValueChange={(v) => setBackgroundVolume(v[0])}
                 max={100}
                 step={1}
                 thumbless
+                className="flex-1 h-1"
+              />
+              <span className="font-mono text-neutral-500 text-[10px] shrink-0 w-6 text-right">{backgroundVolume}</span>
+            </div>
+            {/* RPT Audio label */}
+            <div className="h-14 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1">
+                  <button type="button" onClick={() => setIsMutedRPT(v => !v)} className="flex-shrink-0">
+                    {isMutedRPT ? <VolumeX className="h-3 w-3 text-red-400" /> : <Volume2 className="h-3 w-3 text-amber-400" />}
+                  </button>
+                  <span className="truncate text-amber-400">Preview Audio</span>
+                </div>
+                <span className="font-mono text-neutral-500 text-[10px]">{rptVolume}</span>
+              </div>
+              <Slider
+                value={[rptVolume]}
+                onValueChange={(v) => setRptVolume(v[0])}
+                max={100}
+                step={1}
+                thumbless
                 className="w-full h-1"
               />
+            </div>
+            {/* RPT Video label */}
+            <div className="h-16 shrink-0 flex items-center px-2 text-xs border-b border-neutral-800 gap-1">
+              <PlayCircle className="h-3 w-3 text-amber-400 shrink-0" />
+              <span className="truncate text-amber-400">Preview Video</span>
             </div>
             {/* Emotional curve track label */}
             <div className="h-24 shrink-0 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-700 gap-1 bg-neutral-900/30">
@@ -4267,8 +4293,47 @@ export function DubVerseEditor({
                 })}
               </div>
 
-              {/* BG Music track */}
+              {/* RPT Audio track */}
               <div className="h-14 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
+                {displaySegments.map((seg) => {
+                  const hasAudio = !!(seg.committed_audio_url ?? seg.audio_url)
+                  if (!hasAudio) return null
+                  const start = (seg.committed_start_time ?? seg.start_time) / Math.max(videoDuration, 1) * 100
+                  const end = (seg.committed_end_time ?? seg.end_time) / Math.max(videoDuration, 1) * 100
+                  return (
+                    <div
+                      key={seg.id + '-rpt-audio'}
+                      className={cn(
+                        'absolute top-1 bottom-1 rounded opacity-70',
+                        seg.rpt_dirty
+                          ? 'bg-amber-500/50 border border-amber-500/70'
+                          : 'bg-emerald-500/50 border border-emerald-500/70'
+                      )}
+                      style={{ left: `${start}%`, width: `${Math.max(end - start, 0.5)}%` }}
+                      title={seg.committed_adapted_text ?? seg.active_text ?? seg.target_text}
+                    />
+                  )
+                })}
+                {rptStitching && (
+                  <div className="absolute inset-0 flex items-center justify-center text-[10px] text-amber-400 animate-pulse pointer-events-none">
+                    Building preview…
+                  </div>
+                )}
+              </div>
+              {/* RPT Video track */}
+              <div className="h-16 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
+                {displaySegments.map((seg) => {
+                  if (!seg.rpt_dirty) return null
+                  const start = (seg.committed_start_time ?? seg.start_time) / Math.max(videoDuration, 1) * 100
+                  const end = (seg.committed_end_time ?? seg.end_time) / Math.max(videoDuration, 1) * 100
+                  return (
+                    <div
+                      key={seg.id + '-rpt-video'}
+                      className="absolute top-0 bottom-0 bg-amber-500/20 border-x border-amber-500/40"
+                      style={{ left: `${start}%`, width: `${Math.max(end - start, 0.5)}%` }}
+                    />
+                  )
+                })}
               </div>
 
               {/* Emotional curve track */}
