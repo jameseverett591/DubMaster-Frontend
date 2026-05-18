@@ -285,6 +285,7 @@ interface DubVerseEditorProps {
   onShare?: () => void
   onGenerateSpeech?: () => void
   onTranslateAndDub?: () => void
+  rptVideoUrl?: string | null
 }
 
 function mapAnalysisToQCReport(jobId: string, analysis: any): QCReport {
@@ -408,6 +409,7 @@ export function DubVerseEditor({
   onShare,
   onGenerateSpeech,
   onTranslateAndDub,
+  rptVideoUrl,
 }: DubVerseEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
@@ -1211,7 +1213,11 @@ export function DubVerseEditor({
   }, [])
   
   // Get the actual video URL to use (imported or original)
-  const activeVideoUrl = importedVideoUrl || ((playbackMode === 'dubbed' || playbackMode === 'preview') && activeDubbedVideoUrl ? activeDubbedVideoUrl : videoUrl)
+  const activeVideoUrl = importedVideoUrl || (
+    playbackMode === 'preview'
+      ? (rptVideoUrl ?? activeDubbedVideoUrl ?? videoUrl)
+      : (playbackMode === 'dubbed' && activeDubbedVideoUrl ? activeDubbedVideoUrl : videoUrl)
+  )
   
   // Track which URL we've already extracted thumbnails for
   const lastExtractedUrlRef = useRef<string | null>(null)

@@ -223,6 +223,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         minutesAvailable={60}
         speakerGenders={editorProps.speakerGenders}
         voiceMapping={editorProps.voiceMapping}
+        rptVideoUrl={rptVideoUrl}
         onExport={() => {}}
         onShare={() => {}}
         onGenerateSpeech={() => {}}
