@@ -21,6 +21,8 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  const [rptVideoUrl, setRptVideoUrl] = useState<string | null>(null)
+
   // QC state — populated concurrently while editor loads
   const [qcAnalysis, setQcAnalysis] = useState<any>(null)
   const [qcLoading, setQcLoading] = useState(false)
@@ -96,6 +98,23 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         })
 
         const targetLang = (segmentsData?.language || 'en').toLowerCase()
+
+        // Fire RPT init — creates working copy if it doesn't exist yet
+        if (status.dubbed_video_url) {
+          fetch(`${API_BASE}/api/dub/rpt-init/${jobId}`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${localStorage.getItem('sb-access-token') ?? ''}`,
+            },
+          })
+            .then(r => r.ok ? r.json() : null)
+            .then(data => {
+              if (data?.rpt_video_url) {
+                setRptVideoUrl(`${API_BASE}${data.rpt_video_url}`)
+              }
+            })
+            .catch(() => {}) // silent — editor works without RPT copy
+        }
 
         setEditorProps({
           title: status.video_filename || `Job ${jobId.slice(0, 8)}`,
