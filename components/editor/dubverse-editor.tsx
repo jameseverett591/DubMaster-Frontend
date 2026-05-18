@@ -3840,6 +3840,11 @@ export function DubVerseEditor({
                 className="w-full h-1"
               />
             </div>
+            {/* RPT Video label */}
+            <div className="h-16 shrink-0 flex items-center px-2 text-xs border-b border-neutral-800 gap-1">
+              <PlayCircle className="h-3 w-3 text-amber-400 shrink-0" />
+              <span className="truncate text-amber-400">Preview Video</span>
+            </div>
             {/* RPT Audio label */}
             <div className="h-14 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
               <div className="flex items-center justify-between">
@@ -3859,11 +3864,6 @@ export function DubVerseEditor({
                 thumbless
                 className="w-full h-1"
               />
-            </div>
-            {/* RPT Video label */}
-            <div className="h-16 shrink-0 flex items-center px-2 text-xs border-b border-neutral-800 gap-1">
-              <PlayCircle className="h-3 w-3 text-amber-400 shrink-0" />
-              <span className="truncate text-amber-400">Preview Video</span>
             </div>
             {/* Emotional curve track label */}
             <div className="h-24 shrink-0 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-700 gap-1 bg-neutral-900/30">
@@ -4325,6 +4325,21 @@ export function DubVerseEditor({
                 })}
               </div>
 
+              {/* RPT Video track */}
+              <div className="h-16 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
+                {displaySegments.map((seg) => {
+                  if (!seg.rpt_dirty) return null
+                  const start = (seg.committed_start_time ?? seg.start_time) / Math.max(videoDuration, 1) * 100
+                  const end = (seg.committed_end_time ?? seg.end_time) / Math.max(videoDuration, 1) * 100
+                  return (
+                    <div
+                      key={seg.id + '-rpt-video'}
+                      className="absolute top-0 bottom-0 bg-amber-500/20 border-x border-amber-500/40"
+                      style={{ left: `${start}%`, width: `${Math.max(end - start, 0.5)}%` }}
+                    />
+                  )
+                })}
+              </div>
               {/* RPT Audio track */}
               <div className="h-14 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
                 {displaySegments.map((seg) => {
@@ -4351,21 +4366,6 @@ export function DubVerseEditor({
                     Building preview…
                   </div>
                 )}
-              </div>
-              {/* RPT Video track */}
-              <div className="h-16 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
-                {displaySegments.map((seg) => {
-                  if (!seg.rpt_dirty) return null
-                  const start = (seg.committed_start_time ?? seg.start_time) / Math.max(videoDuration, 1) * 100
-                  const end = (seg.committed_end_time ?? seg.end_time) / Math.max(videoDuration, 1) * 100
-                  return (
-                    <div
-                      key={seg.id + '-rpt-video'}
-                      className="absolute top-0 bottom-0 bg-amber-500/20 border-x border-amber-500/40"
-                      style={{ left: `${start}%`, width: `${Math.max(end - start, 0.5)}%` }}
-                    />
-                  )
-                })}
               </div>
 
               {/* Emotional curve track */}
