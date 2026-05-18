@@ -447,6 +447,9 @@ export function DubVerseEditor({
     resetEmotionalCurve,
     revertToOriginal,
     rptStitching,
+    rebuildStatus,
+    setRebuildStatus,
+    clearAllDirty,
   } = useEditorStore()
 
   const [layoutLocked, setLayoutLocked] = useState(() => {
@@ -1706,6 +1709,7 @@ export function DubVerseEditor({
   const handleRebuildVideo = useCallback(async () => {
     setRebuildError(null)
     setIsRebuilding(true)
+    setRebuildStatus('processing')
     setRebuildProgress(0)
     if (rebuildIntervalRef.current) clearInterval(rebuildIntervalRef.current)
     rebuildIntervalRef.current = setInterval(() => {
@@ -1717,6 +1721,9 @@ export function DubVerseEditor({
       setRebuildProgress(100)
       const absUrl = apiClient.toAbsoluteUrl(response.dubbed_video_url)
       setActiveDubbedVideoUrl(absUrl)
+      setRebuildStatus('complete')
+      clearAllDirty()
+      setTimeout(() => setRebuildStatus('idle'), 5000)
       if (videoRef.current) {
         videoRef.current.volume = isMuted ? 0 : masterVolume / 100
       }
@@ -1731,10 +1738,12 @@ export function DubVerseEditor({
       if (rebuildIntervalRef.current) clearInterval(rebuildIntervalRef.current)
       setRebuildProgress(0)
       setRebuildError(err.message || 'Rebuild failed — please try again')
+      setRebuildStatus('error')
+      setTimeout(() => setRebuildStatus('idle'), 5000)
     } finally {
       setIsRebuilding(false)
     }
-  }, [jobId, setPlaybackMode, setCurrentTime, isMuted, masterVolume])
+  }, [jobId, setPlaybackMode, setCurrentTime, isMuted, masterVolume, setRebuildStatus, clearAllDirty])
 
   const handleTimelineDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -1864,6 +1873,37 @@ export function DubVerseEditor({
       tabIndex={0}
       className="h-screen flex flex-col bg-black text-white outline-none"
     >
+      {/* Rebuild status banner */}
+      {(rebuildStatus === 'processing' || rebuildStatus === 'complete' || rebuildStatus === 'error') && (
+        <div
+          className={cn(
+            "fixed top-0 left-0 right-0 z-[100] flex items-center justify-center gap-3 py-4",
+            "text-sm font-black tracking-widest uppercase select-none",
+            rebuildStatus === 'processing' && "bg-red-600 text-white animate-pulse shadow-[0_6px_32px_rgba(239,68,68,0.9)]",
+            rebuildStatus === 'complete' && "bg-emerald-600 text-white shadow-[0_6px_32px_rgba(16,185,129,0.9)]",
+            rebuildStatus === 'error' && "bg-red-900 text-red-200 shadow-[0_6px_32px_rgba(239,68,68,0.6)]",
+          )}
+        >
+          {rebuildStatus === 'processing' && <RefreshCw className="h-5 w-5 animate-spin" />}
+          {rebuildStatus === 'complete' && <Check className="h-5 w-5" />}
+          {rebuildStatus === 'error' && <X className="h-5 w-5" />}
+          <span>
+            {rebuildStatus === 'processing' && 'REBUILD IN PROGRESS'}
+            {rebuildStatus === 'complete' && 'REBUILD COMPLETE — DUBBED VIDEO UPDATED'}
+            {rebuildStatus === 'error' && (rebuildError?.toUpperCase() || 'REBUILD FAILED — PLEASE TRY AGAIN')}
+          </span>
+          {rebuildStatus !== 'processing' && (
+            <button
+              type="button"
+              aria-label="Dismiss"
+              onClick={() => setRebuildStatus('idle')}
+              className="absolute right-5 opacity-70 hover:opacity-100 transition-opacity"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          )}
+        </div>
+      )}
       {/* Header */}
       <header className="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-neutral-900">
         <div className="flex items-center gap-4">
@@ -1932,19 +1972,27 @@ export function DubVerseEditor({
             <Button
               variant="outline"
               size="sm"
-              className="h-7 text-xs border-slate-700"
+              className={cn(
+                "h-7 text-xs font-bold tracking-wide",
+                rebuildStatus === 'idle' && "border-slate-700",
+                rebuildStatus === 'processing' && "border-red-500 text-red-400 animate-pulse shadow-[0_0_14px_rgba(239,68,68,0.6)]",
+                rebuildStatus === 'complete' && "border-emerald-500 text-emerald-400 shadow-[0_0_14px_rgba(16,185,129,0.6)]",
+                rebuildStatus === 'error' && "border-slate-700",
+              )}
               onClick={handleRebuildVideo}
               disabled={isRebuilding}
             >
-              <RefreshCw className={cn("h-3 w-3 mr-1", isRebuilding && "animate-spin")} />
-              {isRebuilding ? 'Rebuilding...' : 'Rebuild Video'}
+              {rebuildStatus === 'complete'
+                ? <Check className="h-3 w-3 mr-1" />
+                : <RefreshCw className={cn("h-3 w-3 mr-1", isRebuilding && "animate-spin")} />}
+              {rebuildStatus === 'processing' ? 'REBUILD IN PROCESS'
+                : rebuildStatus === 'complete' ? 'REBUILD COMPLETE'
+                : 'Rebuild Video'}
             </Button>
             {(isRebuilding || rebuildProgress > 0) && (
               <div className="h-1 bg-neutral-700 rounded-full overflow-hidden w-32">
-                <div
-                  className="h-full bg-amber-500 rounded-full transition-all duration-500"
-                  style={{ width: `${rebuildProgress}%` }}
-                />
+                <div className="h-full bg-amber-500 rounded-full transition-all duration-500"
+                  style={{ width: `${rebuildProgress}%` }} />
               </div>
             )}
             {rebuildError && (
