@@ -1351,7 +1351,6 @@ export function DubVerseEditor({
       return
     }
     if (!rptBufferRef.current || !audioContextRef.current) return
-    console.log('[RPT] audio effect — isPlaying:', isPlaying, 'buffer:', !!rptBufferRef.current, 'ctx:', !!audioContextRef.current)
 
     if (isPlaying) {
       const ctx = audioContextRef.current
@@ -1699,9 +1698,6 @@ export function DubVerseEditor({
         (result) => {
           if (result) {
             rptBufferRef.current = result.buffer
-            console.log('[RPT] Stitch complete — buffer duration:', result.buffer.duration, 'segments:', result.segmentCount)
-          } else {
-            console.warn('[RPT] Stitch returned null')
           }
         },
       )
