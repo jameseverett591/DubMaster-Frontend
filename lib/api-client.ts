@@ -687,7 +687,7 @@ class DubVerseAPIClient {
   async remixDub(jobId: string): Promise<RemixResponse> {
     const response = await fetch(`${this.baseURL}/api/dub/remix/${jobId}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
     })
     if (!response.ok) {
       if (response.status === 404) throw new JobNotFoundError(jobId)
