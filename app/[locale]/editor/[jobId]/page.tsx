@@ -6,6 +6,9 @@ import { LoadingSpinner } from '@/components/loading-spinner'
 import { ErrorBoundary } from '@/components/error-boundary'
 import type { Segment } from '@/lib/editor-types'
 
+import { apiClient } from '@/lib/api-client'
+import { createClient } from '@/lib/supabase/client'
+
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 function toAbsoluteUrl(url: string): string {
@@ -29,6 +32,22 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   useEffect(() => {
     localStorage.setItem('dubverse.lastEditorJobId', jobId)
   }, [jobId])
+
+  // Set API client auth token from Supabase session
+  useEffect(() => {
+    const supabase = createClient()
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session?.access_token) {
+        apiClient.setToken(data.session.access_token)
+      }
+    })
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        apiClient.setToken(session?.access_token ?? null)
+      }
+    )
+    return () => subscription.unsubscribe()
+  }, [])
 
   // Load job data
   useEffect(() => {
