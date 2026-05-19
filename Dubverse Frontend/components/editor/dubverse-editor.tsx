@@ -61,6 +61,7 @@ import { QCTicker } from '@/components/editor/qc-ticker'
 import { EmotionalCurveTrack } from '@/components/editor/emotional-curve-track'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
+import { ExportModal } from '@/components/editor/export-modal'
 import { requestRPTStitch, invalidateCache, scheduleRPTPlayback } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { createClient } from '@/lib/supabase/client'
@@ -453,6 +454,7 @@ export function DubVerseEditor({
     commitSegmentChanges,
   } = useEditorStore()
 
+  const [showExportModal, setShowExportModal] = useState(false)
   const [layoutLocked, setLayoutLocked] = useState(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('dubverse.editor.layoutLocked') === 'true'
@@ -2327,7 +2329,7 @@ export function DubVerseEditor({
           <Button
             size="sm"
             className="h-8 bg-amber-500 hover:bg-amber-600 text-black font-medium"
-            onClick={onExport}
+            onClick={() => setShowExportModal(true)}
           >
             <Download className="h-4 w-4 mr-1" />
             Export
@@ -4608,6 +4610,12 @@ export function DubVerseEditor({
             </div>
           </div>
         </div>
+      )}
+      {showExportModal && jobId && (
+        <ExportModal
+          jobId={jobId}
+          onClose={() => setShowExportModal(false)}
+        />
       )}
     </div>
   )
