@@ -1706,7 +1706,7 @@ export function DubVerseEditor({
         : segment.audio_url
       updateSegment(activeIndex, {
         audio_url,
-        status: 'locked',
+        status: 'edited',
       })
       commitSegmentChanges(activeIndex, {
         committed_audio_url: audio_url,
@@ -1744,7 +1744,6 @@ export function DubVerseEditor({
           }
         },
       )
-      setLockedSegments(prev => new Set([...prev, activeIndex]))
       if (!droppedTranslations.some(t => t.segmentIndex === activeIndex)) {
         setDroppedTranslations(prev => [
           ...prev,
