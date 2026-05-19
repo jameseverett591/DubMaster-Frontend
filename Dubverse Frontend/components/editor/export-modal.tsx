@@ -44,8 +44,37 @@ export function ExportModal({ jobId, onClose }: ExportModalProps) {
     setError(null)
     try {
       const result = await apiClient.exportVideo(jobId, resolution, aspect, format)
-      // Trigger native browser save dialog
       const downloadUrl = apiClient.getExportDownloadUrl(jobId, result.filename)
+
+      // Try File System Access API for native OS save dialog
+      if ('showSaveFilePicker' in window) {
+        try {
+          const ext = result.filename.split('.').pop() ?? format
+          const mimeTypes: Record<string, string> = {
+            mp4: 'video/mp4', mov: 'video/quicktime',
+            avi: 'video/x-msvideo', mkv: 'video/x-matroska',
+          }
+          const fileHandle = await (window as any).showSaveFilePicker({
+            suggestedName: result.filename,
+            types: [{
+              description: `${ext.toUpperCase()} Video`,
+              accept: { [mimeTypes[ext] ?? 'video/mp4']: [`.${ext}`] },
+            }],
+          })
+          const response = await fetch(downloadUrl)
+          const blob = await response.blob()
+          const writable = await fileHandle.createWritable()
+          await writable.write(blob)
+          await writable.close()
+          onClose()
+          return
+        } catch (err: any) {
+          // User cancelled picker or API unavailable — fall through to download
+          if (err?.name === 'AbortError') { onClose(); return }
+        }
+      }
+
+      // Fallback: browser download
       const a = document.createElement('a')
       a.href = downloadUrl
       a.download = result.filename
