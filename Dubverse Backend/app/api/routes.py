@@ -3126,6 +3126,111 @@ async def remix_dub(job_id: str, request: Request):
     return result
 
 
+class ExportRequest(BaseModel):
+    resolution: str = "1080p"   # "720p" | "1080p" | "4k"
+    aspect: str = "widescreen"  # "widescreen" | "fill"
+    format: str = "mp4"         # "mp4" | "mov" | "avi" | "mkv"
+
+
+RESOLUTION_MAP = {
+    "720p":  (1280, 720),
+    "1080p": (1920, 1080),
+    "4k":    (3840, 2160),
+}
+
+FORMAT_MAP = {
+    "mp4": {"ext": "mp4",  "vcodec": "libx264", "acodec": "aac",  "extra": ["-movflags", "+faststart"]},
+    "mov": {"ext": "mov",  "vcodec": "libx264", "acodec": "aac",  "extra": []},
+    "avi": {"ext": "avi",  "vcodec": "mpeg4",   "acodec": "libmp3lame", "extra": []},
+    "mkv": {"ext": "mkv",  "vcodec": "libx264", "acodec": "aac",  "extra": []},
+}
+
+
+@router.post("/dub/export/{job_id}")
+async def export_video(job_id: str, body: ExportRequest, request: Request):
+    """Re-encode the dubbed video with selected resolution, aspect and format."""
+    import subprocess as _sp
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    verify_jwt(token)
+
+    output_dir = os.path.join(settings.DUBBED_DIR, job_id)
+    if not os.path.isdir(output_dir):
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    # Find master dubbed video
+    candidates = [
+        f for f in os.listdir(output_dir)
+        if f.startswith("dubbed_") and f.endswith(".mp4")
+        and not f.startswith("dubbed_rpt_")
+    ]
+    if not candidates:
+        raise HTTPException(status_code=404, detail="No dubbed video found")
+
+    src = os.path.join(output_dir, candidates[0])
+
+    res = body.resolution.lower().replace(" ", "")
+    if res not in RESOLUTION_MAP:
+        raise HTTPException(status_code=400, detail=f"Unknown resolution: {body.resolution}")
+    w, h = RESOLUTION_MAP[res]
+
+    fmt = body.format.lower()
+    if fmt not in FORMAT_MAP:
+        raise HTTPException(status_code=400, detail=f"Unknown format: {body.format}")
+    fmap = FORMAT_MAP[fmt]
+
+    # Build vf filter
+    if body.aspect == "fill":
+        vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+    else:
+        vf = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"
+
+    out_filename = f"export_{res}_{body.aspect}.{fmap['ext']}"
+    out_path = os.path.join(output_dir, out_filename)
+
+    cmd = [
+        "ffmpeg", "-y", "-i", src,
+        "-vf", vf,
+        "-vcodec", fmap["vcodec"],
+        "-acodec", fmap["acodec"],
+        "-preset", "fast",
+        "-crf", "18",
+    ] + fmap["extra"] + [out_path]
+
+    try:
+        proc = await asyncio.to_thread(
+            _sp.run, cmd, capture_output=True, text=True, timeout=600
+        )
+        if proc.returncode != 0:
+            logger.error(f"[EXPORT] ffmpeg failed: {proc.stderr[-500:]}")
+            raise RuntimeError("FFmpeg encode failed")
+    except _sp.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Export timed out")
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    logger.info(f"[EXPORT] job={job_id} res={res} aspect={body.aspect} fmt={fmt}")
+    return {
+        "job_id": job_id,
+        "download_url": f"/api/dub/export/download/{job_id}/{out_filename}",
+        "filename": out_filename,
+    }
+
+
+@router.get("/dub/export/download/{job_id}/{filename}")
+async def download_export(job_id: str, filename: str):
+    """Serve the exported file as a download attachment."""
+    safe = os.path.basename(filename)
+    file_path = os.path.join(settings.DUBBED_DIR, job_id, safe)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Export file not found")
+    return FileResponse(
+        file_path,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{safe}"'},
+    )
+
+
 @router.get("/segments/{job_id}")
 async def get_segments(job_id: str):
     segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
