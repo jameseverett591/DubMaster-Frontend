@@ -1381,6 +1381,39 @@ export function DubVerseEditor({
     }
   }, [isPlaying, playbackMode, isMutedRPT, rptVolume])
 
+  // Initial RPT stitch — runs once when segments first load
+  // so Preview mode works immediately without needing to
+  // generate a segment first.
+  useEffect(() => {
+    if (!segments.length || !videoDuration) return
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContext()
+    }
+    const ctx = audioContextRef.current
+    const resolved = segments.map(seg => {
+      const resolveUrl = (url: string | undefined) => {
+        if (!url || !jobId) return url
+        if (url.startsWith('http')) return url
+        const filename = url.split('/').pop()
+        return filename ? apiClient.getAudioFileUrl(jobId, filename) : url
+      }
+      return {
+        ...seg,
+        audio_url: resolveUrl(seg.audio_url),
+        committed_audio_url: resolveUrl(seg.committed_audio_url),
+      }
+    })
+    requestRPTStitch(
+      resolved,
+      videoDuration,
+      ctx,
+      () => {},
+      (result) => {
+        if (result) rptBufferRef.current = result.buffer
+      },
+    )
+  }, [segments.length, videoDuration, jobId])
+
   // Cleanup RPT audio resources on unmount
   useEffect(() => {
     return () => {
