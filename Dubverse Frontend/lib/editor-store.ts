@@ -80,7 +80,8 @@ interface EditorState {
   commitSegmentChanges: (index: number, changes: Partial<Segment>) => void
   markSegmentDirty: (index: number) => void
   clearAllDirty: () => void
-  
+  initRPTFromSegments: () => void
+
   // Timeline actions
   setZoomLevel: (zoom: number) => void
   setScrollPosition: (position: number) => void
@@ -207,6 +208,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   })),
   clearAllDirty: () => set((state) => ({
     segments: state.segments.map((seg) => ({ ...seg, rpt_dirty: false })),
+  })),
+  initRPTFromSegments: () => set((state) => ({
+    segments: state.segments.map((seg) => ({
+      ...seg,
+      committed_audio_url: seg.committed_audio_url ?? seg.audio_url,
+      committed_start_time: seg.committed_start_time ?? seg.start_time,
+      committed_end_time: seg.committed_end_time ?? seg.end_time,
+      committed_adapted_text: seg.committed_adapted_text ?? seg.target_text,
+      rpt_dirty: false,
+      committed_at: seg.committed_at ?? new Date().toISOString(),
+    })),
   })),
 
   // Timeline
