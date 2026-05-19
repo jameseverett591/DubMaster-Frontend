@@ -665,6 +665,25 @@ class DubVerseAPIClient {
     return `${this.baseURL}/api/media/${jobId}/audio/${filename}`
   }
 
+  async exportVideo(
+    jobId: string,
+    resolution: '720p' | '1080p' | '4k',
+    aspect: 'widescreen' | 'fill',
+    format: 'mp4' | 'mov' | 'avi' | 'mkv',
+  ): Promise<{ download_url: string; filename: string }> {
+    const res = await fetch(`${this.baseURL}/api/dub/export/${jobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ resolution, aspect, format }),
+    })
+    if (!res.ok) throw new Error(`Export failed: ${res.status}`)
+    return res.json()
+  }
+
+  getExportDownloadUrl(jobId: string, filename: string): string {
+    return `${this.baseURL}/api/dub/export/download/${jobId}/${filename}`
+  }
+
   async remixDub(jobId: string): Promise<RemixResponse> {
     const response = await fetch(`${this.baseURL}/api/dub/remix/${jobId}`, {
       method: 'POST',
