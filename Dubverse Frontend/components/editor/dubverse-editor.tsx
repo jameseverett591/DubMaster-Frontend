@@ -1776,6 +1776,27 @@ export function DubVerseEditor({
     }
 
     setRegenError(null)
+
+    // If segment already has generated audio and no new preview text
+    // pending, play existing audio directly without a backend call
+    if (segment.status === 'edited' && segment.audio_url && !segment.preview_text) {
+      const absUrl = segment.audio_url.startsWith('http')
+        ? segment.audio_url
+        : apiClient.getAudioFileUrl(jobId, segment.audio_url.split('/').pop() ?? '')
+      if (segmentAudioRef.current) {
+        segmentAudioRef.current.pause()
+        segmentAudioRef.current = null
+      }
+      const audio = new Audio(absUrl)
+      audio.playbackRate = stagedSpeeds[index] ?? 1.0
+      audio.volume = isMutedDubbed ? 0 : Math.max(0, Math.min(1, (masterVolume / 100) * (dubbedTextVolume / 100)))
+      audio.onended = () => { setIsSegmentPreviewing(false); segmentAudioRef.current = null }
+      segmentAudioRef.current = audio
+      setIsSegmentPreviewing(true)
+      audio.play()
+      return
+    }
+
     setIsRegenerating(true)
     try {
       const response = await apiClient.regenerateSegment(jobId, index, {
@@ -2813,7 +2834,7 @@ export function DubVerseEditor({
                           </button>
                         )}
                         </div>
-                        {segment.isPreviewing && (
+                        {(segment.isPreviewing || segment.status === 'edited') && (
                           <div className="flex items-center gap-1.5 pointer-events-auto cursor-pointer shrink-0 select-none">
                             <button
                               className="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/30 font-medium select-none pointer-events-auto cursor-pointer hover:bg-orange-500/30 transition-colors"
