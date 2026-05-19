@@ -451,6 +451,7 @@ export function DubVerseEditor({
     rebuildStatus,
     setRebuildStatus,
     clearAllDirty,
+    initRPTFromSegments,
     commitSegmentChanges,
   } = useEditorStore()
 
@@ -1352,6 +1353,13 @@ export function DubVerseEditor({
       }
       return
     }
+
+    // On first switch to Preview, seed RPT manifest
+    // from current dubbed segments if not yet seeded
+    if (!rptBufferRef.current) {
+      initRPTFromSegments()
+    }
+
     if (!rptBufferRef.current || !audioContextRef.current) return
 
     if (isPlaying) {
