@@ -1358,6 +1358,33 @@ export function DubVerseEditor({
     // from current dubbed segments if not yet seeded
     if (!rptBufferRef.current) {
       initRPTFromSegments()
+      // Trigger stitch immediately after seeding
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioContext()
+      }
+      const ctx = audioContextRef.current
+      const resolved = segments.map(seg => {
+        const resolveUrl = (url: string | undefined) => {
+          if (!url || !jobId) return url
+          if (url.startsWith('http')) return url
+          const filename = url.split('/').pop()
+          return filename ? apiClient.getAudioFileUrl(jobId, filename) : url
+        }
+        return {
+          ...seg,
+          audio_url: resolveUrl(seg.audio_url),
+          committed_audio_url: resolveUrl(seg.committed_audio_url),
+        }
+      })
+      requestRPTStitch(
+        resolved,
+        videoDuration,
+        ctx,
+        () => {},
+        (result) => {
+          if (result) rptBufferRef.current = result.buffer
+        },
+      )
     }
 
     if (!rptBufferRef.current || !audioContextRef.current) return
