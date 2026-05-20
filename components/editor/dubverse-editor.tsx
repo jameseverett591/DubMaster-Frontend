@@ -2921,15 +2921,6 @@ export function DubVerseEditor({
                         {(segment.isPreviewing || segment.status === 'edited') && (
                           <div className="flex items-center gap-1.5 pointer-events-auto cursor-pointer shrink-0 select-none">
                             <button
-                              className="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/30 font-medium select-none pointer-events-auto cursor-pointer hover:bg-orange-500/30 transition-colors"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                handlePreviewSpeech(index)
-                              }}
-                            >
-                              Preview
-                            </button>
-                            <button
                               className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors pointer-events-auto cursor-pointer select-none"
                               onClick={(e) => {
                                 e.stopPropagation()
