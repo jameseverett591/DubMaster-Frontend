@@ -1756,16 +1756,19 @@ export function DubVerseEditor({
         displaySegments.map(seg => {
           const resolveAudioUrl = (url: string | undefined) => {
             if (!url || !jobId) return url
-            // If already absolute, return as-is
             if (url.startsWith('http')) return url
-            // Extract filename from disk path and build API URL
             const filename = url.split('/').pop()
             return filename ? apiClient.getAudioFileUrl(jobId, filename) : url
           }
+          // For the segment just generated, use the new audio_url directly
+          // so the stitch reflects the edit without waiting for store update
+          const isActiveSegment = seg.index === activeIndex
           return {
             ...seg,
-            audio_url: resolveAudioUrl(seg.audio_url),
-            committed_audio_url: resolveAudioUrl(seg.committed_audio_url),
+            audio_url: isActiveSegment ? audio_url : resolveAudioUrl(seg.audio_url),
+            committed_audio_url: isActiveSegment
+              ? audio_url
+              : resolveAudioUrl(seg.committed_audio_url),
           }
         }),
         videoDuration,
