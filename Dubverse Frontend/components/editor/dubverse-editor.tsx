@@ -62,7 +62,7 @@ import { EmotionalCurveTrack } from '@/components/editor/emotional-curve-track'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { ExportModal } from '@/components/editor/export-modal'
-import { requestRPTStitch, invalidateCache, scheduleRPTPlayback } from '@/lib/rpt-engine'
+import { requestRPTStitch, stitchRPT, invalidateCache, scheduleRPTPlayback } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { createClient } from '@/lib/supabase/client'
 
@@ -3813,7 +3813,34 @@ export function DubVerseEditor({
                   setIsSegmentPreviewing(true)
                   audio.play()
                 } else {
-                  setIsPlaying(!isPlaying)
+                  if (playbackMode === 'preview' && !isPlaying && !rptBufferRef.current) {
+                    // Buffer not ready yet — stitch first then play
+                    if (!audioContextRef.current) {
+                      audioContextRef.current = new AudioContext()
+                    }
+                    const ctx = audioContextRef.current
+                    const resolved = segments.map(seg => {
+                      const resolveUrl = (url: string | undefined) => {
+                        if (!url || !jobId) return url
+                        if (url.startsWith('http')) return url
+                        const filename = url.split('/').pop()
+                        return filename ? apiClient.getAudioFileUrl(jobId, filename) : url
+                      }
+                      return {
+                        ...seg,
+                        audio_url: resolveUrl(seg.audio_url),
+                        committed_audio_url: resolveUrl(seg.committed_audio_url),
+                      }
+                    })
+                    stitchRPT(resolved, videoDuration, ctx).then(result => {
+                      if (result) {
+                        rptBufferRef.current = result.buffer
+                        setIsPlaying(true)
+                      }
+                    })
+                  } else {
+                    setIsPlaying(!isPlaying)
+                  }
                 }
               }}
             >
@@ -3822,8 +3849,8 @@ export function DubVerseEditor({
                   ? <Pause className="h-4 w-4 text-amber-400" />
                   : <PlayCircle className="h-4 w-4 text-amber-400" />
                 : isPlaying
-                  ? <Pause className="h-4 w-4" />
-                  : <Play className="h-4 w-4" />
+                  ? <Pause className={playbackMode === 'preview' ? 'h-4 w-4 text-amber-400' : 'h-4 w-4'} />
+                  : <Play className={playbackMode === 'preview' ? 'h-4 w-4 text-amber-400' : 'h-4 w-4'} />
               }
             </Button>
             <Button 
