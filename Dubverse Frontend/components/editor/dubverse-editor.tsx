@@ -1422,6 +1422,44 @@ export function DubVerseEditor({
     )
   }, [segments.length, videoDuration, jobId])
 
+  // RPT seek sync — restart RPT audio from new position when user scrubs
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+
+    const handleSeeked = () => {
+      if (playbackMode !== 'preview') return
+      if (!rptBufferRef.current || !audioContextRef.current) return
+
+      // Stop current RPT source
+      if (rptSourceRef.current) {
+        try { rptSourceRef.current.stop() } catch {}
+        rptSourceRef.current = null
+      }
+
+      // Only restart if video is playing
+      if (!isPlaying) return
+
+      const ctx = audioContextRef.current
+      if (ctx.state === 'suspended') ctx.resume()
+      if (!rptGainRef.current) {
+        rptGainRef.current = ctx.createGain()
+        rptGainRef.current.connect(ctx.destination)
+      }
+      rptGainRef.current.gain.value = isMutedRPT ? 0 : rptVolume / 100
+      rptSourceRef.current = scheduleRPTPlayback(
+        rptBufferRef.current,
+        video.currentTime,
+        ctx,
+        rptGainRef.current
+      )
+      rptSourceRef.current.onended = () => { rptSourceRef.current = null }
+    }
+
+    video.addEventListener('seeked', handleSeeked)
+    return () => video.removeEventListener('seeked', handleSeeked)
+  }, [playbackMode, isPlaying, isMutedRPT, rptVolume])
+
   // Cleanup RPT audio resources on unmount
   useEffect(() => {
     return () => {
