@@ -716,6 +716,9 @@ export function DubVerseEditor({
   // Selected finding for the docked QC panel (no floating UI)
   const [selectedQCFinding, setSelectedQCFinding] = useState<QCFinding | null>(null)
   const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
+  const [regeneratingSegmentIndex, setRegeneratingSegmentIndex] = useState<number | null>(null)
+  const [confirmingSegmentIndex, setConfirmingSegmentIndex] = useState<number | null>(null)
+  const autoRegenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [editingText, setEditingText] = useState('')
   const [previewWidth, setPreviewWidth] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -1755,6 +1758,7 @@ export function DubVerseEditor({
     selectSegment(activeIndex)
     setRegenError(null)
     setIsRegenerating(true)
+    setRegeneratingSegmentIndex(activeIndex)
     try {
       const emotionIntensity = sampleEmotionalCurve(activeIndex, 0.5)
       const response = await apiClient.regenerateSegment(jobId, activeIndex, {
@@ -1828,6 +1832,10 @@ export function DubVerseEditor({
       setRegenError('Generation failed — please try again')
     } finally {
       setIsRegenerating(false)
+      setRegeneratingSegmentIndex(null)
+      // Two-pulse confirmation
+      setConfirmingSegmentIndex(activeIndex)
+      setTimeout(() => setConfirmingSegmentIndex(null), 1200)
     }
   }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds, lockedSegments, selectSegment])
 
@@ -2004,6 +2012,14 @@ export function DubVerseEditor({
         )
       })
       setEditingSegmentIndex(null)
+      // Auto-regen in Preview mode — 2 second debounce
+      if (playbackMode === 'preview') {
+        if (autoRegenTimerRef.current) clearTimeout(autoRegenTimerRef.current)
+        autoRegenTimerRef.current = setTimeout(() => {
+          handleGenerateSpeech(idx)
+          autoRegenTimerRef.current = null
+        }, 2000)
+      }
     }
   }, [editingSegmentIndex, editingText, setPreviewText, displaySegments])
 
@@ -4529,8 +4545,12 @@ export function DubVerseEditor({
                     <div
                       key={seg.id + '-rpt-audio'}
                       className={cn(
-                        'absolute top-1 bottom-1 rounded opacity-70',
-                        seg.rpt_dirty
+                        'absolute top-1 bottom-1 rounded opacity-70 transition-all',
+                        regeneratingSegmentIndex === seg.index
+                          ? 'bg-amber-500/70 border border-amber-400 animate-pulse shadow-[0_0_8px_rgba(251,191,36,0.8)]'
+                          : confirmingSegmentIndex === seg.index
+                          ? 'bg-amber-400/80 border border-amber-300 animate-[pulse_0.3s_ease-in-out_2]'
+                          : seg.rpt_dirty
                           ? 'bg-amber-500/50 border border-amber-500/70'
                           : 'bg-emerald-500/50 border border-emerald-500/70'
                       )}
