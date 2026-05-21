@@ -3804,6 +3804,11 @@ export function DubVerseEditor({
                   setIsSegmentPreviewing(true)
                   audio.play()
                 } else {
+                  // Resume AudioContext inside user gesture to satisfy
+                  // browser autoplay policy
+                  if (audioContextRef.current?.state === 'suspended') {
+                    audioContextRef.current.resume()
+                  }
                   if (playbackMode === 'preview' && !isPlaying && !rptBufferRef.current) {
                     // Buffer not ready yet — stitch first then play
                     if (!audioContextRef.current) {
