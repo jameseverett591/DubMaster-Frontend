@@ -3797,65 +3797,38 @@ export function DubVerseEditor({
               size="sm"
               className="h-8 w-8 p-0"
               onClick={async () => {
-                if (selectedSegmentIndex !== null) {
-                  const seg = displaySegments[selectedSegmentIndex]
-                  const rawUrl = seg?.audio_url ?? ''
-                  if (isSegmentPreviewing) {
-                    segmentAudioRef.current?.pause()
-                    segmentAudioRef.current = null
-                    setIsSegmentPreviewing(false)
-                    return
-                  }
-                  if (!rawUrl) return
-                  const filename = rawUrl.split('/').pop() ?? ''
-                  const absUrl = rawUrl.startsWith('http') ? rawUrl : apiClient.getAudioFileUrl(jobId, filename)
-                  const audio = new Audio(absUrl)
-                  audio.playbackRate = stagedSpeeds[selectedSegmentIndex] ?? 1.0
-                  audio.volume = isMutedDubbed ? 0 : Math.max(0, Math.min(1, (masterVolume / 100) * (dubbedTextVolume / 100)))
-                  audio.onended = () => {
-                    setIsSegmentPreviewing(false)
-                    selectSegment(null)
-                  }
-                  segmentAudioRef.current = audio
-                  setIsSegmentPreviewing(true)
-                  audio.play()
-                } else {
-                  // Create and resume AudioContext inside user gesture
-                  // to satisfy browser autoplay policy
-                  if (!audioContextRef.current) {
-                    audioContextRef.current = new AudioContext()
-                  }
-                  if (audioContextRef.current.state === 'suspended') {
-                    await audioContextRef.current.resume()
-                  }
-                  if (playbackMode === 'preview' && !isPlaying && !rptBufferRef.current) {
-                    // Buffer not ready yet — stitch first then play
-                    if (!audioContextRef.current) {
-                      audioContextRef.current = new AudioContext()
+                // Create and resume AudioContext inside user gesture
+                // to satisfy browser autoplay policy
+                if (!audioContextRef.current) {
+                  audioContextRef.current = new AudioContext()
+                }
+                if (audioContextRef.current.state === 'suspended') {
+                  await audioContextRef.current.resume()
+                }
+                // If in Preview and buffer not ready, stitch first
+                if (playbackMode === 'preview' && !isPlaying && !rptBufferRef.current) {
+                  const ctx = audioContextRef.current
+                  const resolved = segments.map(seg => {
+                    const resolveUrl = (url: string | undefined) => {
+                      if (!url || !jobId) return url
+                      if (url.startsWith('http')) return url
+                      const filename = url.split('/').pop()
+                      return filename ? apiClient.getAudioFileUrl(jobId, filename) : url
                     }
-                    const ctx = audioContextRef.current
-                    const resolved = segments.map(seg => {
-                      const resolveUrl = (url: string | undefined) => {
-                        if (!url || !jobId) return url
-                        if (url.startsWith('http')) return url
-                        const filename = url.split('/').pop()
-                        return filename ? apiClient.getAudioFileUrl(jobId, filename) : url
-                      }
-                      return {
-                        ...seg,
-                        audio_url: resolveUrl(seg.audio_url),
-                        committed_audio_url: resolveUrl(seg.committed_audio_url),
-                      }
-                    })
-                    stitchRPT(resolved, videoDuration, ctx).then(result => {
-                      if (result) {
-                        rptBufferRef.current = result.buffer
-                        setIsPlaying(true)
-                      }
-                    })
-                  } else {
-                    setIsPlaying(!isPlaying)
-                  }
+                    return {
+                      ...seg,
+                      audio_url: resolveUrl(seg.audio_url),
+                      committed_audio_url: resolveUrl(seg.committed_audio_url),
+                    }
+                  })
+                  stitchRPT(resolved, videoDuration, ctx).then(result => {
+                    if (result) {
+                      rptBufferRef.current = result.buffer
+                      setIsPlaying(true)
+                    }
+                  })
+                } else {
+                  setIsPlaying(!isPlaying)
                 }
               }}
             >
