@@ -2019,7 +2019,6 @@ export function DubVerseEditor({
           i === idx ? { ...seg, preview_text: text } : seg
         )
       })
-      setEditingSegmentIndex(null)
       // Auto-regen in Preview mode — 2 second debounce
       if (playbackMode === 'preview') {
         if (autoRegenTimerRef.current) clearTimeout(autoRegenTimerRef.current)
@@ -2934,7 +2933,7 @@ export function DubVerseEditor({
                           </button>
                         )}
                         </div>
-                        {(segment.isPreviewing || segment.status === 'edited') && (
+                        {(isEditing || segment.isPreviewing || segment.status === 'edited') && (
                           <div className="flex items-center gap-1.5 pointer-events-auto cursor-pointer shrink-0 select-none">
                             <button
                               className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors pointer-events-auto cursor-pointer select-none"
