@@ -1348,6 +1348,13 @@ export function DubVerseEditor({
   // RPT audio playback — separate effect to avoid hook rules violation
   useEffect(() => {
     const video = videoRef.current
+    console.log('[RPT-EFFECT] fired — isPlaying:', isPlaying,
+      'playbackMode:', playbackMode,
+      'buffer:', !!rptBufferRef.current,
+      'ctx:', audioContextRef.current?.state ?? 'null',
+      'gain:', rptGainRef.current?.gain.value ?? 'null',
+      'rptVolume:', rptVolume,
+      'isMutedRPT:', isMutedRPT)
     if (playbackMode !== 'preview') {
       // Stop RPT audio when leaving preview mode
       if (rptSourceRef.current) {
