@@ -4553,7 +4553,6 @@ export function DubVerseEditor({
               <div className="h-14 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
                 {displaySegments.map((seg) => {
                   const hasAudio = !!(seg.committed_audio_url ?? seg.audio_url)
-                  if (!hasAudio) return null
                   const start = (seg.committed_start_time ?? seg.start_time) / Math.max(videoDuration, 1) * 100
                   const end = (seg.committed_end_time ?? seg.end_time) / Math.max(videoDuration, 1) * 100
                   return (
@@ -4561,7 +4560,9 @@ export function DubVerseEditor({
                       key={seg.id + '-rpt-audio'}
                       className={cn(
                         'absolute top-1 bottom-1 rounded opacity-70 transition-all',
-                        regeneratingSegmentIndex === seg.index
+                        !hasAudio
+                          ? 'bg-neutral-500/30 border border-neutral-600/50'
+                          : regeneratingSegmentIndex === seg.index
                           ? 'bg-amber-500/70 border border-amber-400 animate-pulse shadow-[0_0_8px_rgba(251,191,36,0.8)]'
                           : confirmingSegmentIndex === seg.index
                           ? 'bg-amber-400/80 border border-amber-300 animate-[pulse_0.3s_ease-in-out_2]'
