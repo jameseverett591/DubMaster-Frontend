@@ -2933,56 +2933,56 @@ export function DubVerseEditor({
                           </button>
                         )}
                         </div>
-                        {(isEditing || segment.isPreviewing || segment.status === 'edited') && (
-                          <div className="flex items-center gap-1.5 pointer-events-auto cursor-pointer shrink-0 select-none">
-                            <button
-                              className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors pointer-events-auto cursor-pointer select-none"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                commitPreview(index)
-                                commitSegmentChanges(index, {
-                                  committed_adapted_text: displaySegments[index]?.preview_text ?? undefined,
-                                })
-                                setImportedSegments(prev => {
-                                  const base = prev ?? displaySegments
-                                  return base.map((seg, i) =>
-                                    i === index
-                                      ? {
-                                          ...seg,
-                                          active_text: seg.preview_text ?? seg.active_text ?? seg.target_text,
-                                          target_text: seg.preview_text ?? seg.target_text,
-                                          variant_text: seg.preview_text ?? seg.variant_text ?? seg.target_text,
-                                          isUserEdited: true,
-                                          preview_text: null,
-                                          isPreviewing: false,
-                                        }
-                                      : seg
-                                  )
-                                })
-                                setEditingSegmentIndex(null)
-                              }}
-                            >
-                              Commit
-                            </button>
-                            <button
-                              className="text-[10px] px-2 py-0.5 rounded bg-slate-700 text-slate-400 border border-slate-600 hover:bg-slate-600 hover:text-slate-300 transition-colors pointer-events-auto cursor-pointer select-none"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                cancelPreview(index)
-                                setImportedSegments(prev => {
-                                  const base = prev ?? displaySegments
-                                  return base.map((seg, i) =>
-                                    i === index ? { ...seg, preview_text: null, isPreviewing: false } : seg
-                                  )
-                                })
-                                setEditingSegmentIndex(null)
-                              }}
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        )}
                       </>
+                    )}
+                    {(isEditing || segment.isPreviewing || segment.status === 'edited') && (
+                      <div className="flex items-center gap-1.5 pointer-events-auto cursor-pointer shrink-0 select-none">
+                        <button
+                          className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors pointer-events-auto cursor-pointer select-none"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            commitPreview(index)
+                            commitSegmentChanges(index, {
+                              committed_adapted_text: displaySegments[index]?.preview_text ?? undefined,
+                            })
+                            setImportedSegments(prev => {
+                              const base = prev ?? displaySegments
+                              return base.map((seg, i) =>
+                                i === index
+                                  ? {
+                                      ...seg,
+                                      active_text: seg.preview_text ?? seg.active_text ?? seg.target_text,
+                                      target_text: seg.preview_text ?? seg.target_text,
+                                      variant_text: seg.preview_text ?? seg.variant_text ?? seg.target_text,
+                                      isUserEdited: true,
+                                      preview_text: null,
+                                      isPreviewing: false,
+                                    }
+                                  : seg
+                              )
+                            })
+                            setEditingSegmentIndex(null)
+                          }}
+                        >
+                          Commit
+                        </button>
+                        <button
+                          className="text-[10px] px-2 py-0.5 rounded bg-slate-700 text-slate-400 border border-slate-600 hover:bg-slate-600 hover:text-slate-300 transition-colors pointer-events-auto cursor-pointer select-none"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            cancelPreview(index)
+                            setImportedSegments(prev => {
+                              const base = prev ?? displaySegments
+                              return base.map((seg, i) =>
+                                i === index ? { ...seg, preview_text: null, isPreviewing: false } : seg
+                              )
+                            })
+                            setEditingSegmentIndex(null)
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>
