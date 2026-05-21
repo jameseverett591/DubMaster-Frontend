@@ -3780,7 +3780,7 @@ export function DubVerseEditor({
               variant="ghost"
               size="sm"
               className="h-8 w-8 p-0"
-              onClick={() => {
+              onClick={async () => {
                 if (selectedSegmentIndex !== null) {
                   const seg = displaySegments[selectedSegmentIndex]
                   const rawUrl = seg?.audio_url ?? ''
@@ -3804,10 +3804,13 @@ export function DubVerseEditor({
                   setIsSegmentPreviewing(true)
                   audio.play()
                 } else {
-                  // Resume AudioContext inside user gesture to satisfy
-                  // browser autoplay policy
-                  if (audioContextRef.current?.state === 'suspended') {
-                    audioContextRef.current.resume()
+                  // Create and resume AudioContext inside user gesture
+                  // to satisfy browser autoplay policy
+                  if (!audioContextRef.current) {
+                    audioContextRef.current = new AudioContext()
+                  }
+                  if (audioContextRef.current.state === 'suspended') {
+                    await audioContextRef.current.resume()
                   }
                   if (playbackMode === 'preview' && !isPlaying && !rptBufferRef.current) {
                     // Buffer not ready yet — stitch first then play
