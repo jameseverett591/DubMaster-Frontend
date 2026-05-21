@@ -46,6 +46,7 @@ import {
   Twitter,
   Facebook,
   Instagram,
+  Clapperboard,
 } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -2478,6 +2479,14 @@ export function DubVerseEditor({
             className="hidden"
             onChange={handleTranscriptImport}
           />
+          <Button
+            size="sm"
+            className="h-8 bg-slate-600 hover:bg-slate-700 text-white font-medium"
+            onClick={() => router.push('/studio')}
+          >
+            <Clapperboard className="h-4 w-4 mr-1" />
+            Studio
+          </Button>
           <Button
             size="sm"
             className="h-8 bg-amber-500 hover:bg-amber-600 text-black font-medium"
