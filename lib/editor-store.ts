@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
 import type { Segment, QCFinding, QCScore, QCSeverity, QCFindingType, SidebarTab, EmotionalCurve, EmotionalCurvePoint, PlaybackMode, RebuildStatus } from './editor-types'
 import type { AdaptedSegment, VariantType } from './adaptation-types'
 
@@ -141,9 +142,15 @@ interface EditorState {
   getFilteredFindings: () => QCFinding[]
   getCurrentSegment: () => Segment | null
   getSegmentAtTime: (time: number) => Segment | null
+
+  // Imported segments state
+  importedSegments: Segment[] | null
+  setImportedSegments: (segments: Segment[] | null) => void
 }
 
-export const useEditorStore = create<EditorState>((set, get) => ({
+export const useEditorStore = create<EditorState>(
+  persist(
+    (set, get) => ({
   // Initial state
   jobId: null,
   title: '',
@@ -170,6 +177,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   activeCorrectionTool: null,
   adaptationVariants: {},
   isAdaptationLoading: false,
+  importedSegments: null,
   speakerVoiceMap: {},
   speakerPitchMap: {},
 
@@ -549,4 +557,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const state = get()
     return state.segments.find(seg => time >= seg.start_time && time < seg.end_time) || null
   },
-}))
+
+  setImportedSegments: (segments) => set({ importedSegments: segments }),
+    }),
+    {
+      name: 'dubmaster-editor-store',
+      storage: typeof window !== 'undefined' ? window.localStorage : undefined,
+      partialize: (state) => ({
+        importedSegments: state.importedSegments,
+        selectedSegmentIndex: state.selectedSegmentIndex,
+        activeSidebarTab: state.activeSidebarTab,
+        currentTime: state.currentTime,
+        zoomLevel: state.zoomLevel,
+        scrollPosition: state.scrollPosition,
+        playbackMode: state.playbackMode,
+      }),
+    }
+  )
+)
