@@ -145,7 +145,7 @@ interface EditorState {
 
   // Imported segments state
   importedSegments: Segment[] | null
-  setImportedSegments: (segments: Segment[] | null) => void
+  setImportedSegments: (segments: Segment[] | null | ((prev: Segment[] | null) => Segment[] | null)) => void
 }
 
 export const useEditorStore = create<EditorState>(
@@ -558,7 +558,9 @@ export const useEditorStore = create<EditorState>(
     return state.segments.find(seg => time >= seg.start_time && time < seg.end_time) || null
   },
 
-  setImportedSegments: (segments) => set({ importedSegments: segments }),
+  setImportedSegments: (segments) => set((state) => ({
+    importedSegments: typeof segments === 'function' ? segments(state.importedSegments) : segments,
+  })),
     }),
     {
       name: 'dubmaster-editor-store',
