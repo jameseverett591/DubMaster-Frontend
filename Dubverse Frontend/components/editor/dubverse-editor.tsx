@@ -456,6 +456,9 @@ export function DubVerseEditor({
     commitSegmentChanges,
   } = useEditorStore()
 
+  const importedSegments = useEditorStore((state) => state.importedSegments)
+  const setImportedSegments = useEditorStore((state) => state.setImportedSegments)
+
   const [showExportModal, setShowExportModal] = useState(false)
   const [layoutLocked, setLayoutLocked] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -748,8 +751,6 @@ export function DubVerseEditor({
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null)
   
-  // Imported segments (from transcript file) - null means use original, empty array means cleared
-  const [importedSegments, setImportedSegments] = useState<Segment[] | null>(null)
   const [detectedLanguage, setDetectedLanguage] = useState<string | null>(null)
   
   // Use imported segments if set (even if empty), otherwise use initial segments
