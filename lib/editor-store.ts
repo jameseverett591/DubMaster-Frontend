@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
+import { persist, createJSONStorage } from 'zustand/middleware'
 import type { Segment, QCFinding, QCScore, QCSeverity, QCFindingType, SidebarTab, EmotionalCurve, EmotionalCurvePoint, PlaybackMode, RebuildStatus } from './editor-types'
 import type { AdaptedSegment, VariantType } from './adaptation-types'
 
@@ -564,7 +564,7 @@ export const useEditorStore = create<EditorState>(
     }),
     {
       name: 'dubmaster-editor-store',
-      storage: typeof window !== 'undefined' ? window.localStorage : undefined,
+      storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
         importedSegments: state.importedSegments,
         selectedSegmentIndex: state.selectedSegmentIndex,
