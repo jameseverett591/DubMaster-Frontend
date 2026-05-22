@@ -754,7 +754,7 @@ export function DubVerseEditor({
   const [detectedLanguage, setDetectedLanguage] = useState<string | null>(null)
   
   // Use imported segments if set (even if empty), otherwise use initial segments
-  const displaySegments = importedSegments !== null ? importedSegments : segments
+  const displaySegments = (importedSegments !== null ? importedSegments : segments) ?? []
 
   // Unique speakers across all segments — used for reassignment dropdown
   const uniqueSpeakers = useMemo(() => {
