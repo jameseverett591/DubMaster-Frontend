@@ -1760,8 +1760,6 @@ export function DubVerseEditor({
         next.delete(activeIndex)
         return next
       })
-      updateSegment(activeIndex, { status: 'auto' })
-      return
     }
 
     selectSegment(activeIndex)
@@ -2963,6 +2961,7 @@ export function DubVerseEditor({
                               )
                             })
                             setEditingSegmentIndex(null)
+                            handleGenerateSpeech(index)
                           }}
                         >
                           Commit
