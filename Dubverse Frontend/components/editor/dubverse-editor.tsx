@@ -1011,6 +1011,15 @@ export function DubVerseEditor({
       qcFindings,
     })
 
+    // Restore staged emotions from committed_emotion saved in segments.json
+    const restoredEmotions: Record<number, string> = {}
+    segmentsWithFindings.forEach((seg, i) => {
+      if (seg.committed_emotion) restoredEmotions[i] = seg.committed_emotion
+    })
+    if (Object.keys(restoredEmotions).length > 0) {
+      setStagedEmotions(prev => ({ ...restoredEmotions, ...prev }))
+    }
+
     // Initialise speaker voice map from persisted mapping or compute gender defaults
     if (initialVoiceMapping && Object.keys(initialVoiceMapping).length > 0) {
       setSpeakerVoiceMap(initialVoiceMapping)
@@ -1799,7 +1808,9 @@ export function DubVerseEditor({
       })
       setImportedSegments(prev => {
         if (!prev) return prev
-        return prev.map((seg, i) => i === activeIndex ? { ...seg, audio_url, status: 'edited' as const } : seg)
+        return prev.map((seg, i) => i === activeIndex
+          ? { ...seg, audio_url, status: 'edited' as const, committed_emotion: stagedEmotions[activeIndex] ?? seg.committed_emotion }
+          : seg)
       })
       setPlaybackMode('preview')
       commitSegmentChanges(activeIndex, {
@@ -2823,7 +2834,7 @@ export function DubVerseEditor({
                             className="w-full mt-1 p-2 rounded-xl border border-violet-500/40 bg-[#0d1525] shadow-lg shadow-violet-900/30"
                             onClick={(e) => e.stopPropagation()}
                           >
-                            <div className="flex flex-wrap gap-1">
+                            <div className="flex flex-wrap gap-1 mb-2">
                               {EMOTIONS.map((emotion) => (
                                 <span
                                   key={emotion}
@@ -2833,17 +2844,26 @@ export function DubVerseEditor({
                                       ? 'bg-violet-500/30 text-violet-200 border-violet-400'
                                       : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-violet-500/20 hover:text-violet-300 hover:border-violet-500/40'
                                   )}
-                                  onClick={() => {
-                                    setStagedEmotions(prev => ({ ...prev, [index]: emotion }))
-                                    setInlineEmotionPicker(null)
-                                  }}
+                                  onClick={() => setStagedEmotions(prev => ({ ...prev, [index]: emotion }))}
                                 >
                                   {emotion.toLowerCase()}
                                 </span>
                               ))}
                             </div>
+                            <button
+                              type="button"
+                              disabled={isRegenerating}
+                              className="w-full text-[10px] py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-medium transition-colors mb-1.5"
+                              onClick={() => {
+                                setInlineEmotionPicker(null)
+                                selectSegment(index)
+                                handleGenerateSpeech(index)
+                              }}
+                            >
+                              ✦ Generate Speech
+                            </button>
                             <span
-                              className="mt-1.5 text-[9px] text-slate-600 hover:text-slate-400 cursor-pointer block text-right"
+                              className="text-[9px] text-slate-600 hover:text-slate-400 cursor-pointer block text-right"
                               onClick={() => setInlineEmotionPicker(null)}
                             >
                               ✕ cancel
@@ -2974,6 +2994,7 @@ export function DubVerseEditor({
                                       isUserEdited: true,
                                       preview_text: null,
                                       isPreviewing: false,
+                                      committed_emotion: stagedEmotions[index] ?? seg.committed_emotion,
                                     }
                                   : seg
                               )
@@ -2985,6 +3006,7 @@ export function DubVerseEditor({
                           Commit
                         </button>
                         <button
+                          type="button"
                           className="text-[10px] px-2 py-0.5 rounded bg-slate-700 text-slate-400 border border-slate-600 hover:bg-slate-600 hover:text-slate-300 transition-colors pointer-events-auto cursor-pointer select-none"
                           onClick={(e) => {
                             e.stopPropagation()

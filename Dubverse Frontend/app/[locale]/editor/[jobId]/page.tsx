@@ -98,6 +98,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             speaker_label: seg.speaker ?? 'Speaker 1',
             speaker_gender: gender,
             audio_url: seg.path,
+            committed_emotion: seg.emotion ?? undefined,
             qc_findings: seg.qc_findings ?? [],
             emotionalCurve: {
               combined: [

@@ -2174,6 +2174,8 @@ class DubbingService:
         seg["voice_id"] = use_voice_id
         seg["speed"] = use_speed
         seg["text"] = use_text
+        if emotion:
+            seg["emotion"] = emotion.lower()
         if speed_ratio is not None:
             seg["speed_ratio"] = speed_ratio
         if target_duration is not None:
