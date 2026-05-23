@@ -900,6 +900,7 @@ export function DubVerseEditor({
   const rptGainRef = useRef<GainNode | null>(null)
   const [isMutedRPT, setIsMutedRPT] = useState(false)
   const [rptVolume, setRptVolume] = useState(80)
+  const [rptPlaybackRate, setRptPlaybackRate] = useState(1.0)
   const [isMuted, setIsMuted] = useState(false)
   const [isMutedOriginal, setIsMutedOriginal] = useState(false)
   const [isMutedDubbed, setIsMutedDubbed] = useState(false)
@@ -1417,7 +1418,8 @@ export function DubVerseEditor({
         rptBufferRef.current,
         video?.currentTime ?? 0,
         ctx,
-        rptGainRef.current
+        rptGainRef.current,
+        rptPlaybackRate
       )
       rptSourceRef.current.onended = () => { rptSourceRef.current = null }
     } else {
@@ -1426,7 +1428,7 @@ export function DubVerseEditor({
         rptSourceRef.current = null
       }
     }
-  }, [isPlaying, playbackMode, isMutedRPT, rptVolume])
+  }, [isPlaying, playbackMode, isMutedRPT, rptVolume, rptPlaybackRate])
 
   // Initial RPT stitch — runs once when segments first load
   // so Preview mode works immediately without needing to
@@ -1490,14 +1492,25 @@ export function DubVerseEditor({
         rptBufferRef.current,
         video.currentTime,
         ctx,
-        rptGainRef.current
+        rptGainRef.current,
+        rptPlaybackRate
       )
       rptSourceRef.current.onended = () => { rptSourceRef.current = null }
     }
 
     video.addEventListener('seeked', handleSeeked)
     return () => video.removeEventListener('seeked', handleSeeked)
-  }, [playbackMode, isPlaying, isMutedRPT, rptVolume])
+  }, [playbackMode, isPlaying, isMutedRPT, rptVolume, rptPlaybackRate])
+
+  // Sync playback rate changes live — no restart needed
+  useEffect(() => {
+    if (rptSourceRef.current) {
+      rptSourceRef.current.playbackRate.value = rptPlaybackRate
+    }
+    if (videoRef.current) {
+      videoRef.current.playbackRate = rptPlaybackRate
+    }
+  }, [rptPlaybackRate])
 
   // Cleanup RPT audio resources on unmount
   useEffect(() => {
@@ -4073,7 +4086,7 @@ export function DubVerseEditor({
             </div>
 
             {/* RPT Audio label */}
-            <div className="h-14 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
+            <div className="h-20 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1">
                   <button type="button" onClick={() => setIsMutedRPT(v => !v)} className="flex-shrink-0">
@@ -4091,6 +4104,23 @@ export function DubVerseEditor({
                 thumbless
                 className="w-full h-1"
               />
+              <div className="flex items-center gap-1 pt-0.5">
+                {[0.5, 0.75, 1, 1.25, 1.5].map(rate => (
+                  <button
+                    key={rate}
+                    type="button"
+                    onClick={() => setRptPlaybackRate(rate)}
+                    className={cn(
+                      'text-[9px] px-1.5 py-0.5 rounded border transition-colors',
+                      rptPlaybackRate === rate
+                        ? 'bg-amber-500/20 border-amber-500/50 text-amber-400'
+                        : 'bg-neutral-800 border-neutral-700 text-neutral-500 hover:text-neutral-300 hover:border-neutral-500'
+                    )}
+                  >
+                    {rate === 1 ? '1×' : `${rate}×`}
+                  </button>
+                ))}
+              </div>
             </div>
             {/* Emotional curve track label */}
             <div className="h-24 shrink-0 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-700 gap-1 bg-neutral-900/30">
