@@ -89,7 +89,9 @@ export async function stitchRPT(
       if (!audioUrl) return
 
       const startTime = seg.committed_start_time ?? seg.start_time
+      const endTime = seg.committed_end_time ?? seg.end_time
       const startSample = Math.floor(startTime * sampleRate)
+      const maxSlotSamples = Math.ceil(endTime * sampleRate) - startSample
 
       const segBuffer = await fetchAndDecode(audioUrl, audioContext)
       if (!segBuffer) return
@@ -105,6 +107,7 @@ export async function stitchRPT(
 
       const copyLength = Math.min(
         segBuffer.length,
+        maxSlotSamples,
         totalSamples - startSample
       )
 

@@ -1784,6 +1784,11 @@ export function DubVerseEditor({
         audio_url,
         status: 'edited',
       })
+      setImportedSegments(prev => {
+        if (!prev) return prev
+        return prev.map((seg, i) => i === activeIndex ? { ...seg, audio_url, status: 'edited' as const } : seg)
+      })
+      setPlaybackMode('preview')
       commitSegmentChanges(activeIndex, {
         committed_audio_url: audio_url,
         committed_voice_id: stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id],
@@ -1844,7 +1849,7 @@ export function DubVerseEditor({
       setConfirmingSegmentIndex(activeIndex)
       setTimeout(() => setConfirmingSegmentIndex(null), 1200)
     }
-  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds, lockedSegments, selectSegment])
+  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds, lockedSegments, selectSegment, setImportedSegments, setPlaybackMode])
 
   // Preview speech — non-destructive TTS preview using preview_text
   const handlePreviewSpeech = useCallback(async (index: number) => {
