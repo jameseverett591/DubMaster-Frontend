@@ -939,7 +939,15 @@ export function DubVerseEditor({
   const [suggestions, setSuggestions] = useState<Record<number, Suggestion[]>>({})
   
   // Initialize store
+  const prevJobIdRef = useRef<string | null>(null)
   useEffect(() => {
+    // Clear persisted importedSegments when a new job is loaded so stale
+    // edits from a previous job don't bleed into this one.
+    if (prevJobIdRef.current !== null && prevJobIdRef.current !== jobId) {
+      setImportedSegments(null)
+    }
+    prevJobIdRef.current = jobId
+
     const segmentsWithFindings = initialSegments.map((seg, idx) => {
       // Generate mock segment-level QC data
       const score = Math.floor(Math.random() * 40) + 60 // 60-100
@@ -1044,7 +1052,7 @@ export function DubVerseEditor({
       }
       setSpeakerVoiceMap(defaultMap)
     }
-  }, [jobId, title, sourceLanguage, targetLanguage, videoUrl, dubbedVideoUrl, videoDuration, initialSegments, qcScore, qcFindings, setJobData, setSpeakerVoiceMap, speakerGenders, initialVoiceMapping])
+  }, [jobId, title, sourceLanguage, targetLanguage, videoUrl, dubbedVideoUrl, videoDuration, initialSegments, qcScore, qcFindings, setJobData, setSpeakerVoiceMap, speakerGenders, initialVoiceMapping, setImportedSegments])
   
   // Handle video import and automatic transcription
   const handleVideoImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
