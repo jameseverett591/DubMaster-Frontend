@@ -137,10 +137,12 @@ export function scheduleRPTPlayback(
   buffer: AudioBuffer,
   startAtSeconds: number,
   audioContext: AudioContext,
-  gainNode?: GainNode
+  gainNode?: GainNode,
+  playbackRate = 1.0
 ): AudioBufferSourceNode {
   const source = audioContext.createBufferSource()
   source.buffer = buffer
+  source.playbackRate.value = playbackRate
 
   const destination = gainNode ?? audioContext.destination
   source.connect(destination)
