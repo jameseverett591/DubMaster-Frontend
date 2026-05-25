@@ -697,6 +697,22 @@ class DubVerseAPIClient {
     return response.json()
   }
 
+  async commitSegmentTiming(
+    jobId: string,
+    index: number,
+    data: {
+      committed_start_time?: number
+      committed_end_time?: number
+      committed_audio_url?: string
+    }
+  ): Promise<void> {
+    await fetch(`${this.baseURL}/api/segment/commit/${jobId}/${index}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify(data),
+    })
+  }
+
   async askAI(request: {
     prompt: string
     source_text?: string

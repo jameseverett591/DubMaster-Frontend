@@ -1421,24 +1421,30 @@ export function DubVerseEditor({
 
     if (isPlaying) {
       const ctx = audioContextRef.current
-      if (ctx.state === 'suspended') ctx.resume()
-      if (rptSourceRef.current) {
-        try { rptSourceRef.current.stop() } catch {}
-        rptSourceRef.current = null
+      const doSchedule = () => {
+        if (rptSourceRef.current) {
+          try { rptSourceRef.current.stop() } catch {}
+          rptSourceRef.current = null
+        }
+        if (!rptGainRef.current) {
+          rptGainRef.current = ctx.createGain()
+          rptGainRef.current.connect(ctx.destination)
+        }
+        rptGainRef.current!.gain.value = isMutedRPT ? 0 : rptVolume / 100
+        rptSourceRef.current = scheduleRPTPlayback(
+          rptBufferRef.current!,
+          video?.currentTime ?? 0,
+          ctx,
+          rptGainRef.current!,
+          rptPlaybackRate
+        )
+        rptSourceRef.current.onended = () => { rptSourceRef.current = null }
       }
-      if (!rptGainRef.current) {
-        rptGainRef.current = ctx.createGain()
-        rptGainRef.current.connect(ctx.destination)
+      if (ctx.state === 'suspended') {
+        ctx.resume().then(doSchedule)
+      } else {
+        doSchedule()
       }
-      rptGainRef.current.gain.value = isMutedRPT ? 0 : rptVolume / 100
-      rptSourceRef.current = scheduleRPTPlayback(
-        rptBufferRef.current,
-        video?.currentTime ?? 0,
-        ctx,
-        rptGainRef.current,
-        rptPlaybackRate
-      )
-      rptSourceRef.current.onended = () => { rptSourceRef.current = null }
     } else {
       if (rptSourceRef.current) {
         try { rptSourceRef.current.stop() } catch {}
@@ -4351,6 +4357,10 @@ export function DubVerseEditor({
                             committed_start_time: Math.max(0, originalStart + deltaTime),
                             committed_end_time: Math.max(0, originalEnd + deltaTime),
                           })
+                          apiClient.commitSegmentTiming(jobId, index, {
+                            committed_start_time: Math.max(0, originalStart + deltaTime),
+                            committed_end_time: Math.max(0, originalEnd + deltaTime),
+                          }).catch(err => console.warn('[COMMIT-TIMING]', err))
                           if (lockedPairs.has(index)) {
                             updateSegment(index, {
                               start_time: Math.max(0, originalStart + deltaTime),
@@ -4535,6 +4545,10 @@ export function DubVerseEditor({
                             committed_start_time: Math.max(0, originalStart + deltaTime),
                             committed_end_time: Math.max(0, originalEnd + deltaTime),
                           })
+                          apiClient.commitSegmentTiming(jobId, index, {
+                            committed_start_time: Math.max(0, originalStart + deltaTime),
+                            committed_end_time: Math.max(0, originalEnd + deltaTime),
+                          }).catch(err => console.warn('[COMMIT-TIMING]', err))
                           if (lockedPairs.has(index)) {
                             updateSegment(index, {
                               start_time: Math.max(0, originalStart + deltaTime),
