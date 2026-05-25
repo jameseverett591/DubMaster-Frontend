@@ -2677,7 +2677,7 @@ async def download_dubbed_video(job_id: str, language: str):
     return FileResponse(
         dubbed_path,
         media_type="video/mp4",
-        filename=f"dubbed_{language}.mp4"
+        headers={"Content-Disposition": "inline"},
     )
 
 
@@ -3239,6 +3239,47 @@ async def get_segments(job_id: str):
     with open(segments_path, "r", encoding="utf-8") as f:
         data = _json.load(f)
     return data
+
+
+@router.patch("/segment/commit/{job_id}/{index}")
+async def commit_segment_timing(job_id: str, index: int, body: dict, request: Request):
+    """Save committed timing and audio URL for a single segment to Supabase and segments.json."""
+    from app.services.supabase_client import supabase
+    committed_start_time = body.get("committed_start_time")
+    committed_end_time = body.get("committed_end_time")
+    committed_audio_url = body.get("committed_audio_url")
+    # Update Supabase
+    update_data = {"sequence": index}
+    if committed_start_time is not None:
+        update_data["committed_start_time"] = committed_start_time
+    if committed_end_time is not None:
+        update_data["committed_end_time"] = committed_end_time
+    if committed_audio_url is not None:
+        update_data["committed_audio_url"] = committed_audio_url
+    try:
+        supabase.table("segments").update(update_data).eq("job_id", job_id).eq("sequence", index).execute()
+    except Exception as e:
+        logger.warning(f"Supabase segment commit failed: {e}")
+    # Also update segments.json on disk
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if os.path.exists(segments_path):
+        with open(segments_path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        segs = data.get("segments", [])
+        if index < len(segs):
+            if committed_start_time is not None:
+                segs[index]["start"] = committed_start_time
+            if committed_end_time is not None:
+                segs[index]["end"] = committed_end_time
+            if committed_audio_url is not None:
+                filename = committed_audio_url.split("/")[-1]
+                local_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
+                if os.path.exists(local_path):
+                    segs[index]["path"] = local_path
+            data["segments"] = segs
+            with open(segments_path, "w", encoding="utf-8") as f:
+                _json.dump(data, f, indent=2, ensure_ascii=False)
+    return {"status": "ok", "job_id": job_id, "index": index}
 
 
 @router.post("/segment/regenerate/{job_id}/{index}")
