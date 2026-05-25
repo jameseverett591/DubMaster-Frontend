@@ -3844,6 +3844,12 @@ export function DubVerseEditor({
               size="sm"
               className="h-8 w-8 p-0"
               onClick={async () => {
+                // Drive video play/pause synchronously BEFORE any await
+                // so Chrome's autoplay policy isn't violated for audio
+                if (videoRef.current) {
+                  if (isPlaying) videoRef.current.pause()
+                  else videoRef.current.play().catch(() => {})
+                }
                 // Create and resume AudioContext inside user gesture
                 // to satisfy browser autoplay policy
                 if (!audioContextRef.current) {
