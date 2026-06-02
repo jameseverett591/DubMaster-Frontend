@@ -1,65 +1,45 @@
 'use client'
 
 import { useEffect, useState, useCallback, useMemo } from 'react'
+import { AlertTriangle, Check, ChevronDown, RefreshCw, Loader2 } from 'lucide-react'
 import { useEditorStore } from '@/lib/editor-store'
-import { apiClient, API_BASE_URL, type Voice } from '@/lib/api-client'
+import { apiClient } from '@/lib/api-client'
 
-const VOICES_BY_GENDER: Record<string, string[]> = {
-  male:   ['male-1', 'male-2', 'male-3', 'male-4'],
-  female: ['female-1', 'female-2', 'female-3', 'female-4'],
-  child:  ['child-1', 'child-2', 'child-3'],
-}
-
-function buildDefaultVoiceMap(
-  speakerGenders: Record<string, string>,
-  uniqueSpeakers: string[],
-): Record<string, string> {
-  const usage: Record<string, number> = {}
-  const map: Record<string, string> = {}
-  for (let i = 0; i < uniqueSpeakers.length; i++) {
-    const speaker = uniqueSpeakers[i]
-    const gender = speakerGenders[speaker] ?? 'male'
-    const pool = VOICES_BY_GENDER[gender] ?? VOICES_BY_GENDER.male
-    const idx = usage[gender] ?? 0
-    map[speaker] = pool[idx % pool.length]
-    usage[gender] = idx + 1
-  }
-  return map
-}
-
-interface SpeakerCard {
-  speaker_id: string
-  display_name: string
-  detected_gender: 'male' | 'female' | 'child' | 'unknown'
-  sample_line: string
-  current_voice_id: string
-  is_auto: boolean
-}
+// Curated starter set of character-trait words. Per-speaker custom additions
+// (via the Customize input) extend the list at the speaker level only.
+const TRAIT_PRESETS = [
+  'calm', 'weary', 'paternal', 'confident', 'authoritative',
+  'warm', 'intense', 'controlled', 'measured', 'dignified',
+  'gruff', 'gentle', 'sharp', 'smooth', 'nervous',
+  'playful', 'deliberate', 'energetic', 'reserved', 'commanding',
+]
 
 export function SpeakerVoicePanel() {
   const {
     jobId,
     segments,
     speakerVoiceMap,
-    setSpeakerVoiceMap,
-    updateSpeakerVoice,
+    speakerTraitsMap,
+    setSpeakerTraits,
+    speakerCustomTraits,
+    addCustomTrait,
     speakerPitchMap,
     updateSpeakerPitch,
-    setSpeakerPitchMap,
-    commitSegmentChanges,
+    updateSegment,
+    setImportedSegments,
   } = useEditorStore()
 
-  const [voices, setVoices] = useState<Voice[]>([])
-  const [voicesLoading, setVoicesLoading] = useState(false)
-  const [voicesError, setVoicesError] = useState<string | null>(null)
-  const [previewingId, setPreviewingId] = useState<string | null>(null)
-  // Track which speakers have been manually overridden
-  const [manualOverrides, setManualOverrides] = useState<Set<string>>(new Set())
-  // Pending voice selections (not yet applied)
-  const [pendingVoiceMap, setPendingVoiceMap] = useState<Record<string, string>>({})
-  // Brief "Applied" confirmation per speaker
+  const [openDropdown, setOpenDropdown] = useState<string | null>(null)
+  const [pendingTraits, setPendingTraits] = useState<Record<string, string[]>>({})
+  const [customInput, setCustomInput] = useState<Record<string, string>>({})
   const [justApplied, setJustApplied] = useState<Set<string>>(new Set())
-  const [applyLoading, setApplyLoading] = useState<Set<string>>(new Set())
+
+  // Per-speaker bulk-regenerate state machine: idle → confirming → running → done.
+  // Keyed by speaker_id so two speakers can run independently if needed.
+  type RegenStatus = 'idle' | 'confirming' | 'running' | 'done'
+  const [regenStatus, setRegenStatus] = useState<Record<string, RegenStatus>>({})
+  const [regenProgress, setRegenProgress] = useState<Record<string, { current: number; total: number }>>({})
+  const [regenErrors, setRegenErrors] = useState<Record<string, number>>({})
 
   // Derive unique speakers + their gender/sample from segments
   const speakerData = useMemo(() => {
@@ -84,105 +64,128 @@ export function SpeakerVoicePanel() {
     return speakers
   }, [segments])
 
-  // Load voices once on mount
+  // Sync local pending with applied when applied changes from outside
   useEffect(() => {
-    setVoicesLoading(true)
-    apiClient.getVoices()
-      .then(({ voices }) => setVoices(voices))
-      .catch(() => setVoicesError('Failed to load voices'))
-      .finally(() => setVoicesLoading(false))
-  }, [])
-
-  // Sync pending map when speakerVoiceMap changes from outside
-  useEffect(() => {
-    setPendingVoiceMap(prev => {
+    setPendingTraits(prev => {
       const next = { ...prev }
       for (const spk of speakerData) {
-        const applied = speakerVoiceMap[spk.speaker_id]
+        const applied = speakerTraitsMap[spk.speaker_id]
         if (applied && next[spk.speaker_id] === undefined) {
-          next[spk.speaker_id] = applied
+          next[spk.speaker_id] = [...applied]
         }
       }
       return next
     })
-  }, [speakerVoiceMap, speakerData])
+  }, [speakerTraitsMap, speakerData])
 
-  const handleApplyVoice = useCallback(async (speakerId: string, voiceKey: string) => {
-    setApplyLoading(prev => new Set([...prev, speakerId]))
-    updateSpeakerVoice(speakerId, voiceKey)
-    setManualOverrides(prev => new Set([...prev, speakerId]))
-    if (jobId) {
-      const next = { ...speakerVoiceMap, [speakerId]: voiceKey }
-      try {
-        await apiClient.updateVoiceMapping(jobId, next)
-      } catch {
-        // swallow — UI already updated optimistically
-      }
-    }
-    // Commit voice change to RPT manifest for all segments
-    // belonging to this speaker
-    segments.forEach((seg, idx) => {
-      if (seg.speaker_id === speakerId) {
-        commitSegmentChanges(idx, {
-          committed_voice_id: voiceKey,
-          committed_pitch: speakerPitchMap[speakerId] ?? 0,
-        })
-      }
+  const togglePendingTrait = useCallback((speakerId: string, trait: string) => {
+    setPendingTraits(prev => {
+      const current = prev[speakerId] ?? []
+      const next = current.includes(trait)
+        ? current.filter(t => t !== trait)
+        : [...current, trait]
+      return { ...prev, [speakerId]: next }
     })
-    setApplyLoading(prev => {
-      const n = new Set(prev)
-      n.delete(speakerId)
-      return n
-    })
-    setJustApplied(prev => new Set([...prev, speakerId]))
-    setTimeout(() => {
-      setJustApplied(prev => {
-        const n = new Set(prev)
-        n.delete(speakerId)
-        return n
-      })
-    }, 2000)
-  }, [jobId, speakerVoiceMap, updateSpeakerVoice])
-
-  const handleResetToAuto = useCallback(async (speakerId: string, gender: string) => {
-    setManualOverrides(prev => {
-      const next = new Set(prev)
-      next.delete(speakerId)
-      return next
-    })
-    setPendingVoiceMap(prev => {
-      const next = { ...prev }
-      delete next[speakerId]
-      return next
-    })
-    const uniqueIds = speakerData.map(s => s.speaker_id)
-    const genders = Object.fromEntries(speakerData.map(s => [s.speaker_id, s.detected_gender]))
-    const defaults = buildDefaultVoiceMap(genders, uniqueIds)
-    const autoVoice = defaults[speakerId] ?? 'male-1'
-    updateSpeakerVoice(speakerId, autoVoice)
-    if (jobId) {
-      const next = { ...speakerVoiceMap, [speakerId]: autoVoice }
-      await apiClient.updateVoiceMapping(jobId, next)
-    }
-  }, [jobId, speakerData, speakerVoiceMap, updateSpeakerVoice])
-
-  const handlePreview = useCallback(async (voiceId: string) => {
-    setPreviewingId(voiceId)
-    try {
-      const found = voices.find(v => v.voice_id === voiceId)
-      const src = found?.preview_url || `${API_BASE_URL}/api/voice-preview/${voiceId}`
-      const audio = new Audio(src)
-      audio.onended = () => setPreviewingId(null)
-      audio.onerror = () => setPreviewingId(null)
-      await audio.play()
-    } catch {
-      setPreviewingId(null)
-    }
   }, [])
 
-  const handlePitchChange = useCallback((speakerId: string, nSteps: number) => {
-    updateSpeakerPitch(speakerId, nSteps)
+  const handleApplyTraits = useCallback(async (speakerId: string) => {
+    const traits = pendingTraits[speakerId] ?? []
+    setSpeakerTraits(speakerId, traits)
+    setJustApplied(prev => new Set([...prev, speakerId]))
+    setTimeout(() => {
+      setJustApplied(prev => { const n = new Set(prev); n.delete(speakerId); return n })
+    }, 2000)
+    // Persist server-side. Build the full map (this speaker's new value
+    // merged with everyone else's existing values) so the PATCH replaces
+    // the whole mapping cleanly.
+    if (jobId) {
+      const fullMap: Record<string, string[]> = { ...speakerTraitsMap, [speakerId]: traits }
+      try {
+        await apiClient.updateTraitsMapping(jobId, fullMap)
+      } catch {
+        // UI already updated optimistically; swallow.
+      }
+    }
+  }, [pendingTraits, setSpeakerTraits, jobId, speakerTraitsMap])
+
+  const handlePitchChange = useCallback((speakerId: string, n: number) => {
+    updateSpeakerPitch(speakerId, n)
   }, [updateSpeakerPitch])
+
+  // Loop through every segment for this speaker, sequentially regenerate each
+  // with the speaker's CURRENT voice/traits/pitch and the segment's existing
+  // text/emotion/speed. Touches only this speaker's segments — others are left
+  // entirely alone (filter on speaker_id, not index).
+  const handleRegenerateAllForSpeaker = useCallback(async (speakerId: string) => {
+    if (!jobId) return
+
+    // Snapshot the speaker's segments + speaker-level settings at click time so
+    // an Apply on traits/pitch mid-run doesn't surprise the in-flight loop.
+    const targets = segments
+      .map((seg, idx) => ({ seg, idx }))
+      .filter(({ seg }) => seg.speaker_id === speakerId)
+
+    if (targets.length === 0) {
+      setRegenStatus(prev => { const n = { ...prev }; delete n[speakerId]; return n })
+      return
+    }
+
+    const voiceKey = speakerVoiceMap[speakerId]
+    const traits = speakerTraitsMap[speakerId] ?? []
+    const pitch = speakerPitchMap[speakerId] ?? 0
+
+    setRegenStatus(prev => ({ ...prev, [speakerId]: 'running' }))
+    setRegenProgress(prev => ({ ...prev, [speakerId]: { current: 0, total: targets.length } }))
+    setRegenErrors(prev => { const n = { ...prev }; delete n[speakerId]; return n })
+
+    let failures = 0
+    for (let i = 0; i < targets.length; i++) {
+      const { seg, idx } = targets[i]
+      const text = seg.committed_adapted_text ?? seg.active_text ?? seg.target_text
+      try {
+        const response = await apiClient.regenerateSegment(jobId, idx, {
+          text,
+          speed: seg.committed_speed ?? 1.0,
+          emotion: seg.committed_emotion ?? undefined,
+          traits: traits.length > 0 ? traits : undefined,
+          voice_key: voiceKey,
+          pitch,
+        })
+        // Mirror the new audio + voice into both store buckets so the editor
+        // reflects the change without needing a job reload.
+        const filename = response.segment.path?.split('/').pop() ?? ''
+        // Cache-bust: filename stays the same across regenerates ("segment_NNNN_regen.mp3"),
+        // so without a query param the browser keeps serving the old mp3 from cache.
+        const newAudioUrl = filename ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}` : undefined
+        const update = {
+          audio_url: newAudioUrl,
+          committed_audio_url: newAudioUrl,
+          committed_voice_id: response.segment.voice_id ?? voiceKey,
+          status: 'edited' as const,
+        }
+        updateSegment(idx, update)
+        setImportedSegments(prev => {
+          if (!prev) return prev
+          return prev.map((s, i) => i === idx ? { ...s, ...update } : s)
+        })
+      } catch (e) {
+        console.error(`[Regenerate-all] seg ${idx} failed:`, e)
+        failures += 1
+      }
+      setRegenProgress(prev => ({ ...prev, [speakerId]: { current: i + 1, total: targets.length } }))
+    }
+
+    if (failures > 0) {
+      setRegenErrors(prev => ({ ...prev, [speakerId]: failures }))
+    }
+    setRegenStatus(prev => ({ ...prev, [speakerId]: 'done' }))
+    // Auto-clear the done state after 4s so the button reverts to idle.
+    setTimeout(() => {
+      setRegenStatus(prev => { const n = { ...prev }; delete n[speakerId]; return n })
+      setRegenProgress(prev => { const n = { ...prev }; delete n[speakerId]; return n })
+      setRegenErrors(prev => { const n = { ...prev }; delete n[speakerId]; return n })
+    }, 4000)
+  }, [jobId, segments, speakerVoiceMap, speakerTraitsMap, speakerPitchMap, updateSegment, setImportedSegments])
 
   if (segments.length === 0) {
     return (
@@ -194,36 +197,40 @@ export function SpeakerVoicePanel() {
 
   return (
     <div className="flex flex-col gap-3 p-3 overflow-y-auto">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-          Speaker Voices
-        </span>
-        <span className="text-xs text-slate-500">{speakerData.length} speaker{speakerData.length !== 1 ? 's' : ''}</span>
+      {/* WARNING BANNER */}
+      <div className="rounded-lg bg-amber-500/15 border border-amber-500/40 px-3 py-2.5 flex gap-2.5">
+        <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+        <p className="text-[11px] text-amber-200/90 leading-relaxed">
+          <span className="font-semibold text-amber-300">
+            ⚠ Once a speaker&apos;s character traits are established, this builds the basic character&apos;s personality.
+          </span>{' '}
+          This cannot be changed — to change it means creating a new and/or different character.
+          You can do this by using the Clear button to wipe the segment clean and start building
+          the character over. This will affect all segments across the board.{' '}
+          <span className="font-semibold text-amber-300">Please build characters decisively and carefully.</span>{' '}
+          Make all character changes early on in production so you are happy with the character.
+          This way you don&apos;t lose hours and days of work unnecessarily.
+        </p>
       </div>
 
-      {voicesError && (
-        <div className="rounded bg-red-500/10 border border-red-500/30 px-3 py-2 text-xs text-red-400">
-          {voicesError} —{' '}
-          <button
-            className="underline hover:text-red-300"
-            onClick={() => {
-              setVoicesError(null)
-              setVoicesLoading(true)
-              apiClient.getVoices()
-                .then(({ voices }) => setVoices(voices))
-                .catch(() => setVoicesError('Failed to load voices'))
-                .finally(() => setVoicesLoading(false))
-            }}
-          >
-            retry
-          </button>
-        </div>
-      )}
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+          Characters
+        </span>
+        <span className="text-xs text-slate-500">
+          {speakerData.length} speaker{speakerData.length !== 1 ? 's' : ''}
+        </span>
+      </div>
 
       <div className="flex flex-col gap-2">
         {speakerData.map((spk) => {
-          const currentVoice = speakerVoiceMap[spk.speaker_id] ?? 'male-1'
-          const isAuto = !manualOverrides.has(spk.speaker_id)
+          const applied = speakerTraitsMap[spk.speaker_id] ?? []
+          const pending = pendingTraits[spk.speaker_id] ?? []
+          const custom = speakerCustomTraits[spk.speaker_id] ?? []
+          const isChanged =
+            JSON.stringify([...pending].sort()) !== JSON.stringify([...applied].sort())
+          const isJustApplied = justApplied.has(spk.speaker_id)
+
           const genderColor = {
             male: 'text-blue-400',
             female: 'text-pink-400',
@@ -237,52 +244,17 @@ export function SpeakerVoicePanel() {
             unknown: '? Unknown',
           }[spk.detected_gender]
 
-          // Group voices by gender/age — matching first, then others under a divider
-          const childVoices = voices.filter(v => v.labels?.age === 'child')
-          const femaleVoices = voices.filter(v => v.labels?.gender === 'female' && v.labels?.age !== 'child')
-          const maleVoices = voices.filter(v => v.labels?.gender === 'male' && v.labels?.age !== 'child')
-
-          let primaryVoices: Voice[] = []
-          let otherVoices: Voice[] = []
-          let fallbackNote: string | null = null
-
-          if (spk.detected_gender === 'child') {
-            primaryVoices = childVoices
-            otherVoices = voices.filter(v => v.labels?.age !== 'child')
-            if (childVoices.length === 0) {
-              fallbackNote = 'No child voices available — select from other groups below'
-            }
-          } else if (spk.detected_gender === 'female') {
-            primaryVoices = femaleVoices
-            otherVoices = voices.filter(v => !(v.labels?.gender === 'female' && v.labels?.age !== 'child'))
-            if (femaleVoices.length === 0) {
-              fallbackNote = 'No female voices available — select from other groups below'
-            }
-          } else if (spk.detected_gender === 'male') {
-            primaryVoices = maleVoices
-            otherVoices = voices.filter(v => !(v.labels?.gender === 'male' && v.labels?.age !== 'child'))
-            if (maleVoices.length === 0) {
-              fallbackNote = 'No male voices available — select from other groups below'
-            }
-          } else {
-            otherVoices = voices
-          }
-
           return (
             <div
               key={spk.speaker_id}
               className="rounded-lg border border-slate-700 bg-slate-800/60 p-3 flex flex-col gap-2"
             >
-              {/* Header row */}
+              {/* Header */}
               <div className="flex items-center justify-between">
                 <span className="text-sm font-medium text-slate-100">{spk.display_name}</span>
-                {isAuto ? (
-                  <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-medium text-emerald-400">
-                    Auto
-                  </span>
-                ) : (
-                  <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-medium text-amber-400">
-                    Manual
+                {applied.length > 0 && (
+                  <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] text-emerald-400">
+                    {applied.length} {applied.length === 1 ? 'trait' : 'traits'} applied
                   </span>
                 )}
               </div>
@@ -290,117 +262,105 @@ export function SpeakerVoicePanel() {
               {/* Gender */}
               <span className={`text-xs ${genderColor}`}>{genderLabel} · F0-detected</span>
 
-              {/* Fallback warning */}
-              {fallbackNote && (
-                <span className="text-[10px] text-amber-400/80">
-                  ⚠ {fallbackNote}
-                </span>
-              )}
-
               {/* Sample line */}
               {spk.sample_line && (
                 <p className="text-xs text-slate-500 leading-relaxed line-clamp-2">
-                  "{spk.sample_line}"
+                  &quot;{spk.sample_line}&quot;
                 </p>
               )}
 
-              {/* Voice selector + preview + apply */}
-              <div className="flex items-center gap-2">
-                {voicesLoading ? (
-                  <div className="flex-1 h-7 rounded bg-slate-700 animate-pulse" />
-                ) : voices.length > 0 ? (
-                  <select
-                    value={pendingVoiceMap[spk.speaker_id] ?? currentVoice}
-                    onChange={(e) => setPendingVoiceMap(prev => ({ ...prev, [spk.speaker_id]: e.target.value }))}
-                    className="flex-1 rounded bg-slate-700 border border-slate-600 px-2 py-1 text-xs text-slate-100 focus:outline-none focus:border-blue-500"
-                  >
-                    {primaryVoices.length > 0 && (
-                      <optgroup label="Matching Voices">
-                        {primaryVoices.map((v) => (
-                          <option key={v.voice_id} value={v.voice_id}>
-                            {v.name}
-                            {v.labels?.gender ? ` (${v.labels.gender})` : ''}
-                            {v.labels?.age && v.labels.age !== 'young' && v.labels.age !== 'middle aged' ? ` · ${v.labels.age}` : ''}
-                          </option>
-                        ))}
-                      </optgroup>
-                    )}
-                    {otherVoices.length > 0 && (
-                      <optgroup label={primaryVoices.length > 0 ? 'Other Voices' : 'All Voices'}>
-                        {otherVoices.map((v) => (
-                          <option key={v.voice_id} value={v.voice_id}>
-                            {v.name}
-                            {v.labels?.gender ? ` (${v.labels.gender})` : ''}
-                            {v.labels?.age && v.labels.age !== 'young' && v.labels.age !== 'middle aged' ? ` · ${v.labels.age}` : ''}
-                          </option>
-                        ))}
-                      </optgroup>
-                    )}
-                  </select>
-                ) : (
-                  <select
-                    value={pendingVoiceMap[spk.speaker_id] ?? currentVoice}
-                    onChange={(e) => setPendingVoiceMap(prev => ({ ...prev, [spk.speaker_id]: e.target.value }))}
-                    className="flex-1 rounded bg-slate-700 border border-slate-600 px-2 py-1 text-xs text-slate-100 focus:outline-none focus:border-blue-500"
-                  >
-                    {['male-1','male-2','male-3','male-4','female-1','female-2','female-3','female-4','child-1','child-2','child-3'].map(k => (
-                      <option key={k} value={k}>{k}</option>
-                    ))}
-                  </select>
-                )}
-                <button
-                  onClick={() => handlePreview(pendingVoiceMap[spk.speaker_id] ?? currentVoice)}
-                  disabled={previewingId === (pendingVoiceMap[spk.speaker_id] ?? currentVoice)}
-                  className="shrink-0 rounded border border-slate-600 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700 disabled:opacity-50 transition-colors"
-                  title="Preview voice"
+              {/* Trait dropdown trigger (midnight blue) */}
+              <button
+                type="button"
+                onClick={() =>
+                  setOpenDropdown(prev => (prev === spk.speaker_id ? null : spk.speaker_id))
+                }
+                className="flex items-center justify-between rounded text-white text-xs px-3 py-2 border border-blue-900/70 hover:bg-[#1f1f8a] transition-colors"
+                style={{ backgroundColor: '#191970' }}
+              >
+                <span>
+                  {pending.length > 0
+                    ? `${pending.length} selected — ${pending.slice(0, 2).join(', ')}${pending.length > 2 ? '…' : ''}`
+                    : 'Select character traits…'}
+                </span>
+                <ChevronDown
+                  className={`h-3.5 w-3.5 transition-transform ${openDropdown === spk.speaker_id ? 'rotate-180' : ''}`}
+                />
+              </button>
+
+              {/* Dropdown panel */}
+              {openDropdown === spk.speaker_id && (
+                <div
+                  className="rounded p-2 border border-blue-900/70 flex flex-col gap-0.5 max-h-72 overflow-y-auto"
+                  style={{ backgroundColor: '#191970' }}
                 >
-                  {previewingId === (pendingVoiceMap[spk.speaker_id] ?? currentVoice) ? '▶ …' : '▶'}
-                </button>
-                {/* Apply button */}
-                {(() => {
-                  const selectedVoice = pendingVoiceMap[spk.speaker_id] ?? currentVoice
-                  const isChanged = selectedVoice !== currentVoice
-                  const voiceMeta = voices.find(v => v.voice_id === selectedVoice)
-                  const isGenderMatch = (() => {
-                    if (!voiceMeta) return true
-                    const g = spk.detected_gender
-                    if (g === 'child') return voiceMeta.labels?.age === 'child'
-                    if (g === 'female') return voiceMeta.labels?.gender === 'female' && voiceMeta.labels?.age !== 'child'
-                    if (g === 'male') return voiceMeta.labels?.gender === 'male' && voiceMeta.labels?.age !== 'child'
-                    return true
-                  })()
-                  const isLoading = applyLoading.has(spk.speaker_id)
-                  const isJustApplied = justApplied.has(spk.speaker_id)
-
-                  if (isJustApplied) {
+                  {[...TRAIT_PRESETS, ...custom].map((trait) => {
+                    const isSelected = pending.includes(trait)
                     return (
-                      <span className="shrink-0 flex items-center gap-1 text-[10px] text-emerald-400 font-medium">
-                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-                        Applied
-                      </span>
+                      <button
+                        key={trait}
+                        type="button"
+                        onClick={() => togglePendingTrait(spk.speaker_id, trait)}
+                        className="flex items-center gap-2 text-white text-xs px-2 py-1.5 hover:bg-blue-900 rounded transition-colors text-left"
+                      >
+                        {isSelected ? (
+                          <Check className="h-3.5 w-3.5 text-green-400 shrink-0" />
+                        ) : (
+                          <span className="w-3.5 shrink-0" />
+                        )}
+                        <span>{trait}</span>
+                      </button>
                     )
-                  }
+                  })}
 
-                  return (
-                    <button
-                      onClick={() => handleApplyVoice(spk.speaker_id, selectedVoice)}
-                      disabled={!isChanged || isLoading}
-                      className={`shrink-0 rounded px-2 py-1 text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-                        isChanged
-                          ? isGenderMatch
-                            ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                            : 'bg-amber-600 hover:bg-amber-700 text-white'
-                          : 'bg-slate-700 text-slate-400'
-                      }`}
-                      title={isChanged ? (isGenderMatch ? 'Apply this voice to all segments for this speaker' : 'Apply this voice (gender mismatch)') : 'Already applied'}
-                    >
-                      {isLoading ? '…' : 'Apply'}
-                    </button>
-                  )
-                })()}
+                  {/* Customize write-in */}
+                  <div className="flex gap-1 mt-1 pt-1.5 border-t border-blue-900/70">
+                    <input
+                      type="text"
+                      value={customInput[spk.speaker_id] ?? ''}
+                      onChange={(e) =>
+                        setCustomInput(prev => ({ ...prev, [spk.speaker_id]: e.target.value }))
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          const t = (customInput[spk.speaker_id] ?? '').trim().toLowerCase()
+                          if (t) {
+                            addCustomTrait(spk.speaker_id, t)
+                            togglePendingTrait(spk.speaker_id, t)
+                            setCustomInput(prev => ({ ...prev, [spk.speaker_id]: '' }))
+                          }
+                        }
+                      }}
+                      placeholder="+ Customize: type a trait, Enter to add"
+                      className="flex-1 text-white text-xs px-2 py-1.5 rounded border border-blue-900/70 placeholder-blue-300/70 focus:outline-none focus:border-blue-400"
+                      style={{ backgroundColor: '#0a0a4a' }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Apply button */}
+              <div className="flex justify-end">
+                {isJustApplied ? (
+                  <span className="flex items-center gap-1 text-[10px] text-emerald-400 font-medium">
+                    <Check className="h-3 w-3" /> Applied
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleApplyTraits(spk.speaker_id)}
+                    disabled={!isChanged}
+                    className={`rounded px-3 py-1 text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                      isChanged ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-slate-700 text-slate-400'
+                    }`}
+                    title={isChanged ? 'Lock these traits for this character' : 'No changes to apply'}
+                  >
+                    Apply
+                  </button>
+                )}
               </div>
 
-              {/* Pitch shift slider */}
+              {/* Pitch slider */}
               <div className="flex flex-col gap-1">
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-slate-400">Pitch</span>
@@ -411,6 +371,8 @@ export function SpeakerVoicePanel() {
                 </div>
                 <input
                   type="range"
+                  aria-label={`Pitch shift for ${spk.display_name} in semitones`}
+                  title="Pitch shift"
                   min={-12}
                   max={12}
                   step={1}
@@ -420,22 +382,98 @@ export function SpeakerVoicePanel() {
                 />
               </div>
 
-              {/* Reset to auto */}
-              {!isAuto && (
-                <button
-                  onClick={() => handleResetToAuto(spk.speaker_id, spk.detected_gender)}
-                  className="text-[10px] text-slate-500 hover:text-slate-300 text-left transition-colors"
-                >
-                  Reset to auto
-                </button>
-              )}
+              {/* Regenerate all segments for this speaker — 4-state UX */}
+              {(() => {
+                const speakerSegmentCount = segments.filter(s => s.speaker_id === spk.speaker_id).length
+                const status = regenStatus[spk.speaker_id] ?? 'idle'
+                const progress = regenProgress[spk.speaker_id]
+                const errors = regenErrors[spk.speaker_id] ?? 0
+
+                if (status === 'idle') {
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => setRegenStatus(prev => ({ ...prev, [spk.speaker_id]: 'confirming' }))}
+                      disabled={!jobId || speakerSegmentCount === 0}
+                      className="w-full text-[11px] rounded-md py-1.5 bg-slate-700/80 hover:bg-slate-600 text-slate-200 border border-slate-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
+                      title={`Regenerate all ${speakerSegmentCount} segments using ${spk.display_name}'s current voice + traits`}
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      Regenerate all {speakerSegmentCount} segments
+                    </button>
+                  )
+                }
+
+                if (status === 'confirming') {
+                  return (
+                    <div className="rounded-md bg-amber-500/10 border border-amber-500/40 p-2 flex flex-col gap-2">
+                      <p className="text-[10px] text-amber-200 leading-snug">
+                        This will regenerate <span className="font-semibold">{speakerSegmentCount}</span> segments using
+                        <span className="font-semibold"> {spk.display_name}</span>&apos;s current voice. Continue?
+                      </p>
+                      <div className="flex gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleRegenerateAllForSpeaker(spk.speaker_id)}
+                          className="flex-1 text-[10px] rounded py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-medium transition-colors"
+                        >
+                          Yes, regenerate
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRegenStatus(prev => { const n = { ...prev }; delete n[spk.speaker_id]; return n })}
+                          className="flex-1 text-[10px] rounded py-1 bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )
+                }
+
+                if (status === 'running' && progress) {
+                  return (
+                    <div className="rounded-md bg-slate-800 border border-slate-700 p-2 flex flex-col gap-1.5">
+                      <div className="flex items-center gap-1.5 text-[10px] text-slate-300">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        Regenerating {progress.current} of {progress.total}…
+                      </div>
+                      <div className="h-1 bg-slate-700 rounded overflow-hidden">
+                        <div
+                          className="h-full bg-emerald-500 transition-all duration-300"
+                          style={{ width: `${Math.round((progress.current / progress.total) * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  )
+                }
+
+                if (status === 'done') {
+                  const ok = (progress?.total ?? 0) - errors
+                  return (
+                    <div className={`rounded-md p-2 flex items-center gap-1.5 animate-pulse ${
+                      errors > 0
+                        ? 'bg-amber-500/20 border border-amber-500/40'
+                        : 'bg-emerald-500/20 border border-emerald-500/40'
+                    }`}>
+                      <Check className={`h-3 w-3 ${errors > 0 ? 'text-amber-400' : 'text-emerald-400'}`} />
+                      <span className={`text-[10px] font-medium ${errors > 0 ? 'text-amber-300' : 'text-emerald-300'}`}>
+                        {errors > 0
+                          ? `Regenerated ${ok} of ${progress?.total ?? 0} — ${errors} failed`
+                          : `Regenerated ${progress?.total ?? 0} segments`}
+                      </span>
+                    </div>
+                  )
+                }
+                return null
+              })()}
             </div>
           )
         })}
       </div>
 
       <p className="text-[10px] text-slate-600 text-center mt-1">
-        Changes apply on next Generate Speech or Rebuild
+        Traits attach to a segment on first keystroke in the text box.
       </p>
     </div>
   )

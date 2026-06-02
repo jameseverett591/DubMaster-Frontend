@@ -58,6 +58,7 @@ export interface Segment {
   committed_adapted_text?: string
   committed_at?: string
   emotionalCurve?: EmotionalCurve
+  attached_traits?: string[] | null
 }
 
 export interface QCScore {

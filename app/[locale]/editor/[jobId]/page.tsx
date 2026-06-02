@@ -4,12 +4,17 @@ import { use, useState, useEffect, useRef } from 'react'
 import { DubVerseEditor } from '@/components/editor/dubverse-editor'
 import { LoadingSpinner } from '@/components/loading-spinner'
 import { ErrorBoundary } from '@/components/error-boundary'
-import type { Segment } from '@/lib/editor-types'
+import type { Segment, QCFinding } from '@/lib/editor-types'
 
 import { apiClient } from '@/lib/api-client'
 import { createClient } from '@/lib/supabase/client'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+
+// Stable identity for empty findings — avoids a new [] reference on every render
+// which would otherwise re-trigger the editor's init effects (clobbering speaker
+// voice assignments, traits, etc.) on every parent re-render (e.g. QC poll).
+const NO_FINDINGS: QCFinding[] = []
 
 function toAbsoluteUrl(url: string): string {
   if (!url) return ''
@@ -79,6 +84,14 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
 
         const speakerGenders: Record<string, string> = status.speaker_genders ?? {}
         const persistedVoiceMapping: Record<string, string> | undefined = status.voice_mapping ?? undefined
+        const persistedTraitsMapping: Record<string, string[]> | undefined = (status as any).traits_mapping ?? undefined
+
+        // Cache-bust audio URLs at load time: filenames are stable across
+        // regenerates ("segment_NNNN_regen.mp3"), so without a fresh query
+        // param the browser would re-use stale cached mp3s from a previous
+        // version of this segment's audio. A new timestamp per page load
+        // guarantees fresh fetches every time the editor opens.
+        const cacheBustTs = Date.now()
 
         const editorSegments: Segment[] = (segmentsData?.segments || []).map((seg: any, idx: number) => {
           const speakerId = `speaker-${String(seg.speaker ?? '').replace(/\D/g, '') || '1'}`
@@ -97,7 +110,11 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             speaker_id: speakerId,
             speaker_label: seg.speaker ?? 'Speaker 1',
             speaker_gender: gender,
-            audio_url: seg.path,
+            audio_url: seg.path ? `${seg.path}?ts=${cacheBustTs}` : undefined,
+            committed_audio_url: seg.committed_audio_url ? `${seg.committed_audio_url}?ts=${cacheBustTs}` : undefined,
+            committed_adapted_text: seg.committed_adapted_text ?? undefined,
+            committed_start_time: seg.committed_start_time ?? undefined,
+            committed_end_time: seg.committed_end_time ?? undefined,
             committed_emotion: seg.emotion ?? undefined,
             qc_findings: seg.qc_findings ?? [],
             emotionalCurve: {
@@ -127,6 +144,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
           videoDuration: segmentsData?.video_duration ?? status.video_duration ?? 0,
           speakerGenders,
           voiceMapping: persistedVoiceMapping,
+          traitsMapping: persistedTraitsMapping,
         })
         setSegments(editorSegments)
       } catch (e: any) {
@@ -217,13 +235,14 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         videoDuration={editorProps.videoDuration}
         segments={segments}
         qcScore={null}
-        qcFindings={[]}
+        qcFindings={NO_FINDINGS}
         qcAnalysis={qcAnalysis}
         qcLoading={qcLoading}
         pointsLeft={100}
         minutesAvailable={60}
         speakerGenders={editorProps.speakerGenders}
         voiceMapping={editorProps.voiceMapping}
+        traitsMapping={editorProps.traitsMapping}
         onExport={() => {}}
         onShare={() => {}}
         onGenerateSpeech={() => {}}

@@ -50,8 +50,17 @@ interface EditorState {
   // Speaker voice assignments: speaker_id → voice key (e.g. "speaker-1" → "male-2")
   speakerVoiceMap: Record<string, string>
 
+  // Speaker character traits (applied — set by the Apply button on the Speakers panel)
+  speakerTraitsMap: Record<string, string[]>
+
+  // Per-speaker write-in custom traits added via the Customize input
+  speakerCustomTraits: Record<string, string[]>
+
   // Speaker pitch shifts: speaker_id → semitone offset (e.g. "speaker-1" → 8)
   speakerPitchMap: Record<string, number>
+
+  // Transient UI feedback for speaker assignment
+  speakerPulseId: string | null
 
   // RPT state
   rebuildStatus: RebuildStatus
@@ -127,8 +136,12 @@ interface EditorState {
   // Speaker voice actions
   setSpeakerVoiceMap: (map: Record<string, string>) => void
   updateSpeakerVoice: (speakerId: string, voiceKey: string) => void
+  setSpeakerTraitsMap: (map: Record<string, string[]>) => void
+  setSpeakerTraits: (speakerId: string, traits: string[]) => void
+  addCustomTrait: (speakerId: string, trait: string) => void
   setSpeakerPitchMap: (map: Record<string, number>) => void
   updateSpeakerPitch: (speakerId: string, pitch: number) => void
+  pulseSpeaker: (speakerId: string) => void
 
   // Emotional curve actions
   setEmotionalCurve: (index: number, curve: EmotionalCurve) => void
@@ -179,7 +192,10 @@ export const useEditorStore = create<EditorState>(
   isAdaptationLoading: false,
   importedSegments: null,
   speakerVoiceMap: {},
+  speakerTraitsMap: {},
+  speakerCustomTraits: {},
   speakerPitchMap: {},
+  speakerPulseId: null,
 
   // Set job data
   setJobData: (data) => set({
@@ -415,6 +431,24 @@ export const useEditorStore = create<EditorState>(
   updateSpeakerVoice: (speakerId, voiceKey) => set((state) => ({
     speakerVoiceMap: { ...state.speakerVoiceMap, [speakerId]: voiceKey },
   })),
+  pulseSpeaker: (speakerId) => {
+    set({ speakerPulseId: speakerId })
+    setTimeout(() => set({ speakerPulseId: null }), 1400)
+  },
+  setSpeakerTraitsMap: (map) => set({ speakerTraitsMap: map }),
+  setSpeakerTraits: (speakerId, traits) => set((state) => ({
+    speakerTraitsMap: { ...state.speakerTraitsMap, [speakerId]: traits },
+  })),
+  addCustomTrait: (speakerId, trait) => set((state) => {
+    const existing = state.speakerCustomTraits[speakerId] ?? []
+    if (existing.includes(trait)) return {}
+    return {
+      speakerCustomTraits: {
+        ...state.speakerCustomTraits,
+        [speakerId]: [...existing, trait],
+      },
+    }
+  }),
   setSpeakerPitchMap: (map) => set({ speakerPitchMap: map }),
   updateSpeakerPitch: (speakerId, pitch) => set((state) => ({
     speakerPitchMap: { ...state.speakerPitchMap, [speakerId]: pitch },
@@ -528,9 +562,9 @@ export const useEditorStore = create<EditorState>(
         i === index
           ? {
               ...s,
-              preview_text: seg.source_text,
-              active_text: seg.source_text,
-              target_text: seg.source_text,
+              preview_text: seg.target_text,
+              active_text: seg.target_text,
+              target_text: seg.target_text,
             }
           : s
       ),
@@ -564,6 +598,7 @@ export const useEditorStore = create<EditorState>(
     }),
     {
       name: 'dubmaster-editor-store',
+      version: 1,
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
         importedSegments: state.importedSegments,
@@ -572,7 +607,6 @@ export const useEditorStore = create<EditorState>(
         currentTime: state.currentTime,
         zoomLevel: state.zoomLevel,
         scrollPosition: state.scrollPosition,
-        playbackMode: state.playbackMode,
       }),
     }
   )

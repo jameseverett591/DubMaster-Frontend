@@ -127,6 +127,10 @@ export interface Voice {
   labels: Record<string, string>
   preview_url: string
   description: string
+  tags?: string[]
+  task_count?: number
+  like_count?: number
+  visibility?: string
 }
 
 export interface DubRequest {
@@ -161,6 +165,7 @@ export interface RegenerateSegmentRequest {
   speed?: number
   pitch?: number
   emotion?: string
+  traits?: string[]
   emotionIntensity?: number
 }
 
@@ -494,13 +499,44 @@ class DubVerseAPIClient {
   /**
    * Get available voices from the active TTS provider
    */
-  async getVoices(): Promise<{ voices: Voice[]; provider: string }> {
-    const response = await fetch(`${this.baseURL}/api/voices`)
+  async getVoices(opts?: {
+    page?: number
+    pageSize?: number
+    tag?: string
+    gender?: string
+    language?: string
+    search?: string
+    sortBy?: string
+  }): Promise<{
+    voices: Voice[]
+    provider: string
+    total?: number | null
+    page?: number
+    page_size?: number
+  }> {
+    const params = new URLSearchParams()
+    if (opts?.page) params.set('page', String(opts.page))
+    if (opts?.pageSize) params.set('page_size', String(opts.pageSize))
+    if (opts?.tag) params.set('tag', opts.tag)
+    if (opts?.gender) params.set('gender', opts.gender)
+    if (opts?.language) params.set('language', opts.language)
+    if (opts?.search) params.set('search', opts.search)
+    if (opts?.sortBy) params.set('sort_by', opts.sortBy)
+    const url = params.toString()
+      ? `${this.baseURL}/api/voices?${params}`
+      : `${this.baseURL}/api/voices`
+    const response = await fetch(url)
     if (!response.ok) {
       throw new Error(`Failed to fetch voices: ${response.statusText}`)
     }
     const data = await response.json()
-    return { voices: data.voices || [], provider: data.provider || "elevenlabs" }
+    return {
+      voices: data.voices || [],
+      provider: data.provider || 'fish-audio',
+      total: data.total ?? null,
+      page: data.page,
+      page_size: data.page_size,
+    }
   }
 
   /**
@@ -661,6 +697,18 @@ class DubVerseAPIClient {
     return response.json()
   }
 
+  async resetSegment(jobId: string, index: number): Promise<{ status: string }> {
+    const response = await fetch(
+      `${this.baseURL}/api/segment/reset/${jobId}/${index}`,
+      { method: 'POST' }
+    )
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Reset failed: ${response.statusText}`)
+    }
+    return await response.json()
+  }
+
   getAudioFileUrl(jobId: string, filename: string): string {
     return `${this.baseURL}/api/media/${jobId}/audio/${filename}`
   }
@@ -739,6 +787,22 @@ class DubVerseAPIClient {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(voiceMapping),
+    })
+  }
+
+  async getVoiceById(voiceId: string): Promise<{ voice_id: string; name: string; tags: string[] }> {
+    const response = await fetch(`${this.baseURL}/api/voices/by-id/${encodeURIComponent(voiceId)}`)
+    if (!response.ok) {
+      throw new Error(`Voice ${voiceId} not found`)
+    }
+    return await response.json()
+  }
+
+  async updateTraitsMapping(jobId: string, traitsMapping: Record<string, string[]>): Promise<void> {
+    await fetch(`${this.baseURL}/api/jobs/${jobId}/traits-mapping`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(traitsMapping),
     })
   }
 
