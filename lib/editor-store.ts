@@ -159,6 +159,10 @@ interface EditorState {
   // Imported segments state
   importedSegments: Segment[] | null
   setImportedSegments: (segments: Segment[] | null | ((prev: Segment[] | null) => Segment[] | null)) => void
+  // jobId that owns the current importedSegments — guards against a stale
+  // persisted array from a previous job masking a freshly-loaded job.
+  importedSegmentsJobId: string | null
+  setImportedSegmentsJobId: (jobId: string | null) => void
 }
 
 export const useEditorStore = create<EditorState>(
@@ -191,6 +195,7 @@ export const useEditorStore = create<EditorState>(
   adaptationVariants: {},
   isAdaptationLoading: false,
   importedSegments: null,
+  importedSegmentsJobId: null,
   speakerVoiceMap: {},
   speakerTraitsMap: {},
   speakerCustomTraits: {},
@@ -595,6 +600,8 @@ export const useEditorStore = create<EditorState>(
   setImportedSegments: (segments) => set((state) => ({
     importedSegments: typeof segments === 'function' ? segments(state.importedSegments) : segments,
   })),
+
+  setImportedSegmentsJobId: (jobId) => set({ importedSegmentsJobId: jobId }),
     }),
     {
       name: 'dubmaster-editor-store',
@@ -602,6 +609,7 @@ export const useEditorStore = create<EditorState>(
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
         importedSegments: state.importedSegments,
+        importedSegmentsJobId: state.importedSegmentsJobId,
         selectedSegmentIndex: state.selectedSegmentIndex,
         activeSidebarTab: state.activeSidebarTab,
         currentTime: state.currentTime,

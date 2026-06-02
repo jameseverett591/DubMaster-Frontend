@@ -1,6 +1,6 @@
 'use client'
 
-import { use, useState, useEffect, useRef } from 'react'
+import { use, useState, useEffect, useRef, useCallback } from 'react'
 import { DubVerseEditor } from '@/components/editor/dubverse-editor'
 import { LoadingSpinner } from '@/components/loading-spinner'
 import { ErrorBoundary } from '@/components/error-boundary'
@@ -33,6 +33,13 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   const [qcAnalysis, setQcAnalysis] = useState<any>(null)
   const [qcLoading, setQcLoading] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [qcUpdatedAt, setQcUpdatedAt] = useState<string | null>(null)
+  const [reanalyzeNonce, setReanalyzeNonce] = useState(0)
+  // A manual re-analyze in flight: stamp 'Updated' only for these, and accept a
+  // result only once its generated_at differs from the one we started with
+  // (the GET endpoint can serve the prior result mid-run).
+  const reanalyzePendingRef = useRef(false)
+  const reanalyzePrevGenRef = useRef<string | null>(null)
 
   useEffect(() => {
     localStorage.setItem('dubverse.lastEditorJobId', jobId)
@@ -100,8 +107,8 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             id: `segment-${idx}`,
             index: idx,
             status: seg.locked ? 'locked' : 'auto',
-            start_time: seg.start ?? 0,
-            end_time: seg.end ?? 0,
+            start_time: seg.committed_start_time ?? seg.start ?? 0,
+            end_time: seg.committed_end_time ?? seg.end ?? 0,
             source_text: sourceByIndex.get(seg.transcript_index ?? idx) ?? '',
             target_text: seg.text ?? '',
             active_text: seg.text ?? '',
@@ -162,15 +169,36 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
 
     const lang = editorProps.targetLangCode || 'en'
     let cancelled = false
+    let attempts = 0
+    // Captured when the effect arms; handleReanalyze sets it before bumping the nonce.
+    const prevGen = reanalyzePrevGenRef.current
 
     async function checkQC() {
+      // Safety cap (~5 min at 5s) so a backend error can't poll forever.
+      if (attempts >= 60) {
+        if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+        reanalyzePendingRef.current = false
+        if (!cancelled) setQcLoading(false)
+        return
+      }
+      attempts += 1
       try {
         const res = await fetch(`${API_BASE}/api/analysis/${jobId}/${lang}`)
         if (res.ok) {
           const data = await res.json()
           if (data.status === 'complete' && data.analysis) {
+            // During a manual re-analyze, ignore the prior (stale) result the GET
+            // endpoint may still serve until the new run finishes.
+            if (reanalyzePendingRef.current && data.analysis.generated_at === prevGen) {
+              if (!cancelled) setQcLoading(true)
+              return
+            }
             if (!cancelled) {
               setQcAnalysis(data.analysis)
+              if (reanalyzePendingRef.current) {
+                setQcUpdatedAt(new Date().toISOString())
+                reanalyzePendingRef.current = false
+              }
               setQcLoading(false)
               if (pollRef.current) {
                 clearInterval(pollRef.current)
@@ -204,7 +232,29 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         pollRef.current = null
       }
     }
-  }, [jobId, editorProps])
+  }, [jobId, editorProps, reanalyzeNonce])
+
+  // Manual re-analyze: re-run QC on the last rendered dubbed video, then re-arm
+  // the poll effect above (which stops after the first result) to pick up the
+  // fresh score.
+  const handleReanalyze = useCallback(async () => {
+    if (!editorProps || qcLoading) return
+    const lang = editorProps.targetLangCode || 'en'
+    setQcLoading(true)
+    let res: Response | null = null
+    try {
+      res = await fetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, { method: 'POST' })
+    } catch {}
+    if (!res || !res.ok) {
+      // No dubbed video to analyze (404) or network error — abort cleanly.
+      setQcLoading(false)
+      return
+    }
+    reanalyzePrevGenRef.current = qcAnalysis?.generated_at ?? null
+    reanalyzePendingRef.current = true
+    setQcUpdatedAt(null)
+    setReanalyzeNonce((n) => n + 1)
+  }, [editorProps, jobId, qcLoading, qcAnalysis])
 
   if (loading) {
     return (
@@ -238,6 +288,9 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         qcFindings={NO_FINDINGS}
         qcAnalysis={qcAnalysis}
         qcLoading={qcLoading}
+        qcUpdatedAt={qcUpdatedAt}
+        canReanalyze={!!editorProps.dubbedVideoUrl}
+        onReanalyze={handleReanalyze}
         pointsLeft={100}
         minutesAvailable={60}
         speakerGenders={editorProps.speakerGenders}
