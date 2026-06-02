@@ -2213,6 +2213,16 @@ class DubbingService:
         }
         seg.setdefault("edit_history", []).append(history_entry)
 
+        # Honor timeline drag: committed_* timing is the source of truth once the
+        # user has moved a block. Write it back into start/end so both this regen
+        # response and the persisted JSON reflect the dragged position rather than
+        # the original transcript slot. (The slot-fit above intentionally still
+        # used the original start/end for duration fitting.)
+        if seg.get("committed_start_time") is not None:
+            seg["start"] = seg["committed_start_time"]
+        if seg.get("committed_end_time") is not None:
+            seg["end"] = seg["committed_end_time"]
+
         data["regenerated_at"] = datetime.utcnow().isoformat() + "Z"
         with open(segments_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)

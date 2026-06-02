@@ -298,6 +298,9 @@ interface DubVerseEditorProps {
   qcFindings?: QCFinding[]
   qcAnalysis?: any
   qcLoading?: boolean
+  qcUpdatedAt?: string | null
+  canReanalyze?: boolean
+  onReanalyze?: () => void
   pointsLeft?: number
   minutesAvailable?: number
   speakerGenders?: Record<string, string>
@@ -422,6 +425,9 @@ export function DubVerseEditor({
   qcFindings = [],
   qcAnalysis,
   qcLoading = false,
+  qcUpdatedAt = null,
+  canReanalyze = false,
+  onReanalyze,
   pointsLeft = 6.88,
   minutesAvailable = 2.29,
   speakerGenders,
@@ -481,7 +487,21 @@ export function DubVerseEditor({
   } = useEditorStore()
 
   const importedSegments = useEditorStore((state) => state.importedSegments)
-  const setImportedSegments = useEditorStore((state) => state.setImportedSegments)
+  const importedSegmentsJobId = useEditorStore((state) => state.importedSegmentsJobId)
+  const setImportedSegmentsRaw = useEditorStore((state) => state.setImportedSegments)
+  const setImportedSegmentsJobId = useEditorStore((state) => state.setImportedSegmentsJobId)
+  // Wrap the store setter so every write to importedSegments also stamps the
+  // owning jobId — keeping the pair in sync at all call sites (and any future
+  // ones) without editing each individually. Rehydration from localStorage does
+  // NOT go through this setter, so a persisted (segments, jobId) pair is
+  // restored intact and compared correctly in displaySegments below.
+  const setImportedSegments = useCallback(
+    (segments: Segment[] | null | ((prev: Segment[] | null) => Segment[] | null)) => {
+      setImportedSegmentsRaw(segments)
+      setImportedSegmentsJobId?.(jobId)
+    },
+    [setImportedSegmentsRaw, setImportedSegmentsJobId, jobId],
+  )
 
   const [showExportModal, setShowExportModal] = useState(false)
   const [layoutLocked, setLayoutLocked] = useState(() => {
@@ -622,12 +642,25 @@ export function DubVerseEditor({
   const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
   const [isSegmentPreviewing, setIsSegmentPreviewing] = useState(false)
   const [waveformReady, setWaveformReady] = useState(false)
+  // Briefly surface an "Updated <time>" note under the Re-analyze button after a
+  // successful re-analyze, then fade it out.
+  const [showReanalyzedNote, setShowReanalyzedNote] = useState(false)
   const [dragReorder, setDragReorder] = useState<{
     fromIndex: number
     toIndex: number | null
     isDragging: boolean
   } | null>(null)
   const segmentAudioRef = useRef<HTMLAudioElement | null>(null)
+
+  // Mirror of the live block-drag state so the mount-once safety net below can
+  // read the current delta at interrupt time without re-subscribing on every move.
+  const draggingSegmentRef = useRef(draggingSegment)
+  draggingSegmentRef.current = draggingSegment
+  // Handles to the in-flight block-move document listeners, so the safety net can
+  // tear them down if the normal mouseup is missed. Non-null === a block drag is
+  // live and its normal onMouseUp has NOT yet run (used to avoid double-commit).
+  const dragMoveListenerRef = useRef<((ev: MouseEvent) => void) | null>(null)
+  const dragUpListenerRef = useRef<((ev: MouseEvent) => void) | null>(null)
 
   useEffect(() => {
     if (segmentAudioRef.current) {
@@ -646,6 +679,71 @@ export function DubVerseEditor({
     document.addEventListener('dragend', clearDragHover)
     return () => document.removeEventListener('dragend', clearDragHover)
   }, [])
+
+  // Show the "Updated" confirmation note for a few seconds after each re-analyze,
+  // then let it fade. Re-runs whenever a new re-analysis stamps qcUpdatedAt.
+  useEffect(() => {
+    if (!qcUpdatedAt) return
+    setShowReanalyzedNote(true)
+    const t = setTimeout(() => setShowReanalyzedNote(false), 4000)
+    return () => clearTimeout(t)
+  }, [qcUpdatedAt])
+
+  // Global drag safety net — if a block move / reorder / speed drag is interrupted
+  // without a normal mouseup (button released off-window, tab hidden, focus lost),
+  // commit the block-move position and clear ALL drag state so a block can never
+  // stay stuck to the cursor. Mounted once; reads live state via refs.
+  useEffect(() => {
+    const handleInterrupt = () => {
+      const drag = draggingSegmentRef.current
+      // No-op on ordinary mouseups when nothing is in flight.
+      if (!drag && !dragUpListenerRef.current) return
+      // Commit the block-move position — but only if the normal onMouseUp has not
+      // already run. It nulls dragUpListenerRef synchronously and fires on the
+      // document BEFORE this window-level handler, so this guard prevents a
+      // double-commit on a normal release.
+      if (drag && dragUpListenerRef.current) {
+        const newStart = Math.max(0, drag.originalStart + drag.currentDelta)
+        const newEnd = Math.max(0, drag.originalEnd + drag.currentDelta)
+        updateSegment(drag.index, { start_time: newStart, end_time: newEnd })
+        commitSegmentChanges(drag.index, {
+          committed_start_time: newStart,
+          committed_end_time: newEnd,
+        })
+        apiClient.commitSegmentTiming(jobId, drag.index, {
+          committed_start_time: newStart,
+          committed_end_time: newEnd,
+        }).catch(err => console.warn('[COMMIT-TIMING]', err))
+        setImportedSegments(prev => {
+          const base = prev ?? displaySegmentsRef.current
+          return base.map((seg, i) =>
+            i === drag.index ? { ...seg, start_time: newStart, end_time: newEnd } : seg
+          )
+        })
+      }
+      // Tear down any orphaned block-move document listeners.
+      if (dragMoveListenerRef.current) {
+        document.removeEventListener('mousemove', dragMoveListenerRef.current)
+        dragMoveListenerRef.current = null
+      }
+      if (dragUpListenerRef.current) {
+        document.removeEventListener('mouseup', dragUpListenerRef.current)
+        dragUpListenerRef.current = null
+      }
+      // Clear every drag state so nothing can remain attached to the cursor.
+      setDraggingSegment(null)
+      setDragReorder(null)
+      setDragSpeedPreview(null)
+    }
+    window.addEventListener('mouseup', handleInterrupt)
+    window.addEventListener('blur', handleInterrupt)
+    document.addEventListener('visibilitychange', handleInterrupt)
+    return () => {
+      window.removeEventListener('mouseup', handleInterrupt)
+      window.removeEventListener('blur', handleInterrupt)
+      document.removeEventListener('visibilitychange', handleInterrupt)
+    }
+  }, [jobId, updateSegment, commitSegmentChanges, setImportedSegments])
 
   // Native non-passive drag/drop on the editor container, delegated to
   // [data-segment-row]. Bypasses React's synthetic event system because
@@ -857,6 +955,12 @@ export function DubVerseEditor({
   const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
   const [regeneratingSegmentIndex, setRegeneratingSegmentIndex] = useState<number | null>(null)
   const [confirmingSegmentIndex, setConfirmingSegmentIndex] = useState<number | null>(null)
+  const [queuedSegmentIndex, setQueuedSegmentIndex] = useState<number | null>(null)
+  // Synchronous in-flight guard — avoids the stale-closure race that React state
+  // alone can't prevent when draining the queue on the next macrotask.
+  const isRegeneratingRef = useRef(false)
+  // Pending regen while one is in flight (depth 1, last-write-wins).
+  const regenQueueRef = useRef<{ segIdx?: number; voiceOverride?: string } | null>(null)
   const autoRegenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingAutoRegenRef = useRef<number | null>(null)
   const [editingText, setEditingText] = useState('')
@@ -889,8 +993,12 @@ export function DubVerseEditor({
   
   const [detectedLanguage, setDetectedLanguage] = useState<string | null>(null)
   
-  // Use imported segments if set (even if empty), otherwise use initial segments
-  const displaySegments: Segment[] = Array.isArray(importedSegments) ? importedSegments : Array.isArray(segments) ? segments : []
+  // Use imported segments if set (even if empty), otherwise use initial segments.
+  // Only trust importedSegments when it belongs to THIS job — a stale persisted
+  // array from a previous job (esp. []) must not mask the freshly-fetched prop.
+  const displaySegments: Segment[] = (importedSegmentsJobId === jobId && Array.isArray(importedSegments))
+    ? importedSegments
+    : Array.isArray(segments) ? segments : []
 
   // Unique speakers across all segments — used for reassignment dropdown
   const uniqueSpeakers = useMemo(() => {
@@ -2013,7 +2121,13 @@ export function DubVerseEditor({
     const activeIndex = segIdx ?? selectedSegmentIndex
     console.log('[REGEN] called', { segIdx, voiceOverride, activeIndex, isRegenerating, selectedSegmentIndex })
     if (activeIndex === null) { console.warn('[REGEN] aborted — activeIndex null'); return false }
-    if (isRegenerating) { console.warn('[REGEN] aborted — already regenerating'); return false }
+    if (isRegeneratingRef.current) {
+      // Queue instead of dropping (depth 1, last-write-wins); drained in finally.
+      regenQueueRef.current = { segIdx, voiceOverride }
+      setQueuedSegmentIndex(activeIndex)
+      console.warn('[REGEN] queued — regen already in flight', { segIdx, voiceOverride })
+      return false
+    }
     const segment = displaySegments[activeIndex]
     if (!segment) { console.warn('[REGEN] aborted — no segment at index', activeIndex); return false }
 
@@ -2027,6 +2141,7 @@ export function DubVerseEditor({
 
     selectSegment(activeIndex)
     setRegenError(null)
+    isRegeneratingRef.current = true
     setIsRegenerating(true)
     setRegeneratingSegmentIndex(activeIndex)
     try {
@@ -2130,11 +2245,22 @@ export function DubVerseEditor({
       setRegenError('Generation failed — please try again')
       return false
     } finally {
+      isRegeneratingRef.current = false
       setIsRegenerating(false)
       setRegeneratingSegmentIndex(null)
       // Two-pulse confirmation
       setConfirmingSegmentIndex(activeIndex)
       setTimeout(() => setConfirmingSegmentIndex(null), 1200)
+      // Drain queued regen. The ref guard above is already false, so the next
+      // invocation proceeds regardless of React render timing.
+      const queued = regenQueueRef.current
+      if (queued) {
+        regenQueueRef.current = null
+        setQueuedSegmentIndex(null)
+        setTimeout(() => {
+          handleGenerateSpeechRef.current(queued.segIdx, queued.voiceOverride)
+        }, 0)
+      }
     }
   }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds, lockedSegments, selectSegment, setImportedSegments, setPlaybackMode, editingText])
 
@@ -2996,6 +3122,7 @@ export function DubVerseEditor({
                     draggedVoice !== null && 'ring-1 ring-cyan-500/40',
                     voiceDragOverIndex === index && 'ring-2 ring-emerald-500 bg-emerald-500/10 animate-pulse cursor-copy',
                     confirmingSegmentIndex === index && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-[pulse_0.35s_ease-in-out_2]',
+                    queuedSegmentIndex === index && 'ring-1 ring-cyan-400/60',
                   )}
                   onClick={() => {
                     selectSegment(index)
@@ -4457,26 +4584,34 @@ export function DubVerseEditor({
                 <div className="flex items-center gap-2">
                   <Gauge className={cn("h-4 w-4", qcLoading && !qcAnalysis ? "text-amber-400 animate-pulse" : "text-amber-400")} />
                   <span className="text-sm font-semibold text-white">QC Monitor</span>
-                  {qcLoading && !qcAnalysis ? (
-                    <span className="text-xs px-2 py-0.5 rounded-full border border-amber-500 text-white bg-amber-500/10 animate-pulse">
-                      Analyzing…
-                    </span>
-                  ) : (
+                </div>
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => onReanalyze?.()}
+                    disabled={!canReanalyze || qcLoading}
+                    title={canReanalyze
+                      ? 'Re-run QC analysis on the last rendered video'
+                      : 'Rebuild the video first to enable re-analysis'}
+                    className={cn(
+                      'flex items-center gap-1 text-[11px] px-2 py-0.5 rounded border transition-colors',
+                      (!canReanalyze || qcLoading)
+                        ? 'border-slate-700 text-slate-500 cursor-not-allowed'
+                        : 'border-amber-500/40 text-amber-300 hover:bg-amber-500/10'
+                    )}
+                  >
+                    <RefreshCw className={cn('h-3 w-3', qcLoading && 'animate-spin')} />
+                    {qcLoading ? 'Analyzing…' : 'Re-analyze'}
+                  </button>
+                  {qcUpdatedAt && (
                     <span className={cn(
-                      'text-xs px-2 py-0.5 rounded-full border font-medium',
-                      qcReport.grade === 'A' || qcReport.grade === 'B'
-                        ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
-                        : qcReport.grade === 'C' || qcReport.grade === 'D'
-                          ? 'border-yellow-500/40 text-yellow-300 bg-yellow-500/10'
-                          : 'border-red-500/40 text-red-300 bg-red-500/10'
+                      'absolute top-full right-0 mt-1 text-[10px] text-emerald-400/90 whitespace-nowrap transition-opacity duration-700 pointer-events-none',
+                      showReanalyzedNote ? 'opacity-100' : 'opacity-0'
                     )}>
-                      {qcAnalysis ? 'Live' : 'Preview'} · Grade {qcReport.grade} — {qcReport.overall}/100
+                      Updated {new Date(qcUpdatedAt).toLocaleTimeString()}
                     </span>
                   )}
                 </div>
-                {qcLoading && qcAnalysis && (
-                  <span className="text-[10px] text-slate-500 animate-pulse">Refreshing…</span>
-                )}
               </div>
               {/* QC Content */}
               <div className="flex-1 overflow-y-auto">
@@ -4876,9 +5011,13 @@ export function DubVerseEditor({
                           setDraggingSegment(null)
                           document.removeEventListener('mousemove', onMouseMove)
                           document.removeEventListener('mouseup', onMouseUp)
+                          dragMoveListenerRef.current = null
+                          dragUpListenerRef.current = null
                         }
                         document.addEventListener('mousemove', onMouseMove)
                         document.addEventListener('mouseup', onMouseUp)
+                        dragMoveListenerRef.current = onMouseMove
+                        dragUpListenerRef.current = onMouseUp
                       }}
                     >
                       {/* Left handle — drag to move start_time */}
@@ -5098,9 +5237,13 @@ export function DubVerseEditor({
                           setDraggingSegment(null)
                           document.removeEventListener('mousemove', onMouseMove)
                           document.removeEventListener('mouseup', onMouseUp)
+                          dragMoveListenerRef.current = null
+                          dragUpListenerRef.current = null
                         }
                         document.addEventListener('mousemove', onMouseMove)
                         document.addEventListener('mouseup', onMouseUp)
+                        dragMoveListenerRef.current = onMouseMove
+                        dragUpListenerRef.current = onMouseUp
                       }}
                     >
                       {/* Left stretch handle */}
@@ -5169,8 +5312,8 @@ export function DubVerseEditor({
               <div className="h-14 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
                 {displaySegments.map((seg, i) => {
                   const hasAudio = !!(seg.committed_audio_url ?? seg.audio_url)
-                  const start = (seg.committed_start_time ?? seg.start_time) / Math.max(videoDuration, 1) * 100
-                  const end = (seg.committed_end_time ?? seg.end_time) / Math.max(videoDuration, 1) * 100
+                  const startT = seg.committed_start_time ?? seg.start_time
+                  const endT = seg.committed_end_time ?? seg.end_time
                   return (
                     <div
                       key={seg.id + '-rpt-audio'}
@@ -5184,6 +5327,8 @@ export function DubVerseEditor({
                           ? 'bg-neutral-500/30 border border-neutral-600/50'
                           : regeneratingSegmentIndex === i
                           ? 'bg-amber-500/70 border border-amber-400 animate-pulse shadow-[0_0_8px_rgba(251,191,36,0.8)]'
+                          : queuedSegmentIndex === i
+                          ? 'bg-cyan-500/40 border border-cyan-400/70 border-dashed animate-pulse'
                           : confirmingSegmentIndex === i
                           ? 'bg-amber-400/80 border border-amber-300 animate-[pulse_0.3s_ease-in-out_2]'
                           : seg.rpt_dirty
@@ -5192,7 +5337,7 @@ export function DubVerseEditor({
                           ? 'bg-amber-400/60 border border-amber-400/80'
                           : 'bg-emerald-500/50 border border-emerald-500/70'
                       )}
-                      style={{ left: `${start}%`, width: `${Math.max(end - start, 0.5)}%` }}
+                      style={{ left: startT * PIXELS_PER_SECOND, width: Math.max((endT - startT) * PIXELS_PER_SECOND, 2) }}
                       title={seg.committed_adapted_text ?? seg.active_text ?? seg.target_text}
                     />
                   )
