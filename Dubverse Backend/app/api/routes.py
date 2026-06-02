@@ -1,8 +1,8 @@
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from pydantic import BaseModel
 import fastapi
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Request, Body
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 import uuid
 import os
 import json as _json
@@ -11,6 +11,8 @@ import logging
 import asyncio
 import torchaudio
 import re
+import hashlib
+import traceback
 
 from app.models import (
     UploadResponse,
@@ -717,7 +719,7 @@ async def _get_runpod_file_url(job_id: str, video_path: str) -> str:
     Return a publicly accessible URL for the video file so RunPod can download it.
 
     Prefers Cloudflare R2 (stable, no tunnel required).
-    Falls back to PUBLIC_BASE_URL if R2 is not configured.
+    Raises RuntimeError if R2 is not configured or all upload attempts fail.
     """
     r2_bucket   = os.getenv("R2_BUCKET_NAME", "")
     r2_key_id   = os.getenv("R2_ACCESS_KEY_ID", "")
@@ -726,56 +728,55 @@ async def _get_runpod_file_url(job_id: str, video_path: str) -> str:
     r2_pub_url  = os.getenv("R2_PUBLIC_URL", "").rstrip("/")
 
     if r2_bucket and r2_key_id and r2_secret and r2_account:
-        try:
-            import re
-            import boto3
-            from botocore.config import Config
+        import re
+        import boto3
+        from botocore.config import Config
 
-            endpoint = f"https://{r2_account}.r2.cloudflarestorage.com"
-            s3 = boto3.client(
-                "s3",
-                endpoint_url=endpoint,
-                aws_access_key_id=r2_key_id,
-                aws_secret_access_key=r2_secret,
-                config=Config(signature_version="s3v4"),
-                region_name="auto",
-            )
-
-            safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(video_path).name)
-            object_key = f"{job_id}/{safe_name}"
-            logger.info(f"Job {job_id}: uploading video to R2 → {r2_bucket}/{object_key}")
-
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: s3.upload_file(
-                    video_path,
-                    r2_bucket,
-                    object_key,
-                    ExtraArgs={"ContentType": "video/mp4"},
-                ),
-            )
-
-            # Generate a pre-signed URL (2 hours) — works regardless of bucket public access
-            url = s3.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": r2_bucket, "Key": object_key},
-                ExpiresIn=7200,
-            )
-            logger.info(f"Job {job_id}: R2 upload complete, presigned URL generated")
-            return url
-
-        except Exception as r2_err:
-            logger.warning(f"Job {job_id}: R2 upload failed ({r2_err}), falling back to PUBLIC_BASE_URL")
-
-    # Fallback: tunnel / ngrok URL
-    public_base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
-    if not public_base:
-        raise RuntimeError(
-            "No video URL available for RunPod: configure R2_BUCKET_NAME / R2_ACCESS_KEY_ID / "
-            "R2_SECRET_ACCESS_KEY / R2_ACCOUNT_ID / R2_PUBLIC_URL in .env, "
-            "or set PUBLIC_BASE_URL for a tunnel."
+        endpoint = f"https://{r2_account}.r2.cloudflarestorage.com"
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=r2_key_id,
+            aws_secret_access_key=r2_secret,
+            config=Config(signature_version="s3v4"),
+            region_name="auto",
         )
-    return f"{public_base}/api/media/{job_id}/video"
+
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(video_path).name)
+        object_key = f"{job_id}/{safe_name}"
+        last_r2_err = None
+
+        for attempt in range(1, 4):
+            try:
+                logger.info(f"Job {job_id}: uploading video to R2 (attempt {attempt}/3) → {r2_bucket}/{object_key}")
+                await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: s3.upload_file(
+                        video_path,
+                        r2_bucket,
+                        object_key,
+                        ExtraArgs={"ContentType": "video/mp4"},
+                    ),
+                )
+                url = s3.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": r2_bucket, "Key": object_key},
+                    ExpiresIn=7200,
+                )
+                logger.info(f"Job {job_id}: R2 upload complete, presigned URL generated")
+                return url
+            except Exception as r2_err:
+                last_r2_err = r2_err
+                logger.warning(f"Job {job_id}: R2 upload attempt {attempt}/3 failed: {r2_err}")
+                if attempt < 3:
+                    await asyncio.sleep(2)
+
+        raise RuntimeError(f"R2 upload failed after 3 attempts: {last_r2_err}")
+
+    raise RuntimeError(
+        "No video URL available for RunPod: configure R2_BUCKET_NAME / R2_ACCESS_KEY_ID / "
+        "R2_SECRET_ACCESS_KEY / R2_ACCOUNT_ID in .env."
+    )
 
 
 async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float):
@@ -1874,6 +1875,7 @@ async def get_job_status(job_id: str):
         expected_speakers=getattr(job, "expected_speakers", 2),
         speaker_genders=job.speaker_genders,
         voice_mapping=job.voice_mapping,
+        traits_mapping=job.traits_mapping,
         error_message=job.error_message,
         created_at=job.created_at,
         updated_at=job.updated_at
@@ -1897,6 +1899,41 @@ async def get_chunk_manifest(job_id: str):
         total_chunks=len(job.chunks),
         total_duration=total_duration,
         chunks=job.chunks
+    )
+
+
+@router.get("/transcript/export/{job_id}")
+async def export_transcript_srt(job_id: str):
+    """Export dubbed segment text as a downloadable SRT file."""
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail="No segments found for this job")
+
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+
+    def _srt_time(seconds: float) -> str:
+        ms = int((seconds % 1) * 1000)
+        s = int(seconds)
+        m, s = divmod(s, 60)
+        h, m = divmod(m, 60)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    lines = []
+    for i, seg in enumerate(data.get("segments", []), start=1):
+        text = (seg.get("committed_adapted_text") or seg.get("text") or "").strip()
+        start = float(seg.get("start", 0))
+        end = float(seg.get("end", 0))
+        lines.append(str(i))
+        lines.append(f"{_srt_time(start)} --> {_srt_time(end)}")
+        lines.append(text)
+        lines.append("")
+
+    srt_content = "\n".join(lines)
+    return Response(
+        content=srt_content,
+        media_type="text/plain",
+        headers={"Content-Disposition": f"attachment; filename=\"transcript_{job_id[:8]}.srt\""},
     )
 
 
@@ -2089,6 +2126,17 @@ async def update_voice_mapping(job_id: str, body: Dict[str, str] = Body(...)):
         raise HTTPException(status_code=404, detail="Job not found")
     job.voice_mapping = body
     logger.info(f"[VOICE MAP] Job {job_id} voice mapping updated: {body}")
+
+
+@router.patch("/jobs/{job_id}/traits-mapping", status_code=204)
+async def update_traits_mapping(job_id: str, body: Dict[str, List[str]] = Body(...)):
+    """Persist a speaker_id → traits[] mapping for this job. Applied on regenerate
+    via segment.attached_traits, and on initial batch dub via Job.traits_mapping."""
+    job = await _get_or_rehydrate_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job.traits_mapping = body
+    logger.info(f"[TRAITS MAP] Job {job_id} traits mapping updated: {body}")
 
 
 @router.patch("/jobs/{job_id}/speaker-reassign", status_code=204)
@@ -2406,6 +2454,7 @@ async def process_dubbing_pipeline(
     voice_settings: dict | None,
     speaker_genders: dict | None = None,
     adaptation_selections: dict | None = None,
+    traits_mapping: dict | None = None,
 ):
     try:
         if source_lang != target_lang:
@@ -2433,6 +2482,7 @@ async def process_dubbing_pipeline(
             source_language=source_lang,
             speaker_genders=speaker_genders,
             adaptation_selections=adaptation_selections,
+            traits_mapping=traits_mapping,
         )
 
         if dubbed_video:
@@ -2655,6 +2705,7 @@ async def dub_video(request: DubRequest, background_tasks: BackgroundTasks):
         voice_settings=request.voice_settings,
         speaker_genders=job.speaker_genders,
         adaptation_selections=request.adaptation_selections,
+        traits_mapping=job.traits_mapping,
     )
 
     return DubResponse(
@@ -2724,6 +2775,21 @@ async def get_separated_audio(job_id: str, audio_type: str):
         raise HTTPException(status_code=404, detail=f"Separated audio not found: {filename}")
     return FileResponse(path, media_type="audio/wav",
         headers={"Cache-Control": "public, max-age=3600"})
+
+
+@router.get("/media/{job_id}/{filename}")
+async def serve_job_audio_legacy(job_id: str, filename: str):
+    """Backwards-compat: serve segment audio without the /audio/ sub-path.
+    Resolves stale URLs persisted in client localStorage before the /audio/
+    sub-path was introduced to the getAudioFileUrl helper."""
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    audio_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
+    if not os.path.exists(audio_path):
+        raise HTTPException(status_code=404, detail="Audio file not found")
+    ext = Path(filename).suffix.lower()
+    media_types = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4"}
+    return FileResponse(audio_path, media_type=media_types.get(ext, "audio/mpeg"))
 
 
 @router.get("/dubbing-engines")
@@ -2930,17 +2996,28 @@ async def set_tts_provider(body: dict):
 
 
 @router.get("/voices")
-async def get_available_voices():
+async def get_available_voices(
+    page: int = 1,
+    page_size: int = 50,
+    tag: Optional[str] = None,
+    gender: Optional[str] = None,
+    language: Optional[str] = None,
+    search: Optional[str] = None,
+    sort_by: str = "task_count",
+):
     try:
         provider = os.getenv("TTS_PROVIDER", settings.TTS_PROVIDER).lower().strip()
 
         if provider == "fish-audio" and fish_audio_tts.enabled:
-            voices = await fish_audio_tts.get_voices()
-            source = "fish-audio"
-        else:
-            voices = await elevenlabs_tts.get_voices()
-            source = "elevenlabs"
+            result = await fish_audio_tts.list_voices_filtered(
+                page=page, page_size=page_size,
+                tag=tag, gender=gender, language=language, search=search,
+                sort_by=sort_by,
+            )
+            return {**result, "provider": "fish-audio"}
 
+        # ElevenLabs fallback — return full list, no server-side filtering
+        voices = await elevenlabs_tts.get_voices()
         formatted_voices = []
         for voice in voices:
             voice_id = voice.get("voice_id")
@@ -2951,20 +3028,32 @@ async def get_available_voices():
                 "labels": voice.get("labels", {}),
                 "preview_url": f"/api/voice-preview/{voice_id}",
                 "description": voice.get("description", ""),
+                "tags": [],
+                "task_count": 0,
+                "like_count": 0,
             })
-        return {"voices": formatted_voices, "provider": source}
+        return {
+            "voices": formatted_voices,
+            "total": len(formatted_voices),
+            "page": 1,
+            "page_size": len(formatted_voices),
+            "provider": "elevenlabs",
+        }
     except Exception as e:
         logger.error(f"Failed to fetch voices: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch voices")
 
 
-@router.get("/voice-preview/{voice_id}")
+@router.get("/voice-preview/{voice_id:path}")
 async def get_voice_preview(voice_id: str):
     """Generate and serve a voice preview sample using the active TTS provider."""
     preview_dir = Path("data/voice_previews")
     preview_dir.mkdir(parents=True, exist_ok=True)
 
-    preview_path = preview_dir / f"{voice_id}.mp3"
+    # Use a filesystem-safe hashed filename for previews to avoid issues when
+    # voice IDs contain slashes or other reserved/path characters.
+    safe_name = hashlib.sha256(voice_id.encode('utf-8')).hexdigest()
+    preview_path = preview_dir / f"{safe_name}.mp3"
 
     if preview_path.exists():
         return FileResponse(
@@ -2979,30 +3068,25 @@ async def get_voice_preview(voice_id: str):
     else:
         tts = elevenlabs_tts
 
-    voices = await tts.get_voices()
-    voice_info = next((v for v in voices if v.get("voice_id") == voice_id), None)
-
-    if not voice_info:
-        raise HTTPException(status_code=404, detail="Voice not found")
-
-    voice_name = voice_info.get("name", "This voice")
-    gender = voice_info.get("labels", {}).get("gender", "")
-    accent = voice_info.get("labels", {}).get("accent", "")
-
-    preview_text = f"Hello, I'm {voice_name}. "
-    if gender and accent:
-        preview_text += f"I'm a {gender} voice with a {accent} accent. "
-    preview_text += "I can help bring your videos to life with natural, expressive dubbing."
-
-    result = await tts.text_to_speech(
-        text=preview_text,
-        voice_id=voice_id,
-        output_path=str(preview_path),
-        stability=0.3,
-        similarity_boost=0.9,
-        style=0.5,
-        language="en",
-    )
+    # Attempt to generate a preview directly for the requested voice_id.
+    # Do not rely on a prior listing of voices which may be paginated or cached
+    # differently between list endpoints and real-time preview generation.
+    preview_text = f"Hello, I'm a preview voice. This is a short sample for voice id {voice_id}."
+    try:
+        result = await tts.text_to_speech(
+            text=preview_text,
+            voice_id=voice_id,
+            output_path=str(preview_path),
+            stability=0.3,
+            similarity_boost=0.9,
+            style=0.5,
+            language="en",
+        )
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Preview generation failed for voice {voice_id}: {e}\n{tb}")
+        # Return 500 so the client sees a server error and we can inspect details in logs.
+        raise HTTPException(status_code=500, detail=f"Preview generation failed: {str(e)}")
 
     if result and preview_path.exists():
         return FileResponse(
@@ -3012,6 +3096,26 @@ async def get_voice_preview(voice_id: str):
         )
     else:
         raise HTTPException(status_code=500, detail="Failed to generate voice preview")
+
+
+@router.get("/voices/by-id/{voice_id:path}")
+async def get_voice_by_id(voice_id: str):
+    """Resolve a Fish voice ID to its name + tags for display in UI components
+    like the Character Profile popover. Returns 404 for unknown IDs (e.g.
+    canonical keys like 'male-3' that aren't Fish IDs)."""
+    if not fish_audio_tts.enabled:
+        raise HTTPException(status_code=503, detail="Fish Audio not configured")
+    try:
+        client = fish_audio_tts._get_client()
+        m = await client.voices.get(voice_id)
+        return {
+            "voice_id": voice_id,
+            "name": getattr(m, "title", None) or "Unknown Voice",
+            "tags": list(getattr(m, "tags", None) or []),
+        }
+    except Exception as e:
+        logger.warning(f"Voice lookup failed for {voice_id}: {e}")
+        raise HTTPException(status_code=404, detail="Voice not found")
 
 
 # ---------------------------------------------------------------------------
@@ -3244,10 +3348,11 @@ async def get_segments(job_id: str):
 @router.patch("/segment/commit/{job_id}/{index}")
 async def commit_segment_timing(job_id: str, index: int, body: dict, request: Request):
     """Save committed timing and audio URL for a single segment to Supabase and segments.json."""
-    from app.services.supabase_client import supabase
+    from app.services.supabase_client import supabase_writer
     committed_start_time = body.get("committed_start_time")
     committed_end_time = body.get("committed_end_time")
     committed_audio_url = body.get("committed_audio_url")
+    committed_adapted_text = body.get("committed_adapted_text")
     # Update Supabase
     update_data = {"sequence": index}
     if committed_start_time is not None:
@@ -3256,8 +3361,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         update_data["committed_end_time"] = committed_end_time
     if committed_audio_url is not None:
         update_data["committed_audio_url"] = committed_audio_url
+    if committed_adapted_text is not None:
+        update_data["committed_adapted_text"] = committed_adapted_text
     try:
-        supabase.table("segments").update(update_data).eq("job_id", job_id).eq("sequence", index).execute()
+        supabase_writer.table("segments").update(update_data).eq("job_id", job_id).eq("sequence", index).execute()
     except Exception as e:
         logger.warning(f"Supabase segment commit failed: {e}")
     # Also update segments.json on disk
@@ -3268,17 +3375,58 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         segs = data.get("segments", [])
         if index < len(segs):
             if committed_start_time is not None:
-                segs[index]["start"] = committed_start_time
+                segs[index]["committed_start_time"] = committed_start_time
             if committed_end_time is not None:
-                segs[index]["end"] = committed_end_time
+                segs[index]["committed_end_time"] = committed_end_time
             if committed_audio_url is not None:
-                filename = committed_audio_url.split("/")[-1]
-                local_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
-                if os.path.exists(local_path):
-                    segs[index]["path"] = local_path
+                segs[index]["committed_audio_url"] = committed_audio_url
+            if committed_adapted_text is not None:
+                segs[index]["committed_adapted_text"] = committed_adapted_text
             data["segments"] = segs
             with open(segments_path, "w", encoding="utf-8") as f:
                 _json.dump(data, f, indent=2, ensure_ascii=False)
+    return {"status": "ok", "job_id": job_id, "index": index}
+
+
+@router.post("/segment/reset/{job_id}/{index}")
+async def reset_segment(job_id: str, index: int):
+    """Clear all editor overrides on a segment — drops emotion + committed_* keys from segments.json.
+
+    Leaves pipeline-set fields (voice_id, speed, path) untouched; the frontend's staged-* maps
+    being empty means the next Generate will use whatever those currently hold, which is the
+    pipeline default unless the user has previously regenerated.
+    """
+    from app.services.supabase_client import supabase_writer
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    segs = data.get("segments", [])
+    seg = next((s for s in segs if s.get("transcript_index") == index), None)
+    if seg is None:
+        raise HTTPException(status_code=404, detail=f"Segment {index} not found")
+    for key in (
+        "emotion",
+        "attached_traits",
+        "committed_audio_url", "committed_adapted_text",
+        "committed_start_time", "committed_end_time",
+        "committed_voice_id", "committed_speed", "committed_pitch",
+    ):
+        seg.pop(key, None)
+    data["segments"] = segs
+    with open(segments_path, "w", encoding="utf-8") as f:
+        _json.dump(data, f, indent=2, ensure_ascii=False)
+    try:
+        supabase_writer.table("segments").update({
+            "emotion_tag": None,
+            "committed_audio_url": None,
+            "adapted_text": None,
+            "committed_start_time": None,
+            "committed_end_time": None,
+        }).eq("job_id", job_id).eq("sequence", index).execute()
+    except Exception as e:
+        logger.warning(f"Supabase reset failed: {e}")
     return {"status": "ok", "job_id": job_id, "index": index}
 
 
@@ -3313,6 +3461,7 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
             target_duration=target_duration,
             text=body.text,
             emotion=body.emotion,
+            traits=body.traits,
             pitch=body.pitch,
         )
     except FileNotFoundError as e:

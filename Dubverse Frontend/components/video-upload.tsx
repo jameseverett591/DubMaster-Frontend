@@ -202,6 +202,7 @@ export function VideoUpload({
       })
 
       pollJobStatus(tempId, response.job_id)
+      localStorage.setItem('dubverse.lastEditorJobId', response.job_id)
     } catch (err) {
       const msg = err instanceof Error ? err.message : t('uploadFailed')
       if (msg === "Upload cancelled") {
@@ -211,10 +212,10 @@ export function VideoUpload({
           const recentMatch = jobs
             .filter((j) => j.video_filename === file.name)
             .filter((j) => {
-              const ts = Date.parse(j.created_at)
+              const ts = Date.parse(j.created_at.endsWith('Z') ? j.created_at : j.created_at + 'Z')
               return Number.isFinite(ts) && now - ts <= 5 * 60 * 1000
             })
-            .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0]
+            .sort((a, b) => Date.parse(b.created_at.endsWith('Z') ? b.created_at : b.created_at + 'Z') - Date.parse(a.created_at.endsWith('Z') ? a.created_at : a.created_at + 'Z'))[0]
 
           if (recentMatch?.job_id) {
             setUploadedFiles((prev) => {

@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 _SUPABASE_URL = os.environ.get("SUPABASE_URL")
 _SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
+_SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
 if not _SUPABASE_URL:
     raise RuntimeError("SUPABASE_URL environment variable is not set")
@@ -15,6 +16,13 @@ if not _SUPABASE_ANON_KEY:
     raise RuntimeError("SUPABASE_ANON_KEY environment variable is not set")
 
 supabase: Client = create_client(_SUPABASE_URL, _SUPABASE_ANON_KEY)
+if not _SUPABASE_SERVICE_ROLE_KEY:
+    logger.warning("SUPABASE_SERVICE_ROLE_KEY not set — segment writes will fail RLS")
+supabase_writer: Client = (
+    create_client(_SUPABASE_URL, _SUPABASE_SERVICE_ROLE_KEY)
+    if _SUPABASE_SERVICE_ROLE_KEY
+    else supabase
+)
 
 
 def verify_jwt(token: str) -> str:
@@ -58,7 +66,7 @@ async def upsert_segments(job_id: str, segments: list) -> None:
                 "is_locked": seg.get("locked", False),
             })
         if rows:
-            supabase.table("segments").upsert(
+            supabase_writer.table("segments").upsert(
                 rows,
                 on_conflict="job_id,sequence"
             ).execute()
@@ -84,7 +92,7 @@ async def upsert_job_speakers(
                 "voice_id": (voice_mapping or {}).get(label),
             })
         if rows:
-            supabase.table("job_speakers").upsert(
+            supabase_writer.table("job_speakers").upsert(
                 rows,
                 on_conflict="job_id,speaker_label"
             ).execute()

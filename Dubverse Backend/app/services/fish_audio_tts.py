@@ -146,6 +146,84 @@ class FishAudioTTS:
             logger.error(f"Failed to fetch Fish Audio voices: {e}")
             return self._fallback_voice_list()
 
+    async def list_voices_filtered(
+        self,
+        page: int = 1,
+        page_size: int = 50,
+        tag: Optional[str] = None,
+        gender: Optional[str] = None,
+        language: Optional[str] = None,
+        search: Optional[str] = None,
+        sort_by: str = "task_count",
+    ) -> Dict:
+        """Filter/paginate the Fish Audio voice library via the SDK.
+
+        Returns {"voices": [...], "total": int|None, "page": int, "page_size": int}.
+        ``gender`` is mapped to a tag filter ("male"/"female"/"child").
+        When both ``tag`` and ``gender`` are given they're AND-combined.
+        """
+        if not self.enabled:
+            return {"voices": [], "total": 0, "page": page, "page_size": page_size}
+
+        tags: List[str] = []
+        if tag:
+            tags.append(tag)
+        if gender:
+            tags.append(gender)
+
+        list_kwargs: Dict = {
+            "page_size": page_size,
+            "page_number": page,
+            "sort_by": sort_by,
+        }
+        if tags:
+            list_kwargs["tags"] = tags
+        if language:
+            list_kwargs["language"] = language
+        if search:
+            list_kwargs["title"] = search
+
+        try:
+            client = self._get_client()
+            resp = await client.voices.list(**list_kwargs)
+            items = list(resp.items) if hasattr(resp, "items") else []
+            formatted: List[Dict] = []
+            for v in items:
+                v_tags = list(getattr(v, "tags", None) or [])
+                v_tags_lower = {t.lower() for t in v_tags}
+                v_gender = (
+                    "male" if "male" in v_tags_lower else
+                    "female" if "female" in v_tags_lower else
+                    "child" if "child" in v_tags_lower else
+                    "unknown"
+                )
+                formatted.append({
+                    "voice_id": v.id,
+                    "name": getattr(v, "title", None) or "Fish Audio Voice",
+                    "category": "cloned",
+                    "labels": {
+                        "gender": v_gender,
+                        "accent": "cloned",
+                        "age": "child" if "child" in v_tags_lower else "adult",
+                    },
+                    "preview_url": f"/api/voice-preview/{v.id}",
+                    "description": (getattr(v, "description", "") or "").strip(),
+                    "tags": v_tags,
+                    "task_count": getattr(v, "task_count", 0),
+                    "like_count": getattr(v, "like_count", 0),
+                    "visibility": getattr(v, "visibility", "public"),
+                })
+            total = getattr(resp, "total", None)
+            return {
+                "voices": formatted,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
+        except Exception as e:
+            logger.error(f"Fish voice list (filtered) failed: {e}")
+            return {"voices": [], "total": 0, "page": page, "page_size": page_size}
+
     def _fallback_voice_list(self) -> List[Dict]:
         """Return placeholder entries from the env-based voice map."""
         result = []
@@ -238,6 +316,7 @@ class FishAudioTTS:
         voice_id: str,
         output_path: str,
         emotion_tags: str = "",
+        traits_tag: str = "",
         speaker_references: Optional[List[Dict]] = None,
         speed: float = 1.0,
         pitch: Optional[int] = None,
@@ -280,8 +359,10 @@ class FishAudioTTS:
             logger.warning("Fish Audio unavailable; falling back to Edge TTS.")
             return await self._edge_fallback(text, output_path, language, voice_id)
 
-        # Prepend emotion tags to text
-        tagged_text = f"{emotion_tags} {text}".strip() if emotion_tags else text
+        # Wire format: [trait1] [trait2] [trait3] [emotion] segment_text
+        # Traits = character (speaker-level); emotion = line (segment-level).
+        prefix = " ".join(p for p in (traits_tag, emotion_tags) if p)
+        tagged_text = f"{prefix} {text}".strip() if prefix else text
 
         # Decide cloning mode: inline references vs pre-uploaded model
         use_inline = bool(speaker_references)
@@ -289,22 +370,20 @@ class FishAudioTTS:
         logger.info(
             f"[FISH-TTS] mode={'inline-clone' if use_inline else 'reference-id'}, "
             f"voice={voice_id if not use_inline else f'{len(speaker_references)} refs'}, "
-            f"tags={emotion_tags!r}, text={tagged_text[:60]!r}..."
+            f"traits={traits_tag!r}, emotion={emotion_tags!r}, text={tagged_text[:60]!r}..."
         )
 
         try:
-            from fishaudio import ReferenceAudio
+            from fishaudio import ReferenceAudio, TTSConfig
 
-            # Build call kwargs
+            tts_config = TTSConfig(normalize=True, mp3_bitrate=128)
             tts_kwargs = dict(
                 text=tagged_text,
                 speed=speed,
                 format="mp3",
-                normalize=True,   # normalise output volume — reduces harshness
-                mp3_bitrate=128,  # 128 kbps vs default 64 kbps: cleaner highs
+                config=tts_config,
+                model="s2-pro",
             )
-            if pitch is not None and pitch != 0:
-                tts_kwargs["pitch"] = pitch
 
             if use_inline:
                 # Zero-shot voice cloning from original actor audio
@@ -337,7 +416,13 @@ class FishAudioTTS:
         # to Edge TTS which produces a completely different voice mid-job.
         if use_inline:
             try:
-                retry_kwargs = dict(text=tagged_text, speed=speed, format="mp3", normalize=True, mp3_bitrate=128)
+                retry_kwargs = dict(
+                    text=tagged_text,
+                    speed=speed,
+                    format="mp3",
+                    config=TTSConfig(normalize=True, mp3_bitrate=128),
+                    model="s2-pro",
+                )
                 if voice_id:
                     retry_kwargs["reference_id"] = voice_id
                 audio_bytes = await self._convert_with_backoff(retry_kwargs)

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 async def _upsert_job(job) -> None:
     """Fire-and-forget upsert of job state to Supabase. Never raises."""
     try:
-        from app.services.supabase_client import supabase
+        from app.services.supabase_client import supabase_writer
         if os.environ.get("PERSIST_JOBS", "1") != "1":
             return
         payload = {
@@ -48,7 +48,7 @@ async def _upsert_job(job) -> None:
             "updated_at": job.updated_at.isoformat(),
             "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         }
-        supabase.table("jobs").upsert(payload).execute()
+        supabase_writer.table("jobs").upsert(payload).execute()
     except Exception as exc:
         logger.warning(f"Job {job.job_id}: Supabase upsert failed: {exc}")
 

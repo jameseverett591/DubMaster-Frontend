@@ -28,6 +28,7 @@ import {
   X,
   Bell,
   ArrowLeft,
+  ArrowDownCircle,
   Share2,
   Download,
   User,
@@ -47,11 +48,15 @@ import {
   Facebook,
   Instagram,
   Clapperboard,
+  Save,
+  Loader2,
 } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import { apiClient } from '@/lib/api-client'
+import { VoiceLibraryPanel } from '@/components/voice-library-modal'
+import { CharacterProfilePopover } from '@/components/editor/character-profile-popover'
 import { useEditorStore, type SidebarTab } from '@/lib/editor-store'
 import type { Segment, QCScore, QCFinding, QCFindingType, QCReport } from '@/lib/editor-types'
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
@@ -159,6 +164,7 @@ interface SegmentContextMenuProps {
   onClearEmotion: (index: number) => void
   onSelect: (index: number) => void
   onRenameSpeaker: (index: number) => void
+  onShowProfile: (index: number, x: number, y: number) => void
 }
 
 function SegmentContextMenu({
@@ -179,12 +185,18 @@ function SegmentContextMenu({
   onClearEmotion,
   onSelect,
   onRenameSpeaker,
+  onShowProfile,
 }: SegmentContextMenuProps) {
   const [showEmotions, setShowEmotions] = useState(false)
+  const coordsRef = useRef({ x: 0, y: 0 })
   return (
     <ContextMenu onOpenChange={(open) => { if (!open) setShowEmotions(false) }}>
       <ContextMenuTrigger asChild>
-        <span style={{ display: 'contents' }} onClick={() => onSelect(index)}>
+        <span
+          style={{ display: 'contents' }}
+          onClick={() => onSelect(index)}
+          onContextMenu={(e) => { coordsRef.current = { x: e.clientX, y: e.clientY } }}
+        >
           {children}
         </span>
       </ContextMenuTrigger>
@@ -220,6 +232,13 @@ function SegmentContextMenu({
         <ContextMenuSeparator />
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onRenameSpeaker(index) }} className="text-xs gap-2 text-purple-400 focus:text-purple-400">
           ✏️ Rename Speaker
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          onClick={(e) => { e.stopPropagation(); onShowProfile(index, coordsRef.current.x, coordsRef.current.y) }}
+          className="text-xs gap-2"
+        >
+          🎭 Character Profile
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem className="text-xs gap-2 text-blue-400 focus:text-blue-400">
@@ -283,6 +302,7 @@ interface DubVerseEditorProps {
   minutesAvailable?: number
   speakerGenders?: Record<string, string>
   voiceMapping?: Record<string, string>
+  traitsMapping?: Record<string, string[]>
   onExport?: () => void
   onShare?: () => void
   onGenerateSpeech?: () => void
@@ -406,6 +426,7 @@ export function DubVerseEditor({
   minutesAvailable = 2.29,
   speakerGenders,
   voiceMapping: initialVoiceMapping,
+  traitsMapping: initialTraitsMapping,
   onExport,
   onShare,
   onGenerateSpeech,
@@ -442,7 +463,10 @@ export function DubVerseEditor({
     cancelPreview,
     speakerVoiceMap,
     setSpeakerVoiceMap,
+    speakerTraitsMap,
+    setSpeakerTraitsMap,
     speakerPitchMap,
+    speakerPulseId,
     updateCombinedCurve,
     toggleCurveLock,
     sampleEmotionalCurve,
@@ -468,7 +492,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'studio' | 'adaptation' | 'speakers'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'studio' | 'adaptation' | 'speakers' | 'library'>('result')
 
   // QC report — real data from /api/analysis when available, otherwise mock
   const [qcReport, setQcReport] = useState<QCReport | null>(() =>
@@ -562,9 +586,13 @@ export function DubVerseEditor({
   const [lockedPairs, setLockedPairs] = useState<Set<number>>(new Set())
   const [flashingPair, setFlashingPair] = useState<number | null>(null)
   const [isRegenerating, setIsRegenerating] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
   const [regenError, setRegenError] = useState<string | null>(null)
   const [shareCopied, setShareCopied] = useState<'link' | 'video' | null>(null)
   const [askAiOpen, setAskAiOpen] = useState(false)
+  const [characterProfileOpen, setCharacterProfileOpen] = useState<{
+    segmentIndex: number; x: number; y: number
+  } | null>(null)
   const [askAiPrompt, setAskAiPrompt] = useState('')
   const [askAiLoading, setAskAiLoading] = useState(false)
   const [askAiResult, setAskAiResult] = useState<{ suggestion: string; explanation: string } | null>(null)
@@ -577,6 +605,8 @@ export function DubVerseEditor({
   const [stagedPitches, setStagedPitches] = useState<Record<number, number>>({})
   const [draggedVoice, setDraggedVoice] = useState<string | null>(null)
   const [voicePaletteOpen, setVoicePaletteOpen] = useState(false)
+  const [voiceDragOverIndex, setVoiceDragOverIndex] = useState<number | null>(null)
+  const [voiceAppliedFeedback, setVoiceAppliedFeedback] = useState<{ segmentIndex: number; voiceName: string } | null>(null)
   const [pitchPopupIndex, setPitchPopupIndex] = useState<number | null>(null)
   const [pitchPopupPos, setPitchPopupPos] = useState({ x: 0, y: 0 })
   const [speedPopupIndex, setSpeedPopupIndex] = useState<number | null>(null)
@@ -584,6 +614,8 @@ export function DubVerseEditor({
   const [pendingDelete, setPendingDelete] = useState<number | null>(null)
   const [splitWordMode, setSplitWordMode] = useState<number | null>(null)
   const [inlineEmotionPicker, setInlineEmotionPicker] = useState<number | null>(null)
+  const [inlineEmotionWriteIn, setInlineEmotionWriteIn] = useState<number | null>(null)
+  const [customEmotionDrafts, setCustomEmotionDrafts] = useState<Record<number, string>>({})
   const [userInitials, setUserInitials] = useState("JA")
   const [showRevertAllConfirm, setShowRevertAllConfirm] = useState(false)
   const [contextSegmentIndex, setContextSegmentIndex] = useState<number | null>(null)
@@ -608,6 +640,109 @@ export function DubVerseEditor({
   useEffect(() => {
     if (splitWordMode !== null || selectedSegmentIndex !== null) setInlineEmotionPicker(null)
   }, [splitWordMode, selectedSegmentIndex])
+
+  useEffect(() => {
+    const clearDragHover = () => setVoiceDragOverIndex(null)
+    document.addEventListener('dragend', clearDragHover)
+    return () => document.removeEventListener('dragend', clearDragHover)
+  }, [])
+
+  // Native non-passive drag/drop on the editor container, delegated to
+  // [data-segment-row]. Bypasses React's synthetic event system because
+  // React 19/Next 16 attaches dragover as a passive listener, which makes
+  // preventDefault() a no-op — and without preventDefault the row is not
+  // a valid drop target, so onDrop never fires.
+  useEffect(() => {
+    const container = editorContainerRef.current
+    if (!container) return
+
+    const findRow = (target: EventTarget | null): { row: HTMLElement; index: number } | null => {
+      let el = target as HTMLElement | null
+      while (el && el !== container) {
+        if (el.dataset?.segmentRow !== undefined || el.dataset?.segmentDropZone !== undefined) {
+          const idx = parseInt(el.dataset.index || '-1', 10)
+          if (idx >= 0) return { row: el, index: idx }
+        }
+        el = el.parentElement
+      }
+      return null
+    }
+
+    const hasVoicePayload = (e: DragEvent): boolean => {
+      const types = Array.from(e.dataTransfer?.types || [])
+      return types.some(t =>
+        t === 'application/x-voice-payload' || t === 'voice_key' || t === 'text/plain'
+      )
+    }
+
+    const onDragEnter = (e: DragEvent) => {
+      if (!hasVoicePayload(e)) return
+      const hit = findRow(e.target)
+      if (!hit) return
+      e.preventDefault()
+      setVoiceDragOverIndex(hit.index)
+    }
+
+    const onDragOver = (e: DragEvent) => {
+      if (!hasVoicePayload(e)) return
+      const hit = findRow(e.target)
+      if (!hit) return
+      e.preventDefault()
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+      setVoiceDragOverIndex(hit.index)
+    }
+
+    const onDragLeave = (e: DragEvent) => {
+      const related = e.relatedTarget as Node | null
+      const hit = findRow(e.target)
+      if (!hit) return
+      if (related && hit.row.contains(related)) return
+      setVoiceDragOverIndex(prev => prev === hit.index ? null : prev)
+    }
+
+    const onDrop = (e: DragEvent) => {
+      const hit = findRow(e.target)
+      if (!hit) return
+      e.preventDefault()
+      setVoiceDragOverIndex(null)
+      const payload = e.dataTransfer?.getData('application/x-voice-payload') || ''
+      console.log('[VOICE-DROP] onDrop fired (native)', { index: hit.index, payload, types: Array.from(e.dataTransfer?.types || []) })
+      if (payload) {
+        try {
+          const parsed = JSON.parse(payload) as { voice_id: string; name: string }
+          console.log('[VOICE-DROP] parsed payload (native)', parsed)
+          if (parsed.voice_id) {
+            setStagedVoices(prev => ({ ...prev, [hit.index]: parsed.voice_id }))
+            selectSegment(hit.index)
+            setCurrentTime(displaySegmentsRef.current[hit.index].start_time)
+            console.log('[VOICE-DROP] calling handleGenerateSpeech (native)', { index: hit.index, voice_id: parsed.voice_id })
+            handleGenerateSpeechRef.current(hit.index, parsed.voice_id).then(ok => {
+              if (ok) {
+                console.log('[VOICE-DROP] regen succeeded — showing applied chip (native)', { index: hit.index, voiceName: parsed.name })
+                setVoiceAppliedFeedback({ segmentIndex: hit.index, voiceName: parsed.name })
+                setTimeout(() => setVoiceAppliedFeedback(null), 2200)
+              } else {
+                console.warn('[VOICE-DROP] regen failed — no confirmation chip (native)')
+              }
+            })
+          }
+        } catch (err) {
+          console.error('[VOICE-DROP] payload parse failed (native)', err)
+        }
+      }
+    }
+
+    container.addEventListener('dragenter', onDragEnter, { passive: false })
+    container.addEventListener('dragover', onDragOver, { passive: false })
+    container.addEventListener('dragleave', onDragLeave, { passive: false })
+    container.addEventListener('drop', onDrop, { passive: false })
+    return () => {
+      container.removeEventListener('dragenter', onDragEnter)
+      container.removeEventListener('dragover', onDragOver)
+      container.removeEventListener('dragleave', onDragLeave)
+      container.removeEventListener('drop', onDrop)
+    }
+  }, [selectSegment, setCurrentTime])
 
   // Persist / restore timeline zoom and scroll
   useEffect(() => {
@@ -723,6 +858,7 @@ export function DubVerseEditor({
   const [regeneratingSegmentIndex, setRegeneratingSegmentIndex] = useState<number | null>(null)
   const [confirmingSegmentIndex, setConfirmingSegmentIndex] = useState<number | null>(null)
   const autoRegenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingAutoRegenRef = useRef<number | null>(null)
   const [editingText, setEditingText] = useState('')
   const [previewWidth, setPreviewWidth] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -782,7 +918,7 @@ export function DubVerseEditor({
     const segment = displaySegments[index]
     if (!segment || currentTime <= segment.start_time || currentTime >= segment.end_time) return
     const leftSegment = { ...segment, end_time: currentTime }
-    const rightSegment = { ...segment, start_time: currentTime, target_text: '', source_text: '' }
+    const rightSegment = { ...segment, id: `split-${Date.now()}`, start_time: currentTime, target_text: '', source_text: '', active_text: '', preview_text: null }
     setImportedSegments(prev => {
       const base = prev ?? displaySegments
       const result = [...base]
@@ -817,10 +953,16 @@ export function DubVerseEditor({
     const newSegment = {
       ...segment,
       id: `new-${Date.now()}`,
+      index: index + 1,
       start_time: segment.end_time,
       end_time: segment.end_time + 2,
       target_text: 'New segment',
+      active_text: 'New segment',
+      preview_text: null,
       source_text: '',
+      audio_url: undefined,
+      committed_audio_url: undefined,
+      status: 'auto' as const,
     }
     setImportedSegments(prev => {
       const base = prev ?? displaySegments
@@ -829,6 +971,7 @@ export function DubVerseEditor({
       return result
     })
     selectSegment(index + 1)
+    pendingAutoRegenRef.current = index + 1
   }, [displaySegments, selectSegment])
 
   const commitSpeakerRename = useCallback((speakerId: string, newLabel: string) => {
@@ -898,6 +1041,7 @@ export function DubVerseEditor({
   const rptBufferRef = useRef<AudioBuffer | null>(null)
   const rptSourceRef = useRef<AudioBufferSourceNode | null>(null)
   const rptGainRef = useRef<GainNode | null>(null)
+  const rptCancelRef = useRef<boolean>(false)
   const [isMutedRPT, setIsMutedRPT] = useState(false)
   const [rptVolume, setRptVolume] = useState(80)
   const [rptPlaybackRate, setRptPlaybackRate] = useState(1.0)
@@ -941,9 +1085,15 @@ export function DubVerseEditor({
   // Initialize store
   const prevJobIdRef = useRef<string | null>(null)
   useEffect(() => {
+    // Capture the previous jobId before mutating the ref so we can detect
+    // a real job change (mount or switch) vs. a spurious re-run from an
+    // unrelated prop reference change (e.g. QC poll on the parent page).
+    const prevId = prevJobIdRef.current
+    const isNewJob = prevId !== jobId
+
     // Clear persisted importedSegments when a new job is loaded so stale
     // edits from a previous job don't bleed into this one.
-    if (prevJobIdRef.current !== null && prevJobIdRef.current !== jobId) {
+    if (prevId !== null && prevId !== jobId) {
       setImportedSegments(null)
     }
     prevJobIdRef.current = jobId
@@ -1028,31 +1178,48 @@ export function DubVerseEditor({
       setStagedEmotions(prev => ({ ...restoredEmotions, ...prev }))
     }
 
-    // Initialise speaker voice map from persisted mapping or compute gender defaults
-    if (initialVoiceMapping && Object.keys(initialVoiceMapping).length > 0) {
-      setSpeakerVoiceMap(initialVoiceMapping)
-    } else {
-      const genders = speakerGenders ?? {}
-      const voicesByGender: Record<string, string[]> = {
-        male:   ['male-1',   'male-2',   'male-3',   'male-4'],
-        female: ['female-1', 'female-2', 'female-3', 'female-4'],
-        child:  ['child-1',  'child-2',  'child-3'],
+    // Speaker voice/traits maps: only initialize on initial mount or job switch.
+    // Without this gate, any unrelated prop reference change (e.g. a QC poll
+    // re-render passing a fresh [] for qcFindings) would re-run this effect and
+    // setSpeakerVoiceMap(initialVoiceMapping) would clobber the user's
+    // just-assigned voices from the Library panel.
+    if (isNewJob) {
+      // Initialise speaker voice map from persisted mapping or compute gender defaults
+      if (initialVoiceMapping && Object.keys(initialVoiceMapping).length > 0) {
+        setSpeakerVoiceMap(initialVoiceMapping)
+      } else {
+        const genders = speakerGenders ?? {}
+        const voicesByGender: Record<string, string[]> = {
+          male:   ['male-1',   'male-2',   'male-3',   'male-4'],
+          female: ['female-1', 'female-2', 'female-3', 'female-4'],
+          child:  ['child-1',  'child-2',  'child-3'],
+        }
+        const seen = new Set<string>()
+        const usage: Record<string, number> = {}
+        const defaultMap: Record<string, string> = {}
+        for (const seg of segmentsWithFindings) {
+          if (seen.has(seg.speaker_id)) continue
+          seen.add(seg.speaker_id)
+          const gender = (genders[seg.speaker_id] ?? seg.speaker_gender ?? 'male') as string
+          const pool = voicesByGender[gender] ?? voicesByGender.male
+          const idx = usage[gender] ?? 0
+          defaultMap[seg.speaker_id] = pool[idx % pool.length]
+          usage[gender] = idx + 1
+        }
+        setSpeakerVoiceMap(defaultMap)
       }
-      const seen = new Set<string>()
-      const usage: Record<string, number> = {}
-      const defaultMap: Record<string, string> = {}
-      for (const seg of segmentsWithFindings) {
-        if (seen.has(seg.speaker_id)) continue
-        seen.add(seg.speaker_id)
-        const gender = (genders[seg.speaker_id] ?? seg.speaker_gender ?? 'male') as string
-        const pool = voicesByGender[gender] ?? voicesByGender.male
-        const idx = usage[gender] ?? 0
-        defaultMap[seg.speaker_id] = pool[idx % pool.length]
-        usage[gender] = idx + 1
+
+      // Initialise speaker traits map from persisted mapping (server-side state).
+      // Empty by default — traits are explicit user choices, no auto-default.
+      if (initialTraitsMapping && Object.keys(initialTraitsMapping).length > 0) {
+        setSpeakerTraitsMap(initialTraitsMapping)
       }
-      setSpeakerVoiceMap(defaultMap)
     }
-  }, [jobId, title, sourceLanguage, targetLanguage, videoUrl, dubbedVideoUrl, videoDuration, initialSegments, qcScore, qcFindings, setJobData, setSpeakerVoiceMap, speakerGenders, initialVoiceMapping, setImportedSegments])
+    // initialVoiceMapping, qcScore, qcFindings intentionally excluded from deps:
+    // they shouldn't trigger a voice-map re-init, and the isNewJob gate above
+    // means we only read initialVoiceMapping at the right moment (mount/job switch).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId, title, sourceLanguage, targetLanguage, videoUrl, dubbedVideoUrl, videoDuration, initialSegments, setJobData, setSpeakerVoiceMap, setSpeakerTraitsMap, speakerGenders, initialTraitsMapping, setImportedSegments])
   
   // Handle video import and automatic transcription
   const handleVideoImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1421,7 +1588,9 @@ export function DubVerseEditor({
 
     if (isPlaying) {
       const ctx = audioContextRef.current
+      rptCancelRef.current = false
       const doSchedule = () => {
+        if (rptCancelRef.current) return
         if (rptSourceRef.current) {
           try { rptSourceRef.current.stop() } catch {}
           rptSourceRef.current = null
@@ -1446,6 +1615,7 @@ export function DubVerseEditor({
         doSchedule()
       }
     } else {
+      rptCancelRef.current = true
       if (rptSourceRef.current) {
         try { rptSourceRef.current.stop() } catch {}
         rptSourceRef.current = null
@@ -1453,15 +1623,28 @@ export function DubVerseEditor({
     }
   }, [isPlaying, playbackMode, isMutedRPT, rptVolume, rptPlaybackRate])
 
+  // Initialize AudioContext and GainNode once on mount so they are ready
+  // before the first stitch completes or the user presses Play.
+  useEffect(() => {
+    const ctx = new AudioContext()
+    const gain = ctx.createGain()
+    gain.connect(ctx.destination)
+    audioContextRef.current = ctx
+    rptGainRef.current = gain
+    return () => {
+      ctx.close()
+      audioContextRef.current = null
+      rptGainRef.current = null
+    }
+  }, [])
+
   // Initial RPT stitch — runs once when segments first load
   // so Preview mode works immediately without needing to
   // generate a segment first.
   useEffect(() => {
     if (!segments.length || !videoDuration) return
-    if (!audioContextRef.current) {
-      audioContextRef.current = new AudioContext()
-    }
     const ctx = audioContextRef.current
+    if (!ctx) return
     const resolved = segments.map(seg => {
       const resolveUrl = (url: string | undefined) => {
         if (!url || !jobId) return url
@@ -1783,12 +1966,56 @@ export function DubVerseEditor({
     setDraggedTranslation(null)
   }, [updateSegmentText])
   
+  const handleClearSegment = useCallback((index: number) => {
+    const original = initialSegments[index]
+    const filename = (original?.audio_url ?? '').split('/').pop() ?? ''
+    const audio_url = filename ? apiClient.getAudioFileUrl(jobId, filename) : undefined
+    const clearedFields = {
+      target_text: original?.target_text ?? '',
+      active_text: original?.target_text ?? '',
+      variant_text: original?.target_text ?? '',
+      preview_text: null,
+      isPreviewing: false,
+      isUserEdited: false,
+      audio_url,
+      status: 'auto' as const,
+      rpt_dirty: false,
+      committed_emotion: null,
+      committed_voice_id: null,
+      committed_speed: null,
+      committed_audio_url: undefined,
+      committed_adapted_text: undefined,
+      committed_start_time: undefined,
+      committed_end_time: undefined,
+      attached_traits: null,
+    }
+    updateSegment(index, clearedFields)
+    setImportedSegments(prev => {
+      if (!prev) return prev
+      return prev.map((seg, i) => i === index ? { ...seg, ...clearedFields } : seg)
+    })
+    if (editingSegmentIndex === index) {
+      setEditingText('')
+      setEditingSegmentIndex(null)
+    }
+    setCustomEmotionDrafts(prev => { const n = { ...prev }; delete n[index]; return n })
+    setStagedEmotions(prev => { const n = { ...prev }; delete n[index]; return n })
+    setStagedSpeeds(prev => { const n = { ...prev }; delete n[index]; return n })
+    setStagedVoices(prev => { const n = { ...prev }; delete n[index]; return n })
+    setStagedPitches(prev => { const n = { ...prev }; delete n[index]; return n })
+    setLockedSegments(prev => { const next = new Set(prev); next.delete(index); return next })
+    setDroppedTranslations(prev => prev.filter(t => t.segmentIndex !== index))
+    apiClient.resetSegment(jobId, index).catch(err => console.warn('[CLEAR]', err))
+  }, [initialSegments, jobId, updateSegment, editingSegmentIndex])
+
   // Handle Generate Speech - calls backend TTS regeneration for the selected segment
-  const handleGenerateSpeech = useCallback(async (segIdx?: number) => {
+  const handleGenerateSpeech = useCallback(async (segIdx?: number, voiceOverride?: string): Promise<boolean> => {
     const activeIndex = segIdx ?? selectedSegmentIndex
-    if (activeIndex === null || isRegenerating) return
+    console.log('[REGEN] called', { segIdx, voiceOverride, activeIndex, isRegenerating, selectedSegmentIndex })
+    if (activeIndex === null) { console.warn('[REGEN] aborted — activeIndex null'); return false }
+    if (isRegenerating) { console.warn('[REGEN] aborted — already regenerating'); return false }
     const segment = displaySegments[activeIndex]
-    if (!segment) return
+    if (!segment) { console.warn('[REGEN] aborted — no segment at index', activeIndex); return false }
 
     if (lockedSegments.has(activeIndex)) {
       setLockedSegments(prev => {
@@ -1804,32 +2031,50 @@ export function DubVerseEditor({
     setRegeneratingSegmentIndex(activeIndex)
     try {
       const emotionIntensity = sampleEmotionalCurve(activeIndex, 0.5)
+      const finalVoiceKey = voiceOverride ?? stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id]
+      console.log('[REGEN] calling backend', { activeIndex, finalVoiceKey, voiceOverride, stagedVoice: stagedVoices[activeIndex], speakerDefault: speakerVoiceMap[segment.speaker_id] })
       const response = await apiClient.regenerateSegment(jobId, activeIndex, {
-        text: segment.preview_text ?? segment.active_text ?? segment.target_text,
+        text: (activeIndex === selectedSegmentIndex && editingText.trim())
+          ? editingText.trim()
+          : (segment.preview_text ?? segment.active_text ?? segment.target_text),
         speed: stagedSpeeds[activeIndex] ?? 1.0,
-        emotion: stagedEmotions[activeIndex],
-        voice_key: stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id],
+        // '' = explicit clear (backend pops seg["emotion"]); undefined = unset → use committed
+        emotion: stagedEmotions[activeIndex] ?? segment.committed_emotion,
+        // attached_traits = frozen on first keystroke. undefined = no change; [] = clear; non-empty = set
+        traits: segment.attached_traits ?? undefined,
+        voice_key: voiceOverride ?? stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id],
         pitch: stagedPitches[activeIndex] ?? speakerPitchMap[segment.speaker_id] ?? 0,
         emotionIntensity,
       })
+      console.log('[REGEN] backend response', { path: response.segment.path, voice_id: response.segment.voice_id, status: response.status })
       const filename = response.segment.path.split('/').pop() ?? ''
       const audio_url = filename
-        ? apiClient.getAudioFileUrl(jobId, filename)
+        ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}`
         : segment.audio_url
       updateSegment(activeIndex, {
         audio_url,
         status: 'edited',
+        start_time: response.segment.start ?? segment.start_time,
+        end_time: response.segment.end ?? segment.end_time,
       })
       setImportedSegments(prev => {
         if (!prev) return prev
         return prev.map((seg, i) => i === activeIndex
-          ? { ...seg, audio_url, status: 'edited' as const, committed_emotion: stagedEmotions[activeIndex] ?? seg.committed_emotion }
+          ? {
+              ...seg,
+              audio_url,
+              committed_audio_url: audio_url,
+              status: 'edited' as const,
+              committed_emotion: stagedEmotions[activeIndex] ?? seg.committed_emotion,
+              start_time: response.segment.start ?? seg.start_time,
+              end_time: response.segment.end ?? seg.end_time,
+            }
           : seg)
       })
       setPlaybackMode('preview')
       commitSegmentChanges(activeIndex, {
         committed_audio_url: audio_url,
-        committed_voice_id: stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id],
+        committed_voice_id: response.segment.voice_id ?? voiceOverride ?? stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id],
         committed_speed: stagedSpeeds[activeIndex] ?? 1.0,
         committed_emotion: stagedEmotions[activeIndex],
       })
@@ -1850,6 +2095,8 @@ export function DubVerseEditor({
             committed_audio_url: isActiveSegment
               ? audio_url
               : resolveAudioUrl(seg.committed_audio_url),
+            start_time: isActiveSegment ? (response.segment.start ?? seg.start_time) : seg.start_time,
+            end_time: isActiveSegment ? (response.segment.end ?? seg.end_time) : seg.end_time,
           }
         }),
         videoDuration,
@@ -1877,9 +2124,11 @@ export function DubVerseEditor({
           }
         ])
       }
+      return true
     } catch (err: any) {
       console.error('[Generate Speech] Failed:', err.message)
       setRegenError('Generation failed — please try again')
+      return false
     } finally {
       setIsRegenerating(false)
       setRegeneratingSegmentIndex(null)
@@ -1887,7 +2136,12 @@ export function DubVerseEditor({
       setConfirmingSegmentIndex(activeIndex)
       setTimeout(() => setConfirmingSegmentIndex(null), 1200)
     }
-  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds, lockedSegments, selectSegment, setImportedSegments, setPlaybackMode])
+  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds, lockedSegments, selectSegment, setImportedSegments, setPlaybackMode, editingText])
+
+  const handleGenerateSpeechRef = useRef(handleGenerateSpeech)
+  handleGenerateSpeechRef.current = handleGenerateSpeech
+  const displaySegmentsRef = useRef(displaySegments)
+  displaySegmentsRef.current = displaySegments
 
   // Preview speech — non-destructive TTS preview using preview_text
   const handlePreviewSpeech = useCallback(async (index: number) => {
@@ -1929,12 +2183,13 @@ export function DubVerseEditor({
         text,
         speed: stagedSpeeds[index] ?? 1.0,
         emotion: stagedEmotions[index],
+        traits: segment.attached_traits ?? undefined,
         voice_key: stagedVoices[index] ?? speakerVoiceMap[segment.speaker_id],
         pitch: stagedPitches[index] ?? speakerPitchMap[segment.speaker_id] ?? 0,
       })
       const filename = response.segment.path.split('/').pop() ?? ''
       const absUrl = filename
-        ? apiClient.getAudioFileUrl(jobId, filename)
+        ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}`
         : segment.audio_url
       if (!absUrl) return
 
@@ -1961,6 +2216,13 @@ export function DubVerseEditor({
     }
   }, [displaySegments, jobId, stagedSpeeds, stagedEmotions, stagedVoices, stagedPitches, speakerVoiceMap, speakerPitchMap, isMutedDubbed, masterVolume, dubbedTextVolume, isRegenerating])
 
+  useEffect(() => {
+    if (pendingAutoRegenRef.current === null) return
+    const idx = pendingAutoRegenRef.current
+    pendingAutoRegenRef.current = null
+    handleGenerateSpeech(idx)
+  }, [importedSegments?.length, handleGenerateSpeech])
+
   // Handle Revert to Original — restores text and audio from the initial load snapshot
   const handleRevert = useCallback(() => {
     if (selectedSegmentIndex === null) return
@@ -1970,7 +2232,7 @@ export function DubVerseEditor({
     const filename = (original.audio_url ?? '').split('/').pop() ?? ''
     const audio_url = filename ? apiClient.getAudioFileUrl(jobId, filename) : undefined
 
-    updateSegment(selectedSegmentIndex, {
+    const revertedFields = {
       target_text: original.target_text,
       active_text: original.target_text,
       variant_text: original.target_text,
@@ -1979,6 +2241,15 @@ export function DubVerseEditor({
       isUserEdited: false,
       audio_url,
       status: 'auto',
+      committed_audio_url: undefined,
+      committed_adapted_text: undefined,
+      committed_start_time: undefined,
+      committed_end_time: undefined,
+    }
+    updateSegment(selectedSegmentIndex, revertedFields)
+    setImportedSegments(prev => {
+      if (!prev) return prev
+      return prev.map((seg, i) => i === selectedSegmentIndex ? { ...seg, ...revertedFields } : seg)
     })
     setLockedSegments(prev => {
       const next = new Set(prev)
@@ -1988,7 +2259,33 @@ export function DubVerseEditor({
     setDroppedTranslations(prev => prev.filter(t => t.segmentIndex !== selectedSegmentIndex))
     setStagedSpeeds(prev => { const next = { ...prev }; delete next[selectedSegmentIndex]; return next })
     setStagedEmotions(prev => { const next = { ...prev }; delete next[selectedSegmentIndex]; return next })
-  }, [selectedSegmentIndex, initialSegments, jobId, updateSegment])
+  }, [selectedSegmentIndex, initialSegments, jobId, updateSegment, setImportedSegments])
+
+  const handleSave = useCallback(async () => {
+    if (isSaving) return
+    const toSave = displaySegments
+    if (!toSave.length) return
+    setIsSaving(true)
+    const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+    try {
+      await Promise.all(
+        toSave.map(seg =>
+          fetch(`${base}/api/segment/commit/${jobId}/${seg.index}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              committed_audio_url: seg.committed_audio_url,
+              committed_adapted_text: seg.committed_adapted_text,
+              committed_start_time: seg.committed_start_time,
+              committed_end_time: seg.committed_end_time,
+            }),
+          })
+        )
+      )
+    } finally {
+      setIsSaving(false)
+    }
+  }, [isSaving, displaySegments, jobId])
 
   const handleRebuildVideo = useCallback(async () => {
     setRebuildError(null)
@@ -2211,7 +2508,17 @@ export function DubVerseEditor({
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/dashboard')}>Dashboard</Button>
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/studio?tab=projects')}>My Projects</Button>
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/collaborate')}>Collaborate</Button>
-            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white">Voice Library</Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                'text-slate-400 hover:text-white',
+                rightPanelTab === 'library' && 'bg-slate-800 text-white'
+              )}
+              onClick={() => setRightPanelTab('library')}
+            >
+              Voice Library
+            </Button>
             <Button variant="ghost" size="sm" className="bg-slate-800 text-white">Editor</Button>
           </nav>
         </div>
@@ -2474,14 +2781,27 @@ export function DubVerseEditor({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48 bg-slate-900 border-slate-700">
-              <DropdownMenuItem 
+              <DropdownMenuItem
                 onClick={() => transcriptInputRef.current?.click()}
                 className="cursor-pointer hover:bg-slate-800"
               >
                 <FileText className="h-4 w-4 mr-2" />
                 Import Transcript
               </DropdownMenuItem>
-              <DropdownMenuItem 
+              <DropdownMenuItem
+                onClick={() => {
+                  const url = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/transcript/export/${jobId}`
+                  const a = document.createElement('a')
+                  a.href = url
+                  a.download = `transcript_${jobId.slice(0, 8)}.srt`
+                  a.click()
+                }}
+                className="cursor-pointer hover:bg-slate-800"
+              >
+                <Download className="h-4 w-4 mr-2" />
+                Download Transcript
+              </DropdownMenuItem>
+              <DropdownMenuItem
                 onClick={() => setShowAddSegment(true)}
                 className="cursor-pointer hover:bg-slate-800"
               >
@@ -2520,6 +2840,15 @@ export function DubVerseEditor({
             className="hidden"
             onChange={handleTranscriptImport}
           />
+          <Button
+            size="sm"
+            className="h-8 bg-emerald-600 hover:bg-emerald-700 text-white font-medium"
+            onClick={handleSave}
+            disabled={isSaving}
+          >
+            {isSaving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Save className="h-4 w-4 mr-1" />}
+            {isSaving ? 'Saving…' : 'Save'}
+          </Button>
           <Button
             size="sm"
             className="h-8 bg-slate-600 hover:bg-slate-700 text-white font-medium"
@@ -2620,6 +2949,7 @@ export function DubVerseEditor({
               const isEditing = editingSegmentIndex === index
               const hasQCFindings = segment.qc_findings.length > 0
               const segmentSuggestions = suggestions[index] || []
+                  const isAssignmentPulse = speakerPulseId !== null && segment.speaker_id === speakerPulseId
               
               return (
                 <SegmentContextMenu
@@ -2638,13 +2968,21 @@ export function DubVerseEditor({
                   onTogglePair={(idx) => setLockedPairs(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
                   onRevert={() => handleRevert()}
                   onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
-                  onClearEmotion={(idx) => setStagedEmotions(prev => { const n = { ...prev }; delete n[idx]; return n })}
+                  onClearEmotion={(idx) => {
+                    setStagedEmotions(prev => ({ ...prev, [idx]: '' }))
+                    updateSegment(idx, { committed_emotion: null })
+                    setImportedSegments(prev => {
+                      if (!prev) return prev
+                      return prev.map((seg, i) => i === idx ? { ...seg, committed_emotion: null } : seg)
+                    })
+                  }}
                   onRenameSpeaker={(idx) => {
                     const spkId = displaySegments[idx]?.speaker_id
                     if (!spkId) return
                     setRenamingSpeakerId(spkId)
                     setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
                   }}
+                  onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
                 >
                 <div
                   data-segment-row
@@ -2652,19 +2990,77 @@ export function DubVerseEditor({
                   className={cn(
                     'flex items-start gap-3 px-4 py-3 border-b border-slate-800/50 transition-colors relative group',
                     selectedSegmentIndex === index && 'bg-slate-800/50 ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
+                    isAssignmentPulse && 'ring-2 ring-amber-400/60 shadow-[0_0_6px_2px_rgba(245,158,11,0.22)] animate-pulse',
                     dragReorder?.fromIndex === index && 'opacity-50 bg-amber-500/10',
                     dragReorder?.toIndex === index && 'border-t-2 border-t-amber-500',
                     draggedVoice !== null && 'ring-1 ring-cyan-500/40',
+                    voiceDragOverIndex === index && 'ring-2 ring-emerald-500 bg-emerald-500/10 animate-pulse cursor-copy',
+                    confirmingSegmentIndex === index && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-[pulse_0.35s_ease-in-out_2]',
                   )}
                   onClick={() => {
                     selectSegment(index)
                     setCurrentTime(displaySegments[index].start_time)
                     editorContainerRef.current?.focus()
                   }}
-                  onDragOver={(e) => { if (draggedVoice) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' } }}
+                  onDragEnter={(e) => {
+                    const types = Array.from(e.dataTransfer.types || [])
+                    const hasVoicePayload = types.length === 0 || types.some((type) =>
+                      type === 'application/x-voice-payload' || type === 'voice_key' || type === 'text/plain'
+                    )
+                    if (hasVoicePayload) {
+                      e.preventDefault()
+                      setVoiceDragOverIndex(index)
+                    }
+                  }}
+                  onDragLeave={(e) => {
+                    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                      setVoiceDragOverIndex(prev => prev === index ? null : prev)
+                    }
+                  }}
+                  onDragOver={(e) => {
+                    const types = Array.from(e.dataTransfer.types || [])
+                    const hasVoicePayload = types.length === 0 || types.some((type) =>
+                      type === 'application/x-voice-payload' || type === 'voice_key' || type === 'text/plain'
+                    )
+                    if (hasVoicePayload) {
+                      e.preventDefault()
+                      e.dataTransfer.dropEffect = 'copy'
+                      setVoiceDragOverIndex(index)
+                    }
+                  }}
                   onDrop={(e) => {
                     e.preventDefault()
-                    const vk = draggedVoice ?? e.dataTransfer.getData('voice_key')
+                    setVoiceDragOverIndex(null)
+                    const payload = e.dataTransfer.getData('application/x-voice-payload')
+                    console.log('[VOICE-DROP] onDrop fired', { index, payload, types: Array.from(e.dataTransfer.types) })
+                    if (payload) {
+                      try {
+                        const parsed = JSON.parse(payload) as { voice_id: string; name: string }
+                        console.log('[VOICE-DROP] parsed payload', parsed)
+                        if (parsed.voice_id) {
+                          setStagedVoices(prev => ({ ...prev, [index]: parsed.voice_id }))
+                          selectSegment(index)
+                          setCurrentTime(displaySegments[index].start_time)
+                          console.log('[VOICE-DROP] calling handleGenerateSpeech', { index, voice_id: parsed.voice_id })
+                          handleGenerateSpeech(index, parsed.voice_id).then(ok => {
+                            if (ok) {
+                              console.log('[VOICE-DROP] regen succeeded — showing applied chip', { index, voiceName: parsed.name })
+                              setVoiceAppliedFeedback({ segmentIndex: index, voiceName: parsed.name })
+                              setTimeout(() => setVoiceAppliedFeedback(null), 2200)
+                            } else {
+                              console.warn('[VOICE-DROP] regen failed — no confirmation chip')
+                            }
+                          })
+                        } else {
+                          console.warn('[VOICE-DROP] payload missing voice_id', parsed)
+                        }
+                      } catch (err) {
+                        console.error('[VOICE-DROP] payload parse failed', err)
+                      }
+                      return
+                    }
+                    const fallbackVoiceId = e.dataTransfer.getData('text/plain')
+                    const vk = draggedVoice ?? e.dataTransfer.getData('voice_key') ?? fallbackVoiceId
                     if (!vk) return
                     setStagedVoices(prev => ({ ...prev, [index]: vk }))
                     selectSegment(index)
@@ -2678,6 +3074,17 @@ export function DubVerseEditor({
                     setVoicePaletteOpen(false)
                   }}
                 >
+                  {voiceDragOverIndex === index && (
+                    <div className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500/30 text-emerald-100 shadow-[0_0_24px_rgba(16,185,129,0.8)] animate-bounce ring-2 ring-emerald-400/80">
+                      <ArrowDownCircle className="h-8 w-8" />
+                    </div>
+                  )}
+                  {voiceAppliedFeedback?.segmentIndex === index && (
+                    <div className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-emerald-500/30 text-emerald-100 border border-emerald-400 shadow-[0_0_18px_rgba(16,185,129,0.6)] text-xs font-bold animate-[pulse_0.6s_ease-in-out_3]">
+                      <span className="text-base leading-none">✓</span>
+                      <span>{voiceAppliedFeedback.voiceName}</span>
+                    </div>
+                  )}
                   {/* Speaker drag handle + dropdown */}
                   <div className="flex items-center gap-1">
                     <div
@@ -2788,7 +3195,19 @@ export function DubVerseEditor({
                       >
                         <Input
                           value={editingText}
-                          onChange={(e) => setEditingText(e.target.value)}
+                          onChange={(e) => {
+                            setEditingText(e.target.value)
+                            // First-keystroke trait attachment: freeze speaker's current traits
+                            // onto this segment the moment the user starts editing the text.
+                            const seg = displaySegments[index]
+                            if (seg && (seg.attached_traits == null) && speakerTraitsMap[seg.speaker_id]?.length) {
+                              const frozen = [...speakerTraitsMap[seg.speaker_id]]
+                              setImportedSegments(prev => {
+                                if (!prev) return prev
+                                return prev.map((s, i) => i === index ? { ...s, attached_traits: frozen } : s)
+                              })
+                            }
+                          }}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') saveEditing()
                             if (e.key === 'Escape') cancelEditing()
@@ -2823,7 +3242,12 @@ export function DubVerseEditor({
                             title="Click to remove emotion"
                             onClick={(e) => {
                               e.stopPropagation()
-                              setStagedEmotions(prev => { const n = { ...prev }; delete n[index]; return n })
+                              setStagedEmotions(prev => ({ ...prev, [index]: '' }))
+                              updateSegment(index, { committed_emotion: null })
+                              setImportedSegments(prev => {
+                                if (!prev) return prev
+                                return prev.map((seg, i) => i === index ? { ...seg, committed_emotion: null } : seg)
+                              })
                             }}
                           >
                             ({stagedEmotions[index].toLowerCase()})
@@ -2843,6 +3267,20 @@ export function DubVerseEditor({
                             <Plus className="h-2 w-2" />emotion
                           </span>
                         )}
+                        {/* Write-in chip — always visible; opens free-form custom emotion input */}
+                        <span
+                          className="inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full text-slate-600 border border-slate-800 hover:text-cyan-400 hover:border-cyan-500/30 transition-colors cursor-pointer select-none"
+                          title="Write a custom emotion descriptor"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            selectSegment(null)
+                            setSplitWordMode(null)
+                            setInlineEmotionPicker(null)
+                            setInlineEmotionWriteIn(prev => prev === index ? null : index)
+                          }}
+                        >
+                          <Plus className="h-2 w-2" />write-in
+                        </span>
                         {inlineEmotionPicker === index && (
                           <div
                             className="w-full mt-1 p-2 rounded-xl border border-violet-500/40 bg-[#0d1525] shadow-lg shadow-violet-900/30"
@@ -2882,6 +3320,32 @@ export function DubVerseEditor({
                             >
                               ✕ cancel
                             </span>
+                          </div>
+                        )}
+                        {inlineEmotionWriteIn === index && (
+                          <div
+                            className="w-full mt-1 p-2 rounded-xl border border-cyan-500/40 bg-[#0d1525] shadow-lg shadow-cyan-900/30"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <input
+                              type="text"
+                              autoFocus
+                              placeholder="Type a custom emotion (e.g. bitterly resigned)…"
+                              value={customEmotionDrafts[index] ?? ''}
+                              onChange={(e) => setCustomEmotionDrafts(prev => ({ ...prev, [index]: e.target.value }))}
+                              onClick={(e) => e.stopPropagation()}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  const draft = (customEmotionDrafts[index] ?? '').trim()
+                                  if (draft) {
+                                    setStagedEmotions(prev => ({ ...prev, [index]: draft }))
+                                    selectSegment(index)
+                                  }
+                                  setInlineEmotionWriteIn(null)
+                                }
+                              }}
+                              className="w-full text-[11px] px-2 py-1 rounded-md bg-slate-800 border border-slate-700 text-cyan-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500/60"
+                            />
                           </div>
                         )}
                         {/* Speed chip */}
@@ -3021,20 +3485,11 @@ export function DubVerseEditor({
                         </button>
                         <button
                           type="button"
-                          className="text-[10px] px-2 py-0.5 rounded bg-slate-700 text-slate-400 border border-slate-600 hover:bg-slate-600 hover:text-slate-300 transition-colors pointer-events-auto cursor-pointer select-none"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            cancelPreview(index)
-                            setImportedSegments(prev => {
-                              const base = prev ?? displaySegments
-                              return base.map((seg, i) =>
-                                i === index ? { ...seg, preview_text: null, isPreviewing: false } : seg
-                              )
-                            })
-                            setEditingSegmentIndex(null)
-                          }}
+                          className="text-[10px] px-2 py-0.5 rounded bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30 hover:text-red-300 transition-colors pointer-events-auto cursor-pointer select-none"
+                          title="Reset segment to pipeline-original — wipes all edits, emotion, voice, speed, and audio"
+                          onClick={(e) => { e.stopPropagation(); handleClearSegment(index) }}
                         >
-                          Cancel
+                          Clear
                         </button>
                       </div>
                     )}
@@ -3161,7 +3616,12 @@ export function DubVerseEditor({
                   className="text-slate-500 hover:text-slate-300 hover:bg-slate-700 cursor-pointer text-xs"
                   onClick={() => {
                     if (selectedSegmentIndex !== null) {
-                      setStagedEmotions(prev => { const next = { ...prev }; delete next[selectedSegmentIndex]; return next })
+                      setStagedEmotions(prev => ({ ...prev, [selectedSegmentIndex]: '' }))
+                      updateSegment(selectedSegmentIndex, { committed_emotion: null })
+                      setImportedSegments(prev => {
+                        if (!prev) return prev
+                        return prev.map((seg, i) => i === selectedSegmentIndex ? { ...seg, committed_emotion: null } : seg)
+                      })
                     }
                   }}
                 >
@@ -3309,11 +3769,12 @@ export function DubVerseEditor({
           <div className="flex items-center justify-between gap-1 px-2 py-1.5 border-b border-slate-800 bg-neutral-900">
             <div className="flex items-center gap-1">
               {([
-                { id: 'result', label: 'Result' },
+                { id: 'result', label: 'Video' },
                 { id: 'quality', label: 'Quality' },
                 { id: 'studio', label: 'Studio' },
                 { id: 'adaptation', label: 'Adaptation' },
                 { id: 'speakers', label: 'Speakers' },
+                { id: 'library', label: 'Voice Library' },
               ] as const).map((t) => (
                 <button
                   type="button"
@@ -3435,8 +3896,32 @@ export function DubVerseEditor({
               <SpeakerVoicePanel />
             </div>
           )}
+
+          {/* Library tab — Fish Audio catalog as a paired sibling to Speakers */}
+          {rightPanelTab === 'library' && (
+            <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+              <VoiceLibraryPanel />
+            </div>
+          )}
         </div>
       </div>
+
+      {/* Character Profile — right-click → "Character Profile" floating popover */}
+      {characterProfileOpen && displaySegments[characterProfileOpen.segmentIndex] && (
+        <CharacterProfilePopover
+          segmentIndex={characterProfileOpen.segmentIndex}
+          x={characterProfileOpen.x}
+          y={characterProfileOpen.y}
+          onClose={() => setCharacterProfileOpen(null)}
+          onClearSegment={handleClearSegment}
+          segment={displaySegments[characterProfileOpen.segmentIndex]}
+          speakerVoiceMap={speakerVoiceMap}
+          speakerPitchMap={speakerPitchMap}
+          stagedEmotions={stagedEmotions}
+          stagedSpeeds={stagedSpeeds}
+          stagedVoices={stagedVoices}
+        />
+      )}
 
       {/* Ask AI — draggable floating panel */}
       {askAiOpen && (() => {
@@ -4296,6 +4781,7 @@ export function DubVerseEditor({
                 {displaySegments.map((segment, index) => {
                   const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'original'
                   const isDraggingPaired = draggingSegment?.index === index && draggingSegment?.track === 'dubbed' && lockedPairs.has(index)
+                  const isAssignmentPulse = speakerPulseId !== null && segment.speaker_id === speakerPulseId
                   const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
                   return (
                     <SegmentContextMenu
@@ -4314,18 +4800,30 @@ export function DubVerseEditor({
                       onTogglePair={(idx) => setLockedPairs(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
                       onRevert={revertToOriginal}
                       onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
-                      onClearEmotion={(idx) => setStagedEmotions(prev => { const n = { ...prev }; delete n[idx]; return n })}
+                      onClearEmotion={(idx) => {
+                    setStagedEmotions(prev => ({ ...prev, [idx]: '' }))
+                    updateSegment(idx, { committed_emotion: null })
+                    setImportedSegments(prev => {
+                      if (!prev) return prev
+                      return prev.map((seg, i) => i === idx ? { ...seg, committed_emotion: null } : seg)
+                    })
+                  }}
                       onRenameSpeaker={(idx) => {
                         const spkId = displaySegments[idx]?.speaker_id
                         if (!spkId) return
                         setRenamingSpeakerId(spkId)
                         setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
                       }}
+                      onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
                     >
                     <div
+                      data-segment-drop-zone
+                      data-index={index}
                       className={cn(
                         'absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded group',
                         selectedSegmentIndex === index && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
+                        voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
+                        isAssignmentPulse && 'ring-2 ring-amber-400/60 shadow-[0_0_6px_2px_rgba(245,158,11,0.22)] animate-pulse',
                         flashingPair === index && 'ring-1 ring-amber-400',
                         lockedPairs.has(index) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
                         isDraggingThis ? 'cursor-grabbing' : 'cursor-grab'
@@ -4486,19 +4984,30 @@ export function DubVerseEditor({
                       onTogglePair={(idx) => setLockedPairs(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
                       onRevert={revertToOriginal}
                       onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
-                      onClearEmotion={(idx) => setStagedEmotions(prev => { const n = { ...prev }; delete n[idx]; return n })}
+                      onClearEmotion={(idx) => {
+                    setStagedEmotions(prev => ({ ...prev, [idx]: '' }))
+                    updateSegment(idx, { committed_emotion: null })
+                    setImportedSegments(prev => {
+                      if (!prev) return prev
+                      return prev.map((seg, i) => i === idx ? { ...seg, committed_emotion: null } : seg)
+                    })
+                  }}
                       onRenameSpeaker={(idx) => {
                         const spkId = displaySegments[idx]?.speaker_id
                         if (!spkId) return
                         setRenamingSpeakerId(spkId)
                         setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
                       }}
+                      onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
                     >
                     <div
+                      data-segment-drop-zone
+                      data-index={index}
                       className={cn(
                         'absolute top-1 bottom-1 rounded group border transition-colors',
                         bgColor,
                         selectedSegmentIndex === index && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
+                        voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
                         flashingPair === index && 'ring-1 ring-amber-400',
                         lockedPairs.has(index) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
                         draggingSegment?.index === index && draggingSegment?.track === 'dubbed' ? 'cursor-grabbing' : 'cursor-grab'
@@ -4563,6 +5072,29 @@ export function DubVerseEditor({
                                 : seg
                             )
                           })
+                          if (audioContextRef.current) {
+                            const newStart = Math.max(0, originalStart + deltaTime)
+                            const newEnd = Math.max(0, originalEnd + deltaTime)
+                            const resolveUrl = (url: string | undefined) => {
+                              if (!url) return url
+                              if (url.startsWith('http')) return url
+                              const filename = url.split('/').pop()
+                              return filename ? apiClient.getAudioFileUrl(jobId, filename) : url
+                            }
+                            requestRPTStitch(
+                              displaySegments.map((seg, i) => ({
+                                ...seg,
+                                start_time: i === index ? newStart : seg.start_time,
+                                end_time: i === index ? newEnd : seg.end_time,
+                                audio_url: resolveUrl(seg.audio_url),
+                                committed_audio_url: resolveUrl(seg.committed_audio_url),
+                              })),
+                              videoDuration,
+                              audioContextRef.current,
+                              () => {},
+                              (result) => { if (result) rptBufferRef.current = result.buffer },
+                            )
+                          }
                           setDraggingSegment(null)
                           document.removeEventListener('mousemove', onMouseMove)
                           document.removeEventListener('mouseup', onMouseUp)
@@ -4635,23 +5167,29 @@ export function DubVerseEditor({
 
               {/* RPT Audio track */}
               <div className="h-14 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
-                {displaySegments.map((seg) => {
+                {displaySegments.map((seg, i) => {
                   const hasAudio = !!(seg.committed_audio_url ?? seg.audio_url)
                   const start = (seg.committed_start_time ?? seg.start_time) / Math.max(videoDuration, 1) * 100
                   const end = (seg.committed_end_time ?? seg.end_time) / Math.max(videoDuration, 1) * 100
                   return (
                     <div
                       key={seg.id + '-rpt-audio'}
+                      data-segment-drop-zone
+                      data-index={i}
                       className={cn(
                         'absolute top-1 bottom-1 rounded opacity-70 transition-all',
-                        !hasAudio
+                        voiceDragOverIndex === i
+                          ? 'bg-emerald-500/70 border-2 border-emerald-400 ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.7)] animate-pulse'
+                          : !hasAudio
                           ? 'bg-neutral-500/30 border border-neutral-600/50'
-                          : regeneratingSegmentIndex === seg.index
+                          : regeneratingSegmentIndex === i
                           ? 'bg-amber-500/70 border border-amber-400 animate-pulse shadow-[0_0_8px_rgba(251,191,36,0.8)]'
-                          : confirmingSegmentIndex === seg.index
+                          : confirmingSegmentIndex === i
                           ? 'bg-amber-400/80 border border-amber-300 animate-[pulse_0.3s_ease-in-out_2]'
                           : seg.rpt_dirty
                           ? 'bg-amber-500/50 border border-amber-500/70'
+                          : seg.committed_audio_url
+                          ? 'bg-amber-400/60 border border-amber-400/80'
                           : 'bg-emerald-500/50 border border-emerald-500/70'
                       )}
                       style={{ left: `${start}%`, width: `${Math.max(end - start, 0.5)}%` }}

@@ -63,7 +63,8 @@ function StatusBadge({ status }: { status: string }) {
 
 function formatDate(iso: string): string {
   try {
-    return new Date(iso).toLocaleDateString("en-US", {
+    const safeIso = iso.endsWith('Z') ? iso : iso + 'Z'
+    return new Date(safeIso).toLocaleDateString("en-US", {
       month: "short",
       day: "numeric",
       year: "numeric",

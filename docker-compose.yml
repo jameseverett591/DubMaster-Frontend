@@ -27,7 +27,7 @@ services:
       # Persist HuggingFace/torch model cache across recreates
       - hf-cache:/root/.cache
     env_file:
-      - .env
+      - Dubverse Backend/.env
     environment:
       # Only set vars NOT in .env here. All API keys and app settings
       # come from .env via env_file above. Do NOT duplicate them here

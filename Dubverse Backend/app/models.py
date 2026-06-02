@@ -70,6 +70,7 @@ class Job(BaseModel):
     transcript: Optional[Transcript] = None
     speaker_genders: Optional[Dict[str, str]] = None   # e.g. {"speaker-1": "male", "speaker-2": "female"}
     voice_mapping: Optional[Dict[str, str]] = None     # e.g. {"speaker-1": "male-2", "speaker-2": "female-1"}
+    traits_mapping: Optional[Dict[str, List[str]]] = None  # e.g. {"speaker-1": ["calm", "weary", "paternal"]}
 
     dubbed_video_url: Optional[str] = None
     tts_engine: Optional[str] = None
@@ -108,6 +109,7 @@ class StatusResponse(BaseModel):
     expected_speakers: int = 2
     speaker_genders: Optional[Dict[str, str]] = None
     voice_mapping: Optional[Dict[str, str]] = None
+    traits_mapping: Optional[Dict[str, List[str]]] = None
     error_message: Optional[str]
     created_at: datetime
     updated_at: datetime
@@ -175,4 +177,5 @@ class RegenerateRequest(BaseModel):
     pitch: Optional[int] = None       # semitones: -12 to +12
     text: Optional[str] = None
     emotion: Optional[str] = None
+    traits: Optional[List[str]] = None
     voice_params: Optional[VoiceParams] = None

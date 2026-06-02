@@ -538,6 +538,7 @@ class DubbingService:
         source_language: str = "en",
         speaker_genders: Optional[Dict[str, str]] = None,
         adaptation_selections: Optional[Dict[str, str]] = None,
+        traits_mapping: Optional[Dict[str, List[str]]] = None,
     ) -> Optional[Dict[str, str]]:
         logger.info(f"Starting dubbing for job {job_id}")
         logger.info(f"Voice mapping received: {voice_mapping}")
@@ -842,7 +843,13 @@ class DubbingService:
                             tts_kwargs = None
 
                 if provider_name == "fish-audio" and tts_kwargs is not None:
-                    tts_kwargs["emotion_tags"] = ""
+                    seg_emotion = segment.get("emotion")
+                    tts_kwargs["emotion_tags"] = f"[{seg_emotion.lower()}]" if seg_emotion else ""
+                    # Character traits — per-speaker, injected before emotion in the wire format.
+                    speaker_traits = (traits_mapping or {}).get(speaker) or []
+                    tts_kwargs["traits_tag"] = " ".join(
+                        f"[{t.lower()}]" for t in speaker_traits
+                    ) if speaker_traits else ""
                     # Preset-only: always use reference_id, never inline references.
                     # voice_id is already set from the preset voice map above.
 
@@ -1492,7 +1499,7 @@ class DubbingService:
         # Fallback: ffmpeg arubberband (formant-preserving pitch shift)
         try:
             # rubberband transpose=semitones
-            rb_filter = f"arubberband=pitch={n_steps:.1f}:formant=on"
+            rb_filter = f"rubberband=pitch={n_steps:.1f}:formant=on"
             cmd = ["ffmpeg", "-y", "-i", input_path, "-filter:a", rb_filter, "-vn", output_path]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
@@ -1585,7 +1592,9 @@ class DubbingService:
                 ["ffmpeg", "-filters"],
                 capture_output=True, text=True, timeout=10
             )
-            cls._rubberband_available = "arubberband" in probe.stdout
+            # ffmpeg ≤6.x exposed the filter as "arubberband"; ffmpeg 7.x renamed it to "rubberband".
+            # "rubberband" is a substring of "arubberband" so this check works on both.
+            cls._rubberband_available = "rubberband" in probe.stdout
         except Exception:
             cls._rubberband_available = False
         logger.info(f"[TIME-STRETCH] rubberband={'available' if cls._rubberband_available else 'not available, using atempo'}")
@@ -1630,7 +1639,7 @@ class DubbingService:
                 # smoothing=on reduces phasing artefacts at >1.3×.
                 # transients=crisp keeps consonant clarity.
                 rb_filter = (
-                    f"arubberband=tempo={speed_factor:.4f}"
+                    f"rubberband=tempo={speed_factor:.4f}"
                     ":formant=on:smoothing=on:transients=crisp"
                 )
                 cmd = ["ffmpeg", "-y", "-i", input_path, "-filter:a", rb_filter, "-vn", output_path]
@@ -2071,6 +2080,7 @@ class DubbingService:
         target_duration: Optional[float] = None,
         text: Optional[str] = None,
         emotion: Optional[str] = None,
+        traits: Optional[List[str]] = None,
         pitch: Optional[int] = None,
     ) -> Dict:
         output_dir = os.path.join(self.dubbed_dir, job_id)
@@ -2121,13 +2131,16 @@ class DubbingService:
         # regen for this segment. edit_history preserves the change record.
         audio_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen.mp3")
 
-        emotion_tag = f"({emotion.lower()})" if emotion else ""
+        emotion_tag = f"[{emotion.lower()}]" if emotion else ""
+        # Multiple traits → multiple bracket pairs. Fish normalizes commas to this anyway.
+        traits_tag = " ".join(f"[{t.lower()}]" for t in traits) if traits else ""
         result = await fish_audio_tts.text_to_speech(
             text=use_text,
             voice_id=use_voice_id,
             output_path=audio_path,
             speed=use_speed,
             emotion_tags=emotion_tag,
+            traits_tag=traits_tag,
             pitch=pitch,
         )
         if not result:
@@ -2174,8 +2187,18 @@ class DubbingService:
         seg["voice_id"] = use_voice_id
         seg["speed"] = use_speed
         seg["text"] = use_text
-        if emotion:
+        seg["committed_audio_url"] = final_path
+        seg["committed_adapted_text"] = use_text
+        # Contract: "" = explicit clear (drop seg["emotion"]); None = no change; non-empty = set
+        if emotion == "":
+            seg.pop("emotion", None)
+        elif emotion:
             seg["emotion"] = emotion.lower()
+        # Same contract for attached_traits: [] = explicit clear; None = no change; non-empty = set
+        if traits == []:
+            seg.pop("attached_traits", None)
+        elif traits:
+            seg["attached_traits"] = [t.lower() for t in traits]
         if speed_ratio is not None:
             seg["speed_ratio"] = speed_ratio
         if target_duration is not None:

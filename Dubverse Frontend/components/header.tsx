@@ -13,17 +13,10 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { Bell, Settings, User, Menu, X, Mic2, Check, Users, LogOut, Clapperboard } from "lucide-react"
 import Link from "next/link"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { LanguageSwitcher } from "@/components/language-switcher"
+import { VoiceLibraryModal } from "@/components/voice-library-modal"
 
 import type { EditorMode } from "@/components/dashboard"
 
@@ -80,20 +73,8 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
     setMobileMenuOpen(false)
   }
 
-  const voiceLibrary = [
-    { name: "James", type: "Male Adult", language: "English (US)", accent: "American" },
-    { name: "Sophia", type: "Female Adult", language: "English (UK)", accent: "British" },
-    { name: "Carlos", type: "Male Adult", language: "Spanish", accent: "Castilian" },
-    { name: "Maria", type: "Female Adult", language: "Spanish", accent: "Mexican" },
-    { name: "Yuki", type: "Female Adult", language: "Japanese", accent: "Tokyo" },
-    { name: "Hans", type: "Male Adult", language: "German", accent: "Standard" },
-    { name: "Pierre", type: "Male Adult", language: "French", accent: "Parisian" },
-    { name: "Mei", type: "Female Adult", language: "Chinese", accent: "Mandarin" },
-    { name: "Timmy", type: "Male Child", language: "English (US)", accent: "American" },
-    { name: "Emma", type: "Female Child", language: "English (UK)", accent: "British" },
-    { name: "Raj", type: "Male Adult", language: "Hindi", accent: "Standard" },
-    { name: "Fatima", type: "Female Adult", language: "Arabic", accent: "Modern Standard" },
-  ]
+  // Voice catalog now lives in <VoiceLibraryModal/> — it fetches Fish Audio's
+  // real library via /api/voices with pagination + filters + favorites.
 
   return (
     <>
@@ -257,41 +238,8 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
         )}
       </header>
 
-      {/* Voice Library Modal */}
-      <Dialog open={voiceLibraryOpen} onOpenChange={setVoiceLibraryOpen}>
-        <DialogContent className="max-w-4xl max-h-[80vh] overflow-y-auto bg-[#020817]/95 backdrop-blur-md border-[#A855F7]/30">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-white">
-              <Mic2 className="h-5 w-5 text-[#A855F7]" />
-              Voice Library
-            </DialogTitle>
-            <DialogDescription className="text-[#94A3B8]">
-              Browse our collection of AI voices for dubbing. All voices support multiple emotions and speaking styles.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 mt-4">
-            {voiceLibrary.map((voice) => (
-              <Card key={voice.name} className="bg-[#0F172A]/50 border-[#A855F7]/30 hover:border-[#A855F7] hover:shadow-[0_0_20px_rgba(168,85,247,0.3)] transition-all cursor-pointer">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-base text-white">{voice.name}</CardTitle>
-                  <CardDescription className="text-[#94A3B8]">{voice.type}</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-sm text-[#94A3B8]">
-                    <p>{voice.language}</p>
-                    <p className="text-xs">{voice.accent} accent</p>
-                  </div>
-                  <Button variant="outline" size="sm" className="mt-3 w-full bg-transparent border-[#A855F7]/30 text-[#C084FC] hover:bg-[#A855F7]/10 hover:border-[#A855F7]">
-                    Preview Voice
-                  </Button>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* Pricing Modal removed */}
+      {/* Voice Library Modal — fetches Fish Audio's real catalog with paginated browse */}
+      <VoiceLibraryModal open={voiceLibraryOpen} onOpenChange={setVoiceLibraryOpen} />
     </>
   )
 }
