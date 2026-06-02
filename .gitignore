@@ -37,3 +37,18 @@ ffmpeg-2026-01-14-git-6c878f8b82-full_build
 ffmpeg-2026-01-14-git-6c878f8b82-full_build(1)
 ffmpeg-8.0.1-essentials_build
 ffmpeg-8.0.1-essentials_build(2)
+
+# Archives / project exports
+*.zip
+
+# Reserved Windows device name (breaks checkout)
+Dubverse Frontend/messages/nul
+
+# Build-artifact .js next to .ts source
+Dubverse Frontend/lib/*.js
+
+# Domain-verification token
+httpspub-*.txt
+
+# Local agent settings
+.claude/
