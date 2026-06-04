@@ -183,7 +183,7 @@ export const useEditorStore = create<EditorState>(
   qcFilterType: 'all',
   currentTime: 0,
   isPlaying: false,
-  playbackMode: 'dubbed',
+  playbackMode: 'preview',
   rebuildStatus: 'idle',
   rptStitching: false,
   zoomLevel: 1,
