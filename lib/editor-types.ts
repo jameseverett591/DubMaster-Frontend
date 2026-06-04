@@ -166,7 +166,7 @@ export const SPEAKER_COLORS: Record<string, { bg: string; border: string; text: 
 }
 
 export function getSpeakerColor(speakerId: string) {
-  const index = parseInt(speakerId.replace(/\D/g, '')) || 1
+  const index = parseInt((speakerId ?? '').replace(/\D/g, '')) || 1
   const key = `speaker-${((index - 1) % 6) + 1}`
   return SPEAKER_COLORS[key] || SPEAKER_COLORS['speaker-1']
 }

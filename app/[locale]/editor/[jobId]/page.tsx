@@ -26,6 +26,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   const { jobId } = use(params)
   const [editorProps, setEditorProps] = useState<any>(null)
   const [segments, setSegments] = useState<Segment[]>([])
+  const [snapshotSegments, setSnapshotSegments] = useState<Segment[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -65,10 +66,11 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   useEffect(() => {
     async function loadJob() {
       try {
-        const [statusRes, segmentsRes, transcriptRes] = await Promise.allSettled([
+        const [statusRes, segmentsRes, transcriptRes, snapshotRes] = await Promise.allSettled([
           fetch(`${API_BASE}/api/status/${jobId}`),
           fetch(`${API_BASE}/api/segments/${jobId}`),
           fetch(`${API_BASE}/api/transcript/${jobId}`),
+          fetch(`${API_BASE}/api/segments/${jobId}/snapshot`),
         ])
 
         const statusFetch = statusRes.status === 'fulfilled' ? statusRes.value : null
@@ -139,6 +141,31 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
           }
         })
 
+        const snapshotFetch = snapshotRes.status === 'fulfilled' ? snapshotRes.value : null
+        const snapshotData = snapshotFetch?.ok ? await snapshotFetch.json() : null
+        const mappedSnapshotSegments: Segment[] = (snapshotData?.segments ?? []).map((seg: any, idx: number) => ({
+          id: `snapshot-${idx}`,
+          index: idx,
+          status: 'auto' as const,
+          start_time: seg.start ?? 0,
+          end_time: seg.end ?? 0,
+          source_text: '',
+          target_text: seg.text ?? '',
+          active_text: seg.text ?? '',
+          preview_text: null,
+          isPreviewing: false,
+          speaker_id: `speaker-${String(seg.speaker ?? '').replace(/\D/g, '') || '1'}`,
+          speaker_label: seg.speaker ?? 'Speaker 1',
+          audio_url: seg.path ? `${seg.path}?ts=${cacheBustTs}` : undefined,
+          committed_audio_url: undefined,
+          qc_findings: [],
+          emotionalCurve: {
+            combined: [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }],
+            locked: false,
+            analysis: { facial: [], vocal: [], scene: [] },
+          },
+        }))
+
         const targetLang = (segmentsData?.language || 'en').toLowerCase()
 
         setEditorProps({
@@ -154,6 +181,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
           traitsMapping: persistedTraitsMapping,
         })
         setSegments(editorSegments)
+        setSnapshotSegments(mappedSnapshotSegments)
       } catch (e: any) {
         setError(e.message)
       } finally {
@@ -284,6 +312,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         dubbedVideoUrl={editorProps.dubbedVideoUrl}
         videoDuration={editorProps.videoDuration}
         segments={segments}
+        snapshotSegments={snapshotSegments}
         qcScore={null}
         qcFindings={NO_FINDINGS}
         qcAnalysis={qcAnalysis}
