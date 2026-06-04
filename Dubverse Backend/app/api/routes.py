@@ -1959,9 +1959,11 @@ async def get_transcript(job_id: str):
         }
     
     import json
+    # CRITICAL: Load ONLY the job-specific transcript file. Never fall back to
+    # a global transcript.json — that causes data isolation violations where
+    # fresh jobs silently inherit stale transcripts from previous jobs.
+    # See: https://github.com/anthropics/dubverse/issues/data-isolation-transcript-fallback
     transcript_file = Path("data/transcripts") / f"{job_id}.json"
-    if not transcript_file.exists():
-        transcript_file = Path("data/transcripts/transcript.json")
 
     if transcript_file.exists():
         try:
@@ -1978,8 +1980,8 @@ async def get_transcript(job_id: str):
                 "segments": transcript_data.get("segments", []),
             }
         except Exception as e:
-            logger.error(f"Error reading transcript file: {e}")
-    
+            logger.error(f"Error reading transcript file for {job_id}: {e}")
+
     raise HTTPException(status_code=404, detail="Transcript not available yet")
 
 
@@ -2602,13 +2604,12 @@ async def dub_video(request: DubRequest, background_tasks: BackgroundTasks):
     job_segments = (job.transcript.segments if job and job.transcript and job.transcript.segments else [])
     job_speakers = set((seg.speaker or "speaker-1") for seg in job_segments)
 
+    # CRITICAL: Always use request.transcript, never fall back to cached job_segments.
+    # The previous fallback (if req_speakers <= 1 and job_speakers > 1) caused
+    # cross-job contamination: fresh dub requests would inherit stale segments
+    # from previously cached jobs still in memory, resulting in old translated
+    # text being written to the fresh job's segments.json.
     transcript_source = request.transcript
-    if len(req_speakers) <= 1 and len(job_speakers) > 1:
-        transcript_source = job_segments
-        logger.info(
-            f"Job {request.job_id}: overriding dub request transcript with stored job transcript "
-            f"(req_speakers={sorted(req_speakers)}, job_speakers={sorted(job_speakers)})"
-        )
 
     transcript_dicts = [
         {
@@ -3472,7 +3473,6 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
             speed=speed,
             speed_ratio=speed_ratio,
             target_duration=target_duration,
-            text=body.text,
             emotion=body.emotion,
             traits=body.traits,
             pitch=body.pitch,

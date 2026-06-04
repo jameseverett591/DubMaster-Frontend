@@ -2078,7 +2078,6 @@ class DubbingService:
         speed: Optional[float] = None,
         speed_ratio: Optional[float] = None,
         target_duration: Optional[float] = None,
-        text: Optional[str] = None,
         emotion: Optional[str] = None,
         traits: Optional[List[str]] = None,
         pitch: Optional[int] = None,
@@ -2122,7 +2121,9 @@ class DubbingService:
             use_speed = 1.0
 
         use_speed = max(0.5, min(2.0, use_speed))
-        use_text = text or seg.get("text", "")
+        # CRITICAL FIX: Always use text from disk, never from frontend request body.
+        # This prevents stale React state from overwriting manual corrections.
+        use_text = seg.get("text", "")
 
         previous_text = seg.get("text", "")
         previous_path = seg.get("path", "")
