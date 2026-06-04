@@ -3368,8 +3368,8 @@ export function DubVerseEditor({
                       <div
                         className="flex items-center gap-2 rounded-lg p-1.5 border-2 border-amber-400/80 bg-amber-500/10 shadow-[0_0_0_3px_rgba(251,191,36,0.15),0_0_20px_rgba(251,191,36,0.35)]"
                         onClick={(e) => e.stopPropagation()}
-                        onMouseDown={(e) => e.stopPropagation()}
-                        onMouseUp={(e) => e.stopPropagation()}
+                        onMouseDown={(e) => { if ((e.target as HTMLElement).tagName === 'INPUT') e.stopPropagation() }}
+                        onMouseUp={(e) => { if ((e.target as HTMLElement).tagName === 'INPUT') e.stopPropagation() }}
                       >
                         <Input
                           value={editingText}

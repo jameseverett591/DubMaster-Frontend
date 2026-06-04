@@ -1084,7 +1084,6 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             "Falling back to local transcription."
         )
         try:
-            from app.pipeline.extract_audio import extract_audio
             from app.pipeline.transcribe_cantonese import transcribe_cantonese
 
             prev_lang = os.environ.get("WHISPER_LANGUAGE")
