@@ -1004,14 +1004,14 @@ export function DubVerseEditor({
   // landed (e.g. a missing store action), so a no-op stamp can't silently
   // discard live edits (Original resize handles, drag persistence).
   const displaySegments: Segment[] = ((importedSegmentsJobId === jobId || importedSegmentsJobId === null) && Array.isArray(importedSegments))
-    ? importedSegments
-    : Array.isArray(segments) ? segments : []
+    ? importedSegments.filter(Boolean)
+    : (Array.isArray(segments) ? segments : []).filter(Boolean)
 
   // Unique speakers across all segments — used for reassignment dropdown
   const uniqueSpeakers = useMemo(() => {
     const seen = new Map<string, { id: string; label: string; gender: 'male' | 'female' | 'child' }>()
     displaySegments.forEach(seg => {
-      if (!seen.has(seg.speaker_id)) {
+      if (seg.speaker_id && !seen.has(seg.speaker_id)) {
         seen.set(seg.speaker_id, {
           id: seg.speaker_id,
           label: seg.speaker_label || seg.speaker_id,
@@ -2499,6 +2499,20 @@ export function DubVerseEditor({
     })
   }, [displaySegments, setPreviewText])
 
+  // Freeze speaker traits onto segment when editing starts
+  useEffect(() => {
+    if (editingSegmentIndex !== null) {
+      const seg = displaySegments[editingSegmentIndex]
+      if (seg && (seg.attached_traits == null) && speakerTraitsMap[seg.speaker_id]?.length) {
+        const frozen = [...speakerTraitsMap[seg.speaker_id]]
+        setImportedSegments(prev => {
+          if (!prev) return prev
+          return prev.map((s, i) => i === editingSegmentIndex ? { ...s, attached_traits: frozen } : s)
+        })
+      }
+    }
+  }, [editingSegmentIndex, displaySegments, speakerTraitsMap])
+
   // Save editing — updates preview text while keeping preview mode active
   const saveEditing = useCallback(() => {
     if (editingSegmentIndex !== null) {
@@ -3354,27 +3368,21 @@ export function DubVerseEditor({
                       <div
                         className="flex items-center gap-2 rounded-lg p-1.5 border-2 border-amber-400/80 bg-amber-500/10 shadow-[0_0_0_3px_rgba(251,191,36,0.15),0_0_20px_rgba(251,191,36,0.35)]"
                         onClick={(e) => e.stopPropagation()}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onMouseUp={(e) => e.stopPropagation()}
                       >
                         <Input
                           value={editingText}
                           onChange={(e) => {
                             setEditingText(e.target.value)
-                            // First-keystroke trait attachment: freeze speaker's current traits
-                            // onto this segment the moment the user starts editing the text.
-                            const seg = displaySegments[index]
-                            if (seg && (seg.attached_traits == null) && speakerTraitsMap[seg.speaker_id]?.length) {
-                              const frozen = [...speakerTraitsMap[seg.speaker_id]]
-                              setImportedSegments(prev => {
-                                if (!prev) return prev
-                                return prev.map((s, i) => i === index ? { ...s, attached_traits: frozen } : s)
-                              })
-                            }
                           }}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') saveEditing()
                             if (e.key === 'Escape') cancelEditing()
                             e.stopPropagation()
                           }}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onMouseUp={(e) => e.stopPropagation()}
                           onFocus={(e) => {
                             const len = e.target.value.length
                             e.target.setSelectionRange(len, len)
@@ -3568,27 +3576,13 @@ export function DubVerseEditor({
                         ) : (
                           <div
                             className={cn(
-                              'text-sm cursor-grab active:cursor-grabbing select-none inline-flex items-center gap-1 px-3 py-1 rounded-full border-2 text-white',
+                              'text-sm cursor-pointer select-none inline-flex items-center gap-1 px-3 py-1 rounded-full border-2 text-white',
                               lockedSegments.has(index)
                                 ? 'border-emerald-400 bg-emerald-500/20 shadow-[0_0_10px_rgba(34,197,94,0.4)]'
                                 : segment.isPreviewing
                                   ? 'border-orange-400 bg-orange-500/10 shadow-[0_0_8px_rgba(251,146,60,0.3)]'
                                   : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
                             )}
-                            draggable={!lockedSegments.has(index)}
-                            onDragStart={(e) => {
-                              if (lockedSegments.has(index)) {
-                                e.preventDefault()
-                                return
-                              }
-                              const mockSuggestion: Suggestion = {
-                                id: `direct-${index}`,
-                                text: segment.preview_text ?? segment.active_text ?? segment.target_text,
-                                confidence: 1,
-                                source: 'user'
-                              }
-                              handleDragStart(e, mockSuggestion, index)
-                            }}
                             onDoubleClick={() => !lockedSegments.has(index) && !segment.isPreviewing && startEditing(index)}
                           >
                             {lockedSegments.has(index) && <Lock className="h-3 w-3 shrink-0" />}

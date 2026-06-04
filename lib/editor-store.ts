@@ -608,7 +608,6 @@ export const useEditorStore = create<EditorState>(
       version: 1,
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
-        importedSegments: state.importedSegments,
         importedSegmentsJobId: state.importedSegmentsJobId,
         selectedSegmentIndex: state.selectedSegmentIndex,
         activeSidebarTab: state.activeSidebarTab,

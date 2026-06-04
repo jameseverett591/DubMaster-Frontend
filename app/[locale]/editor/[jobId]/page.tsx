@@ -64,6 +64,16 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
 
   // Load job data
   useEffect(() => {
+    async function safeJson(res: Response): Promise<any> {
+      try {
+        const text = await res.text()
+        if (!text || text.trim() === '') return null
+        return JSON.parse(text)
+      } catch {
+        return null
+      }
+    }
+
     async function loadJob() {
       try {
         const [statusRes, segmentsRes, transcriptRes, snapshotRes] = await Promise.allSettled([
@@ -79,10 +89,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         const status = await statusFetch.json()
 
         const segFetch = segmentsRes.status === 'fulfilled' ? segmentsRes.value : null
-        const segmentsData = segFetch?.ok ? await segFetch.json() : null
+        const segmentsData = segFetch?.ok ? await safeJson(segFetch) : null
 
         const txFetch = transcriptRes.status === 'fulfilled' ? transcriptRes.value : null
-        const transcript = txFetch?.ok ? await txFetch.json() : null
+        const transcript = txFetch?.ok ? await safeJson(txFetch) : null
 
         const sourceByIndex = new Map<number, string>()
         if (transcript?.segments) {
@@ -142,7 +152,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         })
 
         const snapshotFetch = snapshotRes.status === 'fulfilled' ? snapshotRes.value : null
-        const snapshotData = snapshotFetch?.ok ? await snapshotFetch.json() : null
+        const snapshotData = snapshotFetch?.ok ? await safeJson(snapshotFetch) : null
         const mappedSnapshotSegments: Segment[] = (snapshotData?.segments ?? []).map((seg: any, idx: number) => ({
           id: `snapshot-${idx}`,
           index: idx,
