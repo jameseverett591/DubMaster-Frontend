@@ -3345,6 +3345,19 @@ async def get_segments(job_id: str):
     return data
 
 
+@router.get("/segments/{job_id}/snapshot")
+async def get_segments_snapshot(job_id: str):
+    """Return the original pipeline snapshot — never modified by user edits."""
+    dubbed_dir = os.path.join(settings.DUBBED_DIR, job_id)
+    snapshot_path = os.path.join(dubbed_dir, "segments_snapshot.json")
+    fallback_path = os.path.join(dubbed_dir, "segments.json")
+    path = snapshot_path if os.path.exists(snapshot_path) else fallback_path
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail=f"segments not found for job {job_id}")
+    with open(path, "r", encoding="utf-8") as f:
+        return _json.load(f)
+
+
 @router.patch("/segment/commit/{job_id}/{index}")
 async def commit_segment_timing(job_id: str, index: int, body: dict, request: Request):
     """Save committed timing and audio URL for a single segment to Supabase and segments.json."""

@@ -294,6 +294,7 @@ interface DubVerseEditorProps {
   dubbedVideoUrl: string | null
   videoDuration: number
   segments: Segment[]
+  snapshotSegments?: Segment[]
   qcScore?: QCScore | null
   qcFindings?: QCFinding[]
   qcAnalysis?: any
@@ -421,6 +422,7 @@ export function DubVerseEditor({
   dubbedVideoUrl,
   videoDuration,
   segments: initialSegments,
+  snapshotSegments,
   qcScore,
   qcFindings = [],
   qcAnalysis,
@@ -489,18 +491,17 @@ export function DubVerseEditor({
   const importedSegments = useEditorStore((state) => state.importedSegments)
   const importedSegmentsJobId = useEditorStore((state) => state.importedSegmentsJobId)
   const setImportedSegmentsRaw = useEditorStore((state) => state.setImportedSegments)
-  const setImportedSegmentsJobId = useEditorStore((state) => state.setImportedSegmentsJobId)
   // Wrap the store setter so every write to importedSegments also stamps the
-  // owning jobId — keeping the pair in sync at all call sites (and any future
-  // ones) without editing each individually. Rehydration from localStorage does
-  // NOT go through this setter, so a persisted (segments, jobId) pair is
-  // restored intact and compared correctly in displaySegments below.
+  // owning jobId directly via Zustand's static setState — always available,
+  // never undefined, never dependent on a store action that may be missing
+  // in a stale HMR session. Rehydration from localStorage does NOT go through
+  // this setter, so a persisted (segments, jobId) pair is restored intact.
   const setImportedSegments = useCallback(
     (segments: Segment[] | null | ((prev: Segment[] | null) => Segment[] | null)) => {
       setImportedSegmentsRaw(segments)
-      setImportedSegmentsJobId?.(jobId)
+      useEditorStore.setState({ importedSegmentsJobId: jobId })
     },
-    [setImportedSegmentsRaw, setImportedSegmentsJobId, jobId],
+    [setImportedSegmentsRaw, jobId],
   )
 
   const [showExportModal, setShowExportModal] = useState(false)
@@ -608,6 +609,8 @@ export function DubVerseEditor({
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [regenError, setRegenError] = useState<string | null>(null)
+  const [addSegmentFeedback, setAddSegmentFeedback] = useState<'success' | 'error' | null>(null)
+  const [pendingOverwriteIndex, setPendingOverwriteIndex] = useState<number | null>(null)
   const [shareCopied, setShareCopied] = useState<'link' | 'video' | null>(null)
   const [askAiOpen, setAskAiOpen] = useState(false)
   const [characterProfileOpen, setCharacterProfileOpen] = useState<{
@@ -996,7 +999,11 @@ export function DubVerseEditor({
   // Use imported segments if set (even if empty), otherwise use initial segments.
   // Only trust importedSegments when it belongs to THIS job — a stale persisted
   // array from a previous job (esp. []) must not mask the freshly-fetched prop.
-  const displaySegments: Segment[] = (importedSegmentsJobId === jobId && Array.isArray(importedSegments))
+  // Trust importedSegments when it belongs to this job OR is unstamped (null) —
+  // "unstamped" means the current session's edits where the jobId stamp never
+  // landed (e.g. a missing store action), so a no-op stamp can't silently
+  // discard live edits (Original resize handles, drag persistence).
+  const displaySegments: Segment[] = ((importedSegmentsJobId === jobId || importedSegmentsJobId === null) && Array.isArray(importedSegments))
     ? importedSegments
     : Array.isArray(segments) ? segments : []
 
@@ -1072,6 +1079,7 @@ export function DubVerseEditor({
       committed_audio_url: undefined,
       status: 'auto' as const,
     }
+    const expectedLength = displaySegments.length + 1
     setImportedSegments(prev => {
       const base = prev ?? displaySegments
       const result = [...base]
@@ -1080,6 +1088,13 @@ export function DubVerseEditor({
     })
     selectSegment(index + 1)
     pendingAutoRegenRef.current = index + 1
+    // Verify the splice actually rendered. On the next tick, displaySegments
+    // should have grown by 1. If it hasn't, the gate swallowed the write.
+    setTimeout(() => {
+      const grew = displaySegmentsRef.current.length === expectedLength
+      setAddSegmentFeedback(grew ? 'success' : 'error')
+      setTimeout(() => setAddSegmentFeedback(null), grew ? 2000 : 4000)
+    }, 50)
   }, [displaySegments, selectSegment])
 
   const commitSpeakerRename = useCallback((speakerId: string, newLabel: string) => {
@@ -2131,6 +2146,18 @@ export function DubVerseEditor({
     const segment = displaySegments[activeIndex]
     if (!segment) { console.warn('[REGEN] aborted — no segment at index', activeIndex); return false }
 
+    // Guard: if the segment has committed audio AND the text has changed from
+    // what was last committed, require explicit confirmation before overwriting.
+    const incomingText = (activeIndex === selectedSegmentIndex && editingText.trim())
+      ? editingText.trim()
+      : (segment.preview_text ?? segment.active_text ?? segment.target_text)
+    const committedText = segment.committed_adapted_text ?? segment.target_text
+    const textChanged = incomingText !== committedText
+    if (segment.committed_audio_url && textChanged && voiceOverride === undefined && segIdx === undefined) {
+      setPendingOverwriteIndex(activeIndex)
+      return false
+    }
+
     if (lockedSegments.has(activeIndex)) {
       setLockedSegments(prev => {
         const next = new Set(prev)
@@ -2352,7 +2379,7 @@ export function DubVerseEditor({
   // Handle Revert to Original — restores text and audio from the initial load snapshot
   const handleRevert = useCallback(() => {
     if (selectedSegmentIndex === null) return
-    const original = initialSegments[selectedSegmentIndex]
+    const original = (snapshotSegments ?? initialSegments)[selectedSegmentIndex]
     if (!original) return
 
     const filename = (original.audio_url ?? '').split('/').pop() ?? ''
@@ -2577,8 +2604,8 @@ export function DubVerseEditor({
   const timelineWidth = videoDuration * PIXELS_PER_SECOND
 
   // Find pending segment count
-  const pendingCount = displaySegments.filter(s => 
-    s.qc_findings.some(f => f.severity === 'error' || f.severity === 'warning')
+  const pendingCount = displaySegments.filter(s =>
+    s.qc_findings?.some(f => f.severity === 'error' || f.severity === 'warning')
   ).length
   
   return (
@@ -3073,7 +3100,7 @@ export function DubVerseEditor({
           {displaySegments.map((segment, index) => {
               const speakerColor = getSpeakerColor(segment.speaker_id)
               const isEditing = editingSegmentIndex === index
-              const hasQCFindings = segment.qc_findings.length > 0
+              const hasQCFindings = (segment.qc_findings?.length ?? 0) > 0
               const segmentSuggestions = suggestions[index] || []
                   const isAssignmentPulse = speakerPulseId !== null && segment.speaker_id === speakerPulseId
               
@@ -3211,6 +3238,14 @@ export function DubVerseEditor({
                       <span className="text-base leading-none">✓</span>
                       <span>{voiceAppliedFeedback.voiceName}</span>
                     </div>
+                  )}
+                  {segment.id?.startsWith('new-') && !segment.committed_audio_url && (
+                    <div className="pointer-events-none absolute left-0 top-0 bottom-0 w-1 rounded-l bg-emerald-500" />
+                  )}
+                  {segment.id?.startsWith('new-') && !segment.committed_audio_url && (
+                    <span className="absolute top-1 left-3 text-[9px] font-bold uppercase tracking-widest text-emerald-400 bg-emerald-500/15 border border-emerald-500/40 px-1.5 py-0.5 rounded pointer-events-none">
+                      NEW
+                    </span>
                   )}
                   {/* Speaker drag handle + dropdown */}
                   <div className="flex items-center gap-1">
@@ -3813,6 +3848,16 @@ export function DubVerseEditor({
               {regenError && (
                 <p className="text-xs text-red-400">{regenError}</p>
               )}
+              {addSegmentFeedback === 'error' && (
+                <p className="text-xs text-red-400 font-medium">
+                  Add Segment failed — please try again or reload the page.
+                </p>
+              )}
+              {addSegmentFeedback === 'success' && (
+                <p className="text-xs text-emerald-400">
+                  Segment added ✓
+                </p>
+              )}
             </div>
             <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-400"
               onClick={() => setPendingDelete(selectedSegmentIndex)}
@@ -3821,6 +3866,23 @@ export function DubVerseEditor({
               <Trash2 className="h-4 w-4" />
             </Button>
           </div>
+          {pendingOverwriteIndex !== null && (
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-950/50 border border-amber-500/30 rounded text-xs text-amber-300 mx-4 mb-2">
+              <span>This will replace the committed audio for this segment. Regenerate with the new text?</span>
+              <Button size="sm" className="h-6 text-xs bg-amber-600 hover:bg-amber-700 text-white px-2"
+                onClick={() => {
+                  const idx = pendingOverwriteIndex
+                  setPendingOverwriteIndex(null)
+                  handleGenerateSpeech(idx)
+                }}>
+                Regenerate
+              </Button>
+              <Button size="sm" variant="ghost" className="h-6 text-xs px-2"
+                onClick={() => setPendingOverwriteIndex(null)}>
+                Cancel
+              </Button>
+            </div>
+          )}
           {pendingDelete !== null && (
             <div className="flex items-center gap-2 px-3 py-1.5 bg-red-950/50 border border-red-500/30 rounded text-xs text-red-400 mx-4 mb-2">
               <span>Delete this segment?</span>
@@ -4965,7 +5027,11 @@ export function DubVerseEditor({
                       )}
                       style={{
                         left: (segment.start_time + delta) * PIXELS_PER_SECOND,
-                        width: (segment.end_time - segment.start_time) * PIXELS_PER_SECOND,
+                        width: (() => {
+                          const dur = segment.end_time - segment.start_time
+                          const spd = dragSpeedPreview?.index === index ? dragSpeedPreview.speed : (stagedSpeeds[index] ?? 1.0)
+                          return (dur / spd) * PIXELS_PER_SECOND
+                        })(),
                       }}
                       onMouseDown={(e) => {
                         const t = e.target as HTMLElement
@@ -5337,7 +5403,17 @@ export function DubVerseEditor({
                           ? 'bg-amber-400/60 border border-amber-400/80'
                           : 'bg-emerald-500/50 border border-emerald-500/70'
                       )}
-                      style={{ left: startT * PIXELS_PER_SECOND, width: Math.max((endT - startT) * PIXELS_PER_SECOND, 2) }}
+                      style={{
+                        left: startT * PIXELS_PER_SECOND,
+                        width: Math.max(
+                          (() => {
+                            const dur = endT - startT
+                            const spd = dragSpeedPreview?.index === i ? dragSpeedPreview.speed : (stagedSpeeds[i] ?? 1.0)
+                            return (dur / spd) * PIXELS_PER_SECOND
+                          })(),
+                          2
+                        )
+                      }}
                       title={seg.committed_adapted_text ?? seg.active_text ?? seg.target_text}
                     />
                   )
