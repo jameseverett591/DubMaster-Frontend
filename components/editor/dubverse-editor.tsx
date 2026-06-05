@@ -447,7 +447,9 @@ export function DubVerseEditor({
   const waveformCanvasLRef = useRef<HTMLCanvasElement>(null)
   const waveformCanvasRRef = useRef<HTMLCanvasElement>(null)
   const decodedBufferRef = useRef<AudioBuffer | null>(null)
-  
+  const groupMoveStartXRef = useRef(0)
+  const groupMoveActiveRef = useRef(false)
+
   const {
     setJobData,
     segments,
@@ -627,6 +629,15 @@ export function DubVerseEditor({
   const [renameValue, setRenameValue] = useState('')
   const [stagedPitches, setStagedPitches] = useState<Record<number, number>>({})
   const [draggedVoice, setDraggedVoice] = useState<string | null>(null)
+  const [groupSelectedSegments, setGroupSelectedSegments] = useState<Set<number>>(new Set())
+  const [selectionDrag, setSelectionDrag] = useState<{
+    startX: number
+    startY: number
+    currentX: number
+    currentY: number
+  } | null>(null)
+  const [groupMoveActive, setGroupMoveActive] = useState(false)
+  const [groupMoveOffset, setGroupMoveOffset] = useState({ x: 0, y: 0 })
   const [voicePaletteOpen, setVoicePaletteOpen] = useState(false)
   const [voiceDragOverIndex, setVoiceDragOverIndex] = useState<number | null>(null)
   const [voiceAppliedFeedback, setVoiceAppliedFeedback] = useState<{ segmentIndex: number; voiceName: string } | null>(null)
@@ -1087,7 +1098,6 @@ export function DubVerseEditor({
       return result
     })
     selectSegment(index + 1)
-    pendingAutoRegenRef.current = index + 1
     // Verify the splice actually rendered. On the next tick, displaySegments
     // should have grown by 1. If it hasn't, the gate swallowed the write.
     setTimeout(() => {
@@ -1113,6 +1123,16 @@ export function DubVerseEditor({
   // Placed after displaySegments and qcBoxPosition so dep array has no TDZ
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Escape — clear group selection and move state
+      if (e.key === 'Escape') {
+        setGroupSelectedSegments(new Set())
+        setSelectionDrag(null)
+        setGroupMoveActive(false)
+        groupMoveActiveRef.current = false
+        setGroupMoveOffset({ x: 0, y: 0 })
+        return
+      }
+
       if (e.key === 'u' || e.key === 'U') {
         const target = e.target as HTMLElement
         if (
@@ -2088,7 +2108,134 @@ export function DubVerseEditor({
     } catch {}
     setDraggedTranslation(null)
   }, [updateSegmentText])
-  
+
+  const handleTimelineMouseDown = useCallback((e: React.MouseEvent) => {
+    // Only start selection with Shift key
+    if (!e.shiftKey) return
+
+    // Don't start selection if clicking on a segment block or resize handle
+    const target = e.target as HTMLElement
+    if (target.closest('[data-segment-block]') || target.closest('[data-resize-handle]')) return
+
+    e.preventDefault()
+    e.stopPropagation()
+
+    const container = e.currentTarget as HTMLElement
+    const rect = container.getBoundingClientRect()
+    const startX = e.clientX - rect.left
+    const startY = e.clientY - rect.top
+
+    setSelectionDrag({ startX, startY, currentX: startX, currentY: startY })
+  }, [])
+
+  const handleTimelineMouseMove = useCallback((e: React.MouseEvent) => {
+    // Handle group movement during move phase
+    if (groupMoveActiveRef.current) {
+      setGroupMoveOffset({
+        x: e.clientX - groupMoveStartXRef.current,
+        y: 0
+      })
+      return
+    }
+
+    // Handle normal selection rectangle drag
+    if (!selectionDrag) return
+
+    const container = e.currentTarget as HTMLElement
+    const rect = container.getBoundingClientRect()
+    const currentX = e.clientX - rect.left
+    const currentY = e.clientY - rect.top
+
+    setSelectionDrag(prev => prev ? { ...prev, currentX, currentY } : null)
+  }, [selectionDrag])
+
+  const handleTimelineMouseUp = useCallback((e: React.MouseEvent) => {
+    if (!selectionDrag) return
+
+    // Define helpers inside callback — no closure risk, tight scope
+    const getSelectionRect = () => {
+      const x1 = Math.min(selectionDrag.startX, selectionDrag.currentX)
+      const x2 = Math.max(selectionDrag.startX, selectionDrag.currentX)
+      const y1 = Math.min(selectionDrag.startY, selectionDrag.currentY)
+      const y2 = Math.max(selectionDrag.startY, selectionDrag.currentY)
+      return { x1, x2, y1, y2, width: x2 - x1, height: y2 - y1 }
+    }
+
+    const checkSegmentIntersection = (index: number, selectionRect: ReturnType<typeof getSelectionRect>) => {
+      const block = document.querySelector(`[data-segment-block-index="${index}"]`) as HTMLElement
+      if (!block) return false
+      const rect = block.getBoundingClientRect()
+      const container = document.querySelector('[data-timeline-container]') as HTMLElement
+      if (!container) return false
+      const containerRect = container.getBoundingClientRect()
+
+      // Adjust block position relative to container
+      const blockX1 = rect.left - containerRect.left
+      const blockX2 = blockX1 + rect.width
+      const blockY1 = rect.top - containerRect.top
+      const blockY2 = blockY1 + rect.height
+
+      // Check intersection
+      return !(selectionRect.x2 < blockX1 ||
+              selectionRect.x1 > blockX2 ||
+              selectionRect.y2 < blockY1 ||
+              selectionRect.y1 > blockY2)
+    }
+
+    const selectionRect = getSelectionRect()
+    if (!selectionRect) {
+      setSelectionDrag(null)
+      return
+    }
+
+    // Find all intersecting segments
+    const selected = new Set<number>()
+    displaySegments.forEach((_, index) => {
+      if (checkSegmentIntersection(index, selectionRect)) {
+        selected.add(index)
+      }
+    })
+
+    setGroupSelectedSegments(selected)
+    setSelectionDrag(null)
+    setGroupMoveOffset({ x: 0, y: 0 })
+  }, [selectionDrag, displaySegments])
+
+  const handleTimelineMouseUpWrapper = useCallback((e: React.MouseEvent) => {
+    // Handle group movement end
+    if (groupMoveActiveRef.current) {
+      const timeDelta = groupMoveOffset.x / PIXELS_PER_SECOND
+
+      displaySegments.forEach((segment, index) => {
+        if (groupSelectedSegments.has(index)) {
+          const newStartTime = Math.max(0, segment.start_time + timeDelta)
+          const newEndTime = Math.max(0, segment.end_time + timeDelta)
+
+          updateSegment(index, {
+            start_time: newStartTime,
+            end_time: newEndTime,
+          })
+
+          setImportedSegments(prev => {
+            if (!prev) return prev
+            return prev.map((seg, i) =>
+              i === index
+                ? { ...seg, start_time: newStartTime, end_time: newEndTime }
+                : seg
+            )
+          })
+        }
+      })
+
+      setGroupMoveActive(false)
+      groupMoveActiveRef.current = false
+      return
+    }
+
+    // Handle normal selection freeze
+    handleTimelineMouseUp(e)
+  }, [groupMoveOffset, groupSelectedSegments, displaySegments])
+
   const handleClearSegment = useCallback((index: number) => {
     const original = initialSegments[index]
     const filename = (original?.audio_url ?? '').split('/').pop() ?? ''
@@ -4858,10 +5005,17 @@ export function DubVerseEditor({
             className="flex-1 overflow-x-auto overflow-y-hidden flex flex-col"
             onWheel={handleTimelineWheel}
           >
-            <div 
-              className="flex flex-col min-h-full relative" 
+            <div
+              className="flex flex-col min-h-full relative"
               style={{ minWidth: timelineWidth, width: '100%' }}
+              data-timeline-container
+              onMouseDown={handleTimelineMouseDown}
+              onMouseMove={handleTimelineMouseMove}
+              onMouseUp={handleTimelineMouseUpWrapper}
               onClick={(e) => {
+                // Don't move needle during group move
+                if (groupMoveActiveRef.current) return
+
                 const target = e.target as HTMLElement
                 if (target.closest('[data-segment-block]')) return
                 const rect = timelineRef.current?.getBoundingClientRect()
@@ -5205,6 +5359,9 @@ export function DubVerseEditor({
                       className={cn(
                         'absolute top-1 bottom-1 rounded group border transition-colors',
                         bgColor,
+                        groupSelectedSegments.has(index)
+                          ? 'border-yellow-400/70 shadow-[0_0_12px_rgba(250,204,21,0.4)] ring-1 ring-yellow-400/50'
+                          : 'border-slate-400/30',
                         selectedSegmentIndex === index && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                         voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
                         flashingPair === index && 'ring-1 ring-amber-400',
@@ -5216,7 +5373,8 @@ export function DubVerseEditor({
                           const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'dubbed'
                           const isDraggingPaired = draggingSegment?.index === index && draggingSegment?.track === 'original' && lockedPairs.has(index)
                           const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
-                          return (segment.start_time + delta) * PIXELS_PER_SECOND
+                          const groupDelta = (groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0
+                          return (segment.start_time + delta) * PIXELS_PER_SECOND + groupDelta
                         })(),
                         width: (() => {
                           const originalDuration = segment.end_time - segment.start_time
@@ -5227,12 +5385,25 @@ export function DubVerseEditor({
                         })(),
                       }}
                       data-segment-block={true}
+                      data-segment-block-index={index}
                       onClick={() => handleSegmentClick(index)}
                       onDrop={(e) => handleTimelineDrop(e, index)}
                       onDragOver={handleTimelineDragOver}
                       onMouseDown={(e) => {
                         const t = e.target as HTMLElement
                         if (t.closest('[data-resize-handle]')) return
+
+                        // Start group move if segment is selected and Shift is not pressed
+                        if (groupSelectedSegments.has(index) && !e.shiftKey) {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          groupMoveActiveRef.current = true
+                          groupMoveStartXRef.current = e.clientX
+                          setGroupMoveActive(true)
+                          setGroupMoveOffset({ x: 0, y: 0 })
+                          return
+                        }
+
                         e.preventDefault()
                         e.stopPropagation()
                         const startX = e.clientX
@@ -5509,6 +5680,26 @@ export function DubVerseEditor({
                 {/* Needle line — full height, sits on top of ruler and all tracks */}
                 <div className="absolute top-0 bottom-0 left-0 w-[1px] bg-amber-400/60 pointer-events-none" />
               </div>
+
+              {/* Selection rectangle overlay — appears during Shift+drag, disappears on mouseup */}
+              {selectionDrag && (() => {
+                const x1 = Math.min(selectionDrag.startX, selectionDrag.currentX)
+                const x2 = Math.max(selectionDrag.startX, selectionDrag.currentX)
+                const y1 = Math.min(selectionDrag.startY, selectionDrag.currentY)
+                const y2 = Math.max(selectionDrag.startY, selectionDrag.currentY)
+                return (
+                  <div
+                    className="absolute pointer-events-none bg-yellow-400/20 border border-yellow-400/50 rounded"
+                    style={{
+                      left: `${x1}px`,
+                      top: `${y1}px`,
+                      width: `${x2 - x1}px`,
+                      height: `${y2 - y1}px`,
+                      zIndex: 40,
+                    }}
+                  />
+                )
+              })()}
             </div>
           </div>
         </div>
