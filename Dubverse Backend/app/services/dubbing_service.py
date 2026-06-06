@@ -2121,9 +2121,7 @@ class DubbingService:
             use_speed = 1.0
 
         use_speed = max(0.5, min(2.0, use_speed))
-        # CRITICAL FIX: Always use text from disk, never from frontend request body.
-        # This prevents stale React state from overwriting manual corrections.
-        use_text = seg.get("text", "")
+        use_text = seg.get("committed_adapted_text") or seg.get("text", "")
 
         previous_text = seg.get("text", "")
         previous_path = seg.get("path", "")

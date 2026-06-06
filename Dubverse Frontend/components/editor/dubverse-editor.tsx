@@ -974,7 +974,7 @@ export function DubVerseEditor({
   // alone can't prevent when draining the queue on the next macrotask.
   const isRegeneratingRef = useRef(false)
   // Pending regen while one is in flight (depth 1, last-write-wins).
-  const regenQueueRef = useRef<{ segIdx?: number; voiceOverride?: string } | null>(null)
+  const regenQueueRef = useRef<{ segIdx?: number; voiceOverride?: string; textOverride?: string } | null>(null)
   const autoRegenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingAutoRegenRef = useRef<number | null>(null)
   const [editingText, setEditingText] = useState('')
@@ -2279,13 +2279,13 @@ export function DubVerseEditor({
   }, [initialSegments, jobId, updateSegment, editingSegmentIndex])
 
   // Handle Generate Speech - calls backend TTS regeneration for the selected segment
-  const handleGenerateSpeech = useCallback(async (segIdx?: number, voiceOverride?: string): Promise<boolean> => {
+  const handleGenerateSpeech = useCallback(async (segIdx?: number, voiceOverride?: string, textOverride?: string): Promise<boolean> => {
     const activeIndex = segIdx ?? selectedSegmentIndex
-    console.log('[REGEN] called', { segIdx, voiceOverride, activeIndex, isRegenerating, selectedSegmentIndex })
+    console.log('[REGEN] called', { segIdx, voiceOverride, textOverride, activeIndex, isRegenerating, selectedSegmentIndex })
     if (activeIndex === null) { console.warn('[REGEN] aborted — activeIndex null'); return false }
     if (isRegeneratingRef.current) {
       // Queue instead of dropping (depth 1, last-write-wins); drained in finally.
-      regenQueueRef.current = { segIdx, voiceOverride }
+      regenQueueRef.current = { segIdx, voiceOverride, textOverride }
       setQueuedSegmentIndex(activeIndex)
       console.warn('[REGEN] queued — regen already in flight', { segIdx, voiceOverride })
       return false
@@ -2321,11 +2321,16 @@ export function DubVerseEditor({
     try {
       const emotionIntensity = sampleEmotionalCurve(activeIndex, 0.5)
       const finalVoiceKey = voiceOverride ?? stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id]
-      console.log('[REGEN] calling backend', { activeIndex, finalVoiceKey, voiceOverride, stagedVoice: stagedVoices[activeIndex], speakerDefault: speakerVoiceMap[segment.speaker_id] })
-      const response = await apiClient.regenerateSegment(jobId, activeIndex, {
-        text: (activeIndex === selectedSegmentIndex && editingText.trim())
+      // Priority: explicit textOverride (passed by saveEditing — immune to stale
+      // closures) > live editingText for the selected segment > stored preview/active text.
+      const regenerateText = (textOverride && textOverride.trim())
+        ? textOverride.trim()
+        : (activeIndex === selectedSegmentIndex && editingText.trim())
           ? editingText.trim()
-          : (segment.preview_text ?? segment.active_text ?? segment.target_text),
+          : (segment.preview_text ?? segment.active_text ?? segment.target_text)
+      console.log('[REGEN] calling backend', { activeIndex, finalVoiceKey, regenerateText, textOverride, preview_text: segment.preview_text, active_text: segment.active_text, editing: editingText.trim() })
+      const response = await apiClient.regenerateSegment(jobId, activeIndex, {
+        text: regenerateText,
         speed: stagedSpeeds[activeIndex] ?? 1.0,
         // '' = explicit clear (backend pops seg["emotion"]); undefined = unset → use committed
         emotion: stagedEmotions[activeIndex] ?? segment.committed_emotion,
@@ -2368,7 +2373,7 @@ export function DubVerseEditor({
         committed_emotion: stagedEmotions[activeIndex],
       })
       requestRPTStitch(
-        displaySegments.map(seg => {
+        displaySegments.map((seg, segArrayIdx) => {
           const resolveAudioUrl = (url: string | undefined) => {
             if (!url || !jobId) return url
             if (url.startsWith('http')) return url
@@ -2376,8 +2381,11 @@ export function DubVerseEditor({
             return filename ? apiClient.getAudioFileUrl(jobId, filename) : url
           }
           // For the segment just generated, use the new audio_url directly
-          // so the stitch reflects the edit without waiting for store update
-          const isActiveSegment = seg.index === activeIndex
+          // so the stitch reflects the edit without waiting for store update.
+          // Compare by array position — activeIndex indexes into this same
+          // displaySegments array, so seg.index (which may diverge after
+          // splits/reorders) is unreliable here.
+          const isActiveSegment = segArrayIdx === activeIndex
           return {
             ...seg,
             audio_url: isActiveSegment ? audio_url : resolveAudioUrl(seg.audio_url),
@@ -2432,7 +2440,7 @@ export function DubVerseEditor({
         regenQueueRef.current = null
         setQueuedSegmentIndex(null)
         setTimeout(() => {
-          handleGenerateSpeechRef.current(queued.segIdx, queued.voiceOverride)
+          handleGenerateSpeechRef.current(queued.segIdx, queued.voiceOverride, queued.textOverride)
         }, 0)
       }
     }
@@ -2672,11 +2680,21 @@ export function DubVerseEditor({
           i === idx ? { ...seg, preview_text: text } : seg
         )
       })
-      // Auto-regen in Preview mode — 2 second debounce
+      // Clear editing state so regenerate uses preview_text, not editingText
+      setEditingText('')
+      setEditingSegmentIndex(null)
+      // Persist edited text to disk so regenerate_segment reads it from committed_adapted_text
+      apiClient.commitSegmentTiming(jobId, idx, { committed_adapted_text: text }).catch(err =>
+        console.warn('[saveEditing] failed to persist text to disk:', err)
+      )
+      // Auto-regen in Preview mode — 2 second debounce.
+      // Call via the ref (latest closure) and pass the edited text explicitly so
+      // the regen is immune to the stale displaySegments captured here, which
+      // still holds the pre-edit preview_text.
       if (playbackMode === 'preview') {
         if (autoRegenTimerRef.current) clearTimeout(autoRegenTimerRef.current)
         autoRegenTimerRef.current = setTimeout(() => {
-          handleGenerateSpeech(idx)
+          handleGenerateSpeechRef.current(idx, undefined, text)
           autoRegenTimerRef.current = null
         }, 2000)
       }
