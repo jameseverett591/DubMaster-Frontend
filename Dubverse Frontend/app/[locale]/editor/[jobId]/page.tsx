@@ -118,6 +118,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
           return {
             id: `segment-${idx}`,
             index: idx,
+            transcript_index: seg.transcript_index ?? idx,
             status: seg.locked ? 'locked' : 'auto',
             start_time: seg.committed_start_time ?? seg.start ?? 0,
             end_time: seg.committed_end_time ?? seg.end ?? 0,

@@ -1082,12 +1082,15 @@ export function DubVerseEditor({
       index: index + 1,
       start_time: segment.end_time,
       end_time: segment.end_time + 2,
-      target_text: 'New segment',
-      active_text: 'New segment',
+      target_text: segment.target_text,
+      active_text: segment.active_text,
       preview_text: null,
       source_text: '',
       audio_url: undefined,
       committed_audio_url: undefined,
+      committed_start_time: undefined,
+      committed_end_time: undefined,
+      committed_adapted_text: undefined,
       status: 'auto' as const,
     }
     const expectedLength = displaySegments.length + 1
@@ -2329,7 +2332,7 @@ export function DubVerseEditor({
           ? editingText.trim()
           : (segment.preview_text ?? segment.active_text ?? segment.target_text)
       console.log('[REGEN] calling backend', { activeIndex, finalVoiceKey, regenerateText, textOverride, preview_text: segment.preview_text, active_text: segment.active_text, editing: editingText.trim() })
-      const response = await apiClient.regenerateSegment(jobId, activeIndex, {
+      const response = await apiClient.regenerateSegment(jobId, segment.transcript_index ?? activeIndex, {
         text: regenerateText,
         speed: stagedSpeeds[activeIndex] ?? 1.0,
         // '' = explicit clear (backend pops seg["emotion"]); undefined = unset → use committed
@@ -2487,7 +2490,7 @@ export function DubVerseEditor({
 
     setIsRegenerating(true)
     try {
-      const response = await apiClient.regenerateSegment(jobId, index, {
+      const response = await apiClient.regenerateSegment(jobId, segment.transcript_index ?? index, {
         text,
         speed: stagedSpeeds[index] ?? 1.0,
         emotion: stagedEmotions[index],
@@ -5431,6 +5434,20 @@ export function DubVerseEditor({
                         const onMouseMove = (ev: MouseEvent) => {
                           const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
                           setDraggingSegment(prev => prev ? { ...prev, currentDelta: deltaTime } : null)
+                          // Auto-scroll when dragging near the right or left edge
+                          const timelineEl = timelineRef.current
+                          if (timelineEl) {
+                            const containerRect = timelineEl.getBoundingClientRect()
+                            const edgeThreshold = 80 // px from edge to trigger scroll
+                            const scrollSpeed = 12 // px per frame
+                            if (ev.clientX > containerRect.right - edgeThreshold) {
+                              timelineEl.scrollLeft += scrollSpeed
+                              startX -= scrollSpeed
+                            } else if (ev.clientX < containerRect.left + edgeThreshold) {
+                              timelineEl.scrollLeft -= scrollSpeed
+                              startX += scrollSpeed
+                            }
+                          }
                         }
                         const onMouseUp = (ev: MouseEvent) => {
                           const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
@@ -5561,8 +5578,9 @@ export function DubVerseEditor({
               <div className="h-14 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
                 {displaySegments.map((seg, i) => {
                   const hasAudio = !!(seg.committed_audio_url ?? seg.audio_url)
-                  const startT = seg.committed_start_time ?? seg.start_time
-                  const endT = seg.committed_end_time ?? seg.end_time
+                  const startT = seg.start_time ?? seg.committed_start_time ?? 0
+                  const endT = seg.end_time ?? seg.committed_end_time ?? startT
+                  const groupDelta = (groupMoveActive && groupSelectedSegments.has(i)) ? groupMoveOffset.x : 0
                   return (
                     <div
                       key={seg.id + '-rpt-audio'}
@@ -5587,7 +5605,7 @@ export function DubVerseEditor({
                           : 'bg-emerald-500/50 border border-emerald-500/70'
                       )}
                       style={{
-                        left: startT * PIXELS_PER_SECOND,
+                        left: startT * PIXELS_PER_SECOND + groupDelta,
                         width: Math.max(
                           (() => {
                             const dur = endT - startT

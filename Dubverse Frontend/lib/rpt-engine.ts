@@ -88,8 +88,8 @@ export async function stitchRPT(
       const audioUrl = seg.committed_audio_url ?? seg.audio_url
       if (!audioUrl) return
 
-      const startTime = seg.committed_start_time ?? seg.start_time
-      const endTime = seg.committed_end_time ?? seg.end_time
+      const startTime = seg.start_time ?? seg.committed_start_time ?? 0
+      const endTime   = seg.end_time ?? seg.committed_end_time ?? startTime
       const startSample = Math.floor(startTime * sampleRate)
       const maxSlotSamples = Math.ceil(endTime * sampleRate) - startSample
 
