@@ -27,6 +27,7 @@ export interface QCFinding {
 export interface Segment {
   id: string
   index: number
+  transcript_index?: number
   status: SegmentStatus
   start_time: number
   end_time: number
