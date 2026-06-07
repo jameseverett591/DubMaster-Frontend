@@ -67,6 +67,7 @@ import { QCTicker } from '@/components/editor/qc-ticker'
 import { EmotionalCurveTrack } from '@/components/editor/emotional-curve-track'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import VelmaPanel from '@/components/editor/velma-panel'
+import { HeatmapBar } from '@/components/timeline/HeatmapBar'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { ExportModal } from '@/components/editor/export-modal'
 import { requestRPTStitch, stitchRPT, invalidateCache, scheduleRPTPlayback } from '@/lib/rpt-engine'
@@ -412,6 +413,31 @@ function mapAnalysisToQCReport(jobId: string, analysis: any): QCReport {
     },
     findings,
   }
+}
+
+function computeHeatmap(segment: import('@/lib/editor-types').Segment): number[] {
+  const velma = segment.velma_emotion_curve ?? []
+  const dub = segment.emotionalCurve?.combined?.map(p => p.y) ?? []
+
+  const length = Math.min(velma.length, dub.length)
+  const result: number[] = []
+
+  for (let i = 0; i < length; i++) {
+    const emotionMismatch = Math.abs(velma[i] - dub[i])
+    const lip = 0
+    const accent = segment.voiceAccent !== segment.velma_accent ? 1 : 0
+    const deepfake = segment.velma_deepfake_score ?? 0
+
+    const severity =
+      emotionMismatch * 0.5 +
+      lip * 0.2 +
+      accent * 0.2 +
+      deepfake * 0.1
+
+    result.push(Math.min(1, severity))
+  }
+
+  return result
 }
 
 export function DubVerseEditor({
@@ -5217,9 +5243,14 @@ export function DubVerseEditor({
                   </div>
                 ) : null}
               </div>
-              
 
-
+              {/* Velma heatmap bar */}
+              {(() => {
+                const activeSegment = selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null
+                return activeSegment ? (
+                  <HeatmapBar data={computeHeatmap(activeSegment)} />
+                ) : null
+              })()}
 
               {/* Original audio track */}
               <div className="h-14 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative" data-timeline-track>
