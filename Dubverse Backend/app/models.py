@@ -38,6 +38,9 @@ class TranscriptSegment(BaseModel):
     start: float
     end: float
     speaker: str = "speaker-1"
+    velma_emotion: Optional[str] = None
+    velma_accent: Optional[str] = None
+    velma_deepfake_score: Optional[float] = None
 
 
 class Transcript(BaseModel):

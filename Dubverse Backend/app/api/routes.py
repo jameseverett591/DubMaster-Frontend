@@ -1007,6 +1007,27 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         )
     # else: keep diarization_segments from RunPod as fallback (already set above)
 
+    # Merge Velma enrichment data (emotion, accent, deepfake_score) into segments_data by time overlap
+    if diarization_segments and segments_data:
+        for seg in segments_data:
+            seg_mid = (seg.get("start", 0) + seg.get("end", 0)) / 2
+            best_match = None
+            best_overlap = 0
+            for diar_seg in diarization_segments:
+                d_start = diar_seg.get("start", 0)
+                d_end = diar_seg.get("end", 0)
+                overlap = min(seg.get("end", 0), d_end) - max(seg.get("start", 0), d_start)
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_match = diar_seg
+            if best_match:
+                if best_match.get("emotion"):
+                    seg["velma_emotion"] = best_match["emotion"]
+                if best_match.get("accent"):
+                    seg["velma_accent"] = best_match["accent"]
+                if best_match.get("deepfake_score") is not None:
+                    seg["velma_deepfake_score"] = best_match["deepfake_score"]
+
     segments = [
         TranscriptSegment(
             text=seg.get("text", ""),
