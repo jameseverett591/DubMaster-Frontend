@@ -593,6 +593,7 @@ export function DubVerseEditor({
     return 112
   })
   const [isResizingTrackLabel, setIsResizingTrackLabel] = useState(false)
+  const [emotionSource, setEmotionSource] = useState<'velma' | 'dubmaster'>('dubmaster')
 
   const [activeDubbedVideoUrl, setActiveDubbedVideoUrl] = useState(dubbedVideoUrl)
   const [isRebuilding, setIsRebuilding] = useState(false)
@@ -1166,6 +1167,13 @@ export function DubVerseEditor({
           target.contentEditable === 'true'
         ) return
         handleSplitAtPlayhead(selectedSegmentIndex)
+      }
+
+      if (e.ctrlKey && e.key.toLowerCase() === 'v') {
+        setEmotionSource('velma')
+      }
+      if (e.ctrlKey && e.key.toLowerCase() === 'd') {
+        setEmotionSource('dubmaster')
       }
     }
     document.addEventListener('keydown', handleKeyDown)
@@ -5053,10 +5061,37 @@ export function DubVerseEditor({
               </div>
             </div>
             {/* Emotional curve track label */}
-            <div className="h-24 shrink-0 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-700 gap-1 bg-neutral-900/30">
-              <div className="flex items-center gap-1.5">
-                <div className="w-2 h-2 rounded-full bg-amber-400" />
-                <span>Emotion</span>
+            <div className="h-24 shrink-0 flex items-start px-2 pt-2 text-xs text-neutral-400 border-b border-neutral-700 bg-neutral-900/30">
+              <div className="flex flex-col text-xs text-slate-300 select-none">
+                <span className="font-semibold mb-1">Emotion</span>
+
+                <div
+                  className="flex items-center space-x-2 cursor-pointer mb-1"
+                  onClick={() => setEmotionSource('velma')}
+                >
+                  <span
+                    className={`inline-block w-2 h-2 rounded-full ${
+                      emotionSource === 'velma' ? 'bg-amber-400' : 'bg-red-600'
+                    }`}
+                  />
+                  <span className={`${emotionSource === 'velma' ? 'text-amber-300' : 'text-slate-500'}`}>
+                    Velma
+                  </span>
+                </div>
+
+                <div
+                  className="flex items-center space-x-2 cursor-pointer"
+                  onClick={() => setEmotionSource('dubmaster')}
+                >
+                  <span
+                    className={`inline-block w-2 h-2 rounded-full ${
+                      emotionSource === 'dubmaster' ? 'bg-amber-400' : 'bg-red-600'
+                    }`}
+                  />
+                  <span className={`${emotionSource === 'dubmaster' ? 'text-amber-300' : 'text-slate-500'}`}>
+                    DubMaster
+                  </span>
+                </div>
               </div>
             </div>
             {/* Filler + bottom ruler spacer */}
@@ -5683,15 +5718,33 @@ export function DubVerseEditor({
                         width: segWidth,
                       }}
                     >
-                      <EmotionalCurveTrack
-                        segment={segment}
-                        segmentIndex={index}
-                        zoom={zoomLevel}
-                        width={segWidth}
-                        onUpdateCurve={updateCombinedCurve}
-                        onToggleLock={toggleCurveLock}
-                        onResetCurve={resetEmotionalCurve}
-                      />
+                      {emotionSource === 'dubmaster' && (
+                        <EmotionalCurveTrack
+                          segment={segment}
+                          segmentIndex={index}
+                          zoom={zoomLevel}
+                          width={segWidth}
+                          onUpdateCurve={updateCombinedCurve}
+                          onToggleLock={toggleCurveLock}
+                          onResetCurve={resetEmotionalCurve}
+                        />
+                      )}
+                      {emotionSource === 'velma' && segment.velma_emotion_curve && (
+                        <svg
+                          className="w-full h-full"
+                          viewBox={`0 0 ${segWidth} 96`}
+                          preserveAspectRatio="none"
+                        >
+                          <polyline
+                            points={segment.velma_emotion_curve
+                              .map((v, i) => `${(i / (segment.velma_emotion_curve!.length - 1)) * segWidth},${(1 - v) * 96}`)
+                              .join(' ')}
+                            fill="none"
+                            stroke="#8B5CF6"
+                            strokeWidth={2}
+                          />
+                        </svg>
+                      )}
                     </div>
                   )
                 })}
