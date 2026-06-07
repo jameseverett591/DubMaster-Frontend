@@ -10,6 +10,7 @@ interface SegmentQCPanelProps {
   report: QCReport | null
   onRecalculate?: () => void
   onAutoFix?: () => void
+  onRegenerateDub?: () => void
 }
 
 function severityColor(severity: QCFinding['severity']) {
@@ -52,7 +53,7 @@ function gradeColor(grade: QCReport['grade']) {
   }
 }
 
-export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix }: SegmentQCPanelProps) {
+export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix, onRegenerateDub }: SegmentQCPanelProps) {
   const segmentFindings = useMemo(() => {
     if (!segment) return []
     return segment.qc_findings
@@ -153,6 +154,63 @@ export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix }: Se
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Velma Metadata Section */}
+      {(segment.velma_emotion || segment.velma_accent || typeof segment.velma_deepfake_score === 'number') && (
+        <div className="mt-4 p-3 rounded bg-slate-900 border border-slate-800">
+          <h3 className="text-sm font-semibold text-slate-300 mb-2">Original Performance (Velma)</h3>
+
+          {segment.velma_emotion && (
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-slate-400 text-xs">Emotion</span>
+              <span className="px-2 py-0.5 text-xs rounded bg-slate-800 text-slate-200">
+                {segment.velma_emotion}
+              </span>
+            </div>
+          )}
+
+          {segment.velma_accent && (
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-slate-400 text-xs">Accent</span>
+              <span className="px-2 py-0.5 text-xs rounded bg-slate-700 text-slate-300">
+                {segment.velma_accent}
+              </span>
+            </div>
+          )}
+
+          {typeof segment.velma_deepfake_score === 'number' && (
+            <div className="flex items-center justify-between mt-2">
+              <span className="text-slate-400 text-xs">Deepfake Score</span>
+              <span
+                className={`px-2 py-0.5 text-xs rounded ${
+                  segment.velma_deepfake_score > 0.55
+                    ? 'bg-red-700 text-red-100'
+                    : segment.velma_deepfake_score > 0.35
+                    ? 'bg-yellow-700 text-yellow-100'
+                    : 'bg-green-700 text-green-100'
+                }`}
+              >
+                {segment.velma_deepfake_score.toFixed(2)}
+              </span>
+            </div>
+          )}
+
+          {typeof segment.velma_deepfake_score === 'number' && segment.velma_deepfake_score > 0.55 && (
+            <>
+              <div className="mt-3 p-2 rounded bg-red-900 text-red-100 text-xs">
+                This dub sounds synthetic. Consider regenerating the audio.
+              </div>
+              <button
+                type="button"
+                onClick={onRegenerateDub}
+                className="mt-2 w-full px-3 py-1.5 text-xs rounded bg-red-700 hover:bg-red-600 text-white transition-colors"
+              >
+                Regenerate Dub
+              </button>
+            </>
+          )}
         </div>
       )}
 

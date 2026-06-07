@@ -125,3 +125,6 @@
     @apply bg-background text-foreground;
   }
 }
+
+.velma-theme .velma-card { background: #4C1D95; border: 1px solid #8B5CF6; }
+.velma-theme h3 { color: #C4B5FD; }

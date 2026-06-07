@@ -108,6 +108,9 @@ export interface Segment {
   candidates: string[]
   edit_history: unknown[]
   qc_findings: unknown[]
+  velma_emotion?: string
+  velma_accent?: string
+  velma_deepfake_score?: number
 }
 
 export interface SegmentsData {

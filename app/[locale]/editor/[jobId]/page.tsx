@@ -136,6 +136,9 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             committed_start_time: seg.committed_start_time ?? undefined,
             committed_end_time: seg.committed_end_time ?? undefined,
             committed_emotion: seg.emotion ?? undefined,
+            velma_emotion: seg.velma_emotion,
+            velma_accent: seg.velma_accent,
+            velma_deepfake_score: seg.velma_deepfake_score,
             qc_findings: seg.qc_findings ?? [],
             emotionalCurve: {
               combined: [
