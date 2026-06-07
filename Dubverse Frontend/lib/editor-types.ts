@@ -60,6 +60,9 @@ export interface Segment {
   committed_at?: string
   emotionalCurve?: EmotionalCurve
   attached_traits?: string[] | null
+  velma_emotion?: string
+  velma_accent?: string
+  velma_deepfake_score?: number
 }
 
 export interface QCScore {

@@ -66,6 +66,7 @@ import { SegmentQCPanel } from '@/components/editor/segment-qc-panel'
 import { QCTicker } from '@/components/editor/qc-ticker'
 import { EmotionalCurveTrack } from '@/components/editor/emotional-curve-track'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
+import VelmaPanel from '@/components/editor/velma-panel'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { ExportModal } from '@/components/editor/export-modal'
 import { requestRPTStitch, stitchRPT, invalidateCache, scheduleRPTPlayback } from '@/lib/rpt-engine'
@@ -515,7 +516,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'studio' | 'adaptation' | 'speakers' | 'library'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'studio' | 'adaptation' | 'speakers' | 'library'>('result')
 
   // QC report — real data from /api/analysis when available, otherwise mock
   const [qcReport, setQcReport] = useState<QCReport | null>(() =>
@@ -3529,7 +3530,34 @@ export function DubVerseEditor({
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-slate-400">{segment.source_text}</p>
                   </div>
-                  
+
+                  {/* Velma enrichment badges */}
+                  <div className="flex items-center gap-2 ml-2">
+                    {segment.velma_emotion && (
+                      <span className="px-2 py-0.5 text-xs rounded bg-gray-800 text-gray-200">
+                        {segment.velma_emotion}
+                      </span>
+                    )}
+                    {segment.velma_accent && (
+                      <span className="px-2 py-0.5 text-xs rounded bg-gray-700 text-gray-300">
+                        {segment.velma_accent}
+                      </span>
+                    )}
+                    {typeof segment.velma_deepfake_score === "number" && (
+                      <span
+                        className={`px-2 py-0.5 text-xs rounded ${
+                          segment.velma_deepfake_score > 0.55
+                            ? "bg-red-700 text-red-100"
+                            : segment.velma_deepfake_score > 0.35
+                            ? "bg-yellow-700 text-yellow-100"
+                            : "bg-green-700 text-green-100"
+                        }`}
+                      >
+                        DF {segment.velma_deepfake_score.toFixed(2)}
+                      </span>
+                    )}
+                  </div>
+
                   {/* Target text (editable) */}
                   <div className="flex-1 min-w-0 flex items-center gap-1.5">
                     {isEditing ? (
@@ -4122,6 +4150,7 @@ export function DubVerseEditor({
               {([
                 { id: 'result', label: 'Video' },
                 { id: 'quality', label: 'Quality' },
+                { id: 'velma', label: 'Velma' },
                 { id: 'studio', label: 'Studio' },
                 { id: 'adaptation', label: 'Adaptation' },
                 { id: 'speakers', label: 'Speakers' },
@@ -4223,6 +4252,20 @@ export function DubVerseEditor({
                   // Placeholder: trigger auto-fix
                   console.log('Auto-fix segment', selectedSegmentIndex)
                 }}
+                onRegenerateDub={() => {
+                  if (selectedSegmentIndex !== null) handleGenerateSpeech(selectedSegmentIndex)
+                }}
+              />
+            </div>
+          )}
+
+          {/* Velma tab */}
+          {rightPanelTab === 'velma' && (
+            <div className="flex-1 min-h-0 overflow-y-auto bg-neutral-950">
+              <VelmaPanel
+                segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
+                voices={[]}
+                setRightPanelTab={setRightPanelTab}
               />
             </div>
           )}
@@ -4851,6 +4894,7 @@ export function DubVerseEditor({
                 )}
                 <QCQualityPanel
                   report={qcReport}
+                  segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
                   onJumpToTime={(t) => {
                     setCurrentTime(t)
                     if (videoRef.current) videoRef.current.currentTime = t

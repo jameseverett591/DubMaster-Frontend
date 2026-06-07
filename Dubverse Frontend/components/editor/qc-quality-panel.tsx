@@ -2,10 +2,11 @@
 
 import { Clock, Gauge, VolumeX, Volume2, Heart, FileText } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { QCReport, QCFinding } from '@/lib/editor-types'
+import type { QCReport, QCFinding, Segment } from '@/lib/editor-types'
 
 interface QCQualityPanelProps {
   report: QCReport
+  segment?: Segment | null
   onJumpToTime?: (seconds: number) => void
   onSelectFinding?: (finding: QCFinding) => void
   onSelectSegment?: (segmentIndex: number) => void
@@ -49,7 +50,7 @@ function statusBadge(status: 'ok' | 'warn' | 'fail') {
   return <span className="text-[10px] px-2 py-0.5 rounded-full border border-red-500/40 text-red-300 bg-red-500/10">Fail</span>
 }
 
-export function QCQualityPanel({ report, onJumpToTime, onSelectFinding, onSelectSegment, selectedRetranscriptionIndex }: QCQualityPanelProps) {
+export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding, onSelectSegment, selectedRetranscriptionIndex }: QCQualityPanelProps) {
   const componentEntries: { key: keyof QCReport['components']; label: string }[] = [
     { key: 'timing', label: 'timing' },
     { key: 'speed', label: 'speed' },
@@ -204,6 +205,54 @@ export function QCQualityPanel({ report, onJumpToTime, onSelectFinding, onSelect
           ))}
         </div>
       </SectionCard>
+
+      {/* Velma Original Performance Section */}
+      {segment && (segment.velma_emotion || segment.velma_accent || typeof segment.velma_deepfake_score === 'number') && (
+        <div className="mt-1 p-3 rounded-xl bg-neutral-900 border border-neutral-800">
+          <h3 className="text-sm font-semibold text-slate-300 mb-2">Original Performance (Velma)</h3>
+
+          {segment.velma_emotion && (
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-slate-400 text-xs">Emotion</span>
+              <span className="px-2 py-0.5 text-xs rounded bg-slate-800 text-slate-200">
+                {segment.velma_emotion}
+              </span>
+            </div>
+          )}
+
+          {segment.velma_accent && (
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-slate-400 text-xs">Accent</span>
+              <span className="px-2 py-0.5 text-xs rounded bg-slate-700 text-slate-300">
+                {segment.velma_accent}
+              </span>
+            </div>
+          )}
+
+          {typeof segment.velma_deepfake_score === 'number' && (
+            <div className="flex items-center justify-between mt-2">
+              <span className="text-slate-400 text-xs">Deepfake Score</span>
+              <span
+                className={`px-2 py-0.5 text-xs rounded ${
+                  segment.velma_deepfake_score > 0.55
+                    ? 'bg-red-700 text-red-100'
+                    : segment.velma_deepfake_score > 0.35
+                    ? 'bg-yellow-700 text-yellow-100'
+                    : 'bg-green-700 text-green-100'
+                }`}
+              >
+                {segment.velma_deepfake_score.toFixed(2)}
+              </span>
+            </div>
+          )}
+
+          {typeof segment.velma_deepfake_score === 'number' && segment.velma_deepfake_score > 0.55 && (
+            <div className="mt-3 p-2 rounded bg-red-900 text-red-100 text-xs">
+              This dub sounds synthetic. Consider regenerating the audio.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Re-transcription */}
       <SectionCard
