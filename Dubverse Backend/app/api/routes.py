@@ -35,6 +35,7 @@ from app.pipeline.chunk_video import VideoChunker
 from app.pipeline.extract_audio import extract_audio
 from app.pipeline.diarize_audio import diarize_audio
 from app.pipeline.transcribe_audio import transcribe_audio
+from app.pipeline.velma_diarize import velma_diarize
 from app.pipeline.classify_speakers import classify_speakers
 from app.services.dubbing_service import dubbing_service
 from app.services.lipsync_service import lipsync_service
@@ -982,6 +983,30 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
 
     diarization_segments = (result.get("diarization", {}) or {}).get("segments", [])
 
+    # Fetch expected speakers once — used by both Velma and F0 fallback below
+    _job_for_f0 = await job_manager.get_job(job_id)
+    _exp_spk_f0 = (_job_for_f0.expected_speakers if _job_for_f0 else 0) or 0
+
+    # Try Velma diarization first (primary source)
+    velma_audio_path = video_path
+    velma_result = None
+    if os.getenv("MODULATE_API_KEY") and velma_audio_path:
+        try:
+            logger.info(f"Job {job_id}: RunPod path — attempting Velma diarization (primary)")
+            velma_result = await asyncio.to_thread(
+                velma_diarize, velma_audio_path, job_id, _exp_spk_f0
+            )
+        except Exception as _velma_err:
+            logger.warning(f"Job {job_id}: Velma diarization failed: {_velma_err}")
+
+    if velma_result and velma_result.get("status") == "ok":
+        diarization_segments = velma_result.get("segments", [])
+        logger.info(
+            f"Job {job_id}: using Velma diarization (primary) — "
+            f"{len(diarization_segments)} segments, {velma_result.get('unique_speakers', '?')} speakers"
+        )
+    # else: keep diarization_segments from RunPod as fallback (already set above)
+
     segments = [
         TranscriptSegment(
             text=seg.get("text", ""),
@@ -1022,10 +1047,8 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             if reassigned:
                 segments = reassigned
 
-    # F0 fallback: if pyannote collapsed everything to 1 speaker but the user
+    # F0 fallback: if diarization collapsed everything to 1 speaker but the user
     # told us there are N > 1 speakers, split using pitch-based k-means.
-    _job_for_f0 = await job_manager.get_job(job_id)
-    _exp_spk_f0 = (_job_for_f0.expected_speakers if _job_for_f0 else 0) or 0
     if _exp_spk_f0 > 1 and segments:
         _current_spk = set((s.speaker if isinstance(s, TranscriptSegment) else s.get("speaker", "")) for s in segments)
         if len(_current_spk) <= 1:
@@ -1591,31 +1614,48 @@ async def process_video_pipeline(job_id: str, video_path: str):
 
                 from app.services.replicate_service import cloud_diarize
 
-                if is_cloud_enabled() and vocals_path:
-                    logger.info(f"Job {job_id}: using CLOUD GPU for diarization")
-                    diarization_result = await asyncio.to_thread(
-                        cloud_diarize, vocals_path, min_speakers, max_speakers, job_id
-                    )
-                    if diarization_result.get("status") != "ok":
-                        logger.warning(f"Job {job_id}: cloud diarization failed, falling back to local")
+                # Try Velma diarization first if API key is configured
+                velma_result = None
+                velma_audio_path = vocals_path or video_path
+                if os.getenv("MODULATE_API_KEY") and velma_audio_path:
+                    try:
+                        logger.info(f"Job {job_id}: attempting Velma diarization")
+                        velma_result = await asyncio.to_thread(
+                            velma_diarize, velma_audio_path, job_id, _exp_spk
+                        )
+                    except Exception as _velma_err:
+                        logger.warning(f"Job {job_id}: Velma diarization failed: {_velma_err}")
+
+                if velma_result and velma_result.get("status") == "ok":
+                    diarization_segments = velma_result.get("segments", [])
+                    logger.info(f"Job {job_id}: using Velma diarization — {len(diarization_segments)} segments")
+                else:
+                    # Fall back to existing pyannote/cloud diarization
+                    if is_cloud_enabled() and vocals_path:
+                        logger.info(f"Job {job_id}: using CLOUD GPU for diarization")
+                        diarization_result = await asyncio.to_thread(
+                            cloud_diarize, vocals_path, min_speakers, max_speakers, job_id
+                        )
+                        if diarization_result.get("status") != "ok":
+                            logger.warning(f"Job {job_id}: cloud diarization failed, falling back to local")
+                            diarization_result = await _run_diarization_with_heartbeat(
+                                job_id, diarize_input, diarization_timeout_sec,
+                            )
+                    else:
+                        logger.info(
+                            f"Job {job_id}: diarization using "
+                            f"{'separated vocals' if diarize_input is not extract_result else 'original audio'}"
+                        )
                         diarization_result = await _run_diarization_with_heartbeat(
                             job_id, diarize_input, diarization_timeout_sec,
                         )
-                else:
-                    logger.info(
-                        f"Job {job_id}: diarization using "
-                        f"{'separated vocals' if diarize_input is not extract_result else 'original audio'}"
-                    )
-                    diarization_result = await _run_diarization_with_heartbeat(
-                        job_id, diarize_input, diarization_timeout_sec,
-                    )
 
-                if diarization_result.get("status") == "ok":
-                    diarization_segments = diarization_result.get("segments", [])
-                else:
-                    logger.info(
-                        f"Diarization skipped: {diarization_result.get('reason', 'unknown')}"
-                    )
+                    if diarization_result.get("status") == "ok":
+                        diarization_segments = diarization_result.get("segments", [])
+                    else:
+                        logger.info(
+                            f"Diarization skipped: {diarization_result.get('reason', 'unknown')}"
+                        )
 
                 segments = _assign_speakers_from_diarization(raw_segments, diarization_segments)
 
