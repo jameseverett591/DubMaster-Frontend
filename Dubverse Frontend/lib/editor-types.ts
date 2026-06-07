@@ -63,6 +63,7 @@ export interface Segment {
   velma_emotion?: string
   velma_accent?: string
   velma_deepfake_score?: number
+  velma_emotion_curve?: number[]
   dubEmotion?: string
   voiceAccent?: string
 }
