@@ -45,6 +45,7 @@ def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
                     "emotion_signal": "true",
                     "accent_signal": "true",
                     "deepfake_signal": "true",
+                    "speaker_diarization": "true",
                 },
                 timeout=300,
             )
