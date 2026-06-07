@@ -41,6 +41,11 @@ def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
                 VELMA_BATCH_URL,
                 headers={"X-API-Key": api_key},
                 files={"upload_file": f},
+                data={
+                    "emotion_signal": "true",
+                    "accent_signal": "true",
+                    "deepfake_signal": "true",
+                },
                 timeout=300,
             )
 
@@ -68,6 +73,10 @@ def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
                 "end": (utt.get("start_ms", 0) + utt.get("duration_ms", 0)) / 1000.0,
                 "speaker": f"speaker-{speaker_num}",
                 "text": utt.get("text", "").strip(),
+                "emotion": utt.get("emotion"),
+                "accent": utt.get("accent"),
+                "deepfake_score": utt.get("deepfake_score"),
+                "language": utt.get("language"),
             })
 
         unique_speakers = len(set(s["speaker"] for s in segments))
