@@ -1065,6 +1065,9 @@ class DubbingService:
                     "start": start_time,
                     "end": start_time + actual_duration,
                     "duration": actual_duration,
+                    "velma_emotion": segment.get("velma_emotion"),
+                    "velma_accent": segment.get("velma_accent"),
+                    "velma_deepfake_score": segment.get("velma_deepfake_score"),
                 })
                 logger.info(f"Generated TTS for segment {i}: {text[:50]}...")
             
