@@ -41,6 +41,39 @@ export default function VelmaPanel({
         <div className="text-2xl font-bold text-violet-200">{performanceScore}/100</div>
       </div>
 
+      {/* Emotion Mismatch */}
+      {segment.velma_emotion && segment.dubEmotion && segment.velma_emotion !== segment.dubEmotion && (
+        <div className="velma-card p-4 rounded">
+          <h3 className="text-sm font-semibold mb-2 text-violet-300">Emotion Mismatch</h3>
+          <div className="text-xs text-violet-200">
+            Original emotion is <span className="font-semibold">{segment.velma_emotion}</span>,{' '}
+            but the dub expresses <span className="font-semibold">{segment.dubEmotion}</span>.
+          </div>
+        </div>
+      )}
+
+      {/* Accent Mismatch */}
+      {segment.velma_accent && segment.voiceAccent && segment.velma_accent !== segment.voiceAccent && (
+        <div className="velma-card p-4 rounded">
+          <h3 className="text-sm font-semibold mb-2 text-violet-300">Accent Mismatch</h3>
+          <div className="text-xs text-violet-200">
+            Original accent is <span className="font-semibold">{segment.velma_accent}</span>,{' '}
+            but the selected voice uses <span className="font-semibold">{segment.voiceAccent}</span>.
+          </div>
+        </div>
+      )}
+
+      {/* Lip-sync Mismatch */}
+      {typeof segment.lip_sync === 'number' && segment.lip_sync < 0.65 && (
+        <div className="velma-card p-4 rounded">
+          <h3 className="text-sm font-semibold mb-2 text-violet-300">Lip-sync Mismatch</h3>
+          <div className="text-xs text-violet-200">
+            Lip-sync score is <span className="font-semibold">{segment.lip_sync}</span>,{' '}
+            indicating weak alignment between mouth movement and audio.
+          </div>
+        </div>
+      )}
+
       {/* Original Performance */}
       <div className="velma-card p-4 rounded">
         <h3 className="text-sm font-semibold mb-2 text-violet-300">Original Performance (Velma)</h3>
