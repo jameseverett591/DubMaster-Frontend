@@ -66,6 +66,7 @@ import { SegmentQCPanel } from '@/components/editor/segment-qc-panel'
 import { QCTicker } from '@/components/editor/qc-ticker'
 import { EmotionalCurveTrack } from '@/components/editor/emotional-curve-track'
 import { EmotionLedTrack } from '@/components/editor/emotion-led-track'
+import { FloatingEmotionChart } from '@/components/editor/floating-emotion-chart'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import VelmaPanel from '@/components/editor/velma-panel'
 import { HeatmapBar } from '@/components/timeline/HeatmapBar'
@@ -621,6 +622,7 @@ export function DubVerseEditor({
   })
   const [isResizingTrackLabel, setIsResizingTrackLabel] = useState(false)
   const [emotionSource, setEmotionSource] = useState<'velma' | 'dubmaster'>('dubmaster')
+  const [floatingEmotionSegment, setFloatingEmotionSegment] = useState<number | null>(null)
 
   const [activeDubbedVideoUrl, setActiveDubbedVideoUrl] = useState(dubbedVideoUrl)
   const [isRebuilding, setIsRebuilding] = useState(false)
@@ -5745,6 +5747,7 @@ export function DubVerseEditor({
                     <div
                       key={`emotion-${segment.id}`}
                       className="absolute top-0 bottom-0"
+                      onDoubleClick={() => setFloatingEmotionSegment(index)}
                       style={{
                         left: segment.start_time * PIXELS_PER_SECOND,
                         width: segWidth,
@@ -5791,6 +5794,21 @@ export function DubVerseEditor({
                     </div>
                   )
                 })}
+                {floatingEmotionSegment !== null && displaySegments[floatingEmotionSegment] && (
+                  <FloatingEmotionChart
+                    segment={displaySegments[floatingEmotionSegment]}
+                    segmentIndex={floatingEmotionSegment}
+                    jobId={jobId}
+                    onClose={() => setFloatingEmotionSegment(null)}
+                    onCommitEmotion={(idx, emotion) => {
+                      setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))
+                      updateSegment(idx, { committed_emotion: emotion })
+                    }}
+                    onUpdateCurve={(idx, curve) => {
+                      updateSegment(idx, { velma_emotion_curve: curve })
+                    }}
+                  />
+                )}
               </div>
 
               {/* Filler — fills remaining height, shows grid + bottom ruler */}
