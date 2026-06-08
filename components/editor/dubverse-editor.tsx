@@ -65,6 +65,7 @@ import { QCQualityPanel } from '@/components/editor/qc-quality-panel'
 import { SegmentQCPanel } from '@/components/editor/segment-qc-panel'
 import { QCTicker } from '@/components/editor/qc-ticker'
 import { EmotionalCurveTrack } from '@/components/editor/emotional-curve-track'
+import { EmotionLedTrack } from '@/components/editor/emotion-led-track'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import VelmaPanel from '@/components/editor/velma-panel'
 import { HeatmapBar } from '@/components/timeline/HeatmapBar'
@@ -5097,7 +5098,7 @@ export function DubVerseEditor({
                 >
                   <span
                     className={`inline-block w-2 h-2 rounded-full ${
-                      emotionSource === 'velma' ? 'bg-amber-400' : 'bg-red-600'
+                      emotionSource === 'velma' ? 'bg-amber-400' : 'bg-slate-600'
                     }`}
                   />
                   <span className={`${emotionSource === 'velma' ? 'text-amber-300' : 'text-slate-500'}`}>
@@ -5111,7 +5112,7 @@ export function DubVerseEditor({
                 >
                   <span
                     className={`inline-block w-2 h-2 rounded-full ${
-                      emotionSource === 'dubmaster' ? 'bg-amber-400' : 'bg-red-600'
+                      emotionSource === 'dubmaster' ? 'bg-amber-400' : 'bg-slate-600'
                     }`}
                   />
                   <span className={`${emotionSource === 'dubmaster' ? 'text-amber-300' : 'text-slate-500'}`}>
@@ -5749,33 +5750,44 @@ export function DubVerseEditor({
                         width: segWidth,
                       }}
                     >
-                      {emotionSource === 'dubmaster' && (
-                        <EmotionalCurveTrack
-                          segment={segment}
-                          segmentIndex={index}
-                          zoom={zoomLevel}
-                          width={segWidth}
-                          onUpdateCurve={updateCombinedCurve}
-                          onToggleLock={toggleCurveLock}
-                          onResetCurve={resetEmotionalCurve}
-                        />
-                      )}
-                      {emotionSource === 'velma' && segment.velma_emotion_curve && (
-                        <svg
-                          className="w-full h-full"
-                          viewBox={`0 0 ${segWidth} 96`}
-                          preserveAspectRatio="none"
-                        >
-                          <polyline
-                            points={segment.velma_emotion_curve
-                              .map((v, i) => `${(i / (segment.velma_emotion_curve!.length - 1)) * segWidth},${(1 - v) * 96}`)
-                              .join(' ')}
-                            fill="none"
-                            stroke="#8B5CF6"
-                            strokeWidth={2}
+                      <div className="relative w-full h-full overflow-hidden">
+                        {/* Grid overlay */}
+                        <div className="absolute inset-0 pointer-events-none opacity-30">
+                          {[0, 25, 50, 75, 100].map((level) => (
+                            <div
+                              key={level}
+                              className="absolute w-full border-t border-slate-700"
+                              style={{ top: `${100 - level}%` }}
+                            />
+                          ))}
+                          {Array.from({ length: Math.ceil((segment.end_time - segment.start_time) / 0.5) }).map((_, i) => (
+                            <div
+                              key={i}
+                              className="absolute h-full border-l border-slate-800"
+                              style={{ left: `${(i * 0.5 * 100) / (segment.end_time - segment.start_time)}%` }}
+                            />
+                          ))}
+                        </div>
+
+                        {emotionSource === 'dubmaster' && (
+                          <EmotionalCurveTrack
+                            segment={segment}
+                            segmentIndex={index}
+                            zoom={zoomLevel}
+                            width={segWidth}
+                            onUpdateCurve={updateCombinedCurve}
+                            onToggleLock={toggleCurveLock}
+                            onResetCurve={resetEmotionalCurve}
                           />
-                        </svg>
-                      )}
+                        )}
+                        {emotionSource === 'velma' && (
+                          <EmotionLedTrack
+                            curveData={segment.velma_emotion_curve}
+                            trackDuration={segment.end_time - segment.start_time}
+                            emotionLabel={segment.velma_emotion}
+                          />
+                        )}
+                      </div>
                     </div>
                   )
                 })}

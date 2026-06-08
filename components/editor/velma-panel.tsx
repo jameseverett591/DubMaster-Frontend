@@ -22,6 +22,7 @@ export default function VelmaPanel({
     )
   }
 
+  const hasVelmaData = !!(segment.velma_emotion || segment.velma_accent || typeof segment.velma_deepfake_score === 'number')
   const performanceScore = computeVelmaPerformance(segment)
   const recommendations = getVelmaVoiceRecommendations(segment, voices)
 
@@ -35,11 +36,22 @@ export default function VelmaPanel({
         <h2 className="text-violet-300 font-semibold text-sm">Velma Performance Analysis</h2>
       </div>
 
+      {/* No data state */}
+      {!hasVelmaData && (
+        <div className="velma-card p-4 rounded border border-violet-500/20">
+          <p className="text-xs text-violet-400 leading-relaxed">
+            No Velma signals for this segment. Re-dub with Velma enabled to populate emotion, accent, and deepfake scores.
+          </p>
+        </div>
+      )}
+
       {/* Performance Score */}
+      {hasVelmaData && (
       <div className="velma-card p-4 rounded">
         <h3 className="text-sm font-semibold mb-2 text-violet-300">Velma Performance Score</h3>
         <div className="text-2xl font-bold text-violet-200">{performanceScore}/100</div>
       </div>
+      )}
 
       {/* Emotion Mismatch */}
       {segment.velma_emotion && segment.dubEmotion && segment.velma_emotion !== segment.dubEmotion && (
@@ -75,6 +87,7 @@ export default function VelmaPanel({
       )}
 
       {/* Original Performance */}
+      {hasVelmaData && (
       <div className="velma-card p-4 rounded">
         <h3 className="text-sm font-semibold mb-2 text-violet-300">Original Performance (Velma)</h3>
 
@@ -119,6 +132,7 @@ export default function VelmaPanel({
           </div>
         )}
       </div>
+      )}
 
       {/* QC Cross-Link */}
       <button
@@ -163,32 +177,47 @@ function computeVelmaPerformance(segment: Segment): number {
 
   if (!hasData) return 0
 
-  const df = typeof segment.velma_deepfake_score === 'number' ? segment.velma_deepfake_score : 0
-  const dfScore = (1 - df) * 100
+  // Deepfake score is the primary signal (0 = authentic, 1 = synthetic)
+  if (typeof segment.velma_deepfake_score === 'number') {
+    return Math.round((1 - segment.velma_deepfake_score) * 100)
+  }
 
-  return Math.round(dfScore)
+  // No deepfake score yet — return a neutral 70 when emotion/accent exist
+  return 70
 }
 
 function getVelmaVoiceRecommendations(
   segment: Segment,
-  _voices: Voice[]
+  voices: Voice[]
 ): { id: string; name: string; reason: string }[] {
   const recs: { id: string; name: string; reason: string }[] = []
 
-  if (segment.velma_accent) {
-    recs.push({
-      id: 'accent-match',
-      name: 'British Male Neutral',
-      reason: 'Matches original accent',
-    })
+  // Recommend voices whose accent matches the original speaker's accent
+  if (segment.velma_accent && voices.length > 0) {
+    const accentLower = segment.velma_accent.toLowerCase()
+    const match = voices.find(
+      (v) => v.accent && v.accent.toLowerCase().includes(accentLower)
+    )
+    if (match) {
+      recs.push({
+        id: match.id,
+        name: match.name,
+        reason: `Matches original ${segment.velma_accent} accent`,
+      })
+    }
   }
 
+  // Flag high deepfake risk — suggest any voice not currently assigned
   if (typeof segment.velma_deepfake_score === 'number' && segment.velma_deepfake_score > 0.55) {
-    recs.push({
-      id: 'df-fix',
-      name: 'Expressive Male High-Quality',
-      reason: 'Lower deepfake risk',
-    })
+    const current = segment.speaker_id
+    const alt = voices.find((v) => v.id !== current)
+    if (alt) {
+      recs.push({
+        id: alt.id,
+        name: alt.name,
+        reason: 'Lower deepfake risk — current voice sounds synthetic',
+      })
+    }
   }
 
   return recs

@@ -112,6 +112,21 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         // guarantees fresh fetches every time the editor opens.
         const cacheBustTs = Date.now()
 
+        // Map Velma emotion label to a normalised intensity [0,1] for the curve
+        function velmaEmotionToIntensity(emotion: string | null | undefined): number {
+          switch ((emotion ?? '').toLowerCase()) {
+            case 'neutral':    return 0.25
+            case 'calm':       return 0.20
+            case 'happy': case 'joy': return 0.65
+            case 'sad': case 'sadness': return 0.45
+            case 'angry': case 'anger': return 0.85
+            case 'fear': case 'fearful': return 0.75
+            case 'disgusted': case 'disgust': return 0.70
+            case 'surprised': case 'surprise': return 0.60
+            default:           return 0.30
+          }
+        }
+
         const editorSegments: Segment[] = (segmentsData?.segments || []).map((seg: any, idx: number) => {
           const speakerId = `speaker-${String(seg.speaker ?? '').replace(/\D/g, '') || '1'}`
           const gender = speakerGenders[speakerId] as 'male' | 'female' | 'child' | undefined
@@ -139,6 +154,9 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             velma_emotion: seg.velma_emotion,
             velma_accent: seg.velma_accent,
             velma_deepfake_score: seg.velma_deepfake_score,
+            velma_emotion_curve: seg.velma_emotion
+              ? Array.from({ length: 20 }, () => velmaEmotionToIntensity(seg.velma_emotion))
+              : undefined,
             qc_findings: seg.qc_findings ?? [],
             emotionalCurve: {
               combined: [
