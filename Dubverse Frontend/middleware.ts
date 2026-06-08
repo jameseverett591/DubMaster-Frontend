@@ -125,34 +125,41 @@ export async function middleware(request: NextRequest) {
   }
 
   // Check subscription for protected routes (use service role to bypass RLS)
-  if (user && SUBSCRIPTION_ROUTES.some((route) => currentPath.startsWith(route))) {
-    const serviceClient = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SECRET_KEY!
-    )
-    const { data: subscription } = await serviceClient
-      .from("subscriptions")
-      .select("plan_type, status")
-      .eq("user_id", user.id)
-      .in("status", ["active", "trialing"])
-      .limit(1)
-      .single()
+  // Skip on localhost — dev environment doesn't require a subscription
+  const isLocalhost = request.nextUrl.hostname === 'localhost' || request.nextUrl.hostname === '127.0.0.1'
+  if (!isLocalhost && user && SUBSCRIPTION_ROUTES.some((route) => currentPath.startsWith(route))) {
+    try {
+      const serviceClient = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.SUPABASE_SECRET_KEY!
+      )
+      const { data: subscription } = await serviceClient
+        .from("subscriptions")
+        .select("plan_type, status")
+        .eq("user_id", user.id)
+        .in("status", ["active", "trialing"])
+        .limit(1)
+        .single()
 
-    if (!subscription) {
-      const url = request.nextUrl.clone()
-      url.pathname = "/subscribe"
-      return NextResponse.redirect(url)
-    }
+      if (!subscription) {
+        const url = request.nextUrl.clone()
+        url.pathname = "/subscribe"
+        return NextResponse.redirect(url)
+      }
 
-    // Editor requires Premium or Professional
-    if (currentPath.startsWith("/editor") && subscription.plan_type === "basic") {
-      const url = request.nextUrl.clone()
-      // Preserve locale in redirect
-      const locale = pathname.split('/')[1]
-      const localePrefix = locales.includes(locale as any) && locale !== 'en' ? `/${locale}` : ''
-      url.pathname = `${localePrefix}/subscribe`
-      url.searchParams.set("upgrade", "true")
-      return NextResponse.redirect(url)
+      // Editor requires Premium or Professional
+      if (currentPath.startsWith("/editor") && subscription.plan_type === "basic") {
+        const url = request.nextUrl.clone()
+        // Preserve locale in redirect
+        const locale = pathname.split('/')[1]
+        const localePrefix = locales.includes(locale as any) && locale !== 'en' ? `/${locale}` : ''
+        url.pathname = `${localePrefix}/subscribe`
+        url.searchParams.set("upgrade", "true")
+        return NextResponse.redirect(url)
+      }
+    } catch {
+      // Subscription check failed (network/key error) — allow through in production
+      // rather than blocking authenticated users with a 404
     }
   }
 
