@@ -3568,33 +3568,6 @@ export function DubVerseEditor({
                     <p className="text-sm text-slate-400">{segment.source_text}</p>
                   </div>
 
-                  {/* Velma enrichment badges */}
-                  <div className="flex items-center gap-2 ml-2">
-                    {segment.velma_emotion && (
-                      <span className="px-2 py-0.5 text-xs rounded bg-gray-800 text-gray-200">
-                        {segment.velma_emotion}
-                      </span>
-                    )}
-                    {segment.velma_accent && (
-                      <span className="px-2 py-0.5 text-xs rounded bg-gray-700 text-gray-300">
-                        {segment.velma_accent}
-                      </span>
-                    )}
-                    {typeof segment.velma_deepfake_score === "number" && (
-                      <span
-                        className={`px-2 py-0.5 text-xs rounded ${
-                          segment.velma_deepfake_score > 0.55
-                            ? "bg-red-700 text-red-100"
-                            : segment.velma_deepfake_score > 0.35
-                            ? "bg-yellow-700 text-yellow-100"
-                            : "bg-green-700 text-green-100"
-                        }`}
-                      >
-                        DF {segment.velma_deepfake_score.toFixed(2)}
-                      </span>
-                    )}
-                  </div>
-
                   {/* Target text (editable) */}
                   <div className="flex-1 min-w-0 flex items-center gap-1.5">
                     {isEditing ? (
@@ -5852,7 +5825,7 @@ export function DubVerseEditor({
 
               {/* Player needle - yellow triangle head + silver line - DRAGGABLE */}
               <div
-                className="absolute top-0 bottom-0 z-50 pointer-events-none"
+                className="absolute top-0 bottom-0 z-30 pointer-events-none"
                 style={{ left: `${currentTime * PIXELS_PER_SECOND}px` }}
               >
                 {/* Yellow triangle head - positioned below combined seek+ruler (24px+40px=64px) */}

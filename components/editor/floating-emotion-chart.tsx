@@ -324,6 +324,19 @@ export function FloatingEmotionChart({
         </div>
         <button
           type="button"
+          className="text-slate-500 hover:text-slate-200 text-sm leading-none px-1.5 shrink-0 transition-colors"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={() => {
+            const flat = Array.from({ length: 20 }, () => 0.25)
+            setCurveState(flat)
+            setMarkers([])
+            onUpdateCurve(segmentIndex, flat)
+          }}
+        >
+          ↺
+        </button>
+        <button
+          type="button"
           className="text-slate-600 hover:text-slate-300 text-sm leading-none px-1 ml-2 shrink-0 transition-colors"
           onMouseDown={(e) => e.stopPropagation()}
           onClick={onClose}
