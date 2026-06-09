@@ -116,6 +116,7 @@ interface FloatingEmotionChartProps {
   onClose: () => void
   onCommitEmotion: (segmentIndex: number, emotion: string, intensity: number) => void
   onUpdateCurve: (segmentIndex: number, curve: number[]) => void
+  onSaveChord?: (name: string, chord: Chord, intensity: number) => void
 }
 
 export function FloatingEmotionChart({
@@ -124,6 +125,7 @@ export function FloatingEmotionChart({
   onClose,
   onCommitEmotion,
   onUpdateCurve,
+  onSaveChord,
 }: FloatingEmotionChartProps) {
   const [pos, setPos] = useState({ x: 0, y: 0 })
   const [ready, setReady] = useState(false)
@@ -174,6 +176,8 @@ export function FloatingEmotionChart({
 
   const [markers, setMarkers] = useState<Marker[]>([])
   const [hud, setHud] = useState<HudState | null>(null)
+  const [pendingChord, setPendingChord] = useState<{ chordIndex: number; chord: Chord; intensity: number; t: number } | null>(null)
+  const [chordName, setChordName] = useState('')
 
   const trackDuration = Math.max(segment.end_time - segment.start_time, 0.01)
   const avg = curveState.length > 0 ? curveState.reduce((a, b) => a + b, 0) / curveState.length : 0
@@ -260,14 +264,16 @@ export function FloatingEmotionChart({
     if (clickTimerRef.current) clearTimeout(clickTimerRef.current)
     clickTimerRef.current = setTimeout(() => {
       const chord = CHORDS[h.chordIndex]
-      setMarkers(prev => {
-        const idx = prev.findIndex(m => m.chordIndex === h.chordIndex)
-        if (idx >= 0) return prev.filter((_, i) => i !== idx)
-        return [...prev, { chordIndex: h.chordIndex, chord, intensity: h.intensity, t: h.t }]
-      })
-      onCommitEmotion(segmentIndex, chord.emotion, h.intensity)
+      const isMarked = markers.some(m => m.chordIndex === h.chordIndex)
+      if (isMarked) {
+        setMarkers(prev => prev.filter(m => m.chordIndex !== h.chordIndex))
+      } else {
+        setPendingChord({ chordIndex: h.chordIndex, chord, intensity: h.intensity, t: h.t })
+        setChordName('')
+        onCommitEmotion(segmentIndex, chord.emotion, h.intensity)
+      }
     }, 220)
-  }, [getSvgHud, segmentIndex, onCommitEmotion])
+  }, [getSvgHud, segmentIndex, onCommitEmotion, markers])
 
   const handleSvgDoubleClick = useCallback(() => {
     if (clickTimerRef.current) { clearTimeout(clickTimerRef.current); clickTimerRef.current = null }
@@ -502,6 +508,50 @@ export function FloatingEmotionChart({
             </span>
           ))
         )}
+        {pendingChord && (
+          <>
+            <input
+              autoFocus
+              type="text"
+              placeholder="Name this chord…"
+              value={chordName}
+              onChange={e => setChordName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && chordName.trim()) {
+                  onSaveChord?.(chordName.trim(), pendingChord.chord, pendingChord.intensity)
+                  setMarkers(prev => [...prev, pendingChord])
+                  setPendingChord(null)
+                  setChordName('')
+                }
+                if (e.key === 'Escape') {
+                  setPendingChord(null)
+                  setChordName('')
+                }
+              }}
+              className="flex-1 bg-transparent border-b border-violet-500/40 text-xs text-slate-200 placeholder-slate-600 outline-none px-1 py-0.5"
+            />
+            <button type="button" onClick={() => {
+              if (chordName.trim()) {
+                onSaveChord?.(chordName.trim(), pendingChord.chord, pendingChord.intensity)
+                setMarkers(prev => [...prev, pendingChord])
+              }
+              setPendingChord(null)
+              setChordName('')
+            }} className="text-[9px] text-violet-400 hover:text-violet-200 px-2 shrink-0">Save</button>
+          </>
+        )}
+        <button
+          type="button"
+          className="text-[8px] text-slate-500 hover:text-slate-300 px-2 py-0.5 rounded border border-slate-700 hover:border-slate-500 transition-colors ml-auto shrink-0"
+          onClick={() => {
+            const flat = Array.from({ length: 20 }, () => 0.25)
+            setCurveState(flat)
+            setMarkers([])
+            onUpdateCurve(segmentIndex, flat)
+          }}
+        >
+          Clear
+        </button>
       </div>
     </div>
   )

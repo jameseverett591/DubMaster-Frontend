@@ -64,13 +64,13 @@ import { buildMockQCReport } from '@/lib/qc-mock-data'
 import { QCQualityPanel } from '@/components/editor/qc-quality-panel'
 import { SegmentQCPanel } from '@/components/editor/segment-qc-panel'
 import { QCTicker } from '@/components/editor/qc-ticker'
-import { EmotionalCurveTrack } from '@/components/editor/emotional-curve-track'
 import { EmotionLedTrack } from '@/components/editor/emotion-led-track'
 import { FloatingEmotionChart } from '@/components/editor/floating-emotion-chart'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import VelmaPanel from '@/components/editor/velma-panel'
 import { HeatmapBar } from '@/components/timeline/HeatmapBar'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
+import { EmotionalIntelligencePanel } from '@/components/editor/emotional-intelligence-panel'
 import { ExportModal } from '@/components/editor/export-modal'
 import { requestRPTStitch, stitchRPT, invalidateCache, scheduleRPTPlayback } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
@@ -544,7 +544,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'studio' | 'adaptation' | 'speakers' | 'library'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions'>('result')
 
   // QC report — real data from /api/analysis when available, otherwise mock
   const [qcReport, setQcReport] = useState<QCReport | null>(() =>
@@ -621,7 +621,7 @@ export function DubVerseEditor({
     return 112
   })
   const [isResizingTrackLabel, setIsResizingTrackLabel] = useState(false)
-  const [emotionSource, setEmotionSource] = useState<'velma' | 'dubmaster'>('dubmaster')
+  const [emotionSource, setEmotionSource] = useState<'auto' | 'manual'>('auto')
   const [floatingEmotionSegment, setFloatingEmotionSegment] = useState<number | null>(null)
 
   const [activeDubbedVideoUrl, setActiveDubbedVideoUrl] = useState(dubbedVideoUrl)
@@ -4165,6 +4165,7 @@ export function DubVerseEditor({
                 { id: 'adaptation', label: 'Adaptation' },
                 { id: 'speakers', label: 'Speakers' },
                 { id: 'library', label: 'Voice Library' },
+                { id: 'emotions', label: 'E.I.' },
               ] as const).map((t) => (
                 <button
                   type="button"
@@ -4306,6 +4307,19 @@ export function DubVerseEditor({
             <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
               <VoiceLibraryPanel />
             </div>
+          )}
+
+          {rightPanelTab === 'emotions' && (
+            <EmotionalIntelligencePanel
+              jobId={jobId}
+              selectedSegmentIndex={selectedSegmentIndex}
+              onApplyChord={(emotion, state, trait, intensity) => {
+                if (selectedSegmentIndex !== null) {
+                  setStagedEmotions(prev => ({ ...prev, [selectedSegmentIndex]: emotion }))
+                  updateSegment(selectedSegmentIndex, { committed_emotion: emotion })
+                }
+              }}
+            />
           )}
         </div>
       </div>
@@ -5067,32 +5081,25 @@ export function DubVerseEditor({
               <div className="flex flex-col text-xs text-slate-300 select-none">
                 <span className="font-semibold mb-1">Emotion</span>
 
-                <div
-                  className="flex items-center space-x-2 cursor-pointer mb-1"
-                  onClick={() => setEmotionSource('velma')}
-                >
-                  <span
-                    className={`inline-block w-2 h-2 rounded-full ${
-                      emotionSource === 'velma' ? 'bg-amber-400' : 'bg-slate-600'
+                <div className="flex items-center gap-1 mt-1">
+                  <button
+                    type="button"
+                    onClick={() => setEmotionSource('auto')}
+                    className={`text-[9px] px-2 py-0.5 rounded font-semibold transition-colors ${
+                      emotionSource === 'auto'
+                        ? 'bg-amber-400/20 text-amber-300 border border-amber-400/40'
+                        : 'text-slate-500 border border-slate-700'
                     }`}
-                  />
-                  <span className={`${emotionSource === 'velma' ? 'text-amber-300' : 'text-slate-500'}`}>
-                    Velma
-                  </span>
-                </div>
-
-                <div
-                  className="flex items-center space-x-2 cursor-pointer"
-                  onClick={() => setEmotionSource('dubmaster')}
-                >
-                  <span
-                    className={`inline-block w-2 h-2 rounded-full ${
-                      emotionSource === 'dubmaster' ? 'bg-amber-400' : 'bg-slate-600'
+                  >Auto</button>
+                  <button
+                    type="button"
+                    onClick={() => setEmotionSource('manual')}
+                    className={`text-[9px] px-2 py-0.5 rounded font-semibold transition-colors ${
+                      emotionSource === 'manual'
+                        ? 'bg-violet-400/20 text-violet-300 border border-violet-400/40'
+                        : 'text-slate-500 border border-slate-700'
                     }`}
-                  />
-                  <span className={`${emotionSource === 'dubmaster' ? 'text-amber-300' : 'text-slate-500'}`}>
-                    DubMaster
-                  </span>
+                  >Manual</button>
                 </div>
               </div>
             </div>
@@ -5720,7 +5727,7 @@ export function DubVerseEditor({
                     <div
                       key={`emotion-${segment.id}`}
                       className="absolute top-0 bottom-0"
-                      onDoubleClick={() => setFloatingEmotionSegment(index)}
+                      onDoubleClick={() => setFloatingEmotionSegment(prev => prev === index ? null : index)}
                       style={{
                         left: segment.start_time * PIXELS_PER_SECOND,
                         width: segWidth,
@@ -5745,24 +5752,15 @@ export function DubVerseEditor({
                           ))}
                         </div>
 
-                        {emotionSource === 'dubmaster' && (
-                          <EmotionalCurveTrack
-                            segment={segment}
-                            segmentIndex={index}
-                            zoom={zoomLevel}
-                            width={segWidth}
-                            onUpdateCurve={updateCombinedCurve}
-                            onToggleLock={toggleCurveLock}
-                            onResetCurve={resetEmotionalCurve}
-                          />
-                        )}
-                        {emotionSource === 'velma' && (
-                          <EmotionLedTrack
-                            curveData={segment.velma_emotion_curve}
-                            trackDuration={segment.end_time - segment.start_time}
-                            emotionLabel={segment.velma_emotion}
-                          />
-                        )}
+                        <EmotionLedTrack
+                          curveData={
+                            emotionSource === 'manual'
+                              ? segment.velma_emotion_curve ?? Array.from({ length: 20 }, () => 0.25)
+                              : segment.velma_emotion_curve
+                          }
+                          trackDuration={segment.end_time - segment.start_time}
+                          emotionLabel={segment.velma_emotion}
+                        />
                       </div>
                     </div>
                   )
@@ -5779,6 +5777,15 @@ export function DubVerseEditor({
                     }}
                     onUpdateCurve={(idx, curve) => {
                       updateSegment(idx, { velma_emotion_curve: curve })
+                    }}
+                    onSaveChord={async (name, chord, intensity) => {
+                      await apiClient.saveEmotionalChord({
+                        name,
+                        emotion: chord.emotion,
+                        state: chord.state,
+                        trait: chord.trait,
+                        intensity,
+                      })
                     }}
                   />
                 )}
