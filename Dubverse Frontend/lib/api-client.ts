@@ -362,6 +362,17 @@ export interface AnalysisResponse {
   analysis?: QualityAnalysis
 }
 
+export interface EmotionalChord {
+  id: string
+  user_id: string
+  name: string
+  emotion: string
+  state: string
+  trait: string
+  intensity: number
+  created_at: string
+}
+
 // ============================================================================
 // API CLIENT CLASS
 // ============================================================================
@@ -822,6 +833,39 @@ class DubVerseAPIClient {
     if (!url) return ''
     if (url.startsWith('http://') || url.startsWith('https://')) return url
     return `${this.baseURL}${url.startsWith('/') ? url : `/${url}`}`
+  }
+
+  async getEmotionalLibrary(): Promise<EmotionalChord[]> {
+    const response = await fetch(`${this.baseURL}/api/emotional-library`, {
+      headers: { ...this._authHeaders() },
+    })
+    if (!response.ok) return []
+    const data = await response.json()
+    return data.chords ?? []
+  }
+
+  async saveEmotionalChord(chord: Omit<EmotionalChord, 'id' | 'user_id' | 'created_at'>): Promise<EmotionalChord | null> {
+    const response = await fetch(`${this.baseURL}/api/emotional-library`, {
+      method: 'POST',
+      headers: { ...this._authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(chord),
+    })
+    if (!response.ok) return null
+    return response.json()
+  }
+
+  async deleteEmotionalChord(id: string): Promise<void> {
+    await fetch(`${this.baseURL}/api/emotional-library/${id}`, {
+      method: 'DELETE',
+      headers: { ...this._authHeaders() },
+    })
+  }
+
+  async clearEmotionalLibrary(): Promise<void> {
+    await fetch(`${this.baseURL}/api/emotional-library`, {
+      method: 'DELETE',
+      headers: { ...this._authHeaders() },
+    })
   }
 }
 

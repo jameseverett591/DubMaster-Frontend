@@ -3627,3 +3627,61 @@ Respond with JSON: {{"suggestion": "<improved dubbed text>", "explanation": "<on
     except Exception as e:
         logger.error(f"[ASK-AI] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Emotional Intelligence Library ──────────────────────────────────────────
+
+@router.get("/emotional-library")
+async def get_emotional_library(request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+    from app.services.supabase_client import supabase_writer
+    result = supabase_writer.table("emotional_library") \
+        .select("*") \
+        .eq("user_id", user_id) \
+        .order("created_at", desc=True) \
+        .execute()
+    return {"chords": result.data or []}
+
+@router.post("/emotional-library")
+async def save_emotional_chord(request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+    body = await request.json()
+    from app.services.supabase_client import supabase_writer
+    result = supabase_writer.table("emotional_library").insert({
+        "user_id": user_id,
+        "name": body.get("name", "Unnamed"),
+        "emotion": body["emotion"],
+        "state": body["state"],
+        "trait": body["trait"],
+        "intensity": body.get("intensity", 0.5),
+    }).execute()
+    return result.data[0] if result.data else {}
+
+@router.delete("/emotional-library/{chord_id}")
+async def delete_emotional_chord(chord_id: str, request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+    from app.services.supabase_client import supabase_writer
+    supabase_writer.table("emotional_library") \
+        .delete() \
+        .eq("id", chord_id) \
+        .eq("user_id", user_id) \
+        .execute()
+    return {"status": "ok"}
+
+@router.delete("/emotional-library")
+async def clear_emotional_library(request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+    from app.services.supabase_client import supabase_writer
+    supabase_writer.table("emotional_library") \
+        .delete() \
+        .eq("user_id", user_id) \
+        .execute()
+    return {"status": "ok"}
