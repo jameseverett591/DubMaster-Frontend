@@ -545,6 +545,8 @@ export function DubVerseEditor({
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
   const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'chord'>('result')
+  const [velmaEnrichLoading, setVelmaEnrichLoading] = useState(false)
+  const [velmaEnrichResult, setVelmaEnrichResult] = useState<{ patched: number; total: number } | null>(null)
 
   // QC report — real data from /api/analysis when available, otherwise mock
   const [qcReport, setQcReport] = useState<QCReport | null>(() =>
@@ -4348,10 +4350,43 @@ export function DubVerseEditor({
                     intensity,
                   })
                 }}
+                onAnalyzeWithHume={async () => {
+                  const seg = displaySegments[floatingEmotionSegment!]
+                  return apiClient.analyzeSegmentEmotion(jobId, seg.start_time, seg.end_time)
+                }}
               />
             ) : (
-              <div className="flex-1 flex items-center justify-center text-slate-600 text-sm">
-                Double-click a segment in the Emotion track to edit its chord
+              <div className="flex-1 flex flex-col items-center justify-center gap-4 p-6 text-center">
+                <p className="text-slate-500 text-sm">Double-click a segment in the Emotion track to edit its chord</p>
+                <div className="border border-slate-700 rounded-lg p-4 w-full max-w-xs flex flex-col gap-3">
+                  <p className="text-slate-400 text-xs">Run Velma on this job to populate emotion data for all segments before using the chord chart.</p>
+                  {velmaEnrichResult && (
+                    <p className="text-green-400 text-xs">Enriched {velmaEnrichResult.patched} / {velmaEnrichResult.total} segments</p>
+                  )}
+                  <button
+                    disabled={velmaEnrichLoading}
+                    onClick={async () => {
+                      setVelmaEnrichLoading(true)
+                      try {
+                        const res = await apiClient.rediarizeWithVelma(jobId)
+                        setVelmaEnrichResult({ patched: res.segments_patched, total: res.total_segments })
+                      } catch (err: any) {
+                        alert(`Velma enrichment failed: ${err.message}`)
+                      } finally {
+                        setVelmaEnrichLoading(false)
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded text-xs font-bold tracking-wide transition-all"
+                    style={{
+                      color: velmaEnrichLoading ? 'rgba(167,139,250,0.4)' : '#a78bfa',
+                      background: 'rgba(167,139,250,0.1)',
+                      border: '1px solid rgba(167,139,250,0.3)',
+                      cursor: velmaEnrichLoading ? 'wait' : 'pointer',
+                    }}
+                  >
+                    {velmaEnrichLoading ? '⏳ Running Velma…' : '🎙 Enrich Job with Velma'}
+                  </button>
+                </div>
               </div>
             )}
           </div>

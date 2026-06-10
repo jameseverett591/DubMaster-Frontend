@@ -3274,6 +3274,369 @@ async def get_analysis(job_id: str, language: str):
     return {"status": "complete", "analysis": analysis}
 
 
+# ---------------------------------------------------------------------------
+# Hume per-segment emotion analysis — maps to 50-chord model
+# ---------------------------------------------------------------------------
+
+# Hume returns ~48 raw emotion names. Map them to the 50 emotions in our chord model.
+_HUME_TO_CHORD: Dict[str, str] = {
+    # Direct matches
+    "Anger": "Anger", "Fear": "Fear", "Joy": "Joy", "Sadness": "Sadness",
+    "Surprise": "Surprise", "Disgust": "Disgust", "Contempt": "Contempt",
+    "Awe": "Awe", "Confusion": "Confusion", "Pride": "Pride",
+    "Shame": "Shame", "Guilt": "Guilt", "Love": "Love", "Hope": "Hope",
+    "Grief": "Grief", "Curiosity": "Curiosity", "Anxiety": "Anxiety",
+    "Nostalgia": "Nostalgia", "Relief": "Relief", "Serenity": "Serenity",
+    "Determination": "Determination", "Boredom": "Boredom",
+    # Hume name -> our chord emotion
+    "Admiration": "Gratitude",
+    "Adoration": "Love",
+    "Aesthetic Appreciation": "Awe",
+    "Amusement": "Joy",
+    "Annoyance": "Frustration",
+    "Anticipation": "Anticipation",
+    "Awkwardness": "Shame",
+    "Calmness": "Serenity",
+    "Concentration": "Determination",
+    "Contemplation": "Melancholy",
+    "Contentment": "Contentment",
+    "Craving": "Anticipation",
+    "Desire": "Love",
+    "Disappointment": "Sadness",
+    "Disapproval": "Contempt",
+    "Disgust": "Disgust",
+    "Distress": "Anxiety",
+    "Doubt": "Confusion",
+    "Ecstasy": "Euphoria",
+    "Embarrassment": "Shame",
+    "Empathic Pain": "Empathy",
+    "Enthusiasm": "Zeal",
+    "Entrancement": "Wonder",
+    "Envy": "Jealousy",
+    "Excitement": "Excitement",
+    "Exhaustion": "Indifference",
+    "Fear": "Fear",
+    "Frustration": "Frustration",
+    "Horror": "Fear",
+    "Interest": "Curiosity",
+    "Ire": "Anger",
+    "Irritability": "Irritation",
+    "Jealousy": "Jealousy",
+    "Loneliness": "Loneliness",
+    "Melancholy": "Melancholy",
+    "Nervousness": "Anxiety",
+    "Pain": "Grief",
+    "Pleasure": "Delight",
+    "Realization": "Surprise",
+    "Regret": "Regret",
+    "Relief": "Relief",
+    "Romance": "Love",
+    "Satisfaction": "Contentment",
+    "Sympathy": "Compassion",
+    "Tenderness": "Tenderness",
+    "Tiredness": "Indifference",
+    "Triumph": "Pride",
+    "Vulnerability": "Vulnerability",
+    "Wonder": "Wonder",
+}
+
+# Natural next-emotion progression (mirrors frontend NEXT_EMOTION)
+_NEXT_CHORD: Dict[str, str] = {
+    "Anger": "Frustration", "Frustration": "Resentment", "Resentment": "Contempt",
+    "Contempt": "Disgust", "Disgust": "Sadness", "Irritation": "Frustration",
+    "Jealousy": "Resentment", "Fear": "Anxiety", "Anxiety": "Apprehension",
+    "Apprehension": "Confusion", "Confusion": "Vulnerability",
+    "Boredom": "Indifference", "Zeal": "Excitement", "Excitement": "Anticipation",
+    "Anticipation": "Hope", "Hope": "Joy", "Surprise": "Curiosity",
+    "Joy": "Delight", "Delight": "Euphoria", "Euphoria": "Excitement",
+    "Love": "Tenderness", "Tenderness": "Compassion", "Compassion": "Empathy",
+    "Empathy": "Gratitude", "Gratitude": "Trust", "Trust": "Serenity",
+    "Serenity": "Contentment", "Contentment": "Acceptance", "Acceptance": "Serenity",
+    "Awe": "Wonder", "Wonder": "Curiosity", "Curiosity": "Surprise",
+    "Pride": "Confidence", "Confidence": "Determination", "Determination": "Courage",
+    "Courage": "Pride", "Humility": "Acceptance", "Relief": "Contentment",
+    "Sadness": "Grief", "Grief": "Loneliness", "Loneliness": "Melancholy",
+    "Melancholy": "Nostalgia", "Nostalgia": "Regret", "Regret": "Vulnerability",
+    "Vulnerability": "Humility", "Shame": "Guilt", "Guilt": "Regret",
+    "Despair": "Sadness", "Indifference": "Boredom",
+}
+
+_EMOTION_INTENSITY: Dict[str, float] = {
+    "Anger": 0.92, "Frustration": 0.78, "Resentment": 0.72, "Contempt": 0.68,
+    "Disgust": 0.70, "Irritation": 0.65, "Jealousy": 0.74, "Fear": 0.84,
+    "Anxiety": 0.76, "Apprehension": 0.62, "Confusion": 0.50, "Boredom": 0.22,
+    "Zeal": 0.80, "Excitement": 0.82, "Anticipation": 0.68, "Hope": 0.64,
+    "Surprise": 0.78, "Joy": 0.85, "Delight": 0.80, "Euphoria": 0.95,
+    "Love": 0.75, "Tenderness": 0.65, "Compassion": 0.68, "Empathy": 0.66,
+    "Gratitude": 0.72, "Trust": 0.58, "Serenity": 0.55, "Contentment": 0.60,
+    "Acceptance": 0.52, "Awe": 0.88, "Wonder": 0.82, "Curiosity": 0.70,
+    "Pride": 0.82, "Confidence": 0.78, "Determination": 0.80, "Courage": 0.85,
+    "Humility": 0.48, "Relief": 0.60, "Sadness": 0.32, "Grief": 0.28,
+    "Loneliness": 0.30, "Melancholy": 0.35, "Nostalgia": 0.42, "Regret": 0.38,
+    "Vulnerability": 0.40, "Shame": 0.42, "Guilt": 0.38, "Despair": 0.20,
+    "Indifference": 0.25, "Resentment": 0.72,
+}
+
+_EMOTION_COLOR: Dict[str, str] = {
+    "Anger": "#ef4444", "Contempt": "#ef4444", "Disgust": "#ef4444",
+    "Frustration": "#ef4444", "Resentment": "#ef4444", "Irritation": "#ef4444",
+    "Jealousy": "#ef4444", "Anticipation": "#f59e0b", "Fear": "#f59e0b",
+    "Surprise": "#f59e0b", "Excitement": "#f59e0b", "Anxiety": "#f59e0b",
+    "Apprehension": "#f59e0b", "Zeal": "#f59e0b", "Boredom": "#f59e0b",
+    "Confusion": "#f59e0b", "Hope": "#f59e0b", "Joy": "#22c55e",
+    "Love": "#22c55e", "Pride": "#22c55e", "Trust": "#22c55e",
+    "Gratitude": "#22c55e", "Euphoria": "#22c55e", "Delight": "#22c55e",
+    "Contentment": "#22c55e", "Serenity": "#22c55e", "Awe": "#22c55e",
+    "Wonder": "#22c55e", "Acceptance": "#22c55e", "Courage": "#22c55e",
+    "Confidence": "#22c55e", "Relief": "#22c55e", "Empathy": "#22c55e",
+    "Compassion": "#22c55e", "Tenderness": "#22c55e", "Determination": "#22c55e",
+    "Humility": "#22c55e", "Sadness": "#a78bfa", "Shame": "#a78bfa",
+    "Guilt": "#a78bfa", "Loneliness": "#a78bfa", "Nostalgia": "#a78bfa",
+    "Regret": "#a78bfa", "Melancholy": "#a78bfa", "Vulnerability": "#a78bfa",
+    "Despair": "#a78bfa", "Grief": "#a78bfa", "Indifference": "#a78bfa",
+}
+
+
+def _build_progression(start_emotion: str, steps: int = 5) -> List[str]:
+    """Follow NEXT_CHORD chain from start_emotion, up to `steps` unique emotions."""
+    chain = [start_emotion]
+    seen = {start_emotion}
+    current = start_emotion
+    for _ in range(steps - 1):
+        nxt = _NEXT_CHORD.get(current)
+        if not nxt or nxt in seen:
+            break
+        chain.append(nxt)
+        seen.add(nxt)
+        current = nxt
+    return chain
+
+
+class SegmentAnalyzeRequest(BaseModel):
+    start_time: float
+    end_time: float
+
+
+@router.post("/jobs/{job_id}/rediarize-velma")
+async def rediarize_with_velma(job_id: str, request: Request):
+    """
+    Re-run Velma diarization on an existing job's source audio and patch
+    velma_emotion (and velma_accent, velma_deepfake_score) back onto
+    every segment in segments.json, both on disk and in Supabase.
+    """
+    if not os.getenv("MODULATE_API_KEY"):
+        raise HTTPException(status_code=503, detail="MODULATE_API_KEY not configured")
+
+    job = await _get_or_rehydrate_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    source_path = Path(job.video_path)
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Source video not found")
+
+    # Run Velma on the full source audio
+    logger.info(f"[REDIARIZE] Job {job_id}: running Velma on {source_path}")
+    velma_result = await asyncio.to_thread(
+        velma_diarize, str(source_path), job_id, 0
+    )
+
+    if not velma_result or velma_result.get("status") != "ok":
+        reason = velma_result.get("error_message", "unknown") if velma_result else "no result"
+        raise HTTPException(status_code=502, detail=f"Velma diarization failed: {reason}")
+
+    velma_segs = velma_result.get("segments", [])
+    logger.info(f"[REDIARIZE] Job {job_id}: Velma returned {len(velma_segs)} utterances")
+
+    # Build a lookup: for each Velma utterance, find overlapping segments.json segments
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail="segments.json not found for this job")
+
+    with open(segments_path, "r", encoding="utf-8") as f:
+        segments_doc = _json.load(f)
+
+    # segments.json is {"job_id":..., "segments": [...]}
+    disk_segs = segments_doc.get("segments", segments_doc) if isinstance(segments_doc, dict) else segments_doc
+
+    patched = 0
+    for ds in disk_segs:
+        ds_start = float(ds.get("start_time", ds.get("start", 0)))
+        ds_end = float(ds.get("end_time", ds.get("end", 0)))
+
+        # Find the Velma utterance with the most overlap
+        best_overlap = 0.0
+        best_velma = None
+        for vs in velma_segs:
+            vs_start = float(vs.get("start", 0))
+            vs_end = float(vs.get("end", 0))
+            overlap = max(0.0, min(ds_end, vs_end) - max(ds_start, vs_start))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_velma = vs
+
+        if best_velma and best_overlap > 0.1:
+            if best_velma.get("emotion"):
+                ds["velma_emotion"] = best_velma["emotion"]
+                patched += 1
+            if best_velma.get("accent"):
+                ds["velma_accent"] = best_velma["accent"]
+            if best_velma.get("deepfake_score") is not None:
+                ds["velma_deepfake_score"] = best_velma["deepfake_score"]
+
+    # Write patched segments back to disk (preserve wrapper doc)
+    if isinstance(segments_doc, dict) and "segments" in segments_doc:
+        segments_doc["segments"] = disk_segs
+        write_data = segments_doc
+    else:
+        write_data = disk_segs
+    with open(segments_path, "w", encoding="utf-8") as f:
+        _json.dump(write_data, f, ensure_ascii=False, indent=2)
+
+    # Update in-memory job transcript segments too
+    if job.transcript and job.transcript.segments:
+        for ts in job.transcript.segments:
+            best_overlap = 0.0
+            best_velma = None
+            for vs in velma_segs:
+                vs_start = float(vs.get("start", 0))
+                vs_end = float(vs.get("end", 0))
+                overlap = max(0.0, min(ts.end, vs_end) - max(ts.start, vs_start))
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_velma = vs
+            if best_velma and best_overlap > 0.1 and best_velma.get("emotion"):
+                ts.velma_emotion = best_velma["emotion"]
+
+    logger.info(f"[REDIARIZE] Job {job_id}: patched velma_emotion on {patched}/{len(disk_segs)} segments")
+
+    return {
+        "status": "ok",
+        "job_id": job_id,
+        "velma_utterances": len(velma_segs),
+        "segments_patched": patched,
+        "total_segments": len(disk_segs),
+    }
+
+
+@router.post("/hume/analyze-segment/{job_id}")
+async def hume_analyze_segment(job_id: str, body: SegmentAnalyzeRequest):
+    """
+    Read Velma emotion labels from transcript segments that overlap [start_time, end_time]
+    and return a 5-chord progression mapped to DubMaster's 50-chord model.
+    """
+    # Velma emotion label → chord emotion name
+    _VELMA_TO_CHORD: Dict[str, str] = {
+        "angry": "Anger", "anger": "Anger",
+        "happy": "Excitement", "happiness": "Excitement", "excited": "Excitement",
+        "joy": "Joy", "joyful": "Joy",
+        "sad": "Sadness", "sadness": "Sadness", "sorrow": "Sadness",
+        "fear": "Fear", "fearful": "Fear", "scared": "Fear",
+        "surprised": "Surprise", "surprise": "Surprise",
+        "disgusted": "Disgust", "disgust": "Disgust",
+        "contempt": "Contempt",
+        "neutral": "Serenity", "calm": "Serenity", "serenity": "Serenity",
+        "concerned": "Anxiety", "worried": "Anxiety",
+        "excited": "Excitement",
+        "anxious": "Anxiety", "anxiety": "Anxiety",
+        "frustrated": "Frustration", "frustration": "Frustration",
+        "curious": "Curiosity", "curiosity": "Curiosity",
+        "confused": "Confusion", "confusion": "Confusion",
+        "determined": "Determination", "determination": "Determination",
+        "hopeful": "Hope", "hope": "Hope",
+        "loving": "Love", "love": "Love",
+        "proud": "Pride", "pride": "Pride",
+        "guilty": "Guilt", "guilt": "Guilt",
+        "ashamed": "Shame", "shame": "Shame",
+        "grateful": "Gratitude", "gratitude": "Gratitude",
+        "bored": "Boredom", "boredom": "Boredom",
+        "nostalgic": "Nostalgia", "nostalgia": "Nostalgia",
+        "lonely": "Loneliness", "loneliness": "Loneliness",
+        "enthusiastic": "Zeal", "zeal": "Zeal",
+        "awe": "Awe", "amazed": "Awe",
+        "relieved": "Relief", "relief": "Relief",
+        "grief": "Grief", "grieving": "Grief",
+        "melancholy": "Melancholy",
+        "delight": "Delight", "delighted": "Delight",
+    }
+
+    job = await _get_or_rehydrate_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Collect velma_emotion labels from overlapping transcript segments
+    chord_votes: Dict[str, float] = {}
+    if job.transcript and job.transcript.segments:
+        overlapping = [
+            s for s in job.transcript.segments
+            if s.velma_emotion and s.end > body.start_time and s.start < body.end_time
+        ]
+        for seg in overlapping:
+            label = (seg.velma_emotion or "").lower().strip()
+            chord_emotion = _VELMA_TO_CHORD.get(label)
+            if chord_emotion:
+                # Weight by how much of the segment overlaps
+                overlap = min(seg.end, body.end_time) - max(seg.start, body.start_time)
+                chord_votes[chord_emotion] = chord_votes.get(chord_emotion, 0.0) + overlap
+
+    if not chord_votes:
+        # No Velma emotion data — fall back to Excitement as neutral starting point
+        logger.warning(f"[VELMA-CHORD] No velma_emotion found for {job_id} [{body.start_time}-{body.end_time}], using Excitement fallback")
+        chord_votes = {"Excitement": 1.0}
+
+    # Normalise votes to scores
+    total = sum(chord_votes.values()) or 1.0
+    chord_scores: Dict[str, float] = {k: round(v / total, 4) for k, v in chord_votes.items()}
+
+    # Primary emotion = highest weighted chord emotion
+    primary = max(chord_scores, key=lambda k: chord_scores[k])
+    primary_score = chord_scores[primary]
+
+    # Build 5-step progression chain
+    chain = _build_progression(primary, steps=5)
+
+    # Build gaussian curve (50 points, one additive peak per chord)
+    import math
+    n = len(chain)
+    positions = [0.5 if n == 1 else 0.10 + (i / (n - 1)) * 0.80 for i in range(n)]
+    sigma = 0.055
+    curve = [0.05] * 50
+    for chord_emotion, xfrac in zip(chain, positions):
+        target = _EMOTION_INTENSITY.get(chord_emotion, 0.5)
+        for idx in range(50):
+            t = idx / 49
+            dist = t - xfrac
+            w = math.exp(-(dist * dist) / (2 * sigma * sigma))
+            curve[idx] = min(1.0, curve[idx] + w * target)
+
+    # Build markers
+    markers = []
+    for i, chord_emotion in enumerate(chain):
+        xfrac = positions[i]
+        pos_idx = xfrac * 49
+        lo = int(pos_idx)
+        hi = min(lo + 1, 49)
+        frac = pos_idx - lo
+        intensity = curve[lo] * (1 - frac) + curve[hi] * frac
+        markers.append({
+            "emotion": chord_emotion,
+            "intensity": round(intensity, 4),
+            "color": _EMOTION_COLOR.get(chord_emotion, "#60a5fa"),
+            "xFrac": round(xfrac, 4),
+        })
+
+    return {
+        "status": "ok",
+        "primary_emotion": primary,
+        "primary_score": round(primary_score, 4),
+        "chain": chain,
+        "curve": [round(v, 4) for v in curve],
+        "markers": markers,
+        "top_emotions": sorted(chord_scores.items(), key=lambda x: x[1], reverse=True)[:8],
+        "analysis_method": "velma",
+    }
+
+
 @router.post("/dub/remix/{job_id}")
 async def remix_dub(job_id: str, request: Request):
     auth_header = request.headers.get("Authorization", "")
