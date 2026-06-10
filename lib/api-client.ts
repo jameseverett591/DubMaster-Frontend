@@ -690,6 +690,52 @@ class DubVerseAPIClient {
     return response.json()
   }
 
+  /**
+   * Analyze a segment's audio via Hume AI and return a 5-chord progression
+   */
+  async analyzeSegmentEmotion(
+    jobId: string,
+    startTime: number,
+    endTime: number,
+  ): Promise<{
+    status: string
+    primary_emotion: string
+    primary_score: number
+    chain: string[]
+    curve: number[]
+    markers: Array<{ emotion: string; intensity: number; color: string; xFrac: number }>
+    hume_top: Array<[string, number]>
+  }> {
+    const response = await fetch(`${this.baseURL}/api/hume/analyze-segment/${jobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ start_time: startTime, end_time: endTime }),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Hume analysis failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  async rediarizeWithVelma(jobId: string): Promise<{
+    status: string
+    job_id: string
+    velma_utterances: number
+    segments_patched: number
+    total_segments: number
+  }> {
+    const response = await fetch(`${this.baseURL}/api/jobs/${jobId}/rediarize-velma`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Velma re-diarization failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
   async regenerateSegment(
     jobId: string,
     index: number,

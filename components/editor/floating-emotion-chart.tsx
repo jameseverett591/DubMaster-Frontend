@@ -281,6 +281,11 @@ interface FloatingEmotionChartProps {
   onUpdateProgression?: (segmentIndex: number, markers: Array<{ emotion: string; intensity: number; color: string }>) => void
   /** When true, renders inline (fills container) instead of as a floating overlay */
   embedded?: boolean
+  onAnalyzeWithHume?: () => Promise<{
+    curve: number[]
+    markers: Array<{ emotion: string; intensity: number; color: string; xFrac: number }>
+    primary_emotion: string
+  }>
 }
 
 export function FloatingEmotionChart({
@@ -291,6 +296,7 @@ export function FloatingEmotionChart({
   onUpdateCurve,
   onSaveChord,
   onUpdateProgression,
+  onAnalyzeWithHume,
   embedded = false,
 }: FloatingEmotionChartProps) {
   const [pos, setPos] = useState({ x: 0, y: 0 })
@@ -342,6 +348,7 @@ export function FloatingEmotionChart({
     dragOffsetRef.current = { x: e.clientX - posRef.current.x, y: e.clientY - posRef.current.y }
   }, [])
 
+  const [humeLoading, setHumeLoading] = useState(false)
   const [markers, setMarkers] = useState<Marker[]>([])
   const [autoMarkers, setAutoMarkers] = useState<AutoMarker[]>([])
   const [hud, setHud] = useState<HudState | null>(null)
@@ -557,6 +564,47 @@ export function FloatingEmotionChart({
             onUpdateCurve(segmentIndex, flat)
           }}
         >↺</button>
+        {onAnalyzeWithHume && (
+          <button
+            type="button"
+            disabled={humeLoading}
+            className="shrink-0 ml-2 px-2 py-0.5 rounded text-[8px] font-bold tracking-wide transition-all"
+            style={{
+              color: humeLoading ? 'rgba(167,139,250,0.5)' : '#a78bfa',
+              background: humeLoading ? 'rgba(167,139,250,0.06)' : 'rgba(167,139,250,0.12)',
+              border: '1px solid rgba(167,139,250,0.35)',
+              cursor: humeLoading ? 'wait' : 'pointer',
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={async () => {
+              if (!onAnalyzeWithHume || humeLoading) return
+              setHumeLoading(true)
+              try {
+                const result = await onAnalyzeWithHume()
+                const newMarkers: AutoMarker[] = result.markers.map(m => ({
+                  chordIndex: Math.round(m.xFrac * NUM_CHORDS),
+                  chord: CHORDS.find(c => c.emotion === m.emotion) ?? CHORDS[0],
+                  intensity: m.intensity,
+                  t: m.xFrac * trackDuration,
+                  svgX: m.xFrac * SVG_W,
+                  color: m.color,
+                }))
+                setCurveState(result.curve)
+                setAutoMarkers(newMarkers)
+                setMarkers([])
+                onUpdateCurve(segmentIndex, result.curve)
+                onUpdateProgression?.(segmentIndex, result.markers.map(m => ({ emotion: m.emotion, intensity: m.intensity, color: m.color })))
+                onCommitEmotion(segmentIndex, result.primary_emotion, newMarkers[0]?.intensity ?? 0.5)
+              } catch (err) {
+                console.error('[Hume]', err)
+              } finally {
+                setHumeLoading(false)
+              }
+            }}
+          >
+            {humeLoading ? '⏳ Analysing…' : '🎙 Velma'}
+          </button>
+        )}
         <button
           type="button"
           className="text-slate-600 hover:text-slate-300 text-sm leading-none px-1 ml-2 shrink-0 transition-colors"
