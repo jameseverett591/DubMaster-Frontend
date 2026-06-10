@@ -544,7 +544,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'chord'>('result')
 
   // QC report — real data from /api/analysis when available, otherwise mock
   const [qcReport, setQcReport] = useState<QCReport | null>(() =>
@@ -1198,12 +1198,6 @@ export function DubVerseEditor({
         handleSplitAtPlayhead(selectedSegmentIndex)
       }
 
-      if (e.ctrlKey && e.key.toLowerCase() === 'v') {
-        setEmotionSource('velma')
-      }
-      if (e.ctrlKey && e.key.toLowerCase() === 'd') {
-        setEmotionSource('dubmaster')
-      }
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
@@ -4166,6 +4160,7 @@ export function DubVerseEditor({
                 { id: 'speakers', label: 'Speakers' },
                 { id: 'library', label: 'Voice Library' },
                 { id: 'emotions', label: 'E.I.' },
+                { id: 'chord', label: 'Chord' },
               ] as const).map((t) => (
                 <button
                   type="button"
@@ -4321,6 +4316,45 @@ export function DubVerseEditor({
               }}
             />
           )}
+
+          {/* Chord tab — always mounted to preserve curve state; hidden when not active */}
+          <div
+            className="flex-1 min-h-0 flex flex-col overflow-hidden"
+            style={{ display: rightPanelTab === 'chord' ? 'flex' : 'none' }}
+          >
+            {floatingEmotionSegment !== null && displaySegments[floatingEmotionSegment] ? (
+              <FloatingEmotionChart
+                embedded
+                segment={displaySegments[floatingEmotionSegment]}
+                segmentIndex={floatingEmotionSegment}
+                jobId={jobId}
+                onClose={() => { setFloatingEmotionSegment(null); setRightPanelTab('result') }}
+                onCommitEmotion={(idx, emotion) => {
+                  setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))
+                  updateSegment(idx, { committed_emotion: emotion })
+                }}
+                onUpdateCurve={(idx, curve) => {
+                  updateSegment(idx, { velma_emotion_curve: curve })
+                }}
+                onUpdateProgression={(idx, markers) => {
+                  updateSegment(idx, { velma_progression: markers })
+                }}
+                onSaveChord={async (name, chord, intensity) => {
+                  await apiClient.saveEmotionalChord({
+                    name,
+                    emotion: chord.emotion,
+                    state: chord.state,
+                    trait: chord.trait,
+                    intensity,
+                  })
+                }}
+              />
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-slate-600 text-sm">
+                Double-click a segment in the Emotion track to edit its chord
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -5727,7 +5761,10 @@ export function DubVerseEditor({
                     <div
                       key={`emotion-${segment.id}`}
                       className="absolute top-0 bottom-0"
-                      onDoubleClick={() => setFloatingEmotionSegment(prev => prev === index ? null : index)}
+                      onDoubleClick={() => {
+                        setFloatingEmotionSegment(prev => prev === index ? null : index)
+                        setRightPanelTab('chord')
+                      }}
                       style={{
                         left: segment.start_time * PIXELS_PER_SECOND,
                         width: segWidth,
@@ -5760,35 +5797,12 @@ export function DubVerseEditor({
                           }
                           trackDuration={segment.end_time - segment.start_time}
                           emotionLabel={segment.velma_emotion}
+                          progressionMarkers={segment.velma_progression}
                         />
                       </div>
                     </div>
                   )
                 })}
-                {floatingEmotionSegment !== null && displaySegments[floatingEmotionSegment] && (
-                  <FloatingEmotionChart
-                    segment={displaySegments[floatingEmotionSegment]}
-                    segmentIndex={floatingEmotionSegment}
-                    jobId={jobId}
-                    onClose={() => setFloatingEmotionSegment(null)}
-                    onCommitEmotion={(idx, emotion) => {
-                      setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))
-                      updateSegment(idx, { committed_emotion: emotion })
-                    }}
-                    onUpdateCurve={(idx, curve) => {
-                      updateSegment(idx, { velma_emotion_curve: curve })
-                    }}
-                    onSaveChord={async (name, chord, intensity) => {
-                      await apiClient.saveEmotionalChord({
-                        name,
-                        emotion: chord.emotion,
-                        state: chord.state,
-                        trait: chord.trait,
-                        intensity,
-                      })
-                    }}
-                  />
-                )}
               </div>
 
               {/* Filler — fills remaining height, shows grid + bottom ruler */}

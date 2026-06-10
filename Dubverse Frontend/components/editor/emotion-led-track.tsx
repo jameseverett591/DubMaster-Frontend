@@ -42,10 +42,12 @@ export function EmotionLedTrack({
   curveData,
   trackDuration,
   emotionLabel,
+  progressionMarkers,
 }: {
   curveData: number[] | undefined
   trackDuration: number
   emotionLabel?: string | null
+  progressionMarkers?: Array<{ emotion: string; intensity: number; color: string }>
 }) {
   const [colEmotions, setColEmotions] = useState<Record<number, string>>({})
   const [selectedCols, setSelectedCols] = useState<Set<number>>(new Set())
@@ -222,27 +224,46 @@ export function EmotionLedTrack({
       </div>
 
       {/* Emotion badges */}
-      <div className="absolute bottom-1 left-1.5 right-1.5 flex flex-wrap gap-x-1.5 gap-y-0.5 pointer-events-none">
-        {showDefaultBadge && (
-          <span
-            className="text-[8px] font-semibold leading-none px-1 py-0.5 rounded select-none"
-            style={{ color: EMOTION_PALETTE.Neutral.text, background: 'rgba(0,0,0,0.55)' }}
-          >
-            {emotionLabel ?? defaultLabel(avg)} · {Math.round(avg * 100)}%
-          </span>
-        )}
-        {emotionSummary.map(({ emotion, avgIntensity }) => {
-          const p = EMOTION_PALETTE[emotion] ?? EMOTION_PALETTE.Neutral
-          return (
+      <div className="absolute bottom-1 left-1.5 right-1.5 flex flex-wrap gap-x-1 gap-y-0.5 pointer-events-none">
+        {progressionMarkers && progressionMarkers.length > 0 ? (
+          progressionMarkers.map((m, i) => (
             <span
-              key={emotion}
-              className="text-[8px] font-semibold leading-none px-1 py-0.5 rounded select-none"
-              style={{ color: p.text, background: 'rgba(0,0,0,0.55)' }}
+              key={i}
+              className="text-[7.5px] font-bold leading-none px-1.5 py-0.5 rounded select-none"
+              style={{
+                color: m.color,
+                background: m.color + '22',
+                border: `1px solid ${m.color}55`,
+                boxShadow: `0 0 5px ${m.color}44`,
+              }}
             >
-              {emotion} · {Math.round(avgIntensity * 100)}%
+              {m.emotion} · {Math.round(m.intensity * 100)}%
             </span>
-          )
-        })}
+          ))
+        ) : (
+          <>
+            {showDefaultBadge && (
+              <span
+                className="text-[8px] font-semibold leading-none px-1 py-0.5 rounded select-none"
+                style={{ color: EMOTION_PALETTE.Neutral.text, background: 'rgba(0,0,0,0.55)' }}
+              >
+                {emotionLabel ?? defaultLabel(avg)} · {Math.round(avg * 100)}%
+              </span>
+            )}
+            {emotionSummary.map(({ emotion, avgIntensity }) => {
+              const p = EMOTION_PALETTE[emotion] ?? EMOTION_PALETTE.Neutral
+              return (
+                <span
+                  key={emotion}
+                  className="text-[8px] font-semibold leading-none px-1 py-0.5 rounded select-none"
+                  style={{ color: p.text, background: 'rgba(0,0,0,0.55)' }}
+                >
+                  {emotion} · {Math.round(avgIntensity * 100)}%
+                </span>
+              )
+            })}
+          </>
+        )}
       </div>
 
       {/* Hover tooltip — view mode only */}
