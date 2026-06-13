@@ -3,6 +3,7 @@
 import { Clock, Gauge, VolumeX, Volume2, Heart, FileText } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { QCReport, QCFinding, Segment } from '@/lib/editor-types'
+import { usePlan } from '@/lib/use-plan'
 
 interface QCQualityPanelProps {
   report: QCReport
@@ -51,6 +52,7 @@ function statusBadge(status: 'ok' | 'warn' | 'fail') {
 }
 
 export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding, onSelectSegment, selectedRetranscriptionIndex }: QCQualityPanelProps) {
+  const { hasFeature } = usePlan()
   const componentEntries: { key: keyof QCReport['components']; label: string }[] = [
     { key: 'timing', label: 'timing' },
     { key: 'speed', label: 'speed' },
@@ -58,7 +60,7 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
     { key: 'silences', label: 'silences' },
     { key: 'emotion_variance', label: 'emotion_variance' },
     { key: 'emotion_intensity', label: 'emotion_intensity' },
-    { key: 'lip_sync', label: 'lip_sync' },
+    ...(hasFeature('lipSyncScoring') ? [{ key: 'lip_sync' as const, label: 'lip_sync' }] : []),
     { key: 'emotion_preservation', label: 'emotion_preservation' },
   ]
 
