@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useCallback, useEffect, useRef } from "react"
+import { useEditorStore } from "@/lib/editor-store"
 import { useDropzone } from "react-dropzone"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
@@ -11,6 +12,8 @@ import { Upload, FileVideo, X, CheckCircle2, AlertCircle, Languages, Users } fro
 import type { VideoSource } from "@/components/dashboard"
 import { apiClient, isTerminalStatus, JobNotFoundError, type JobStatusValue } from "@/lib/api-client"
 import PipelineMonitor from "@/components/pipeline-monitor"
+import { BasicPlaybackViewer } from "@/components/basic-playback-viewer"
+import { usePlan } from "@/lib/use-plan"
 
 const STORAGE_KEY = "dubverse_uploaded_files"
 const SOURCE_LANG_STORAGE_KEY = "dubverse_source_language"
@@ -79,6 +82,8 @@ export function VideoUpload({
   const sourceLanguageRef = useRef<string>("auto")
   const t = useTranslations('upload')
   const ts = useTranslations('studio')
+  const { hasFeature } = usePlan()
+  const resetEditor = useEditorStore((s) => s.resetEditor)
 
   // Restore previously chosen source language so users uploading multiple
   // Cantonese videos in a row don't have to re-select it each time.
@@ -506,10 +511,13 @@ export function VideoUpload({
         </div>
       </div>
 
-      {/* Pipeline Monitor - appears beside upload area when processing */}
+      {/* Right panel — Pipeline Monitor (Premium+) or Playback Viewer (Basic) */}
       {activeProcessingFile && (
         <div className="min-w-0 overflow-hidden self-start">
-          <PipelineMonitor jobId={activeProcessingFile.jobId!} />
+          {hasFeature('pipelineMonitor')
+            ? <PipelineMonitor jobId={activeProcessingFile.jobId!} />
+            : <BasicPlaybackViewer jobId={activeProcessingFile.jobId!} />
+          }
         </div>
       )}
       </div>
@@ -526,9 +534,11 @@ export function VideoUpload({
               size="sm"
               className="text-red-400 border-red-400/30 hover:bg-red-400/10 hover:text-red-300"
               onClick={async () => {
-                // Always clear UI first so the user can re-upload even if the backend call fails
+                // Clear upload UI immediately
                 setUploadedFiles([])
                 localStorage.removeItem(STORAGE_KEY)
+                // Wipe editor store so the editor starts fresh if opened again
+                resetEditor()
                 try {
                   await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/jobs/clear-all?force=true`, { method: "DELETE" })
                 } catch (e) {
