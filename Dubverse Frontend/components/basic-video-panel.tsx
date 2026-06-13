@@ -108,13 +108,26 @@ export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
   const handleBeginDubbing = async () => {
     setLaunching(true)
     try {
-      const segData = await apiClient.getSegments(jobId)
-      const transcript = segData.segments.map((seg) => ({
-        text:    seg.text,
-        start:   seg.start,
-        end:     seg.end,
-        speaker: seg.speaker,
-      }))
+      // Try segments endpoint first (has diarization + positions).
+      // Fall back to raw transcript when segments aren't ready yet.
+      let transcript: { text: string; start: number; end: number; speaker: string }[]
+      try {
+        const segData = await apiClient.getSegments(jobId)
+        transcript = segData.segments.map((seg) => ({
+          text:    seg.text,
+          start:   seg.start,
+          end:     seg.end,
+          speaker: seg.speaker,
+        }))
+      } catch {
+        const txData = await apiClient.getTranscript(jobId)
+        transcript = txData.segments.map((seg) => ({
+          text:    seg.text,
+          start:   seg.start,
+          end:     seg.end,
+          speaker: seg.speaker || "SPEAKER_0",
+        }))
+      }
 
       await apiClient.startDubbing({
         job_id:          jobId,
