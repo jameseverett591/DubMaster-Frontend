@@ -113,6 +113,7 @@ import {
 
 // Additional QC tab icons not in main import block
 import { LayoutList, AudioLines, Zap, GitBranch } from 'lucide-react'
+import { usePlan } from '@/lib/use-plan'
 
 // QC Tab definitions - main navigation tabs + QC-specific tabs
 type QCCategory = 'speech' | 'lip-sync' | 'pipeline' | 'voices' | 'script' | 'timeline-tab' | 'timing' | 'pronunciation' | 'translation' | 'delivery' | 'sync'
@@ -522,6 +523,7 @@ export function DubVerseEditor({
   const importedSegments = useEditorStore((state) => state.importedSegments)
   const importedSegmentsJobId = useEditorStore((state) => state.importedSegmentsJobId)
   const setImportedSegmentsRaw = useEditorStore((state) => state.setImportedSegments)
+  const { hasFeature } = usePlan()
   // Wrap the store setter so every write to importedSegments also stamps the
   // owning jobId directly via Zustand's static setState — always available,
   // never undefined, never dependent on a store action that may be missing
@@ -4268,7 +4270,7 @@ export function DubVerseEditor({
           )}
 
           {/* Velma tab */}
-          {rightPanelTab === 'velma' && (
+          {rightPanelTab === 'velma' && hasFeature('velmaPanel') && (
             <div className="flex-1 min-h-0 overflow-y-auto bg-neutral-950">
               <VelmaPanel
                 segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
@@ -4279,7 +4281,7 @@ export function DubVerseEditor({
           )}
 
           {/* Studio tab — placeholder */}
-          {rightPanelTab === 'studio' && (
+          {rightPanelTab === 'studio' && hasFeature('studioCollaboration') && (
             <div className="flex-1 min-h-0 flex items-center justify-center text-slate-500 text-sm bg-neutral-950">
               Studio coming soon
             </div>
@@ -4306,7 +4308,7 @@ export function DubVerseEditor({
             </div>
           )}
 
-          {rightPanelTab === 'emotions' && (
+          {rightPanelTab === 'emotions' && hasFeature('emotionalIntelligence') && (
             <EmotionalIntelligencePanel
               jobId={jobId}
               selectedSegmentIndex={selectedSegmentIndex}
