@@ -66,17 +66,29 @@ export function BasicVideoPanel({ jobId }: BasicVideoPanelProps) {
         setProgress(s.progress ?? 0)
         setStageLabel(s.current_stage ?? STAGE_LABELS[s.status] ?? "Processing...")
 
-        const next = statusToPhase(s.status)
-        // Once we're in 'dubbing' phase (user clicked Begin), don't regress to 'ready'
-        setPhase(prev => (prev === "dubbing" && next === "ready") ? "dubbing" : next)
-
         if (s.status === "completed") {
-          setDubbedUrl(s.dubbed_video_url ?? null)
-          clearInterval(intervalRef.current!)
-        } else if (s.status === "failed" || s.status === "cancelled") {
-          setErrorMsg(s.error_message ?? "Something went wrong. Please try again.")
-          clearInterval(intervalRef.current!)
+          if (s.dubbed_video_url) {
+            // Dubbing pipeline is fully done
+            setDubbedUrl(s.dubbed_video_url)
+            setPhase("complete")
+            clearInterval(intervalRef.current!)
+          } else {
+            // Transcription done, dubbing not yet started — show Begin Dubbing
+            setPhase("ready")
+          }
+          return
         }
+
+        if (s.status === "failed" || s.status === "cancelled") {
+          setErrorMsg(s.error_message ?? "Something went wrong. Please try again.")
+          setPhase("error")
+          clearInterval(intervalRef.current!)
+          return
+        }
+
+        const next = statusToPhase(s.status)
+        // Don't regress from 'dubbing' back to 'ready' if polling catches an intermediate state
+        setPhase(prev => (prev === "dubbing" && next === "ready") ? "dubbing" : next)
       } catch {
         // silently retry on network hiccup
       }
