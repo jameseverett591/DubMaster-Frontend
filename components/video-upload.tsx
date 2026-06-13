@@ -372,9 +372,10 @@ export function VideoUpload({
 
   // Premium+: show PipelineMonitor while actively processing
   const activeProcessingFile = uploadedFiles.find((f) => f.status === "processing" && f.jobId)
-  // Basic: show BasicVideoPanel for any file that has a jobId (all states)
+  // Basic: show BasicVideoPanel for the most recently uploaded file that has a jobId.
+  // Using .findLast so a fresh upload always takes over from stale restored files.
   const basicPanelFile = !hasFeature('pipelineMonitor')
-    ? (uploadedFiles.find((f) => f.jobId) ?? null)
+    ? (uploadedFiles.findLast((f) => f.jobId) ?? null)
     : null
 
   const showRightPanel = hasFeature('pipelineMonitor') ? !!activeProcessingFile : !!basicPanelFile
