@@ -125,9 +125,8 @@ export async function middleware(request: NextRequest) {
   }
 
   // Check subscription for protected routes (use service role to bypass RLS)
-  // Skip on localhost — dev environment doesn't require a subscription
-  const isLocalhost = request.nextUrl.hostname === 'localhost' || request.nextUrl.hostname === '127.0.0.1'
-  if (!isLocalhost && user && SUBSCRIPTION_ROUTES.some((route) => currentPath.startsWith(route))) {
+  const skipSubscriptionCheck = process.env.NEXT_PUBLIC_SKIP_SUBSCRIPTION_CHECK === 'true'
+  if (!skipSubscriptionCheck && user && SUBSCRIPTION_ROUTES.some((route) => currentPath.startsWith(route))) {
     try {
       const serviceClient = createClient(
         process.env.NEXT_PUBLIC_SUPABASE_URL!,
