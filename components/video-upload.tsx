@@ -121,9 +121,10 @@ export function VideoUpload({
         jobId: p.jobId,
       }))
       setUploadedFiles(restored)
-      // Re-verify each non-ready job against the backend
+      // Re-verify all jobs against the backend — catches stale IDs for ready
+      // files too so deleted jobs are cleaned up automatically on page load.
       restored.forEach((f) => {
-        if (f.jobId && f.status !== "ready") {
+        if (f.jobId) {
           pollJobStatus(f.id, f.jobId)
         }
       })

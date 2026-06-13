@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import { Download, Loader2, AlertCircle, CheckCircle2, Play } from "lucide-react"
-import { apiClient, type JobStatusValue } from "@/lib/api-client"
+import { apiClient, JobNotFoundError, type JobStatusValue } from "@/lib/api-client"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
@@ -89,8 +89,13 @@ export function BasicVideoPanel({ jobId }: BasicVideoPanelProps) {
         const next = statusToPhase(s.status)
         // Don't regress from 'dubbing' back to 'ready' if polling catches an intermediate state
         setPhase(prev => (prev === "dubbing" && next === "ready") ? "dubbing" : next)
-      } catch {
-        // silently retry on network hiccup
+      } catch (err) {
+        if (err instanceof JobNotFoundError) {
+          setErrorMsg("This job no longer exists. Clear the list and upload again.")
+          setPhase("error")
+          clearInterval(intervalRef.current!)
+        }
+        // other errors: silently retry on network hiccup
       }
     }
 
