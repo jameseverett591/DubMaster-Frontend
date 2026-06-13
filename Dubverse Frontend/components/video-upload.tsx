@@ -12,7 +12,7 @@ import { Upload, FileVideo, X, CheckCircle2, AlertCircle, Languages, Users } fro
 import type { VideoSource } from "@/components/dashboard"
 import { apiClient, isTerminalStatus, JobNotFoundError, type JobStatusValue } from "@/lib/api-client"
 import PipelineMonitor from "@/components/pipeline-monitor"
-import { BasicPlaybackViewer } from "@/components/basic-playback-viewer"
+import { BasicVideoPanel } from "@/components/basic-video-panel"
 import { usePlan } from "@/lib/use-plan"
 
 const STORAGE_KEY = "dubverse_uploaded_files"
@@ -369,13 +369,19 @@ export function VideoUpload({
     disabled: quotaExceeded,
   })
 
-  // Find the first file that is currently processing (to show its pipeline monitor)
+  // Premium+: show PipelineMonitor while actively processing
   const activeProcessingFile = uploadedFiles.find((f) => f.status === "processing" && f.jobId)
+  // Basic: show BasicVideoPanel for any file that has a jobId (all states)
+  const basicPanelFile = !hasFeature('pipelineMonitor')
+    ? (uploadedFiles.find((f) => f.jobId) ?? null)
+    : null
+
+  const showRightPanel = hasFeature('pipelineMonitor') ? !!activeProcessingFile : !!basicPanelFile
 
   return (
     <div className="space-y-6">
-      {/* Top section: Upload Area + Pipeline Monitor side by side when processing */}
-      <div className={`grid gap-6 transition-all duration-500 ${activeProcessingFile ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"}`}>
+      {/* Top section: Upload Area + right panel side by side */}
+      <div className={`grid gap-6 transition-all duration-500 ${showRightPanel ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"}`}>
       {/* Main Upload Area - Compact */}
       <div>
         <div className="text-center mb-4">
@@ -511,12 +517,12 @@ export function VideoUpload({
         </div>
       </div>
 
-      {/* Right panel — Pipeline Monitor (Premium+) or Playback Viewer (Basic) */}
-      {activeProcessingFile && (
+      {/* Right panel — Pipeline Monitor (Premium+) or BasicVideoPanel (Basic) */}
+      {showRightPanel && (
         <div className="min-w-0 overflow-hidden self-start">
           {hasFeature('pipelineMonitor')
-            ? <PipelineMonitor jobId={activeProcessingFile.jobId!} />
-            : <BasicPlaybackViewer jobId={activeProcessingFile.jobId!} />
+            ? <PipelineMonitor jobId={activeProcessingFile!.jobId!} />
+            : <BasicVideoPanel jobId={basicPanelFile!.jobId!} />
           }
         </div>
       )}
@@ -617,13 +623,16 @@ export function VideoUpload({
                           <CheckCircle2 className="h-4 w-4 text-[#22D3EE]" />
                           <span className="text-[#22D3EE] font-semibold">{t('readyForDubbing')}</span>
                         </div>
-                        <Button
-                          size="sm"
-                          onClick={() => handleStartDubbing(uploadedFile)}
-                          className="bg-gradient-to-r from-[#A855F7] to-[#22D3EE] hover:opacity-90 shadow-[0_0_20px_rgba(168,85,247,0.4)]"
-                        >
-                          {t('startDubbing')} →
-                        </Button>
+                        {/* Basic users dub from the right panel — no navigation needed */}
+                        {hasFeature('pipelineMonitor') && (
+                          <Button
+                            size="sm"
+                            onClick={() => handleStartDubbing(uploadedFile)}
+                            className="bg-gradient-to-r from-[#A855F7] to-[#22D3EE] hover:opacity-90 shadow-[0_0_20px_rgba(168,85,247,0.4)]"
+                          >
+                            {t('startDubbing')} →
+                          </Button>
+                        )}
                       </div>
                     )}
 
