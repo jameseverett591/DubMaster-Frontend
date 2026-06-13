@@ -57,11 +57,11 @@ import {
   type JobStatus,
 } from "@/lib/api-client"
 import { useEditorStore } from "@/lib/editor-store"
+import { usePlan } from "@/lib/use-plan"
 
 interface DubbingWorkspaceProps {
   video: VideoSource
   onClose: () => void
-  planType?: string
 }
 
 const LANGUAGES = [
@@ -169,8 +169,8 @@ function buildDetectedVoices(
 
 // ── Component ──────────────────────────────────────────────────────────────
 
-export function DubbingWorkspace({ video, onClose, planType }: DubbingWorkspaceProps) {
-  const isBasicPlan = (planType ?? 'basic') === 'basic'
+export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
+  const { hasFeature } = usePlan()
   const [targetLanguage, setTargetLanguage] = useState("en")
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
@@ -862,8 +862,8 @@ export function DubbingWorkspace({ video, onClose, planType }: DubbingWorkspaceP
           </div>
         </div>
 
-        {/* Sidebar Panel — hidden on Basic plan */}
-        {!isBasicPlan && <div className="w-80 shrink-0 border-l border-border/50 bg-card/50 backdrop-blur-md flex flex-col min-h-0">
+        {/* Sidebar Panel — editor feature (Premium+) */}
+        {hasFeature('editor') && <div className="w-80 shrink-0 border-l border-border/50 bg-card/50 backdrop-blur-md flex flex-col min-h-0">
           <Tabs value={activeTab} onValueChange={setActiveTab} className="flex h-full flex-col min-h-0">
             <div className="mx-3 mt-3 shrink-0 space-y-1">
               <TabsList className="grid w-full grid-cols-4">
