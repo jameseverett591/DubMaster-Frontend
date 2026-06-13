@@ -7,15 +7,16 @@ import { VideoUpload } from "@/components/video-upload"
 import { YouTubeIntegration } from "@/components/youtube-integration"
 import { PublicDomainLibrary } from "@/components/public-domain-library"
 import { CreatorCollaboration } from "@/components/creator-collaboration"
-import { StudioModeSelector } from "@/components/studio-mode-selector"
+import { UpgradePanel } from "@/components/upgrade-panel"
 import { DubbingWorkspace } from "@/components/dubbing-workspace"
 import { AdvancedDubbingEditor } from "@/components/advanced-dubbing-editor"
 import { Header } from "@/components/header"
-import { Upload, Youtube, Film, Clapperboard, Mic2, AlertTriangle } from "lucide-react"
+import { Upload, Youtube, Film, Sparkles, Mic2, AlertTriangle } from "lucide-react"
 import { RecentProjects } from "@/components/recent-projects"
 import { BonusMinutesDialog } from "@/components/bonus-minutes-dialog"
 import { createClient } from "@/lib/supabase/client"
 import { apiClient } from "@/lib/api-client"
+import { usePlan } from "@/lib/use-plan"
 
 export type VideoSource = {
   id: string
@@ -61,12 +62,14 @@ export function Dashboard() {
   const [editorMode, setEditorMode] = useState<EditorMode>("automatic")
 
   // Usage tracking state
-  const [planType, setPlanType] = useState<string>("premium")
-  const [planLimit, setPlanLimit] = useState<number>(90)
+  const { plan } = usePlan()
   const [minutesUsed, setMinutesUsed] = useState<number>(0)
   const [bonusBalance, setBonusBalance] = useState<number>(0)
   const [bonusDialogOpen, setBonusDialogOpen] = useState(false)
   const [loadingUsage, setLoadingUsage] = useState(true)
+
+  const PLAN_LIMITS: Record<string, number> = { basic: 45, premium: 90, professional: -1 }
+  const planLimit = PLAN_LIMITS[plan ?? 'basic'] ?? 45
 
   const supabase = createClient()
 
@@ -79,15 +82,6 @@ export function Dashboard() {
         if (!session) return
         const user = session.user
         apiClient.setToken(session.access_token)
-
-        // Fetch subscription info
-        const { data: subData } = await supabase
-          .from("subscriptions")
-          .select("plan_type")
-          .eq("user_id", user.id)
-          .in("status", ["active", "trialing"])
-          .limit(1)
-          .single()
 
         // Fetch current month usage
         const { data: usageData } = await supabase
@@ -105,27 +99,14 @@ export function Dashboard() {
           .eq("user_id", user.id)
           .maybeSingle()
 
-        // Set plan limits
-        const PLAN_LIMITS: Record<string, number> = {
-          basic: 45,
-          premium: 90,
-          professional: -1, // unlimited
-        }
-
-        const plan = subData?.plan_type || "basic"
-        const limit = PLAN_LIMITS[plan] || 45
         const used = usageData?.minutes_used || 0
         const bonus = bonusData?.balance || 0
 
-        setPlanType(plan)
-        setPlanLimit(limit)
         setMinutesUsed(used)
         setBonusBalance(bonus)
       } catch (error) {
         console.error("Failed to fetch usage data:", error)
         // Set defaults on error to prevent blank UI
-        setPlanType("basic")
-        setPlanLimit(45)
         setMinutesUsed(0)
         setBonusBalance(0)
       } finally {
@@ -193,7 +174,7 @@ export function Dashboard() {
               onExport={() => {}}
             />
           ) : (
-            <DubbingWorkspace video={selectedVideo} onClose={handleCloseWorkspace} planType={planType} />
+            <DubbingWorkspace video={selectedVideo} onClose={handleCloseWorkspace} planType={plan ?? 'basic'} />
           )
         ) : (
           <main className="relative z-10 flex items-center justify-center px-4" style={{ minHeight: 'calc(100vh - 256px)', paddingTop: '220px', paddingBottom: '160px' }}>
@@ -208,7 +189,7 @@ export function Dashboard() {
                     <div>
                       <p className="text-[#94A3B8] text-xs mb-1">Your Plan</p>
                       <p className="text-white text-xl font-bold bg-gradient-to-r from-[#A855F7] to-[#FDB022] bg-clip-text text-transparent capitalize">
-                        {loadingUsage ? "..." : planType}
+                        {loadingUsage ? "..." : (plan ?? 'basic')}
                       </p>
                     </div>
 
@@ -328,8 +309,8 @@ export function Dashboard() {
                     value="studio"
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
                   >
-                    <Clapperboard className="h-4 w-4" />
-                    <span className="hidden sm:inline">Studio</span>
+                    <Sparkles className="h-4 w-4" />
+                    <span className="hidden sm:inline">Upgrade</span>
                   </TabsTrigger>
                   <TabsTrigger
                     value="projects"
@@ -365,12 +346,7 @@ export function Dashboard() {
                   <PublicDomainLibrary onVideoSelect={handleVideoSelect} />
                 </TabsContent>
                 <TabsContent value="studio">
-                  <StudioModeSelector
-                    editorMode={editorMode}
-                    onEditorModeChange={handleEditorModeChange}
-                    onStartProject={() => setActiveTab("upload")}
-                    onOpenEditor={handleOpenEditor}
-                  />
+                  <UpgradePanel />
                 </TabsContent>
                 <TabsContent value="projects">
                   <RecentProjects onVideoSelect={handleVideoSelect} />
@@ -388,7 +364,7 @@ export function Dashboard() {
         planMinutesUsed={minutesUsed}
         planMinutesLimit={planLimit}
         bonusBalance={bonusBalance}
-        planType={planType}
+        planType={plan ?? 'basic'}
       />
     </div>
   )
