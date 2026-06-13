@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import asyncio
 import re
 from typing import List, Dict, Optional, Tuple
@@ -173,7 +173,8 @@ class TranslationService:
         self,
         segments: List[Dict],
         source_language: str,
-        target_language: str
+        target_language: str,
+        character_profiles: Optional[List[Dict]] = None,
     ) -> List[Dict]:
         # Load the glossary for the incoming source language so every downstream
         # call to _apply_glossary_pre/_post uses the correct language-specific terms.
@@ -235,8 +236,10 @@ class TranslationService:
         azure_key = os.getenv("AZURE_OPENAI_KEY", "")
         has_llm = bool(anthropic_key) or bool(openai_key) or (bool(azure_endpoint) and bool(azure_key))
 
-        # Exact-match overrides for single-word utterances — bypass LLM entirely.
-        # These are short Cantonese words that LLMs hallucinate into garbage.
+        # --- FIX 3: Universal short-segment bypass ---
+        # Segments ≤3 words that are pure punctuation/particles get direct lookup
+        # or are left as-is. Applies to ALL languages, not just Cantonese.
+        # Prevents LLMs from padding out "Okay." into three sentences.
         _EXACT_OVERRIDES = {
             "好": "Okay.", "好呀": "Sure.", "好了": "Alright.",
             "請": "Please.", "请": "Please.",
@@ -244,25 +247,46 @@ class TranslationService:
             "包賠": "I'll pay.", "照賠": "I'll pay.",
             "賠": "I'll pay.", "赔": "I'll pay.",
         }
-        for seg in segments:
+        _SHORT_BYPASS_INDICES: set = set()
+        for i, seg in enumerate(segments):
             stripped = (seg.get("text") or "").strip()
             if stripped in _EXACT_OVERRIDES:
                 seg["text"] = _EXACT_OVERRIDES[stripped]
+                _SHORT_BYPASS_INDICES.add(i)
+                continue
+            # Universal: skip LLM for segments with ≤2 non-CJK words that are
+            # already in English (target language). These are usually sound effects
+            # or titles that got through transcription as English.
+            _cjk_re_quick = re.compile(r'[一-鿿぀-ゟ゠-ヿ]')
+            words = stripped.split()
+            if (
+                len(words) <= 2
+                and not _cjk_re_quick.search(stripped)
+                and target_norm.startswith("en")
+                and re.match(r'^[A-Za-z0-9 .,!?\'"-]+$', stripped)
+            ):
+                # Already looks like English — keep as-is
+                _SHORT_BYPASS_INDICES.add(i)
 
         if is_cantonese and has_llm:
             # Try Claude first (most reliable for Cantonese)
             if anthropic_key:
                 result = await self._translate_segments_claude(
-                    segments, target_norm, source_norm
+                    segments, target_norm, source_norm,
+                    character_profiles=character_profiles,
                 )
                 if result is not None:
-                    return result
+                    translated = result
+                    # Adaptation pass disabled — rewrites cause synonym substitution and
+                    # paraphrasing that breaks word-for-word fidelity to the source script.
+                    return translated
                 logger.warning("[TRANSLATE] Claude Cantonese translation failed — trying GPT")
 
             # Fall back to GPT-4 (Azure or OpenAI)
             if bool(openai_key) or (bool(azure_endpoint) and bool(azure_key)):
                 result = await self._translate_segments_gpt(
-                    segments, target_norm, source_norm
+                    segments, target_norm, source_norm,
+                    character_profiles=character_profiles,
                 )
                 if result is not None:
                     return result
@@ -303,6 +327,7 @@ class TranslationService:
         segments: List[Dict],
         target_language: str,
         source_language: str = "yue",
+        character_profiles: Optional[List[Dict]] = None,
     ) -> Optional[List[Dict]]:
         """
         Translate segments using Claude via the Anthropic API.
@@ -315,6 +340,20 @@ class TranslationService:
         api_key = os.getenv("ANTHROPIC_API_KEY", "")
         if not api_key:
             return None
+
+        # Process in chunks of 20 to avoid token overflow and dropped tail segments.
+        _CHUNK_SIZE = 20
+        if len(segments) > _CHUNK_SIZE:
+            results: List[Dict] = []
+            for start in range(0, len(segments), _CHUNK_SIZE):
+                chunk = segments[start:start + _CHUNK_SIZE]
+                chunk_result = await self._translate_segments_claude(
+                    chunk, target_language, source_language, character_profiles
+                )
+                if chunk_result is None:
+                    return None
+                results.extend(chunk_result)
+            return results
 
         lang_name = LANGUAGE_NAMES.get(source_language, "Cantonese")
         target_name = LANGUAGE_NAMES.get(target_language, "English")
@@ -343,15 +382,22 @@ class TranslationService:
         # Build centralized system prompt from policy layer
         system_prompt_parts = [DUBBING_SYSTEM_PROMPT]
 
-        detected_profile = detect_character_from_text("\n".join(texts))
-        if detected_profile:
-            system_prompt_parts.append("")
-            system_prompt_parts.append(detected_profile.to_prompt())
+        # CHARACTER_REGISTRY injection suppressed — pre-baked character profiles caused
+        # name hallucination (e.g. "Master Ip" -> "Brother Man"). Per-job character_profiles
+        # (below) are still applied if explicitly provided by the caller.
+        # detected_profile = detect_character_from_text("\n".join(texts))
+        # name_mapping = build_name_mapping_prompt(texts)
 
-        name_mapping = build_name_mapping_prompt(texts)
-        if name_mapping:
+        # Per-job character profiles (Fix 2)
+        if character_profiles:
             system_prompt_parts.append("")
-            system_prompt_parts.append(name_mapping)
+            system_prompt_parts.append("CHARACTER PROFILES FOR THIS PROJECT:")
+            for cp in character_profiles:
+                name = cp.get("name", "Unknown")
+                traits = ", ".join(cp.get("traits", []))
+                style = cp.get("speech_style", "")
+                system_prompt_parts.append(f"- {name}: traits=[{traits}]. Speech style: {style}")
+            system_prompt_parts.append("Apply these character voices consistently across all lines.")
 
         system_prompt_parts.append("")
         system_prompt_parts.append("DOMAIN-SPECIFIC RULES:")
@@ -377,9 +423,12 @@ class TranslationService:
         system_prompt = "\n".join(system_prompt_parts)
 
         user_prompt = (
-            f"Translate these spoken {lang_name} dialogue lines to natural {target_name} for voice actors.\n\n"
-            f"Preserve meaning, emotion, and character voice. "
-            f"Use colloquial spoken English — not formal or written style.\n\n"
+            f"Translate these spoken {lang_name} dialogue lines to {target_name} word-for-word.\n\n"
+            f"Rules:\n"
+            f"- Translate LITERALLY. Do NOT substitute synonyms, paraphrase, or rewrite for 'naturalness'.\n"
+            f"- Keep the exact meaning of each word. 'Secretive' must stay 'secretive', not 'mysterious'.\n"
+            f"- Preserve every line. Do NOT drop, merge, or skip any numbered line.\n"
+            f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
             f"{numbered_lines}"
         )
 
@@ -510,6 +559,7 @@ class TranslationService:
         segments: List[Dict],
         target_language: str,
         source_language: str = "yue",
+        character_profiles: Optional[List[Dict]] = None,
     ) -> Optional[List[Dict]]:
         """
         Translate segments using GPT-4 via Azure OpenAI or OpenAI API.
@@ -575,6 +625,17 @@ class TranslationService:
         if name_mapping:
             system_prompt_parts.append("")
             system_prompt_parts.append(name_mapping)
+
+        # Per-job character profiles (Fix 2)
+        if character_profiles:
+            system_prompt_parts.append("")
+            system_prompt_parts.append("CHARACTER PROFILES FOR THIS PROJECT:")
+            for cp in character_profiles:
+                name = cp.get("name", "Unknown")
+                traits = ", ".join(cp.get("traits", []))
+                style = cp.get("speech_style", "")
+                system_prompt_parts.append(f"- {name}: traits=[{traits}]. Speech style: {style}")
+            system_prompt_parts.append("Apply these character voices consistently across all lines.")
 
         system_prompt_parts.append("")
         system_prompt_parts.append("DOMAIN-SPECIFIC RULES:")
@@ -977,7 +1038,119 @@ class TranslationService:
             logger.info(f"[TRANSLATE] {changed_count}/{len(segments)} segments changed ({change_ratio:.0%})")
 
         return result
-    
+
+    # -----------------------------------------------------------------------
+    # FIX 1 — Two-pass dubbing adaptation
+    # -----------------------------------------------------------------------
+    async def _dubbing_adaptation_pass(
+        self,
+        segments: List[Dict],
+        source_language: str = "yue",
+        character_profiles: Optional[List[Dict]] = None,
+        skip_indices: Optional[set] = None,
+    ) -> List[Dict]:
+        """
+        Second pass: takes raw translated English and rewrites each line for
+        natural spoken performance — colloquial rhythm, character voice, no stiffness.
+        Short/bypassed segments are returned unchanged.
+        """
+        import httpx
+
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return segments
+
+        skip = skip_indices or set()
+
+        # Only adapt segments that actually have English text worth rewriting
+        adapt_indices = [
+            i for i, seg in enumerate(segments)
+            if i not in skip and len((seg.get("text") or "").split()) >= 3
+        ]
+        if not adapt_indices:
+            return segments
+
+        numbered_lines = "\n".join(
+            f"{i+1}. ({round(max(0.3, (seg.get('end', 0) or 0) - (seg.get('start', 0) or 0)), 1)}s) {seg.get('text', '')}"
+            for i, seg in [(i, segments[i]) for i in adapt_indices]
+        )
+
+        system_parts = [
+            "You are a professional dubbing dialogue coach.",
+            "",
+            "Your job: take a literal translated line and rewrite it so a voice actor can deliver it naturally.",
+            "",
+            "RULES:",
+            "- Keep the exact meaning — do NOT add, remove, or change information.",
+            "- Make it sound like something a person would actually SAY, not write.",
+            "- Use contractions, natural rhythm, and conversational phrasing.",
+            "- Preserve the character's emotional tone and personality.",
+            "- Keep it within the timing budget (Xs) shown before each line.",
+            "- Do NOT add filler words, reactions, or extra content.",
+            "- Do NOT change character names or proper nouns.",
+            "- Return ONLY numbered lines in the same format as input.",
+        ]
+
+        if character_profiles:
+            system_parts.append("")
+            system_parts.append("CHARACTER VOICES:")
+            for cp in character_profiles:
+                name = cp.get("name", "Unknown")
+                traits = ", ".join(cp.get("traits", []))
+                style = cp.get("speech_style", "")
+                system_parts.append(f"- {name}: [{traits}]. {style}")
+
+        system_prompt = "\n".join(system_parts)
+        user_prompt = (
+            "Rewrite these translated dialogue lines for natural spoken dubbing performance.\n\n"
+            f"{numbered_lines}"
+        )
+
+        try:
+            logger.info(f"[ADAPT] Dubbing adaptation pass: {len(adapt_indices)} segments")
+            payload = {
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 4096,
+                "temperature": 0.4,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+            }
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            }
+            response = await asyncio.to_thread(
+                lambda: httpx.post(
+                    "https://api.anthropic.com/v1/messages",
+                    json=payload, headers=headers, timeout=60.0,
+                )
+            )
+            if response.status_code != 200:
+                logger.warning(f"[ADAPT] Adaptation pass failed: {response.status_code} — returning raw translation")
+                return segments
+
+            reply = response.json()["content"][0]["text"].strip()
+            adapted_lines = re.findall(r"^\d+\.\s*(.+)$", reply, re.MULTILINE)
+
+            result = list(segments)
+            for local_i, seg_i in enumerate(adapt_indices):
+                if local_i < len(adapted_lines):
+                    adapted = adapted_lines[local_i].strip()
+                    # Sanity: reject if obviously longer than 2x original (hallucination guard)
+                    original_words = len((result[seg_i].get("text") or "").split())
+                    adapted_words = len(adapted.split())
+                    if adapted_words <= max(original_words * 2, original_words + 6):
+                        result[seg_i] = {**result[seg_i], "text": adapted}
+                    else:
+                        logger.warning(f"[ADAPT] Seg {seg_i} adaptation too long ({adapted_words} vs {original_words} words) — keeping raw")
+            logger.info(f"[ADAPT] Adaptation pass complete: {len(adapted_lines)} lines rewritten")
+            return result
+
+        except Exception as exc:
+            logger.warning(f"[ADAPT] Adaptation pass exception: {exc} — returning raw translation")
+            return segments
+
     async def _translate_text(
         self,
         text: str,
