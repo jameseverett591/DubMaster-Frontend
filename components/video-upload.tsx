@@ -523,7 +523,7 @@ export function VideoUpload({
         <div className="min-w-0 overflow-hidden self-start">
           {hasFeature('pipelineMonitor')
             ? <PipelineMonitor jobId={activeProcessingFile!.jobId!} />
-            : <BasicVideoPanel jobId={basicPanelFile!.jobId!} />
+            : <BasicVideoPanel jobId={basicPanelFile!.jobId!} onStale={() => removeFile(basicPanelFile!.id)} />
           }
         </div>
       )}

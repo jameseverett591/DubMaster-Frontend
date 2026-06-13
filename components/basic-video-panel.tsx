@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 
 interface BasicVideoPanelProps {
   jobId: string
+  onStale?: () => void
 }
 
 type Phase = "transcribing" | "ready" | "dubbing" | "complete" | "error"
@@ -49,7 +50,7 @@ const TARGET_LANGUAGES = [
   { code: "zh", name: "Mandarin",   flag: "🇨🇳" },
 ]
 
-export function BasicVideoPanel({ jobId }: BasicVideoPanelProps) {
+export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
   const [phase, setPhase]             = useState<Phase>("transcribing")
   const [progress, setProgress]       = useState(0)
   const [stageLabel, setStageLabel]   = useState("Preparing your video...")
@@ -91,9 +92,9 @@ export function BasicVideoPanel({ jobId }: BasicVideoPanelProps) {
         setPhase(prev => (prev === "dubbing" && next === "ready") ? "dubbing" : next)
       } catch (err) {
         if (err instanceof JobNotFoundError) {
-          setErrorMsg("This job no longer exists. Clear the list and upload again.")
-          setPhase("error")
           clearInterval(intervalRef.current!)
+          onStale?.()  // tell parent to remove the stale file — panel will unmount
+          return
         }
         // other errors: silently retry on network hiccup
       }
