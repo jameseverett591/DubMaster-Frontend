@@ -379,8 +379,27 @@ class TranslationService:
             for i, p in enumerate(protected)
         )
 
-        # Build centralized system prompt from policy layer
-        system_prompt_parts = [DUBBING_SYSTEM_PROMPT]
+        # Literal translation system prompt — does NOT use DUBBING_SYSTEM_PROMPT because
+        # that prompt instructs the model to "prefer short conversational English" and
+        # "optimize for spoken performance", which causes synonym substitution and
+        # paraphrasing that breaks fidelity to the source script.
+        _LITERAL_TRANSLATION_SYSTEM_PROMPT = (
+            "You are a professional subtitler and translator.\n\n"
+            "Your ONLY job is to produce a LITERAL, WORD-FOR-WORD translation.\n\n"
+            "ABSOLUTE RULES:\n"
+            "- Translate the EXACT meaning of each word. Do NOT substitute synonyms.\n"
+            "  Example: '神秘' = 'secretive' — do NOT change it to 'mysterious'.\n"
+            "- Do NOT paraphrase, adapt, or rewrite for 'naturalness'.\n"
+            "- Do NOT add, remove, or combine any words beyond what is needed to form a grammatical sentence.\n"
+            "- Do NOT merge two numbered lines into one answer.\n"
+            "- Do NOT prefix lines with speaker names (e.g. NEVER write 'Ip Man: ...').\n"
+            "- Do NOT echo the timing value (e.g. '(1.2s)') in your answer.\n"
+            "- [[ENTITY:n]] tokens are protected placeholders — keep them EXACTLY.\n"
+            "- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.\n"
+            "- NEVER invent character names. Use only names that appear in the source text.\n"
+            "- NEVER hallucinate. ONLY translate what is written."
+        )
+        system_prompt_parts = [_LITERAL_TRANSLATION_SYSTEM_PROMPT]
 
         # CHARACTER_REGISTRY injection suppressed — pre-baked character profiles caused
         # name hallucination (e.g. "Master Ip" -> "Brother Man"). Per-job character_profiles
