@@ -1,5 +1,14 @@
 export type PlanType = 'basic' | 'premium' | 'professional'
 
+// Max recording seconds per plan — replaces the old recordButton feature flag.
+// All plans can record; the cap enforced in VideoRecorder determines how long.
+export const RECORDING_LIMITS: Record<PlanType, number> = {
+  basic:        360,      // 6 min
+  premium:      900,      // 15 min
+  professional: Infinity, // unlimited (capped only by dubbing balance)
+}
+export const RECORDING_LIMIT_DEFAULT = 360 // fallback for null / unauthenticated
+
 export type FeatureKey =
   | 'editor'
   | 'pipelineMonitor'
@@ -7,7 +16,6 @@ export type FeatureKey =
   | 'askAI'
   | 'voiceLibrary'
   | 'emotionWriteIn'
-  | 'recordButton'
   | 'emotionalCurveEditor'
   | 'lipSyncScoring'
   | 'heatmaps'
@@ -28,7 +36,6 @@ export const FEATURE_MATRIX: Record<FeatureKey, PlanType[]> = {
   askAI:                ['premium', 'professional'],
   voiceLibrary:         ['premium', 'professional'],
   emotionWriteIn:       ['premium', 'professional'],
-  recordButton:         ['premium', 'professional'],
   // Professional only
   emotionalCurveEditor: ['professional'],
   lipSyncScoring:       ['professional'],

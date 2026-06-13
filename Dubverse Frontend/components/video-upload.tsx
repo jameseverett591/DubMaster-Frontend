@@ -13,6 +13,7 @@ import type { VideoSource } from "@/components/dashboard"
 import { apiClient, isTerminalStatus, JobNotFoundError, type JobStatusValue } from "@/lib/api-client"
 import PipelineMonitor from "@/components/pipeline-monitor"
 import { BasicVideoPanel } from "@/components/basic-video-panel"
+import { VideoRecorder } from "@/components/video-recorder"
 import { usePlan } from "@/lib/use-plan"
 
 const STORAGE_KEY = "dubverse_uploaded_files"
@@ -82,7 +83,7 @@ export function VideoUpload({
   const sourceLanguageRef = useRef<string>("auto")
   const t = useTranslations('upload')
   const ts = useTranslations('studio')
-  const { hasFeature } = usePlan()
+  const { hasFeature, recordingLimit } = usePlan()
   const resetEditor = useEditorStore((s) => s.resetEditor)
 
   // Restore previously chosen source language so users uploading multiple
@@ -516,6 +517,14 @@ export function VideoUpload({
               </span>
             </div>
           </div>
+        </div>
+
+        <div className="mt-3 flex justify-center">
+          <VideoRecorder
+            onFileCaptured={(file) => onDrop([file])}
+            maxSeconds={recordingLimit}
+            remainingSeconds={(remainingMinutes ?? 0) * 60}
+          />
         </div>
       </div>
 
