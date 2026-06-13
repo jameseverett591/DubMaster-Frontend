@@ -4,6 +4,7 @@ import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { useTranslations } from "next-intl"
 import { createClient } from "@/lib/supabase/client"
+import { usePlan } from "@/lib/use-plan"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -31,28 +32,20 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [voiceLibraryOpen, setVoiceLibraryOpen] = useState(false)
   const [userEmail, setUserEmail] = useState<string | null>(null)
-  const [planType, setPlanType] = useState<string | null>(null)
   const router = useRouter()
   const supabase = createClient()
   const t = useTranslations('nav')
   const tc = useTranslations('common')
+  const { hasFeature } = usePlan()
 
   useEffect(() => {
-    supabase.auth.getUser().then(async ({ data }) => {
+    supabase.auth.getUser().then(({ data }) => {
       if (!data.user) return
       setUserEmail(data.user.email ?? null)
-      const { data: sub } = await supabase
-        .from("subscriptions")
-        .select("plan_type")
-        .eq("user_id", data.user.id)
-        .in("status", ["active", "trialing"])
-        .limit(1)
-        .single()
-      setPlanType(sub?.plan_type ?? null)
     })
   }, [])
 
-  const canAccessEditor = planType === "premium" || planType === "professional"
+  const canAccessEditor = hasFeature('editor')
 
   const userInitials = userEmail ? userEmail.slice(0, 2).toUpperCase() : "?"
 
@@ -115,12 +108,14 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
               {t('collaborate')}
             </button>
 
-            <button
-              onClick={() => setVoiceLibraryOpen(true)}
-              className="text-sm font-medium text-[#94A3B8] transition-colors hover:text-[#C084FC]"
-            >
-              {t('voiceLibrary')}
-            </button>
+            {hasFeature('voiceLibrary') && (
+              <button
+                onClick={() => setVoiceLibraryOpen(true)}
+                className="text-sm font-medium text-[#94A3B8] transition-colors hover:text-[#C084FC]"
+              >
+                {t('voiceLibrary')}
+              </button>
+            )}
             {canAccessEditor && (
               <Link
                 href="/editor"
@@ -205,14 +200,16 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
                 {t('collaborate')}
               </button>
 
-              <div className="border-t border-[#A855F7]/20 pt-4 mt-2">
-                <button
-                  onClick={() => { setVoiceLibraryOpen(true); setMobileMenuOpen(false); }}
-                  className="text-sm font-medium text-[#94A3B8] text-left"
-                >
-                  {t('voiceLibrary')}
-                </button>
-              </div>
+              {hasFeature('voiceLibrary') && (
+                <div className="border-t border-[#A855F7]/20 pt-4 mt-2">
+                  <button
+                    onClick={() => { setVoiceLibraryOpen(true); setMobileMenuOpen(false); }}
+                    className="text-sm font-medium text-[#94A3B8] text-left"
+                  >
+                    {t('voiceLibrary')}
+                  </button>
+                </div>
+              )}
               {canAccessEditor && (
                 <Link
                   href="/editor"
