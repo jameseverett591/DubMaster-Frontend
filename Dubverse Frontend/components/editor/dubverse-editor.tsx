@@ -60,6 +60,7 @@ import { useEditorStore, type SidebarTab } from '@/lib/editor-store'
 import type { Segment, QCScore, QCFinding, QCFindingType, QCReport } from '@/lib/editor-types'
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
 import { buildMockQCReport } from '@/lib/qc-mock-data'
+import { applyQCFix } from '@/lib/qc-fixes'
 import { QCQualityPanel } from '@/components/editor/qc-quality-panel'
 import { SegmentQCPanel } from '@/components/editor/segment-qc-panel'
 import { QCTicker } from '@/components/editor/qc-ticker'
@@ -3272,10 +3273,16 @@ export function DubVerseEditor({
                     const rank: Record<string, number> = { error: 0, warning: 1, info: 2 }
                     return (rank[a.severity] ?? 2) - (rank[b.severity] ?? 2)
                   })[0]
-                  if (worst) {
-                    setCurrentTime(worst.timestamp_start)
-                    setRightPanelTab('quality')
-                  }
+                  if (!worst) return
+                  const retranscriptionText = worst.type === 'pronunciation'
+                    ? qcReport?.retranscription.items.find(
+                        item => Math.abs(item.start - worst.timestamp_start) < 1
+                      )?.text
+                    : undefined
+                  const fixResult = applyQCFix(worst, seg, { retranscriptionText })
+                  if (fixResult) updateSegment(selectedSegmentIndex, fixResult.patch)
+                  setCurrentTime(worst.timestamp_start)
+                  setRightPanelTab('quality')
                 }}
               />
             </div>
@@ -5108,6 +5115,17 @@ export function DubVerseEditor({
                     if (finding.segment_index >= 0 && finding.segment_index < displaySegments.length) {
                       selectSegment(finding.segment_index)
                     }
+                  }}
+                  onApplyFix={(finding) => {
+                    if (finding.segment_index < 0 || finding.segment_index >= displaySegments.length) return
+                    const seg = displaySegments[finding.segment_index]
+                    const retranscriptionText = finding.type === 'pronunciation'
+                      ? qcReport?.retranscription.items.find(
+                          item => Math.abs(item.start - finding.timestamp_start) < 1
+                        )?.text
+                      : undefined
+                    const fixResult = applyQCFix(finding, seg, { retranscriptionText })
+                    if (fixResult) updateSegment(finding.segment_index, fixResult.patch)
                   }}
                   onSelectSegment={(retranscriptionIndex) => {
                     setSelectedRetranscriptionIndex(retranscriptionIndex)
