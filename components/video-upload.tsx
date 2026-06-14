@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Upload, FileVideo, X, CheckCircle2, AlertCircle, Languages, Users } from "lucide-react"
+import { Upload, FileVideo, X, CheckCircle2, AlertCircle, Languages, Users, Mic, Square } from "lucide-react"
 import type { VideoSource } from "@/components/dashboard"
 import { apiClient, isTerminalStatus, JobNotFoundError, type JobStatusValue } from "@/lib/api-client"
 import PipelineMonitor from "@/components/pipeline-monitor"
@@ -85,6 +85,88 @@ export function VideoUpload({
   const ts = useTranslations('studio')
   const { hasFeature, recordingLimit } = usePlan()
   const resetEditor = useEditorStore((s) => s.resetEditor)
+
+  // ── Inline recording ───────────────────────────────────────────────────
+  const [recordingState, setRecordingState] = useState<'idle' | 'active' | 'done'>('idle')
+  const [recordedUrl, setRecordedUrl]       = useState<string | null>(null)
+  const [recordedFile, setRecordedFile]     = useState<File | null>(null)
+  const [recordingElapsed, setRecordingElapsed] = useState(0)
+
+  const cameraVideoRef    = useRef<HTMLVideoElement>(null)
+  const cameraStreamRef   = useRef<MediaStream | null>(null)
+  const mediaRecorderRef  = useRef<MediaRecorder | null>(null)
+  const recordingChunksRef = useRef<Blob[]>([])
+  const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const remainingSeconds = (remainingMinutes ?? 0) * 60
+  const effectiveCap = Math.min(
+    recordingLimit !== undefined ? recordingLimit : Infinity,
+    remainingSeconds > 0 ? remainingSeconds : Infinity,
+  )
+  const capIsFinite = Number.isFinite(effectiveCap)
+  const fmtTime = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+
+  const stopCameraStream = useCallback(() => {
+    if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach(t => t.stop())
+      cameraStreamRef.current = null
+    }
+  }, [])
+
+  const handleStopRecording = useCallback(() => {
+    if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
+    mediaRecorderRef.current?.stop()
+  }, [])
+
+  const handleStartRecording = useCallback(async () => {
+    if (capIsFinite && effectiveCap <= 0) return
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      cameraStreamRef.current = stream
+      recordingChunksRef.current = []
+      const MIME_CANDIDATES = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4']
+      const mimeType = MIME_CANDIDATES.find(t => MediaRecorder.isTypeSupported(t)) ?? ''
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+      mediaRecorderRef.current = recorder
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) recordingChunksRef.current.push(e.data) }
+      recorder.onstop = () => {
+        const blob = new Blob(recordingChunksRef.current, { type: mimeType || 'video/webm' })
+        const ext  = mimeType.includes('mp4') ? 'mp4' : 'webm'
+        const file = new File([blob], `recording-${Date.now()}.${ext}`, { type: mimeType || 'video/webm' })
+        setRecordedFile(file)
+        setRecordedUrl(URL.createObjectURL(blob))
+        setRecordingState('done')
+        stopCameraStream()
+      }
+      recorder.start(100)
+      setRecordingState('active')
+      setRecordingElapsed(0)
+      recordingTimerRef.current = setInterval(() => setRecordingElapsed(s => s + 1), 1000)
+    } catch (err) {
+      console.error('[Record] camera access failed', err)
+    }
+  }, [capIsFinite, effectiveCap, stopCameraStream])
+
+  // Attach stream to <video> element once 'active' state renders it
+  useEffect(() => {
+    if (recordingState === 'active' && cameraVideoRef.current && cameraStreamRef.current) {
+      cameraVideoRef.current.srcObject = cameraStreamRef.current
+    }
+  }, [recordingState])
+
+  // Auto-stop when elapsed hits plan cap
+  useEffect(() => {
+    if (recordingState === 'active' && capIsFinite && recordingElapsed >= effectiveCap) {
+      handleStopRecording()
+    }
+  }, [recordingElapsed, recordingState, capIsFinite, effectiveCap, handleStopRecording])
+
+  // Turn off camera light on unmount / navigation away
+  useEffect(() => () => stopCameraStream(), [stopCameraStream])
+
+  // Revoke blob URL when replaced or on unmount
+  useEffect(() => () => { if (recordedUrl) URL.revokeObjectURL(recordedUrl) }, [recordedUrl])
 
   // Restore previously chosen source language so users uploading multiple
   // Cantonese videos in a row don't have to re-select it each time.
@@ -170,6 +252,13 @@ export function VideoUpload({
       startUpload(uploadedFile.id, uploadedFile.file, langForBatch, speakersForBatch)
     })
   }, [])
+
+  const handleUseRecording = useCallback(() => {
+    if (recordedFile) onDrop([recordedFile])
+    setRecordingState('idle')
+    setRecordedUrl(null)
+    setRecordedFile(null)
+  }, [recordedFile, onDrop])
 
   const formatDuration = (seconds: number) => {
     const hrs = Math.floor(seconds / 3600)
@@ -379,7 +468,7 @@ export function VideoUpload({
     ? (uploadedFiles.findLast((f) => f.jobId) ?? null)
     : null
 
-  const showRightPanel = hasFeature('pipelineMonitor') ? !!activeProcessingFile : !!basicPanelFile
+  const showRightPanel = recordingState !== 'idle' || (hasFeature('pipelineMonitor') ? !!activeProcessingFile : !!basicPanelFile)
 
   return (
     <div className="space-y-6">
@@ -437,6 +526,17 @@ export function VideoUpload({
               </SelectContent>
             </Select>
           </div>
+
+          <button
+            type="button"
+            onClick={handleStartRecording}
+            disabled={recordingState !== 'idle' || (capIsFinite && effectiveCap <= 0)}
+            title={capIsFinite ? `Max ${fmtTime(effectiveCap)}` : 'Record video'}
+            className="flex items-center gap-2 h-9 px-3 rounded-md border border-red-500/50 bg-red-600/10 text-sm text-red-400 hover:border-red-500 hover:bg-red-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Mic className="h-3.5 w-3.5" />
+            Record
+          </button>
         </div>
 
         <div
@@ -519,53 +619,96 @@ export function VideoUpload({
           </div>
         </div>
 
-        <div className="mt-3 flex justify-center">
-          <VideoRecorder
-            onFileCaptured={(file) => onDrop([file])}
-            maxSeconds={recordingLimit}
-            remainingSeconds={(remainingMinutes ?? 0) * 60}
-          />
-        </div>
       </div>
 
-      {/* Right panel — Pipeline Monitor (Premium+) or BasicVideoPanel (Basic) */}
+      {/* Right panel — recording states take priority over pipeline panels */}
       {showRightPanel && (
         <div className="min-w-0 overflow-hidden self-start">
-          {hasFeature('pipelineMonitor')
-            ? <PipelineMonitor jobId={activeProcessingFile!.jobId!} />
-            : <BasicVideoPanel jobId={basicPanelFile!.jobId!} onStale={() => removeFile(basicPanelFile!.id)} />
-          }
+
+          {recordingState === 'active' && (
+            <div className="rounded-2xl border border-[#A855F7]/30 bg-[#0F172A]/80 overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-[#1E293B]">
+                <div className="flex items-center gap-2">
+                  <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
+                  <span className="text-sm font-semibold text-white">Recording in Progress</span>
+                </div>
+                <span className="font-mono text-xs text-red-400">
+                  {fmtTime(recordingElapsed)}
+                  {capIsFinite && <span className="text-slate-500"> / {fmtTime(effectiveCap)}</span>}
+                </span>
+              </div>
+              <video
+                ref={cameraVideoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full aspect-video object-cover bg-black"
+                style={{ transform: 'scaleX(-1)' }}
+              />
+              <div className="p-4 flex justify-center">
+                <button
+                  type="button"
+                  onClick={handleStopRecording}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-sm font-medium transition-colors"
+                >
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                  Stop & Save
+                </button>
+              </div>
+            </div>
+          )}
+
+          {recordingState === 'done' && recordedUrl && (
+            <div className="rounded-2xl border border-[#A855F7]/30 bg-[#0F172A]/80 overflow-hidden">
+              <div className="px-4 py-3 border-b border-[#1E293B]">
+                <span className="text-sm font-semibold text-white">DubMaster Video Player</span>
+              </div>
+              <video
+                src={recordedUrl}
+                controls
+                className="w-full aspect-video object-cover bg-black"
+              />
+              <div className="p-4 flex flex-wrap gap-3 justify-center">
+                <button
+                  type="button"
+                  onClick={handleUseRecording}
+                  className="px-4 py-2 rounded-lg bg-gradient-to-r from-[#A855F7] to-[#22D3EE] text-white text-sm font-medium hover:opacity-90 transition-opacity"
+                >
+                  Use This Video
+                </button>
+                <a
+                  href={recordedUrl}
+                  download="dubmaster-recording.webm"
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#1E293B] border border-slate-700 text-slate-300 text-sm hover:bg-slate-800 transition-colors"
+                >
+                  Download
+                </a>
+                <button
+                  type="button"
+                  onClick={() => { setRecordingState('idle'); setRecordedUrl(null); setRecordedFile(null) }}
+                  className="px-3 py-2 rounded-lg bg-[#1E293B] border border-slate-700 text-slate-400 text-sm hover:text-white transition-colors"
+                >
+                  Discard
+                </button>
+              </div>
+            </div>
+          )}
+
+          {recordingState === 'idle' && (
+            hasFeature('pipelineMonitor')
+              ? <PipelineMonitor jobId={activeProcessingFile!.jobId!} />
+              : <BasicVideoPanel jobId={basicPanelFile!.jobId!} onStale={() => removeFile(basicPanelFile!.id)} />
+          )}
+
         </div>
       )}
       </div>
 
       {uploadedFiles.length > 0 && (
         <div className="mt-12">
-          <div className="mb-6 flex items-center justify-between">
-            <div>
-              <h3 className="text-2xl font-bold text-white mb-2">{ts('yourVideos')}</h3>
-              <p className="text-[#94A3B8]">{ts('readyToTransform')}</p>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-red-400 border-red-400/30 hover:bg-red-400/10 hover:text-red-300"
-              onClick={async () => {
-                // Clear upload UI immediately
-                setUploadedFiles([])
-                localStorage.removeItem(STORAGE_KEY)
-                // Wipe editor store so the editor starts fresh if opened again
-                resetEditor()
-                try {
-                  await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/jobs/clear-all?force=true`, { method: "DELETE" })
-                } catch (e) {
-                  console.error("Failed to clear jobs on backend:", e)
-                }
-              }}
-            >
-              <X className="h-3.5 w-3.5 mr-1" />
-              Clear All
-            </Button>
+          <div className="mb-6">
+            <h3 className="text-2xl font-bold text-white mb-2">{ts('yourVideos')}</h3>
+            <p className="text-[#94A3B8]">{ts('readyToTransform')}</p>
           </div>
 
           <div className="space-y-4">
@@ -665,6 +808,27 @@ export function VideoUpload({
                 </div>
               </div>
             ))}
+          </div>
+
+          <div className="mt-4 flex justify-end">
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-red-400 border-red-400/30 hover:bg-red-400/10 hover:text-red-300"
+              onClick={async () => {
+                setUploadedFiles([])
+                localStorage.removeItem(STORAGE_KEY)
+                resetEditor()
+                try {
+                  await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/jobs/clear-all?force=true`, { method: "DELETE" })
+                } catch (e) {
+                  console.error("Failed to clear jobs on backend:", e)
+                }
+              }}
+            >
+              <X className="h-3.5 w-3.5 mr-1" />
+              Clear All
+            </Button>
           </div>
         </div>
       )}
