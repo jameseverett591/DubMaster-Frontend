@@ -69,13 +69,19 @@ export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
 
         if (s.status === "completed") {
           if (s.dubbed_video_url) {
-            // Dubbing pipeline is fully done
-            setDubbedUrl(s.dubbed_video_url)
+            // Dubbing pipeline is fully done.
+            // dubbed_video_url is a relative path — prefix with API base so the
+            // <video> element loads from the backend, not the Next.js dev server.
+            const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+            const url = s.dubbed_video_url
+            setDubbedUrl(url.startsWith("http") ? url : `${apiBase}${url}`)
             setPhase("complete")
             clearInterval(intervalRef.current!)
           } else {
-            // Transcription done, dubbing not yet started — show Begin Dubbing
-            setPhase("ready")
+            // Transcription done, dubbing not yet started — but don't regress
+            // from "dubbing" back to "ready" if the backend hasn't picked up the
+            // new job yet (race between clicking Begin Dubbing and the next poll).
+            setPhase(prev => prev === "dubbing" ? "dubbing" : "ready")
           }
           return
         }
@@ -183,7 +189,7 @@ export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
             <video
               src={dubbedUrl}
               controls
-              className="w-full rounded-xl border border-[#A855F7]/20 bg-black aspect-video"
+              className="w-full rounded-xl border border-[#A855F7]/20 bg-black min-h-[460px] object-contain"
             />
             <Button
               asChild
