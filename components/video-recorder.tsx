@@ -33,9 +33,13 @@ interface VideoRecorderProps {
   maxSeconds?: number
   /** Remaining dubbing quota in seconds — caps further if smaller than maxSeconds. */
   remainingSeconds?: number
+  /** Override the trigger button's className (defaults to text-link style for upload page). */
+  triggerClassName?: string
+  /** Override the trigger button's label text. */
+  triggerLabel?: string
 }
 
-export function VideoRecorder({ onFileCaptured, maxSeconds, remainingSeconds }: VideoRecorderProps) {
+export function VideoRecorder({ onFileCaptured, maxSeconds, remainingSeconds, triggerClassName, triggerLabel }: VideoRecorderProps) {
   const [open, setOpen] = useState(false)
   const [phase, setPhase] = useState<Phase>("idle")
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
@@ -157,14 +161,14 @@ export function VideoRecorder({ onFileCaptured, maxSeconds, remainingSeconds }: 
 
   return (
     <>
-      {/* Trigger — secondary text link below the dropzone */}
+      {/* Trigger */}
       <button
         type="button"
         onClick={handleOpen}
-        className="flex items-center gap-2 text-sm text-[#64748B] hover:text-[#C084FC] transition-colors"
+        className={triggerClassName ?? "flex items-center gap-2 text-sm text-[#64748B] hover:text-[#C084FC] transition-colors"}
       >
         <Video className="h-4 w-4" />
-        or record from your webcam
+        {triggerLabel ?? "or record from your webcam"}
       </button>
 
       {/* Modal */}
@@ -191,6 +195,7 @@ export function VideoRecorder({ onFileCaptured, maxSeconds, remainingSeconds }: 
               </div>
               <button
                 type="button"
+                aria-label="Close recorder"
                 onClick={handleClose}
                 className="text-[#64748B] hover:text-white transition-colors"
               >
