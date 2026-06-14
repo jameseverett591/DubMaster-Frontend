@@ -61,6 +61,7 @@ import type { Segment, QCScore, QCFinding, QCFindingType, QCReport } from '@/lib
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
 import { buildMockQCReport } from '@/lib/qc-mock-data'
 import { applyQCFix } from '@/lib/qc-fixes'
+import { VideoRecorder } from '@/components/video-recorder'
 import { QCQualityPanel } from '@/components/editor/qc-quality-panel'
 import { SegmentQCPanel } from '@/components/editor/segment-qc-panel'
 import { QCTicker } from '@/components/editor/qc-ticker'
@@ -525,7 +526,7 @@ export function DubVerseEditor({
   const importedSegments = useEditorStore((state) => state.importedSegments)
   const importedSegmentsJobId = useEditorStore((state) => state.importedSegmentsJobId)
   const setImportedSegmentsRaw = useEditorStore((state) => state.setImportedSegments)
-  const { hasFeature } = usePlan()
+  const { hasFeature, recordingLimit } = usePlan()
   // Wrap the store setter so every write to importedSegments also stamps the
   // owning jobId directly via Zustand's static setState — always available,
   // never undefined, never dependent on a store action that may be missing
@@ -3153,6 +3154,16 @@ export function DubVerseEditor({
             accept="video/*"
             className="hidden"
             onChange={handleVideoImport}
+          />
+          <VideoRecorder
+            onFileCaptured={(file) => {
+              const url = URL.createObjectURL(file)
+              setImportedVideoUrl(url)
+              setImportedVideoFile(file)
+            }}
+            maxSeconds={recordingLimit}
+            triggerClassName="flex items-center gap-1.5 h-8 px-3 text-sm border border-slate-700 rounded-md hover:bg-slate-800 text-slate-200 transition-colors"
+            triggerLabel="Record"
           />
           
           {/* Advanced menu for Import Transcript and Add Segment */}
