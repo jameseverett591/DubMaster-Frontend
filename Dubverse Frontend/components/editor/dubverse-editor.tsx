@@ -47,7 +47,6 @@ import {
   Twitter,
   Facebook,
   Instagram,
-  Clapperboard,
   Save,
   Loader2,
 } from 'lucide-react'
@@ -66,6 +65,8 @@ import { SegmentQCPanel } from '@/components/editor/segment-qc-panel'
 import { QCTicker } from '@/components/editor/qc-ticker'
 import { EmotionLedTrack } from '@/components/editor/emotion-led-track'
 import { FloatingEmotionChart } from '@/components/editor/floating-emotion-chart'
+import { AdvancedChordBrowser } from '@/components/editor/advanced-chord-browser'
+import { CharacterProfilesPanel } from '@/components/editor/character-profiles-panel'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import VelmaPanel from '@/components/editor/velma-panel'
 import { HeatmapBar } from '@/components/timeline/HeatmapBar'
@@ -546,7 +547,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'chord'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'chord' | 'advanced' | 'characters'>('result')
   const [velmaEnrichLoading, setVelmaEnrichLoading] = useState(false)
   const [velmaEnrichResult, setVelmaEnrichResult] = useState<{ patched: number; total: number } | null>(null)
 
@@ -632,8 +633,10 @@ export function DubVerseEditor({
     return 112
   })
   const [isResizingTrackLabel, setIsResizingTrackLabel] = useState(false)
-  const [emotionSource, setEmotionSource] = useState<'auto' | 'manual'>('auto')
+  const [emotionSource, setEmotionSource] = useState<'auto' | 'advanced'>('auto')
+  const [advancedBrowserSegment, setAdvancedBrowserSegment] = useState<number | null>(null)
   const [floatingEmotionSegment, setFloatingEmotionSegment] = useState<number | null>(null)
+  const [videoSubTab, setVideoSubTab] = useState<'chord' | 'advanced' | 'characters' | null>(null)
 
   const [activeDubbedVideoUrl, setActiveDubbedVideoUrl] = useState(dubbedVideoUrl)
   const [isRebuilding, setIsRebuilding] = useState(false)
@@ -657,6 +660,7 @@ export function DubVerseEditor({
   const [pendingOverwriteIndex, setPendingOverwriteIndex] = useState<number | null>(null)
   const [shareCopied, setShareCopied] = useState<'link' | 'video' | null>(null)
   const [askAiOpen, setAskAiOpen] = useState(false)
+  const [askAiModel, setAskAiModel] = useState<'haiku' | 'sonnet' | 'opus'>('sonnet')
   const [characterProfileOpen, setCharacterProfileOpen] = useState<{
     segmentIndex: number; x: number; y: number
   } | null>(null)
@@ -4109,21 +4113,37 @@ export function DubVerseEditor({
           )}
           {showRevertAllConfirm && (
             <div className="flex items-center gap-2 px-3 py-1.5 bg-red-950/50 border border-red-500/30 rounded text-xs text-red-400 mx-4 mb-2">
-              <span>This will remove all edits and return to the original pipeline output. Are you sure?</span>
+              <span>This will clear all editor changes and return to the original pipeline output. Are you sure?</span>
               <Button size="sm" className="h-6 text-xs bg-red-600 hover:bg-red-700 text-white px-2"
                 onClick={() => {
+                  // Segment data
                   setImportedSegments(null)
-                  setLockedSegments(new Set())
+                  // Selections & panels
+                  selectSegment(null)
+                  setFloatingEmotionSegment(null)
+                  setAdvancedBrowserSegment(null)
+                  setVideoSubTab(null)
+                  // Staged per-segment overrides
                   setStagedSpeeds({})
                   setStagedEmotions({})
+                  setStagedVoices({})
+                  setCustomEmotionDrafts({})
+                  // Locks & grouping
+                  setLockedSegments(new Set())
                   setLockedPairs(new Set())
                   setGroupedSegments(new Set())
-                  selectSegment(null)
+                  // Inline editor state
+                  setInlineEmotionPicker(null)
+                  setInlineEmotionWriteIn(null)
+                  setSplitWordMode(null)
+                  // Emotion curves
+                  revertToOriginal()
+                  // Playhead
                   setCurrentTime(0)
                   if (videoRef.current) videoRef.current.currentTime = 0
                   setShowRevertAllConfirm(false)
                 }}>
-                Revert
+                Clear Editor
               </Button>
               <Button size="sm" variant="ghost" className="h-6 text-xs px-2"
                 onClick={() => setShowRevertAllConfirm(false)}>
@@ -4152,16 +4172,15 @@ export function DubVerseEditor({
           <div className="flex items-center justify-between gap-1 px-2 py-1.5 border-b border-slate-800 bg-neutral-900">
             <div className="flex items-center gap-1">
               {([
-                { id: 'result', label: 'Video' },
-                { id: 'quality', label: 'Quality' },
-                { id: 'velma', label: 'Velma' },
-                { id: 'studio', label: 'Studio' },
+                { id: 'result',     label: 'Video' },
+                { id: 'quality',    label: 'Quality' },
+                { id: 'velma',      label: 'Velma',        feature: 'velmaPanel' },
+                { id: 'studio',     label: 'Studio',       feature: 'studioCollaboration' },
                 { id: 'adaptation', label: 'Adaptation' },
-                { id: 'speakers', label: 'Speakers' },
-                { id: 'library', label: 'Voice Library' },
-                { id: 'emotions', label: 'E.I.' },
-                { id: 'chord', label: 'Chord' },
-              ] as const).map((t) => (
+                { id: 'speakers',   label: 'Speakers' },
+                { id: 'library',    label: 'Voice Library' },
+                { id: 'emotions',   label: 'E.I.',         feature: 'emotionalIntelligence' },
+              ] as const).filter((t) => !('feature' in t) || hasFeature(t.feature as any)).map((t) => (
                 <button
                   type="button"
                   key={t.id}
@@ -4220,27 +4239,33 @@ export function DubVerseEditor({
             )}
           </div>
 
-          {/* Result tab — Video (always mounted to keep ref stable; hidden when not active) */}
+          {/* Result tab — Video fills panel; hidden when a sub-tab is active (sub-tab panel takes over) */}
           <div
-            className="flex-1 min-h-0 relative bg-black"
-            style={{ display: rightPanelTab === 'result' ? 'block' : 'none' }}
+            className="flex flex-col min-h-0"
+            style={{ display: rightPanelTab === 'result' && !videoSubTab ? 'flex' : 'none', flex: 1 }}
           >
-            <video
-              ref={videoRef}
-              src={activeVideoUrl}
-              className="absolute top-0 left-0 w-full h-full object-cover"
-              onTimeUpdate={handleVideoTimeUpdate}
-              controls={false}
-            />
-            {selectedSegmentIndex !== null && displaySegments[selectedSegmentIndex] && (
-              <div className="absolute bottom-8 left-0 right-0 text-center">
-                <span className="bg-black/75 px-4 py-2 rounded text-white text-sm">
-                  {displaySegments[selectedSegmentIndex].preview_text ?? displaySegments[selectedSegmentIndex].active_text ?? displaySegments[selectedSegmentIndex].target_text}
-                </span>
+            {/* Video player — fills all space; hidden (not unmounted) when sub-tab is active so ref stays valid */}
+            <div
+              className="relative bg-black"
+              style={{ display: videoSubTab ? 'none' : 'flex', flex: 1, minHeight: 0 }}
+            >
+              <video
+                ref={videoRef}
+                src={activeVideoUrl}
+                className="absolute top-0 left-0 w-full h-full object-cover"
+                onTimeUpdate={handleVideoTimeUpdate}
+                controls={false}
+              />
+              {selectedSegmentIndex !== null && displaySegments[selectedSegmentIndex] && (
+                <div className="absolute bottom-8 left-0 right-0 text-center">
+                  <span className="bg-black/75 px-4 py-2 rounded text-white text-sm">
+                    {displaySegments[selectedSegmentIndex].preview_text ?? displaySegments[selectedSegmentIndex].active_text ?? displaySegments[selectedSegmentIndex].target_text}
+                  </span>
+                </div>
+              )}
+              <div className="absolute bottom-2 right-2 flex items-center gap-1 text-xs text-slate-500">
+                <span>Video Translated by DubMaster</span>
               </div>
-            )}
-            <div className="absolute bottom-2 right-2 flex items-center gap-1 text-xs text-slate-500">
-              <span>Video Translated by DubMaster</span>
             </div>
           </div>
 
@@ -4320,7 +4345,7 @@ export function DubVerseEditor({
           {/* Chord tab — always mounted to preserve curve state; hidden when not active */}
           <div
             className="flex-1 min-h-0 flex flex-col overflow-hidden"
-            style={{ display: rightPanelTab === 'chord' ? 'flex' : 'none' }}
+            style={{ display: videoSubTab === 'chord' && rightPanelTab === 'result' ? 'flex' : 'none' }}
           >
             {floatingEmotionSegment !== null && displaySegments[floatingEmotionSegment] ? (
               <FloatingEmotionChart
@@ -4328,7 +4353,7 @@ export function DubVerseEditor({
                 segment={displaySegments[floatingEmotionSegment]}
                 segmentIndex={floatingEmotionSegment}
                 jobId={jobId}
-                onClose={() => { setFloatingEmotionSegment(null); setRightPanelTab('result') }}
+                onClose={() => { setFloatingEmotionSegment(null); setVideoSubTab(null) }}
                 onCommitEmotion={(idx, emotion) => {
                   setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))
                   updateSegment(idx, { committed_emotion: emotion })
@@ -4355,9 +4380,7 @@ export function DubVerseEditor({
               />
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center gap-4 p-6 text-center">
-                <p className="text-slate-500 text-sm">Double-click a segment in the Emotion track to edit its chord</p>
                 <div className="border border-slate-700 rounded-lg p-4 w-full max-w-xs flex flex-col gap-3">
-                  <p className="text-slate-400 text-xs">Run Velma on this job to populate emotion data for all segments before using the chord chart.</p>
                   {velmaEnrichResult && (
                     <p className="text-green-400 text-xs">Enriched {velmaEnrichResult.patched} / {velmaEnrichResult.total} segments</p>
                   )}
@@ -4388,6 +4411,35 @@ export function DubVerseEditor({
               </div>
             )}
           </div>
+
+          {/* Characters tab — per-job character profiles for translation */}
+          {videoSubTab === 'characters' && rightPanelTab === 'result' && (
+            <div className="flex-1 min-h-0 overflow-hidden">
+              <CharacterProfilesPanel jobId={jobId} />
+            </div>
+          )}
+
+          {/* Advanced tab — embedded chord browser in panel */}
+          <div
+            className="flex-1 min-h-0 flex flex-col overflow-hidden"
+            style={{ display: videoSubTab === 'advanced' && rightPanelTab === 'result' ? 'flex' : 'none' }}
+          >
+            {advancedBrowserSegment !== null && displaySegments[advancedBrowserSegment] ? (
+              <AdvancedChordBrowser
+                embedded
+                segment={displaySegments[advancedBrowserSegment]}
+                segmentIndex={advancedBrowserSegment}
+                onClose={() => { setAdvancedBrowserSegment(null); setVideoSubTab(null) }}
+                onApply={(markers) => {
+                  updateSegment(advancedBrowserSegment, { velma_progression: markers })
+                }}
+              />
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-slate-600 text-sm">
+                Double-click a segment in the Emotion track
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -4413,9 +4465,14 @@ export function DubVerseEditor({
         const seg = selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null
         const QUICK = [
           'Make this sound more natural',
-          'Match the character\'s emotion',
+          "Match the character's emotion",
           'Shorten to fit lip-sync',
           'Improve the translation',
+        ]
+        const AI_MODELS = [
+          { id: 'haiku'  as const, label: 'Haiku 4.5',  desc: 'Fast · everyday edits',            color: '#60a5fa' },
+          { id: 'sonnet' as const, label: 'Sonnet 4.6', desc: 'Balanced · recommended',            color: '#a78bfa' },
+          { id: 'opus'   as const, label: 'Opus 4.8',   desc: 'Most capable · complex rewrites',   color: '#f59e0b' },
         ]
         const submit = async (prompt: string) => {
           if (!prompt.trim() || askAiLoading) return
@@ -4424,6 +4481,7 @@ export function DubVerseEditor({
           try {
             const res = await apiClient.askAI({
               prompt,
+              model: askAiModel,
               source_text: seg?.source_text ?? '',
               dubbed_text: seg?.preview_text ?? seg?.active_text ?? seg?.target_text ?? '',
               source_language: sourceLanguage,
@@ -4442,13 +4500,13 @@ export function DubVerseEditor({
           <>
             <div className="fixed inset-0 z-40" onClick={() => setAskAiOpen(false)} />
             <div
-              className="fixed z-50 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[440px] animate-in fade-in-0 zoom-in-95 duration-150 flex flex-col"
-              style={{ left: askAiPos.x, top: askAiPos.y }}
+              className="fixed z-50 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[600px] animate-in fade-in-0 zoom-in-95 duration-150 flex flex-col"
+              style={{ left: askAiPos.x, top: askAiPos.y, maxHeight: 'calc(100vh - 80px)' }}
               onClick={(e) => e.stopPropagation()}
             >
               {/* Drag handle / header */}
               <div
-                className="flex items-center justify-between px-4 py-3 border-b border-slate-800 cursor-grab active:cursor-grabbing select-none"
+                className="flex items-center justify-between px-4 py-3 border-b border-slate-800 cursor-grab active:cursor-grabbing select-none shrink-0"
                 onMouseDown={(e) => {
                   e.preventDefault()
                   const panel = (e.currentTarget as HTMLElement).parentElement as HTMLElement
@@ -4470,7 +4528,30 @@ export function DubVerseEditor({
                 </button>
               </div>
 
-              <div className="p-4 space-y-3">
+              {/* Model selector */}
+              <div className="px-4 pt-3 pb-3 border-b border-slate-800 shrink-0">
+                <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold mb-2">Select AI Model</p>
+                <div className="flex gap-2">
+                  {AI_MODELS.map(m => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => setAskAiModel(m.id)}
+                      className="flex-1 flex flex-col items-start px-3 py-2.5 rounded-lg transition-all text-left"
+                      style={{
+                        background: askAiModel === m.id ? `${m.color}18` : 'rgba(255,255,255,0.03)',
+                        border: `1px solid ${askAiModel === m.id ? m.color + '55' : 'rgba(255,255,255,0.08)'}`,
+                        boxShadow: askAiModel === m.id ? `0 0 10px ${m.color}22` : 'none',
+                      }}
+                    >
+                      <span className="text-xs font-semibold" style={{ color: askAiModel === m.id ? m.color : '#94a3b8' }}>{m.label}</span>
+                      <span className="text-[10px] mt-0.5 leading-snug" style={{ color: askAiModel === m.id ? m.color + 'bb' : '#475569' }}>{m.desc}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="p-4 space-y-3 overflow-y-auto">
                 {/* Segment context */}
                 {seg && (
                   <div className="bg-slate-800 rounded-lg p-3 space-y-1.5 text-xs">
@@ -4491,7 +4572,7 @@ export function DubVerseEditor({
                     <button
                       key={q}
                       type="button"
-                      className="px-2 py-1 rounded-full text-[11px] bg-slate-800 hover:bg-amber-500/20 text-slate-400 hover:text-amber-300 border border-slate-700 hover:border-amber-500/40 transition-colors"
+                      className="px-2.5 py-1.5 rounded-full text-[11px] bg-slate-800 hover:bg-amber-500/20 text-slate-400 hover:text-amber-300 border border-slate-700 hover:border-amber-500/40 transition-colors"
                       onClick={() => { setAskAiPrompt(q); submit(q) }}
                     >
                       {q}
@@ -4503,7 +4584,7 @@ export function DubVerseEditor({
                 <div className="flex gap-2">
                   <input
                     aria-label="Ask AI prompt"
-                    className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-amber-500/50"
+                    className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-amber-500/50"
                     placeholder="Ask anything about this segment…"
                     value={askAiPrompt}
                     onChange={e => setAskAiPrompt(e.target.value)}
@@ -4511,7 +4592,7 @@ export function DubVerseEditor({
                   />
                   <Button
                     size="sm"
-                    className="bg-amber-600 hover:bg-amber-700 text-white shrink-0"
+                    className="bg-amber-600 hover:bg-amber-700 text-white shrink-0 px-4"
                     onClick={() => submit(askAiPrompt)}
                     disabled={!askAiPrompt.trim() || askAiLoading}
                   >
@@ -4521,27 +4602,27 @@ export function DubVerseEditor({
 
                 {/* AI response */}
                 {askAiLoading && (
-                  <div className="flex items-center gap-2 text-xs text-slate-400 py-2">
-                    <RefreshCw className="h-3 w-3 animate-spin" />
-                    Claude is thinking…
+                  <div className="flex items-center gap-2 text-xs text-slate-400 py-3">
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    Claude {AI_MODELS.find(m => m.id === askAiModel)?.label} is thinking…
                   </div>
                 )}
                 {askAiResult && !askAiLoading && (
-                  <div className="bg-amber-500/10 border border-amber-500/25 rounded-lg p-3 space-y-2">
-                    <p className="text-sm text-amber-200 font-medium">"{askAiResult.suggestion}"</p>
+                  <div className="bg-amber-500/10 border border-amber-500/25 rounded-lg p-4 space-y-3">
+                    <p className="text-sm text-amber-200 font-medium leading-relaxed">"{askAiResult.suggestion}"</p>
                     {askAiResult.explanation && (
-                      <p className="text-xs text-slate-400">{askAiResult.explanation}</p>
+                      <p className="text-xs text-slate-400 leading-relaxed">{askAiResult.explanation}</p>
                     )}
                     {askAiResult.suggestion && selectedSegmentIndex !== null && (
                       <Button
                         size="sm"
-                        className="w-full mt-1 bg-amber-600 hover:bg-amber-700 text-white text-xs h-7"
+                        className="w-full bg-amber-600 hover:bg-amber-700 text-white text-xs h-8"
                         onClick={() => {
                           updateSegment(selectedSegmentIndex, { target_text: askAiResult!.suggestion, active_text: askAiResult!.suggestion, variant_text: askAiResult!.suggestion, preview_text: null, isPreviewing: false, isUserEdited: false, status: 'edited' })
                           setAskAiOpen(false)
                         }}
                       >
-                        <Check className="h-3 w-3 mr-1" />
+                        <Check className="h-3 w-3 mr-1.5" />
                         Apply suggestion
                       </Button>
                     )}
@@ -4886,7 +4967,7 @@ export function DubVerseEditor({
             </Button>
           </div>
           
-          {/* Zoom controls */}
+          {/* Zoom + panel tab toggles — grouped on the right */}
           <div className="flex items-center gap-2">
             <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => setZoomLevel(zoomLevel / 1.5)}>
               <ZoomOut className="h-4 w-4" />
@@ -4902,6 +4983,26 @@ export function DubVerseEditor({
             <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => setZoomLevel(zoomLevel * 1.5)}>
               <ZoomIn className="h-4 w-4" />
             </Button>
+            <div className="w-px h-5 bg-white/10 mx-1" />
+            {([
+              { id: 'chord',      label: '🎼 Chord',      feature: 'emotionalCurveEditor' },
+              { id: 'advanced',   label: '🎛 Advanced',   feature: 'emotionalCurveEditor' },
+              { id: 'characters', label: '🎭 Characters', feature: 'characterProfiles' },
+            ] as const).filter(t => hasFeature(t.feature as any)).map(t => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setVideoSubTab(prev => prev === t.id ? null : t.id)}
+                className="text-xs px-2.5 py-1 rounded-md transition-all font-medium"
+                style={{
+                  background: videoSubTab === t.id ? 'rgba(167,139,250,0.15)' : 'transparent',
+                  color: videoSubTab === t.id ? '#a78bfa' : '#64748b',
+                  border: `1px solid ${videoSubTab === t.id ? 'rgba(167,139,250,0.35)' : 'transparent'}`,
+                }}
+              >
+                {t.label}
+              </button>
+            ))}
           </div>
         </div>
         
@@ -5144,6 +5245,7 @@ export function DubVerseEditor({
               </div>
             </div>
             {/* Emotional curve track label */}
+            {hasFeature('emotionalCurveEditor') && (
             <div className="h-24 shrink-0 flex items-start px-2 pt-2 text-xs text-neutral-400 border-b border-neutral-700 bg-neutral-900/30">
               <div className="flex flex-col text-xs text-slate-300 select-none">
                 <span className="font-semibold mb-1">Emotion</span>
@@ -5160,16 +5262,17 @@ export function DubVerseEditor({
                   >Auto</button>
                   <button
                     type="button"
-                    onClick={() => setEmotionSource('manual')}
+                    onClick={() => setEmotionSource('advanced')}
                     className={`text-[9px] px-2 py-0.5 rounded font-semibold transition-colors ${
-                      emotionSource === 'manual'
+                      emotionSource === 'advanced'
                         ? 'bg-violet-400/20 text-violet-300 border border-violet-400/40'
                         : 'text-slate-500 border border-slate-700'
                     }`}
-                  >Manual</button>
+                  >Advanced</button>
                 </div>
               </div>
             </div>
+            )}
             {/* Filler + bottom ruler spacer */}
             <div className="flex-1 bg-neutral-900/50 border-b border-neutral-800" />
             <div className="h-5 shrink-0 bg-neutral-900 border-t border-neutral-700" />
@@ -5194,6 +5297,7 @@ export function DubVerseEditor({
 
                 const target = e.target as HTMLElement
                 if (target.closest('[data-segment-block]')) return
+                if (target.closest('[data-emotion-segment]')) return
                 const rect = timelineRef.current?.getBoundingClientRect()
                 if (!rect) return
                 const scrollLeft = timelineRef.current?.scrollLeft ?? 0
@@ -5787,16 +5891,20 @@ export function DubVerseEditor({
               </div>
 
               {/* Emotional curve track */}
-              <div className="h-24 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+              {hasFeature('emotionalCurveEditor') && <div className="h-24 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
                 {displaySegments.map((segment, index) => {
                   const segWidth = (segment.end_time - segment.start_time) * PIXELS_PER_SECOND
                   return (
                     <div
                       key={`emotion-${segment.id}`}
                       className="absolute top-0 bottom-0"
-                      onDoubleClick={() => {
+                      data-emotion-segment
+                      onDoubleClick={(e) => {
+                        e.stopPropagation()
+                        setAdvancedBrowserSegment(index)
                         setFloatingEmotionSegment(prev => prev === index ? null : index)
-                        setRightPanelTab('chord')
+                        setRightPanelTab('result')
+                        setVideoSubTab('chord')
                       }}
                       style={{
                         left: segment.start_time * PIXELS_PER_SECOND,
@@ -5824,9 +5932,7 @@ export function DubVerseEditor({
 
                         <EmotionLedTrack
                           curveData={
-                            emotionSource === 'manual'
-                              ? segment.velma_emotion_curve ?? Array.from({ length: 20 }, () => 0.25)
-                              : segment.velma_emotion_curve
+                            segment.velma_emotion_curve ?? Array.from({ length: 20 }, () => 0.25)
                           }
                           trackDuration={segment.end_time - segment.start_time}
                           emotionLabel={segment.velma_emotion}
@@ -5836,7 +5942,7 @@ export function DubVerseEditor({
                     </div>
                   )
                 })}
-              </div>
+              </div>}
 
               {/* Filler — fills remaining height, shows grid + bottom ruler */}
               <div className="flex-1 relative bg-[#07090f] flex flex-col">
