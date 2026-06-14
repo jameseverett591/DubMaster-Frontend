@@ -1,9 +1,10 @@
 'use client'
 
-import { Clock, Gauge, VolumeX, Volume2, Heart, FileText } from 'lucide-react'
+import { Clock, Gauge, VolumeX, Volume2, Heart, FileText, Wrench } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { QCReport, QCFinding, Segment } from '@/lib/editor-types'
 import { usePlan } from '@/lib/use-plan'
+import { findingIsAutoFixable } from '@/lib/qc-fixes'
 
 interface QCQualityPanelProps {
   report: QCReport
@@ -11,6 +12,7 @@ interface QCQualityPanelProps {
   onJumpToTime?: (seconds: number) => void
   onSelectFinding?: (finding: QCFinding) => void
   onSelectSegment?: (segmentIndex: number) => void
+  onApplyFix?: (finding: QCFinding) => void
   selectedRetranscriptionIndex?: number
 }
 
@@ -51,7 +53,7 @@ function statusBadge(status: 'ok' | 'warn' | 'fail') {
   return <span className="text-[10px] px-2 py-0.5 rounded-full border border-red-500/40 text-red-300 bg-red-500/10">Fail</span>
 }
 
-export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding, onSelectSegment, selectedRetranscriptionIndex }: QCQualityPanelProps) {
+export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding, onSelectSegment, onApplyFix, selectedRetranscriptionIndex }: QCQualityPanelProps) {
   const { hasFeature } = usePlan()
   const componentEntries: { key: keyof QCReport['components']; label: string }[] = [
     { key: 'timing', label: 'timing' },
@@ -308,33 +310,60 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
           subtitle="Click to jump to issue and apply correction"
         >
           <div className="flex flex-col gap-1 max-h-64 overflow-y-auto pr-1">
-            {report.findings.map((finding, i) => (
-              <button
-                key={i}
-                onClick={() => {
-                  onJumpToTime?.(finding.timestamp_start)
-                  onSelectFinding?.(finding)
-                }}
-                className="flex items-start gap-3 py-2 px-2 -mx-2 text-xs hover:bg-neutral-800/50 rounded cursor-pointer text-left border-l-2"
-                style={{
-                  borderColor: finding.severity === 'error' ? '#ef4444' : finding.severity === 'warning' ? '#eab308' : '#3b82f6'
-                }}
-              >
-                <span className="text-slate-500 font-mono w-10 shrink-0">{formatTimeShort(finding.timestamp_start)}</span>
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className={cn(
-                      'text-[10px] px-1.5 py-0.5 rounded font-medium uppercase',
-                      finding.severity === 'error' ? 'bg-red-500/20 text-red-400' : finding.severity === 'warning' ? 'bg-yellow-500/20 text-yellow-400' : 'bg-blue-500/20 text-blue-400'
-                    )}>
-                      {finding.severity}
-                    </span>
-                    <span className="capitalize text-slate-300">{finding.type}</span>
-                  </div>
-                  <div className="text-slate-400">{finding.message}</div>
+            {report.findings.map((finding, i) => {
+              const retranscriptionText = finding.type === 'pronunciation'
+                ? report.retranscription.items.find(
+                    item => Math.abs(item.start - finding.timestamp_start) < 1
+                  )?.text
+                : undefined
+              const canFix = findingIsAutoFixable(finding, { retranscriptionText })
+              const borderClass = finding.severity === 'error'
+                ? 'border-red-500'
+                : finding.severity === 'warning'
+                  ? 'border-yellow-500'
+                  : 'border-blue-500'
+              return (
+                <div
+                  key={i}
+                  className={cn('flex items-start gap-2 py-1 -mx-2 pl-2 border-l-2', borderClass)}
+                >
+                  {/* Navigation button — jump to finding in timeline */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onJumpToTime?.(finding.timestamp_start)
+                      onSelectFinding?.(finding)
+                    }}
+                    className="flex-1 flex items-start gap-3 text-xs hover:bg-neutral-800/50 rounded px-1 py-1 text-left"
+                  >
+                    <span className="text-slate-500 font-mono w-10 shrink-0">{formatTimeShort(finding.timestamp_start)}</span>
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={cn(
+                          'text-[10px] px-1.5 py-0.5 rounded font-medium uppercase',
+                          finding.severity === 'error' ? 'bg-red-500/20 text-red-400' : finding.severity === 'warning' ? 'bg-yellow-500/20 text-yellow-400' : 'bg-blue-500/20 text-blue-400'
+                        )}>
+                          {finding.severity}
+                        </span>
+                        <span className="capitalize text-slate-300">{finding.type}</span>
+                      </div>
+                      <div className="text-slate-400">{finding.message}</div>
+                    </div>
+                  </button>
+                  {/* Fix button — sibling, not nested */}
+                  {canFix && onApplyFix && (
+                    <button
+                      type="button"
+                      onClick={() => onApplyFix(finding)}
+                      className="shrink-0 self-center flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-emerald-700/30 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-600/30 transition-colors"
+                    >
+                      <Wrench className="h-2.5 w-2.5" />
+                      Fix
+                    </button>
+                  )}
                 </div>
-              </button>
-            ))}
+              )
+            })}
           </div>
         </SectionCard>
       )}
