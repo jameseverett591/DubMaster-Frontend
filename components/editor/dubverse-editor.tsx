@@ -591,7 +591,10 @@ export function DubVerseEditor({
   }, [qcReport, updateSegment])
 
   useEffect(() => {
-    createClient().auth.getUser().then(({ data: { user } }) => {
+    const supabase = createClient()
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.access_token) apiClient.setToken(session.access_token)
+      const user = session?.user
       if (!user) return
       const name = (user.user_metadata?.full_name as string | undefined) || user.email || ''
       const parts = name.trim().split(/\s+/)
@@ -601,6 +604,10 @@ export function DubVerseEditor({
           : name.slice(0, 2).toUpperCase()
       )
     })
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      apiClient.setToken(session?.access_token ?? null)
+    })
+    return () => subscription.unsubscribe()
   }, [])
 
   // Selected re-transcription index for highlighting in QC monitor
@@ -2629,10 +2636,15 @@ export function DubVerseEditor({
           })
         )
       )
+      // Save project metadata so it appears in My Projects
+      await apiClient.saveProject(jobId, {
+        title,
+        target_language: targetLanguage,
+      })
     } finally {
       setIsSaving(false)
     }
-  }, [isSaving, displaySegments, jobId])
+  }, [isSaving, displaySegments, jobId, title, targetLanguage])
 
   const handleRebuildVideo = useCallback(async () => {
     setRebuildError(null)
@@ -3180,27 +3192,11 @@ export function DubVerseEditor({
                 Add Segment
               </DropdownMenuItem>
               <DropdownMenuItem
-                onClick={() => {
-                  setImportedSegments([])
-                  setLockedSegments(new Set())
-                  setDroppedTranslations([])
-                  setWaveformData([])
-                  setImportedVideoUrl(null)
-                  setImportedVideoFile(null)
-                  setVideoThumbnails([])
-                }}
-                className="cursor-pointer hover:bg-slate-800 text-red-400"
-              >
-                <Trash2 className="h-4 w-4 mr-2" />
-                Clear All
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
                 onClick={() => setShowRevertAllConfirm(true)}
                 className="cursor-pointer hover:bg-red-950/50 text-red-400"
               >
-                <RefreshCw className="h-4 w-4 mr-2" />
-                Revert All Changes
+                <Trash2 className="h-4 w-4 mr-2" />
+                Clear Editor
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -3222,11 +3218,11 @@ export function DubVerseEditor({
           </Button>
           <Button
             size="sm"
-            className="h-8 bg-slate-600 hover:bg-slate-700 text-white font-medium"
-            onClick={() => router.push('/studio')}
+            className="h-8 bg-violet-600 hover:bg-violet-700 text-white font-medium"
+            onClick={() => router.push('/subscribe')}
           >
-            <Clapperboard className="h-4 w-4 mr-1" />
-            Studio
+            <Sparkles className="h-4 w-4 mr-1" />
+            Upgrade
           </Button>
           <Button
             size="sm"
@@ -3306,7 +3302,7 @@ export function DubVerseEditor({
             <div className="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
               <Upload className="h-12 w-12 text-neutral-500" />
               <div>
-                <p className="text-lg font-medium text-neutral-300">No video loaded</p>
+                <p className="text-lg font-medium text-neutral-300">Please upload a video</p>
                 <p className="text-sm text-neutral-500 mt-1">Click "Import Video" to upload a video and automatically transcribe it</p>
               </div>
             </div>
@@ -4805,7 +4801,7 @@ export function DubVerseEditor({
               <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
                 <Grid3X3 className="h-4 w-4" />
               </Button>
-              <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
+              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Clear editor" onClick={() => setShowRevertAllConfirm(true)}>
                 <Trash2 className="h-4 w-4" />
               </Button>
             </div>
@@ -5271,6 +5267,14 @@ export function DubVerseEditor({
 
 {/* Video track with thumbnails - tiled background preserves aspect ratio */}
               <div className="h-16 shrink-0 bg-neutral-900/30 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+                {(() => {
+                  const activeSegment = selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null
+                  return activeSegment ? (
+                    <div className="absolute inset-x-0 bottom-0 z-10 pointer-events-none">
+                      <HeatmapBar data={computeHeatmap(activeSegment)} />
+                    </div>
+                  ) : null
+                })()}
                 {videoThumbnails.length > 0 ? (
                   <div className="absolute inset-y-1 left-1 right-1 rounded overflow-hidden border border-emerald-500/50 flex">
                     {videoThumbnails.map((thumb, idx) => {
@@ -5297,14 +5301,6 @@ export function DubVerseEditor({
                   </div>
                 ) : null}
               </div>
-
-              {/* Velma heatmap bar */}
-              {(() => {
-                const activeSegment = selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null
-                return activeSegment ? (
-                  <HeatmapBar data={computeHeatmap(activeSegment)} />
-                ) : null
-              })()}
 
               {/* Original audio track */}
               <div className="h-14 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative" data-timeline-track>
@@ -5739,7 +5735,7 @@ export function DubVerseEditor({
 
 
               {/* RPT Audio track */}
-              <div className="h-14 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
+              <div className="h-20 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
                 {displaySegments.map((seg, i) => {
                   const hasAudio = !!(seg.committed_audio_url ?? seg.audio_url)
                   const startT = seg.start_time ?? seg.committed_start_time ?? 0
