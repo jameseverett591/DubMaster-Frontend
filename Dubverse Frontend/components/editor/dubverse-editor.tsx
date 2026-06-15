@@ -4375,7 +4375,17 @@ export function DubVerseEditor({
           {/* Library tab — Fish Audio catalog as a paired sibling to Speakers */}
           {rightPanelTab === 'library' && (
             <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-              <VoiceLibraryPanel />
+              <VoiceLibraryPanel
+                onVoiceAssigned={(speakerId) => {
+                  setStagedVoices(prev => {
+                    const next = { ...prev }
+                    displaySegments.forEach((seg, i) => {
+                      if (seg.speaker_id === speakerId) delete next[i]
+                    })
+                    return next
+                  })
+                }}
+              />
             </div>
           )}
 
