@@ -22,12 +22,32 @@ function SuccessContent() {
   const [plan, setPlan] = useState<string | null>(null)
 
   useEffect(() => {
-    if (sessionId) {
+    if (!sessionId) return
+
+    if (isBonus) {
+      // Bonus minutes: just display, no subscription to activate
       fetch(`/api/checkout-session?session_id=${sessionId}`)
         .then((r) => r.json())
         .then((data) => setPlan(data.plan_type))
         .catch(() => {})
+      return
     }
+
+    // Subscription checkout: activate in Supabase, then show plan name
+    fetch("/api/activate-subscription", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId }),
+    })
+      .then((r) => r.json())
+      .then((data) => setPlan(data.plan ?? data.plan_type ?? null))
+      .catch(() => {
+        // Fallback: at least show the plan name even if DB write failed
+        fetch(`/api/checkout-session?session_id=${sessionId}`)
+          .then((r) => r.json())
+          .then((data) => setPlan(data.plan_type))
+          .catch(() => {})
+      })
   }, [sessionId])
 
   return (
@@ -75,8 +95,11 @@ function SuccessContent() {
           </div>
 
           <div className="flex flex-col sm:flex-row gap-3 pt-4">
-            <Button asChild className="flex-1 bg-gradient-to-r from-[#A855F7] to-[#22D3EE] text-white font-semibold">
-              <Link href="/studio">Go to Studio</Link>
+            <Button
+              className="flex-1 bg-gradient-to-r from-[#A855F7] to-[#22D3EE] text-white font-semibold"
+              onClick={() => { window.location.href = "/" }}
+            >
+              Go to Studio
             </Button>
             <Button asChild variant="outline" className="flex-1 border-[#334155] text-[#E2E8F0] hover:bg-[#1E293B]">
               <Link href="/account">View Account</Link>
