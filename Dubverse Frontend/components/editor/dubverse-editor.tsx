@@ -872,7 +872,18 @@ export function DubVerseEditor({
           const parsed = JSON.parse(payload) as { voice_id: string; name: string }
           console.log('[VOICE-DROP] parsed payload (native)', parsed)
           if (parsed.voice_id) {
+            const speakerId = displaySegmentsRef.current[hit.index]?.speaker_id
             setStagedVoices(prev => ({ ...prev, [hit.index]: parsed.voice_id }))
+            if (speakerId) {
+              setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: parsed.voice_id }))
+              setStagedVoices(prev => {
+                const next = { ...prev }
+                displaySegmentsRef.current.forEach((seg, i) => {
+                  if (seg.speaker_id === speakerId && i !== hit.index) delete next[i]
+                })
+                return next
+              })
+            }
             selectSegment(hit.index)
             setCurrentTime(displaySegmentsRef.current[hit.index].start_time)
             console.log('[VOICE-DROP] calling handleGenerateSpeech (native)', { index: hit.index, voice_id: parsed.voice_id })
@@ -2502,7 +2513,6 @@ export function DubVerseEditor({
   handleGenerateSpeechRef.current = handleGenerateSpeech
   const displaySegmentsRef = useRef(displaySegments)
   displaySegmentsRef.current = displaySegments
-
   // Preview speech — non-destructive TTS preview using preview_text
   const handlePreviewSpeech = useCallback(async (index: number) => {
     if (isRegenerating) return
@@ -2698,7 +2708,7 @@ export function DubVerseEditor({
   
   // Start editing a segment — immediately enters preview mode
   const startEditing = useCallback((index: number) => {
-    const currentText = displaySegments[index]?.active_text ?? displaySegments[index]?.target_text ?? ''
+    const currentText = displaySegments[index]?.preview_text ?? displaySegments[index]?.committed_adapted_text ?? displaySegments[index]?.active_text ?? displaySegments[index]?.target_text ?? ''
     setEditingSegmentIndex(index)
     setEditingText(currentText)
     // Immediately activate preview so the orange chip + Commit/Cancel appear
@@ -3428,7 +3438,18 @@ export function DubVerseEditor({
                         const parsed = JSON.parse(payload) as { voice_id: string; name: string }
                         console.log('[VOICE-DROP] parsed payload', parsed)
                         if (parsed.voice_id) {
+                          const speakerId = displaySegments[index]?.speaker_id
                           setStagedVoices(prev => ({ ...prev, [index]: parsed.voice_id }))
+                          if (speakerId) {
+                            setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: parsed.voice_id }))
+                            setStagedVoices(prev => {
+                              const next = { ...prev }
+                              displaySegments.forEach((seg, i) => {
+                                if (seg.speaker_id === speakerId && i !== index) delete next[i]
+                              })
+                              return next
+                            })
+                          }
                           selectSegment(index)
                           setCurrentTime(displaySegments[index].start_time)
                           console.log('[VOICE-DROP] calling handleGenerateSpeech', { index, voice_id: parsed.voice_id })
@@ -3452,7 +3473,18 @@ export function DubVerseEditor({
                     const fallbackVoiceId = e.dataTransfer.getData('text/plain')
                     const vk = draggedVoice ?? e.dataTransfer.getData('voice_key') ?? fallbackVoiceId
                     if (!vk) return
+                    const speakerId = displaySegments[index]?.speaker_id
                     setStagedVoices(prev => ({ ...prev, [index]: vk }))
+                    if (speakerId) {
+                      setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: vk }))
+                      setStagedVoices(prev => {
+                        const next = { ...prev }
+                        displaySegments.forEach((seg, i) => {
+                          if (seg.speaker_id === speakerId && i !== index) delete next[i]
+                        })
+                        return next
+                      })
+                    }
                     selectSegment(index)
                     setCurrentTime(displaySegments[index].start_time)
                     setPitchPopupPos({
@@ -5021,6 +5053,29 @@ export function DubVerseEditor({
                 {t.label}
               </button>
             ))}
+            <div className="w-px h-5 bg-white/10 mx-1" />
+            <button
+              type="button"
+              onClick={() => {
+                const url = activeDubbedVideoUrl ?? dubbedVideoUrl
+                if (!url) return
+                const a = document.createElement('a')
+                a.href = url
+                a.download = `${title || jobId}_dubbed.mp4`
+                a.click()
+              }}
+              title={activeDubbedVideoUrl ?? dubbedVideoUrl ? 'Download dubbed video' : 'No dubbed video yet'}
+              className="text-xs px-2.5 py-1 rounded-md transition-all font-medium flex items-center gap-1.5"
+              style={{
+                background: 'transparent',
+                color: (activeDubbedVideoUrl ?? dubbedVideoUrl) ? '#34d399' : '#475569',
+                border: '1px solid transparent',
+                cursor: (activeDubbedVideoUrl ?? dubbedVideoUrl) ? 'pointer' : 'not-allowed',
+                opacity: (activeDubbedVideoUrl ?? dubbedVideoUrl) ? 1 : 0.45,
+              }}
+            >
+              ⬇ Download
+            </button>
           </div>
         </div>
         
