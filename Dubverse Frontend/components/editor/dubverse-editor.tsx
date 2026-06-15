@@ -2965,37 +2965,6 @@ export function DubVerseEditor({
             </Button>
           </Link>
           <h1 className="text-sm font-medium truncate max-w-[300px]">{title}</h1>
-          <div className="flex flex-col items-start gap-1">
-            <Button
-              variant="outline"
-              size="sm"
-              className={cn(
-                "h-7 text-xs font-bold tracking-wide",
-                rebuildStatus === 'idle' && "border-slate-700",
-                rebuildStatus === 'processing' && "border-red-500 text-red-400 animate-pulse shadow-[0_0_14px_rgba(239,68,68,0.6)]",
-                rebuildStatus === 'complete' && "border-emerald-500 text-emerald-400 shadow-[0_0_14px_rgba(16,185,129,0.6)]",
-                rebuildStatus === 'error' && "border-slate-700",
-              )}
-              onClick={handleRebuildVideo}
-              disabled={isRebuilding}
-            >
-              {rebuildStatus === 'complete'
-                ? <Check className="h-3 w-3 mr-1" />
-                : <RefreshCw className={cn("h-3 w-3 mr-1", isRebuilding && "animate-spin")} />}
-              {rebuildStatus === 'processing' ? 'REBUILD IN PROCESS'
-                : rebuildStatus === 'complete' ? 'REBUILD COMPLETE'
-                : 'Rebuild Video'}
-            </Button>
-            {(isRebuilding || rebuildProgress > 0) && (
-              <div className="h-1 bg-neutral-700 rounded-full overflow-hidden w-32">
-                <div className="h-full bg-amber-500 rounded-full transition-all duration-500"
-                  style={{ width: `${rebuildProgress}%` }} />
-              </div>
-            )}
-            {rebuildError && (
-              <span className="text-[10px] text-red-400 max-w-[160px] truncate">{rebuildError}</span>
-            )}
-          </div>
         </div>
         
         <div className="flex items-center gap-3">
@@ -4251,6 +4220,24 @@ export function DubVerseEditor({
                 </button>
               ))}
             </div>
+            <Button
+              className={cn(
+                "h-7 px-4 text-xs font-bold tracking-widest uppercase text-white",
+                rebuildStatus === 'idle' && "bg-red-600 hover:bg-red-700",
+                rebuildStatus === 'processing' && "bg-red-800 border border-red-500 animate-pulse shadow-[0_0_14px_rgba(239,68,68,0.5)]",
+                rebuildStatus === 'complete' && "bg-emerald-700 hover:bg-emerald-800",
+                rebuildStatus === 'error' && "bg-red-600 hover:bg-red-700",
+              )}
+              onClick={handleRebuildVideo}
+              disabled={isRebuilding}
+            >
+              {rebuildStatus === 'complete'
+                ? <Check className="h-3.5 w-3.5 mr-1" />
+                : <RefreshCw className={cn("h-3.5 w-3.5 mr-1", isRebuilding && "animate-spin")} />}
+              {rebuildStatus === 'processing' ? 'REBUILDING…'
+                : rebuildStatus === 'complete' ? 'REBUILD COMPLETE'
+                : 'REBUILD VIDEO'}
+            </Button>
             {rightPanelTab === 'result' && (
               <div className="flex items-center gap-1">
                 <Button
