@@ -20,6 +20,7 @@ type Layout = 'grid' | 'list'
 interface VoiceLibraryContentProps {
   /** 'grid' = responsive multi-col (modal). 'list' = single-column (narrow panel). */
   layout?: Layout
+  onVoiceAssigned?: (speakerId: string, voiceId: string) => void
 }
 
 /**
@@ -27,7 +28,7 @@ interface VoiceLibraryContentProps {
  * Rendered inside both <VoiceLibraryModal> (Dialog wrapper) and <VoiceLibraryPanel>
  * (right-panel-tab wrapper). All state lives here.
  */
-export function VoiceLibraryContent({ layout = 'grid' }: VoiceLibraryContentProps) {
+export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned }: VoiceLibraryContentProps) {
   // Job context (browse-only when no jobId in URL)
   const params = useParams<{ jobId?: string }>()
   const routeJobId = (params as any)?.jobId as string | undefined
@@ -224,6 +225,7 @@ export function VoiceLibraryContent({ layout = 'grid' }: VoiceLibraryContentProp
   const handleAssign = useCallback(async (voiceId: string, speakerId: string) => {
     updateSpeakerVoice(speakerId, voiceId)
     pulseSpeaker(speakerId)
+    onVoiceAssigned?.(speakerId, voiceId)
     const newMap = { ...speakerVoiceMap, [speakerId]: voiceId }
     if (jobId) {
       try { await apiClient.updateVoiceMapping(jobId, newMap) } catch {}
@@ -234,7 +236,7 @@ export function VoiceLibraryContent({ layout = 'grid' }: VoiceLibraryContentProp
     setTimeout(() => {
       setAssignFeedback(prev => { const n = { ...prev }; delete n[voiceId]; return n })
     }, 2500)
-  }, [jobId, speakerVoiceMap, updateSpeakerVoice, pulseSpeaker, speakers, getSpeakerDisplayName])
+  }, [jobId, speakerVoiceMap, updateSpeakerVoice, pulseSpeaker, onVoiceAssigned, speakers, getSpeakerDisplayName])
 
   // Swipe carousel
   const viewportRef = useRef<HTMLDivElement>(null)
@@ -815,10 +817,10 @@ export function VoiceLibraryModal({ open, onOpenChange }: VoiceLibraryModalProps
  * Right-panel tab wrapper — narrow, single-column. Used inside the editor's
  * right rail as a sibling to the Speakers tab.
  */
-export function VoiceLibraryPanel() {
+export function VoiceLibraryPanel({ onVoiceAssigned }: { onVoiceAssigned?: (speakerId: string, voiceId: string) => void } = {}) {
   return (
     <div className="flex-1 min-h-0 flex flex-col p-3">
-      <VoiceLibraryContent layout="list" />
+      <VoiceLibraryContent layout="list" onVoiceAssigned={onVoiceAssigned} />
     </div>
   )
 }
