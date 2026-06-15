@@ -539,6 +539,7 @@ class DubbingService:
         speaker_genders: Optional[Dict[str, str]] = None,
         adaptation_selections: Optional[Dict[str, str]] = None,
         traits_mapping: Optional[Dict[str, List[str]]] = None,
+        character_profiles: Optional[List[Dict]] = None,
     ) -> Optional[Dict[str, str]]:
         logger.info(f"Starting dubbing for job {job_id}")
         logger.info(f"Voice mapping received: {voice_mapping}")
@@ -650,7 +651,8 @@ class DubbingService:
                 transcript = await translation_service.translate_segments(
                     transcript,
                     source_norm,
-                    target_norm
+                    target_norm,
+                    character_profiles=character_profiles,
                 )
                 logger.info(f"Translation complete for {len(transcript)} segments")
                 if transcript:
@@ -2172,18 +2174,39 @@ class DubbingService:
 
             actual_dur = await asyncio.to_thread(self._get_audio_duration, final_path)
             if actual_dur > slot_dur + 0.05:
-                stretched_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen_fit.mp3")
-                stretched = await asyncio.to_thread(
-                    self._adjust_audio_duration,
-                    final_path, stretched_path, slot_dur,
-                    min_speed=0.8, max_speed=1.5,
+                # Check how much room exists before the next segment starts
+                next_seg = next(
+                    (s for s in segments if float(s.get("start", 0)) > slot_end + 0.01),
+                    None
                 )
-                if stretched and os.path.exists(stretched_path):
-                    final_path = stretched_path
+                next_start = float(next_seg["start"]) if next_seg else slot_end + 999.0
+                available_dur = next_start - slot_start
+
+                if actual_dur <= available_dur - 0.05:
+                    # Gap is large enough — extend this segment's window to fit the audio
+                    new_end = round(slot_start + actual_dur, 3)
+                    seg["end"] = new_end
+                    seg["committed_end_time"] = new_end
                     logger.info(
-                        f"[REGEN-FIT] seg {segment_index}: "
-                        f"{actual_dur:.2f}s → {slot_dur:.2f}s slot"
+                        f"[REGEN-EXTEND] seg {segment_index}: "
+                        f"extended end {slot_end:.2f}s → {new_end:.2f}s "
+                        f"(next seg at {next_start:.2f}s, gap was {available_dur - slot_dur:.2f}s)"
                     )
+                else:
+                    # No room — time-stretch to fit available space, never exceed next speaker
+                    target = min(slot_dur, available_dur - 0.05)
+                    stretched_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen_fit.mp3")
+                    stretched = await asyncio.to_thread(
+                        self._adjust_audio_duration,
+                        final_path, stretched_path, target,
+                        min_speed=0.8, max_speed=1.5,
+                    )
+                    if stretched and os.path.exists(stretched_path):
+                        final_path = stretched_path
+                        logger.info(
+                            f"[REGEN-FIT] seg {segment_index}: "
+                            f"{actual_dur:.2f}s → {target:.2f}s (no gap available)"
+                        )
 
         seg["path"] = final_path
         seg["voice_id"] = use_voice_id
