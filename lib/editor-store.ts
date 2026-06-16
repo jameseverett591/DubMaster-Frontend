@@ -91,6 +91,7 @@ interface EditorState {
   markSegmentDirty: (index: number) => void
   clearAllDirty: () => void
   initRPTFromSegments: () => void
+  resetEditor: () => void
 
   // Timeline actions
   setZoomLevel: (zoom: number) => void
@@ -238,6 +239,29 @@ export const useEditorStore = create<EditorState>(
   clearAllDirty: () => set((state) => ({
     segments: state.segments.map((seg) => ({ ...seg, rpt_dirty: false })),
   })),
+  resetEditor: () => set({
+    jobId: null,
+    title: '',
+    videoUrl: '',
+    dubbedVideoUrl: null,
+    videoDuration: 0,
+    segments: [],
+    qcScore: null,
+    qcFindings: [],
+    importedSegments: null,
+    importedSegmentsJobId: null,
+    speakerVoiceMap: {},
+    speakerTraitsMap: {},
+    speakerCustomTraits: {},
+    speakerPitchMap: {},
+    rebuildStatus: 'idle',
+    rptStitching: false,
+    selectedSegmentIndex: null,
+    selectedFindingId: null,
+    currentTime: 0,
+    isPlaying: false,
+    adaptationVariants: {},
+  }),
   initRPTFromSegments: () => set((state) => ({
     segments: state.segments.map((seg) => ({
       ...seg,
