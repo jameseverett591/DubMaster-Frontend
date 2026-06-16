@@ -2334,8 +2334,14 @@ async def list_projects():
     return {"total": len(projects), "projects": projects}
 
 
+class SaveProjectBody(BaseModel):
+    title: Optional[str] = None
+    target_language: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+
+
 @router.post("/projects/save/{job_id}")
-async def save_project(job_id: str):
+async def save_project(job_id: str, body: SaveProjectBody = SaveProjectBody()):
     job = await job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -2347,12 +2353,29 @@ async def save_project(job_id: str):
     base.mkdir(parents=True, exist_ok=True)
 
     now = datetime.utcnow().isoformat()
+
+    # Preserve created_at if project already exists
+    existing_created_at = now
+    meta_path = base / "project.json"
+    if meta_path.exists():
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                existing = _json.load(f)
+                existing_created_at = existing.get("created_at", now)
+        except Exception:
+            pass
+
     meta = {
         "project_id": project_id,
         "job_id": job_id,
+        "title": body.title or getattr(job, "video_filename", None) or job_id,
         "video_filename": getattr(job, "video_filename", None),
         "source_language": getattr(job, "source_language", None),
-        "created_at": now,
+        "target_language": body.target_language or getattr(job, "target_language", None),
+        "thumbnail_url": body.thumbnail_url,
+        "status": getattr(job, "status", "completed"),
+        "progress": getattr(job, "progress", 100),
+        "created_at": existing_created_at,
         "updated_at": now,
     }
 
@@ -2529,6 +2552,7 @@ async def process_dubbing_pipeline(
     speaker_genders: dict | None = None,
     adaptation_selections: dict | None = None,
     traits_mapping: dict | None = None,
+    character_profiles: list | None = None,
 ):
     try:
         if source_lang != target_lang:
@@ -2557,6 +2581,7 @@ async def process_dubbing_pipeline(
             speaker_genders=speaker_genders,
             adaptation_selections=adaptation_selections,
             traits_mapping=traits_mapping,
+            character_profiles=character_profiles,
         )
 
         if dubbed_video:
@@ -2782,6 +2807,7 @@ async def dub_video(request: DubRequest, background_tasks: BackgroundTasks):
         speaker_genders=job.speaker_genders,
         adaptation_selections=request.adaptation_selections,
         traits_mapping=job.traits_mapping,
+        character_profiles=request.character_profiles or job.character_profiles,
     )
 
     return DubResponse(
@@ -3890,11 +3916,12 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
         speed_ratio = None
         target_duration = None
 
-        # Resolve canonical voice key (e.g. "male-1") to Fish Audio reference_id
+        # Resolve canonical voice key (e.g. "male-1") to Fish Audio reference_id.
+        # Fall through to body.voice_key directly if unresolved — it may already
+        # be a Fish Audio UUID dragged from the Voice Library.
         if body.voice_key and not voice_id:
             resolved = fish_audio_tts.get_voice_id(body.voice_key)
-            if resolved:
-                voice_id = resolved
+            voice_id = resolved or body.voice_key
 
         if getattr(body, "voice_params", None):
             if body.voice_params.voice_id is not None:
@@ -3926,6 +3953,7 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
 
 class AskAIRequest(BaseModel):
     prompt: str
+    model: str = "sonnet"
     source_text: str = ""
     dubbed_text: str = ""
     source_language: str = "zh"
@@ -3942,6 +3970,13 @@ async def ask_ai(body: AskAIRequest):
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(status_code=503, detail="AI not configured")
+
+    _model_map = {
+        "haiku":  "claude-haiku-4-5-20251001",
+        "sonnet": "claude-sonnet-4-6",
+        "opus":   "claude-opus-4-8",
+    }
+    claude_model = _model_map.get(body.model, "claude-sonnet-4-6")
 
     system_prompt = (
         "You are an expert dubbing editor and dialogue writer. "
@@ -3971,7 +4006,7 @@ Respond with JSON: {{"suggestion": "<improved dubbed text>", "explanation": "<on
                     "content-type": "application/json",
                 },
                 json={
-                    "model": "claude-haiku-4-5-20251001",
+                    "model": claude_model,
                     "max_tokens": 512,
                     "system": system_prompt,
                     "messages": [{"role": "user", "content": user_prompt}],
@@ -4048,3 +4083,33 @@ async def clear_emotional_library(request: Request):
         .eq("user_id", user_id) \
         .execute()
     return {"status": "ok"}
+
+
+@router.get("/jobs/{job_id}/character-profiles")
+async def get_character_profiles(job_id: str, request: Request):
+    """Return the per-job character profiles."""
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    verify_jwt(token)
+    job = await job_manager.get_job(job_id)
+    return {"character_profiles": job.character_profiles or []}
+
+
+@router.put("/jobs/{job_id}/character-profiles")
+async def save_character_profiles(job_id: str, request: Request):
+    """Save per-job character profiles. Body: {character_profiles: [{name, traits, speech_style}]}"""
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    verify_jwt(token)
+    body = await request.json()
+    profiles = body.get("character_profiles", [])
+    job = await job_manager.get_job(job_id)
+    job.character_profiles = profiles
+    job_manager._jobs[job_id] = job
+    import json, os
+    settings = get_settings()
+    meta_path = os.path.join(settings.DUBBED_DIR, job_id, "character_profiles.json")
+    os.makedirs(os.path.dirname(meta_path), exist_ok=True)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(profiles, f, ensure_ascii=False, indent=2)
+    return {"status": "ok", "count": len(profiles)}

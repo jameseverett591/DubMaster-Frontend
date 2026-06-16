@@ -1121,9 +1121,13 @@ export function DubVerseEditor({
     const leftText = words.slice(0, wordIndex).join(' ')
     const rightText = words.slice(wordIndex).join(' ')
     const splitRatio = wordIndex / words.length
-    const splitTime = segment.start_time + splitRatio * (segment.end_time - segment.start_time)
-    const leftSegment = { ...segment, end_time: splitTime, target_text: leftText }
-    const rightSegment = { ...segment, id: `split-${Date.now()}`, start_time: splitTime, target_text: rightText }
+    // Use full available space to next segment (not just this segment's narrow window)
+    // so split halves don't pile on each other when the original window is tight.
+    const nextSeg = displaySegments[index + 1]
+    const availableEnd = nextSeg ? nextSeg.start_time : segment.end_time
+    const splitTime = segment.start_time + splitRatio * (availableEnd - segment.start_time)
+    const leftSegment = { ...segment, end_time: splitTime, target_text: leftText, active_text: leftText, preview_text: null }
+    const rightSegment = { ...segment, id: `split-${Date.now()}`, start_time: splitTime, end_time: availableEnd, target_text: rightText, active_text: rightText, preview_text: null }
     setImportedSegments(prev => {
       const base = prev ?? displaySegments
       const result = [...base]

@@ -69,7 +69,7 @@ class DubbingService:
 
         return transcript
 
-    def _merge_close_segments(self, transcript: List[Dict], max_gap: float = 1.0) -> List[Dict]:
+    def _merge_close_segments(self, transcript: List[Dict], max_gap: float = 0.15) -> List[Dict]:
         """
         Merge consecutive segments from the same speaker when the gap between
         them is smaller than *max_gap* seconds.  This produces longer, more
