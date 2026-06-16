@@ -521,6 +521,7 @@ export function DubVerseEditor({
     clearAllDirty,
     initRPTFromSegments,
     commitSegmentChanges,
+    resetEditor,
   } = useEditorStore()
 
   const importedSegments = useEditorStore((state) => state.importedSegments)
@@ -4135,31 +4136,28 @@ export function DubVerseEditor({
               <span>This will clear all editor changes and return to the original pipeline output. Are you sure?</span>
               <Button size="sm" className="h-6 text-xs bg-red-600 hover:bg-red-700 text-white px-2"
                 onClick={() => {
-                  // Segment data
-                  setImportedSegments(null)
-                  // Selections & panels
-                  selectSegment(null)
+                  // Wipe all store state (job, video, segments, speakers, QC)
+                  resetEditor()
+                  // Local UI state
                   setFloatingEmotionSegment(null)
                   setAdvancedBrowserSegment(null)
                   setVideoSubTab(null)
-                  // Staged per-segment overrides
                   setStagedSpeeds({})
                   setStagedEmotions({})
                   setStagedVoices({})
                   setCustomEmotionDrafts({})
-                  // Locks & grouping
                   setLockedSegments(new Set())
                   setLockedPairs(new Set())
                   setGroupedSegments(new Set())
-                  // Inline editor state
                   setInlineEmotionPicker(null)
                   setInlineEmotionWriteIn(null)
                   setSplitWordMode(null)
-                  // Emotion curves
                   revertToOriginal()
-                  // Playhead
-                  setCurrentTime(0)
-                  if (videoRef.current) videoRef.current.currentTime = 0
+                  if (videoRef.current) {
+                    videoRef.current.pause()
+                    videoRef.current.src = ''
+                    videoRef.current.load()
+                  }
                   setShowRevertAllConfirm(false)
                 }}>
                 Clear Editor
