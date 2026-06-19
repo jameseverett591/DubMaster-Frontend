@@ -170,6 +170,7 @@ export interface RegenerateSegmentRequest {
   emotion?: string
   traits?: string[]
   emotionIntensity?: number
+  force_timing?: boolean
 }
 
 export interface RegenerateSegmentResponse {
