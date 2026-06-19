@@ -659,6 +659,12 @@ export function DubVerseEditor({
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [regenError, setRegenError] = useState<string | null>(null)
+  const [timingExclusion, setTimingExclusion] = useState<{
+    audioDuration: number
+    slotDuration: number
+    overlap: number
+    segmentIndex: number
+  } | null>(null)
   const [addSegmentFeedback, setAddSegmentFeedback] = useState<'success' | 'error' | null>(null)
   const [pendingOverwriteIndex, setPendingOverwriteIndex] = useState<number | null>(null)
   const [shareCopied, setShareCopied] = useState<'link' | 'video' | null>(null)
@@ -2409,6 +2415,15 @@ export function DubVerseEditor({
         emotionIntensity,
       })
       console.log('[REGEN] backend response', { path: response.segment.path, voice_id: response.segment.voice_id, status: response.status })
+      if (response.segment.timing_exclusion) {
+        setTimingExclusion({
+          audioDuration: response.segment.timing_audio_duration ?? 0,
+          slotDuration: response.segment.timing_slot_duration ?? 0,
+          overlap: response.segment.timing_overlap ?? 0,
+          segmentIndex: activeIndex,
+        })
+        return false
+      }
       const filename = response.segment.path.split('/').pop() ?? ''
       const audio_url = filename
         ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}`
@@ -6135,6 +6150,100 @@ export function DubVerseEditor({
         </div>
       </div>
       
+      {/* Timing Exclusion — Hard block (overlap > 0.3s): rewrite only */}
+      {timingExclusion && timingExclusion.overlap > 0.3 && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-neutral-900 border border-red-500/50 rounded-lg p-6 w-[440px] shadow-xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-red-500/20 flex items-center justify-center shrink-0">
+                <span className="text-red-400 text-xl">⚠</span>
+              </div>
+              <h3 className="text-lg font-semibold text-white">Rewrite Text — Timing Exclusion Error</h3>
+            </div>
+            <p className="text-sm text-neutral-300 mb-4">
+              Your allotted space for this text is <span className="text-amber-400 font-mono font-bold">{timingExclusion.slotDuration.toFixed(1)}s</span>.
+              Your text exceeds this by <span className="text-red-400 font-mono font-bold">{timingExclusion.overlap.toFixed(1)}s</span>.
+            </p>
+            <p className="text-sm text-neutral-400 mb-6">
+              Please rewrite your text so that it fits into its given time slot.
+            </p>
+            <div className="flex justify-end">
+              <button
+                className="px-4 py-2 rounded bg-amber-500 hover:bg-amber-600 text-black text-sm font-medium transition-colors"
+                onClick={() => setTimingExclusion(null)}
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Timing Exclusion — Soft warning (overlap ≤ 0.3s): can generate anyway */}
+      {timingExclusion && timingExclusion.overlap <= 0.3 && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-neutral-900 border border-amber-500/50 rounded-lg p-6 w-[440px] shadow-xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-amber-500/20 flex items-center justify-center shrink-0">
+                <span className="text-amber-400 text-xl">⚠</span>
+              </div>
+              <h3 className="text-lg font-semibold text-white">Timing Warning</h3>
+            </div>
+            <p className="text-sm text-neutral-300 mb-4">
+              Your allotted space for this text is <span className="text-amber-400 font-mono font-bold">{timingExclusion.slotDuration.toFixed(1)}s</span>.
+              Your text exceeds this by <span className="text-amber-400 font-mono font-bold">{timingExclusion.overlap.toFixed(1)}s</span>.
+            </p>
+            <p className="text-sm text-neutral-400 mb-6">
+              This is close enough to fit. You can generate anyway or rewrite the text to shorten it.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                className="px-4 py-2 rounded bg-neutral-700 hover:bg-neutral-600 text-white text-sm font-medium transition-colors"
+                onClick={() => setTimingExclusion(null)}
+              >
+                Rewrite Text
+              </button>
+              <button
+                type="button"
+                className="px-4 py-2 rounded bg-amber-500 hover:bg-amber-600 text-black text-sm font-medium transition-colors"
+                onClick={async () => {
+                  const idx = timingExclusion.segmentIndex
+                  const seg = displaySegments[idx]
+                  if (!seg) return
+                  setTimingExclusion(null)
+                  setIsRegenerating(true)
+                  setRegeneratingSegmentIndex(idx)
+                  try {
+                    const response = await apiClient.regenerateSegment(jobId, seg.transcript_index ?? idx, {
+                      speed: stagedSpeeds[idx] ?? 1.0,
+                      emotion: stagedEmotions[idx] ?? seg.committed_emotion,
+                      voice_key: stagedVoices[idx] ?? speakerVoiceMap[seg.speaker_id],
+                      pitch: stagedPitches[idx] ?? speakerPitchMap[seg.speaker_id] ?? 0,
+                      force_timing: true,
+                    })
+                    const filename = response.segment.path.split('/').pop() ?? ''
+                    const audio_url = filename ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}` : seg.audio_url
+                    updateSegment(idx, { audio_url, status: 'edited', start_time: response.segment.start ?? seg.start_time, end_time: response.segment.end ?? seg.end_time })
+                    setImportedSegments(prev => {
+                      if (!prev) return prev
+                      return prev.map((s, i) => i === idx ? { ...s, audio_url, committed_audio_url: audio_url, status: 'edited' as const, start_time: response.segment.start ?? s.start_time, end_time: response.segment.end ?? s.end_time } : s)
+                    })
+                    commitSegmentChanges(idx, { committed_audio_url: audio_url })
+                  } catch (err: any) {
+                    setRegenError('Generation failed — please try again')
+                  } finally {
+                    setIsRegenerating(false)
+                    setRegeneratingSegmentIndex(null)
+                  }
+                }}
+              >
+                Generate Anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Add Segment Modal */}
       {showAddSegment && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">

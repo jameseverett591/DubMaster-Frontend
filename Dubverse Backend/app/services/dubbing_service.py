@@ -2086,6 +2086,7 @@ class DubbingService:
         emotion: Optional[str] = None,
         traits: Optional[List[str]] = None,
         pitch: Optional[int] = None,
+        force_timing: Optional[bool] = None,
     ) -> Dict:
         output_dir = os.path.join(self.dubbed_dir, job_id)
         segments_path = os.path.join(output_dir, "segments.json")
@@ -2152,6 +2153,12 @@ class DubbingService:
 
         final_path = result["path"]
 
+        # Clear any stale exclusion from a previous attempt
+        seg.pop("timing_exclusion", None)
+        seg.pop("timing_audio_duration", None)
+        seg.pop("timing_slot_duration", None)
+        seg.pop("timing_overlap", None)
+
         # Fit/trim pass — same quality treatment as the main dub pipeline.
         # If the TTS audio overflows the segment slot, time-stretch it with
         # rubberband (formant-preserving) so the editor regen is never worse
@@ -2182,6 +2189,9 @@ class DubbingService:
                 next_start = float(next_seg["start"]) if next_seg else slot_end + 999.0
                 available_dur = next_start - slot_start
 
+                overlap = actual_dur - available_dur
+                TOLERANCE = 0.3
+
                 if actual_dur <= available_dur - 0.05:
                     # Gap is large enough — extend this segment's window to fit the audio
                     new_end = round(slot_start + actual_dur, 3)
@@ -2192,9 +2202,9 @@ class DubbingService:
                         f"extended end {slot_end:.2f}s → {new_end:.2f}s "
                         f"(next seg at {next_start:.2f}s, gap was {available_dur - slot_dur:.2f}s)"
                     )
-                else:
-                    # No room — time-stretch to fit available space, never exceed next speaker
-                    target = min(slot_dur, available_dur - 0.05)
+                elif overlap <= TOLERANCE or force_timing:
+                    # Marginal overrun or user-forced — speed-up to fit
+                    target = available_dur - 0.05
                     stretched_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen_fit.mp3")
                     stretched = await asyncio.to_thread(
                         self._adjust_audio_duration,
@@ -2203,10 +2213,23 @@ class DubbingService:
                     )
                     if stretched and os.path.exists(stretched_path):
                         final_path = stretched_path
-                        logger.info(
-                            f"[REGEN-FIT] seg {segment_index}: "
-                            f"{actual_dur:.2f}s → {target:.2f}s (no gap available)"
-                        )
+                    new_end = round(slot_start + target, 3)
+                    seg["end"] = new_end
+                    seg["committed_end_time"] = new_end
+                    logger.info(
+                        f"[REGEN-TOLERANCE] seg {segment_index}: "
+                        f"overlap {overlap:.2f}s {'(forced)' if force_timing else 'within tolerance'}, speed-fit to {target:.2f}s"
+                    )
+                else:
+                    # Genuinely too long — reject with exclusion error
+                    seg["timing_exclusion"] = True
+                    seg["timing_audio_duration"] = round(actual_dur, 2)
+                    seg["timing_slot_duration"] = round(available_dur, 2)
+                    seg["timing_overlap"] = round(overlap, 2)
+                    logger.info(
+                        f"[REGEN-EXCLUSION] seg {segment_index}: "
+                        f"{actual_dur:.2f}s exceeds {available_dur:.2f}s by {overlap:.2f}s"
+                    )
 
         seg["path"] = final_path
         seg["voice_id"] = use_voice_id

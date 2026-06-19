@@ -181,3 +181,4 @@ class RegenerateRequest(BaseModel):
     emotion: Optional[str] = None
     traits: Optional[List[str]] = None
     voice_params: Optional[VoiceParams] = None
+    force_timing: Optional[bool] = None
