@@ -648,11 +648,23 @@ class DubbingService:
 
             if source_norm != target_norm:
                 logger.info(f"Translating transcript from {source_norm} to {target_norm}")
+                # Load Velma scene context if available
+                _velma_context = None
+                _velma_path = os.path.join("data", "velma", f"{job_id}.json")
+                if os.path.exists(_velma_path):
+                    try:
+                        import json as _json_vc
+                        with open(_velma_path, "r", encoding="utf-8") as _vcf:
+                            _velma_context = _json_vc.load(_vcf)
+                        logger.info(f"[DUB] Loaded Velma scene context for {job_id}")
+                    except Exception as _vc_err:
+                        logger.warning(f"[DUB] Failed to load Velma context: {_vc_err}")
                 transcript = await translation_service.translate_segments(
                     transcript,
                     source_norm,
                     target_norm,
                     character_profiles=character_profiles,
+                    velma_context=_velma_context,
                 )
                 logger.info(f"Translation complete for {len(transcript)} segments")
                 if transcript:
@@ -845,7 +857,7 @@ class DubbingService:
                             tts_kwargs = None
 
                 if provider_name == "fish-audio" and tts_kwargs is not None:
-                    seg_emotion = segment.get("emotion")
+                    seg_emotion = segment.get("emotion") or segment.get("velma_emotion")
                     tts_kwargs["emotion_tags"] = f"[{seg_emotion.lower()}]" if seg_emotion else ""
                     # Character traits — per-speaker, injected before emotion in the wire format.
                     speaker_traits = (traits_mapping or {}).get(speaker) or []

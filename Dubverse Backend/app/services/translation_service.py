@@ -175,6 +175,7 @@ class TranslationService:
         source_language: str,
         target_language: str,
         character_profiles: Optional[List[Dict]] = None,
+        velma_context: Optional[Dict] = None,
     ) -> List[Dict]:
         # Load the glossary for the incoming source language so every downstream
         # call to _apply_glossary_pre/_post uses the correct language-specific terms.
@@ -274,6 +275,7 @@ class TranslationService:
                 result = await self._translate_segments_claude(
                     segments, target_norm, source_norm,
                     character_profiles=character_profiles,
+                    velma_context=velma_context,
                 )
                 if result is not None:
                     translated = result
@@ -328,6 +330,7 @@ class TranslationService:
         target_language: str,
         source_language: str = "yue",
         character_profiles: Optional[List[Dict]] = None,
+        velma_context: Optional[Dict] = None,
     ) -> Optional[List[Dict]]:
         """
         Translate segments using Claude via the Anthropic API.
@@ -417,6 +420,42 @@ class TranslationService:
                 style = cp.get("speech_style", "")
                 system_prompt_parts.append(f"- {name}: traits=[{traits}]. Speech style: {style}")
             system_prompt_parts.append("Apply these character voices consistently across all lines.")
+
+        # Velma scene context — summary, topics, speaker roles, sentiment
+        if velma_context:
+            _vc_summary = velma_context.get("summary")
+            _vc_topics = velma_context.get("topics", [])
+            _vc_roles = velma_context.get("role_picks", [])
+            _vc_sentiments = velma_context.get("topic_sentiments", [])
+
+            if _vc_summary or _vc_topics or _vc_roles:
+                system_prompt_parts.append("")
+                system_prompt_parts.append("SCENE CONTEXT (from audio analysis):")
+                if _vc_summary:
+                    system_prompt_parts.append(f"Scene summary: {_vc_summary}")
+                if _vc_topics:
+                    system_prompt_parts.append(f"Topics discussed: {', '.join(_vc_topics)}")
+                if _vc_roles:
+                    for _rp in _vc_roles:
+                        _spk = _rp.get("speaker_label", "?")
+                        _role = _rp.get("name", "Unknown")
+                        _conf = _rp.get("confidence", 0)
+                        _reason = _rp.get("reasoning", "")
+                        system_prompt_parts.append(
+                            f"- Speaker {_spk}: role={_role} (confidence={_conf:.0%}). {_reason}"
+                        )
+                if _vc_sentiments:
+                    _sent_parts = []
+                    for _ts in _vc_sentiments:
+                        _sent_parts.append(
+                            f"Speaker {_ts.get('speaker_label', '?')} on '{_ts.get('topic', '?')}': "
+                            f"{_ts.get('sentiment_label', '?')} ({_ts.get('sentiment_score', 0):+.1f})"
+                        )
+                    system_prompt_parts.append(f"Speaker sentiments: {'; '.join(_sent_parts)}")
+                system_prompt_parts.append(
+                    "Use this context to inform word choice and tone — "
+                    "but do NOT add information not present in the source text."
+                )
 
         system_prompt_parts.append("")
         system_prompt_parts.append("DOMAIN-SPECIFIC RULES:")

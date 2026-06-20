@@ -1005,6 +1005,21 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             f"Job {job_id}: using Velma diarization (primary) — "
             f"{len(diarization_segments)} segments, {velma_result.get('unique_speakers', '?')} speakers"
         )
+        # Persist Velma scene context for use during translation
+        _velma_context = {
+            "summary": velma_result.get("summary"),
+            "topics": velma_result.get("topics", []),
+            "topic_sentiments": velma_result.get("topic_sentiments", []),
+            "role_picks": velma_result.get("role_picks", []),
+        }
+        if any(_velma_context.values()):
+            _velma_dir = Path("data/velma")
+            _velma_dir.mkdir(parents=True, exist_ok=True)
+            _velma_path = _velma_dir / f"{job_id}.json"
+            import json as _json_velma
+            with open(_velma_path, "w", encoding="utf-8") as _vf:
+                _json_velma.dump(_velma_context, _vf, ensure_ascii=False, indent=2)
+            logger.info(f"Job {job_id}: Velma scene context saved to {_velma_path}")
     # else: keep diarization_segments from RunPod as fallback (already set above)
 
     segments = [
@@ -1659,6 +1674,19 @@ async def process_video_pipeline(job_id: str, video_path: str):
                 if velma_result and velma_result.get("status") == "ok":
                     diarization_segments = velma_result.get("segments", [])
                     logger.info(f"Job {job_id}: using Velma diarization — {len(diarization_segments)} segments")
+                    # Persist Velma scene context for use during translation
+                    _velma_ctx = {
+                        "summary": velma_result.get("summary"),
+                        "topics": velma_result.get("topics", []),
+                        "topic_sentiments": velma_result.get("topic_sentiments", []),
+                        "role_picks": velma_result.get("role_picks", []),
+                    }
+                    if any(_velma_ctx.values()):
+                        _vd = Path("data/velma")
+                        _vd.mkdir(parents=True, exist_ok=True)
+                        with open(_vd / f"{job_id}.json", "w", encoding="utf-8") as _vf2:
+                            _json.dump(_velma_ctx, _vf2, ensure_ascii=False, indent=2)
+                        logger.info(f"Job {job_id}: Velma scene context saved")
                 else:
                     # Fall back to existing pyannote/cloud diarization
                     if is_cloud_enabled() and vocals_path:

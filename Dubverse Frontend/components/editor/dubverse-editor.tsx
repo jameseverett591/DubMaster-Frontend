@@ -4221,6 +4221,10 @@ export function DubVerseEditor({
                   type="button"
                   key={t.id}
                   onClick={() => {
+                    if (t.id === 'studio') {
+                      router.push('/studio')
+                      return
+                    }
                     setRightPanelTab(t.id)
                   }}
                   className={cn(
