@@ -857,7 +857,7 @@ class DubbingService:
                             tts_kwargs = None
 
                 if provider_name == "fish-audio" and tts_kwargs is not None:
-                    seg_emotion = segment.get("emotion") or segment.get("velma_emotion")
+                    seg_emotion = segment.get("emotion")
                     tts_kwargs["emotion_tags"] = f"[{seg_emotion.lower()}]" if seg_emotion else ""
                     # Character traits — per-speaker, injected before emotion in the wire format.
                     speaker_traits = (traits_mapping or {}).get(speaker) or []
