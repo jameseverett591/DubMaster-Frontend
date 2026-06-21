@@ -6,6 +6,12 @@
 
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
+export interface CharacterProfile {
+  name: string
+  traits: string[]
+  speech_style: string
+}
+
 // ============================================================================
 // CUSTOM ERRORS
 // ============================================================================
@@ -737,6 +743,24 @@ class DubVerseAPIClient {
     return response.json()
   }
 
+  async getCharacterProfiles(jobId: string): Promise<CharacterProfile[]> {
+    const response = await fetch(`${this.baseURL}/api/jobs/${jobId}/character-profiles`, {
+      headers: this._authHeaders(),
+    })
+    if (!response.ok) throw new Error('Failed to load character profiles')
+    const data = await response.json()
+    return data.character_profiles ?? []
+  }
+
+  async saveCharacterProfiles(jobId: string, profiles: CharacterProfile[]): Promise<void> {
+    const response = await fetch(`${this.baseURL}/api/jobs/${jobId}/character-profiles`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ character_profiles: profiles }),
+    })
+    if (!response.ok) throw new Error('Failed to save character profiles')
+  }
+
   async regenerateSegment(
     jobId: string,
     index: number,
@@ -785,12 +809,44 @@ class DubVerseAPIClient {
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify({ resolution, aspect, format }),
     })
-    if (!res.ok) throw new Error(`Export failed: ${res.status}`)
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: res.statusText }))
+      throw new Error(body.detail || `Export failed: ${res.status}`)
+    }
     return res.json()
   }
 
   getExportDownloadUrl(jobId: string, filename: string): string {
     return `${this.baseURL}/api/dub/export/download/${jobId}/${filename}`
+  }
+
+  async saveProject(jobId: string, meta: { title?: string; target_language?: string; thumbnail_url?: string }): Promise<void> {
+    await fetch(`${this.baseURL}/api/projects/save/${jobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify(meta),
+    })
+  }
+
+  async listProjects(): Promise<Array<{
+    project_id: string
+    job_id: string
+    title: string
+    video_filename: string | null
+    source_language: string | null
+    target_language: string | null
+    thumbnail_url: string | null
+    status: string
+    progress: number
+    created_at: string
+    updated_at: string
+  }>> {
+    const res = await fetch(`${this.baseURL}/api/projects`, {
+      headers: this._authHeaders(),
+    })
+    if (!res.ok) return []
+    const data = await res.json()
+    return data.projects ?? []
   }
 
   async remixDub(jobId: string): Promise<RemixResponse> {
@@ -825,6 +881,7 @@ class DubVerseAPIClient {
 
   async askAI(request: {
     prompt: string
+    model?: 'haiku' | 'sonnet' | 'opus'
     source_text?: string
     dubbed_text?: string
     source_language?: string
