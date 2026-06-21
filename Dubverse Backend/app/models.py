@@ -74,6 +74,7 @@ class Job(BaseModel):
     speaker_genders: Optional[Dict[str, str]] = None   # e.g. {"speaker-1": "male", "speaker-2": "female"}
     voice_mapping: Optional[Dict[str, str]] = None     # e.g. {"speaker-1": "male-2", "speaker-2": "female-1"}
     traits_mapping: Optional[Dict[str, List[str]]] = None  # e.g. {"speaker-1": ["calm", "weary", "paternal"]}
+    character_profiles: Optional[List[Dict]] = None  # per-job character profiles [{name, traits, speech_style}]
 
     dubbed_video_url: Optional[str] = None
     tts_engine: Optional[str] = None
@@ -135,6 +136,7 @@ class DubRequest(BaseModel):
     dubbing_engine: Optional[str] = None  # "dubmaster" (default) or "vozo"
     vozo_user_prompt: Optional[str] = None  # translation guidance for Vozo
     adaptation_selections: Optional[Dict[str, str]] = None  # segment_id → "faithful"|"performable"|"sync_fit"
+    character_profiles: Optional[List[Dict]] = None  # [{name, traits, speech_style}]
 
 
 class AdaptVariant(BaseModel):

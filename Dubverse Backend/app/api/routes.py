@@ -2134,6 +2134,105 @@ async def get_transcript(job_id: str):
     raise HTTPException(status_code=404, detail="Transcript not available yet")
 
 
+@router.get("/transcript/{job_id}/editor-format")
+async def get_transcript_editor_format(job_id: str):
+    """Serve transcript in the format expected by the standalone Transcript Editor.
+
+    Transforms DubMaster/Velma segments into the editor's schema with
+    speakers, segments (id, text, speaker_id, confidence, status, words),
+    and Velma role picks mapped to speaker names.
+    """
+    import json as _json_ed
+
+    transcript_file = Path("data/transcripts") / f"{job_id}.json"
+    velma_file = Path("data/velma") / f"{job_id}.json"
+
+    if not transcript_file.exists():
+        job = await _get_or_rehydrate_job(job_id)
+        if not (job and job.transcript):
+            raise HTTPException(status_code=404, detail="Transcript not available yet")
+        segments_raw = [
+            {"text": s.text, "start": s.start, "end": s.end, "speaker": s.speaker}
+            for s in job.transcript.segments
+        ]
+        duration = job.transcript.duration or 0
+        language = job.transcript.language or "en"
+    else:
+        with open(transcript_file, "r", encoding="utf-8") as f:
+            tdata = _json_ed.load(f)
+        segments_raw = tdata.get("segments", [])
+        duration = tdata.get("duration", 0)
+        language = tdata.get("language", "en")
+
+    velma_context = None
+    if velma_file.exists():
+        try:
+            with open(velma_file, "r", encoding="utf-8") as f:
+                velma_context = _json_ed.load(f)
+        except Exception:
+            pass
+
+    role_map: dict = {}
+    if velma_context and velma_context.get("role_picks"):
+        for rp in velma_context["role_picks"]:
+            role_map[str(rp.get("speaker_label", ""))] = rp.get("name", "Speaker")
+
+    speaker_genders = {}
+    job_obj = await _get_or_rehydrate_job(job_id)
+    if job_obj and hasattr(job_obj, "speaker_genders") and job_obj.speaker_genders:
+        speaker_genders = job_obj.speaker_genders
+
+    colors = ["#3B82F6", "#10B981", "#F59E0B", "#EC4899", "#8B5CF6",
+              "#EF4444", "#06B6D4", "#84CC16", "#F97316", "#6366F1"]
+    unique_speakers = sorted(set(str(s.get("speaker", "1")) for s in segments_raw))
+
+    speakers = []
+    for i, spk in enumerate(unique_speakers):
+        name = role_map.get(spk, f"Speaker {spk}")
+        gender = speaker_genders.get(f"speaker-{spk}", speaker_genders.get(spk, "male"))
+        speakers.append({
+            "id": f"spk_{i}",
+            "name": name,
+            "gender": gender,
+            "age_estimate": 8 if gender == "child" else 35,
+            "color": colors[i % len(colors)],
+        })
+
+    spk_id_map = {spk: f"spk_{i}" for i, spk in enumerate(unique_speakers)}
+
+    editor_segments = []
+    for i, seg in enumerate(segments_raw):
+        text = seg.get("text", "").strip()
+        if not text:
+            continue
+        spk_label = str(seg.get("speaker", "1"))
+        editor_segments.append({
+            "id": f"seg_{i:03d}",
+            "text": text,
+            "original_text": text,
+            "start": seg.get("start", 0),
+            "end": seg.get("end", 0),
+            "speaker_id": spk_id_map.get(spk_label, "spk_0"),
+            "language": language,
+            "confidence": 1.0,
+            "words": [],
+            "is_edited": False,
+            "status": "pending",
+        })
+
+    return {
+        "project": {
+            "id": job_id,
+            "name": f"Job {job_id[:8]}",
+            "duration": duration,
+            "language": language,
+        },
+        "speakers": speakers,
+        "segments": editor_segments,
+        "velma_summary": velma_context.get("summary") if velma_context else None,
+    }
+
+
 @router.delete("/jobs/clear-all")
 async def clear_all_jobs(request: Request, force: bool = False):
     """Delete all jobs belonging to the authenticated user.
