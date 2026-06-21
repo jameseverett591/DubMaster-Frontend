@@ -817,22 +817,42 @@ export function FloatingEmotionChart({
             )
           })()}
 
-          {/* Click flash — expanding ring + pulsing dot in emotion color */}
+          {/* Click flash — expanding ring + pulsing dot + label in emotion color */}
           {clickFlash && clickFlash.chord && (
             <g key={clickFlash.id} style={{ pointerEvents: 'none' }}>
               {(() => {
                 const c = emotionColor(clickFlash.chord.emotion)
+                const lx = clickFlash.svgX
+                const ly = clickFlash.svgY
                 return (
                   <>
-                    <circle cx={clickFlash.svgX} cy={clickFlash.svgY} r={4} fill="none" stroke={c} strokeWidth={1.5} opacity={0.7}>
+                    <circle cx={lx} cy={ly} r={4} fill="none" stroke={c} strokeWidth={1.5} opacity={0.7}>
                       <animate attributeName="r" from="4" to="28" dur="0.9s" fill="freeze" />
                       <animate attributeName="opacity" from="0.7" to="0" dur="0.9s" fill="freeze" />
                     </circle>
-                    <circle cx={clickFlash.svgX} cy={clickFlash.svgY} r={5} fill={c} opacity={1}
+                    <circle cx={lx} cy={ly} r={5} fill={c} opacity={1}
                       style={{ filter: `drop-shadow(0 0 8px ${c}) drop-shadow(0 0 16px ${c}88)` }}>
                       <animate attributeName="r" values="5;6.5;5" dur="1.1s" repeatCount="indefinite" />
                       <animate attributeName="opacity" values="0.9;1;0.9" dur="1.1s" repeatCount="indefinite" />
                     </circle>
+                    {/* Label above dot */}
+                    <text x={lx} y={ly - 12} textAnchor="middle"
+                      fill={c} fontSize={8.5} fontFamily="monospace" fontWeight="bold"
+                      style={{ filter: `drop-shadow(0 0 4px ${c}99)` }}>
+                      {clickFlash.chord.emotion}
+                    </text>
+                    {clickFlash.chord.state && (
+                      <text x={lx} y={ly - 4} textAnchor="middle"
+                        fill={c + 'bb'} fontSize={6.5} fontFamily="monospace">
+                        {clickFlash.chord.state}
+                      </text>
+                    )}
+                    {clickFlash.chord.trait && (
+                      <text x={lx} y={ly + 16} textAnchor="middle"
+                        fill="rgba(147,197,253,0.70)" fontSize={6} fontFamily="monospace">
+                        {clickFlash.chord.trait}
+                      </text>
+                    )}
                   </>
                 )
               })()}
@@ -903,7 +923,12 @@ export function FloatingEmotionChart({
                   setChordName('')
                 }
               }}
-              className="flex-1 bg-transparent border-b border-violet-500/40 text-xs text-slate-200 placeholder-slate-600 outline-none px-1 py-0.5"
+              className="flex-1 rounded px-2 py-1 text-xs text-white placeholder-violet-400/60 outline-none"
+              style={{
+                background: 'rgba(139,92,246,0.12)',
+                border: '1px solid rgba(139,92,246,0.6)',
+                boxShadow: '0 0 8px rgba(139,92,246,0.35), inset 0 0 6px rgba(139,92,246,0.08)',
+              }}
             />
             <button type="button" onClick={() => {
               if (chordName.trim()) {
@@ -912,7 +937,7 @@ export function FloatingEmotionChart({
               }
               setPendingChord(null)
               setChordName('')
-            }} className="text-[9px] text-violet-400 hover:text-violet-200 px-2 shrink-0">Save</button>
+            }} className="text-[9px] font-semibold text-violet-300 hover:text-white bg-violet-600/30 hover:bg-violet-600/60 border border-violet-500/50 px-2 py-1 rounded shrink-0 transition-colors">Save</button>
           </>
         )}
         <button

@@ -55,7 +55,7 @@ export function LanguageSwitcher() {
           <span className="text-xs text-[#64748B] hidden sm:inline">▾</span>
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-52 bg-[#0F172A] border-[#A855F7]/30">
+      <DropdownMenuContent align="end" className="w-52 bg-[#0F172A] border-[#A855F7]/30 max-h-[70vh] overflow-y-auto">
         <DropdownMenuLabel className="text-[#94A3B8] text-xs font-normal flex items-center gap-2 pb-1">
           <Globe className="h-3.5 w-3.5 text-[#22D3EE]" strokeWidth={1.5} />
           Select your language

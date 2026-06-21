@@ -140,7 +140,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             source_text: sourceByIndex.get(seg.transcript_index ?? idx) ?? '',
             target_text: seg.text ?? '',
             active_text: seg.text ?? '',
-            preview_text: null,
+            preview_text: seg.committed_adapted_text ?? null,
             isPreviewing: false,
             speaker_id: speakerId,
             speaker_label: seg.speaker ?? 'Speaker 1',

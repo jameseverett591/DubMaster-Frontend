@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useCallback } from 'react'
+import React, { useState } from 'react'
 
 const ROWS = 8
 
@@ -49,40 +49,11 @@ export function EmotionLedTrack({
   emotionLabel?: string | null
   progressionMarkers?: Array<{ emotion: string; intensity: number; color: string }>
 }) {
-  const [colEmotions, setColEmotions] = useState<Record<number, string>>({})
-  const [selectedCols, setSelectedCols] = useState<Set<number>>(new Set())
-  const [editingMode, setEditingMode] = useState(false)
   const [hover, setHover] = useState<{
     x: number; y: number; t: number; intensity: number; col: number
   } | null>(null)
 
-  const exitEditing = useCallback(() => {
-    setEditingMode(false)
-    setSelectedCols(new Set())
-    setHover(null)
-  }, [])
-
-  const handleColClick = useCallback((col: number, e: React.MouseEvent) => {
-    e.stopPropagation()
-    if (!editingMode) setEditingMode(true)
-    setSelectedCols(prev => {
-      const next = new Set(prev)
-      if (next.has(col)) next.delete(col)
-      else next.add(col)
-      return next
-    })
-  }, [editingMode])
-
-  const assignEmotion = useCallback((emotion: string) => {
-    setColEmotions(prev => {
-      const next = { ...prev }
-      selectedCols.forEach(col => { next[col] = emotion })
-      return next
-    })
-  }, [selectedCols])
-
   const handleMouseMove: React.MouseEventHandler<HTMLDivElement> = (e) => {
-    if (editingMode) return
     const rect = e.currentTarget.getBoundingClientRect()
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
@@ -94,11 +65,11 @@ export function EmotionLedTrack({
   if (!curveData || curveData.length === 0) {
     return (
       <div
-        className="absolute inset-1 rounded-md flex items-center justify-center border border-cyan-900/20"
-        style={{ background: 'rgba(0,10,15,0.55)' }}
-      >
-        <span className="text-[10px] text-cyan-600/40 select-none">re-dub to populate</span>
-      </div>
+        className="absolute inset-1 rounded-md border border-cyan-900/10"
+        style={{
+          background: 'linear-gradient(90deg, rgba(0,206,209,0.04) 0%, rgba(0,206,209,0.02) 100%)',
+        }}
+      />
     )
   }
 
@@ -106,101 +77,62 @@ export function EmotionLedTrack({
   const boxGlow = defaultGlowColor(avg)
   const duration = pulseDuration(avg)
 
-  // Build emotion summary from tagged columns
-  const grouped: Record<string, number[]> = {}
-  Object.entries(colEmotions).forEach(([colStr, emotion]) => {
-    const col = parseInt(colStr)
-    if (!grouped[emotion]) grouped[emotion] = []
-    grouped[emotion].push(curveData[col] ?? avg)
-  })
-  const emotionSummary = Object.entries(grouped).map(([emotion, intensities]) => ({
-    emotion,
-    avgIntensity: intensities.reduce((a, b) => a + b, 0) / intensities.length,
-  }))
-  const showDefaultBadge = emotionSummary.length === 0
+  // Peak column for emotion label overlay
+  let peakCol = 0
+  let peakVal = 0
+  curveData.forEach((v, i) => { if (v > peakVal) { peakVal = v; peakCol = i } })
+  const peakPct = ((peakCol + 0.5) / curveData.length) * 100
 
   return (
     <div
       className="absolute inset-1 rounded-md overflow-hidden"
       style={{
         background: 'rgba(0,12,18,0.72)',
-        border: `1px solid ${editingMode ? 'rgba(0,206,209,0.35)' : 'rgba(0,206,209,0.18)'}`,
+        border: 'rgba(0,206,209,0.18)',
         boxShadow: `0 0 10px 1px ${boxGlow}, inset 0 0 6px rgba(0,206,209,0.04)`,
         animation: `emotion-pulse ${duration} ease-in-out infinite`,
       }}
-      onDoubleClick={exitEditing}
       onMouseMove={handleMouseMove}
       onMouseLeave={() => setHover(null)}
     >
-      {/* Picker bar — editing mode only */}
-      {editingMode && (
-        <div
-          className="absolute top-0 left-0 right-0 flex items-center gap-0.5 px-1 z-10"
-          style={{
-            height: 30,
-            background: 'rgba(0,8,14,0.92)',
-            borderBottom: '1px solid rgba(0,206,209,0.15)',
-          }}
-        >
-          {EMOTION_LIST.map(emotion => {
-            const p = EMOTION_PALETTE[emotion]
-            const isActive = Array.from(selectedCols).some(col => colEmotions[col] === emotion)
-            return (
-              <button
-                key={emotion}
-                type="button"
-                className="text-[7.5px] px-1 py-0.5 rounded leading-none font-semibold shrink-0 transition-all"
-                style={{
-                  color: p.text,
-                  background: isActive ? `${p.lit}22` : 'rgba(255,255,255,0.04)',
-                  border: `1px solid ${isActive ? p.lit + '55' : 'rgba(255,255,255,0.06)'}`,
-                  boxShadow: isActive ? `0 0 4px ${p.glow}` : 'none',
-                }}
-                onClick={(e) => { e.stopPropagation(); assignEmotion(emotion) }}
-              >
-                {emotion}
-              </button>
-            )
-          })}
-          <button
-            type="button"
-            className="ml-auto text-[9px] text-slate-500 hover:text-slate-300 px-1 leading-none shrink-0"
-            onClick={(e) => { e.stopPropagation(); exitEditing() }}
-          >
-            ×
-          </button>
-        </div>
-      )}
+      {/* Decorative emotion palette header */}
+      <div
+        className="absolute top-0 left-0 right-0 flex items-center gap-0.5 px-1 pointer-events-none z-10"
+        style={{
+          height: 16,
+          background: 'rgba(0,8,14,0.80)',
+          borderBottom: '1px solid rgba(0,206,209,0.10)',
+        }}
+      >
+        {EMOTION_LIST.map(emotion => {
+          const p = EMOTION_PALETTE[emotion]
+          return (
+            <span
+              key={emotion}
+              className="text-[7px] px-1 leading-none font-semibold shrink-0 rounded"
+              style={{ color: p.text }}
+            >
+              {emotion}
+            </span>
+          )
+        })}
+      </div>
 
       {/* LED columns */}
       <div
         className="absolute left-0 right-0 flex items-end"
-        style={{
-          top: editingMode ? 30 : 0,
-          bottom: 0,
-          padding: '3px 2px 18px 2px',
-        }}
+        style={{ top: 16, bottom: 0, padding: '3px 2px 18px 2px' }}
       >
         {curveData.map((intensity, col) => {
           const litRows = Math.max(1, Math.round(intensity * ROWS))
-          const assigned = colEmotions[col]
-          const palette = assigned ? EMOTION_PALETTE[assigned] : null
-          const litColor = palette ? palette.lit : '#00CED1'
-          const cellGlow = palette ? palette.glow : defaultGlowColor(intensity)
-          const isSelected = selectedCols.has(col)
+          const litColor = '#00CED1'
+          const cellGlow = defaultGlowColor(intensity)
 
           return (
             <div
               key={col}
-              className="flex flex-col-reverse flex-1 cursor-pointer"
-              style={{
-                gap: 2,
-                padding: '0 1px',
-                outline: isSelected ? `1px solid ${litColor}80` : 'none',
-                outlineOffset: -1,
-                borderRadius: 2,
-              }}
-              onClick={(e) => handleColClick(col, e)}
+              className="flex flex-col-reverse flex-1"
+              style={{ gap: 2, padding: '0 1px' }}
             >
               {Array.from({ length: ROWS }).map((_, row) => {
                 const isLit = row < litRows
@@ -218,56 +150,60 @@ export function EmotionLedTrack({
                   />
                 )
               })}
+
             </div>
           )
         })}
       </div>
 
-      {/* Emotion badges */}
-      <div className="absolute bottom-1 left-1.5 right-1.5 flex flex-wrap gap-x-1 gap-y-0.5 pointer-events-none">
-        {progressionMarkers && progressionMarkers.length > 0 ? (
-          progressionMarkers.map((m, i) => (
+      {/* Emotion label — floats above the peak LED column */}
+      {progressionMarkers && progressionMarkers.length > 0 ? (
+        progressionMarkers.map((m, i) => {
+          // Distribute markers evenly if multiple
+          const pct = progressionMarkers.length === 1
+            ? peakPct
+            : (i / (progressionMarkers.length - 1)) * 100
+          return (
             <span
               key={i}
-              className="text-[7.5px] font-bold leading-none px-1.5 py-0.5 rounded select-none"
+              className="absolute pointer-events-none select-none text-[7.5px] font-bold leading-none px-1.5 py-0.5 rounded"
               style={{
+                left: `${Math.min(Math.max(pct, 5), 90)}%`,
+                top: 20,
+                transform: 'translateX(-50%)',
                 color: m.color,
                 background: m.color + '22',
                 border: `1px solid ${m.color}55`,
                 boxShadow: `0 0 5px ${m.color}44`,
+                whiteSpace: 'nowrap',
+                zIndex: 5,
               }}
             >
               {m.emotion} · {Math.round(m.intensity * 100)}%
             </span>
-          ))
-        ) : (
-          <>
-            {showDefaultBadge && (
-              <span
-                className="text-[8px] font-semibold leading-none px-1 py-0.5 rounded select-none"
-                style={{ color: EMOTION_PALETTE.Neutral.text, background: 'rgba(0,0,0,0.55)' }}
-              >
-                {emotionLabel ?? defaultLabel(avg)} · {Math.round(avg * 100)}%
-              </span>
-            )}
-            {emotionSummary.map(({ emotion, avgIntensity }) => {
-              const p = EMOTION_PALETTE[emotion] ?? EMOTION_PALETTE.Neutral
-              return (
-                <span
-                  key={emotion}
-                  className="text-[8px] font-semibold leading-none px-1 py-0.5 rounded select-none"
-                  style={{ color: p.text, background: 'rgba(0,0,0,0.55)' }}
-                >
-                  {emotion} · {Math.round(avgIntensity * 100)}%
-                </span>
-              )
-            })}
-          </>
-        )}
-      </div>
+          )
+        })
+      ) : (
+        <span
+          className="absolute pointer-events-none select-none text-[8px] font-semibold leading-none px-1.5 py-0.5 rounded"
+          style={{
+            left: `${Math.min(Math.max(peakPct, 5), 90)}%`,
+            top: 20,
+            transform: 'translateX(-50%)',
+            color: EMOTION_PALETTE.Neutral.text,
+            background: 'rgba(0,0,0,0.72)',
+            border: '1px solid rgba(0,206,209,0.25)',
+            boxShadow: `0 0 6px ${defaultGlowColor(peakVal)}`,
+            whiteSpace: 'nowrap',
+            zIndex: 5,
+          }}
+        >
+          {emotionLabel ?? defaultLabel(avg)} · {Math.round(avg * 100)}%
+        </span>
+      )}
 
-      {/* Hover tooltip — view mode only */}
-      {hover && !editingMode && (
+      {/* Hover tooltip */}
+      {hover && (
         <div
           className="absolute pointer-events-none z-20"
           style={{ left: Math.min(hover.x + 10, 160), top: Math.max(2, hover.y - 42) }}
@@ -275,20 +211,13 @@ export function EmotionLedTrack({
           <div
             className="rounded-md px-2 py-1 text-xs bg-slate-900/85 backdrop-blur-sm"
             style={{
-              border: `1px solid ${(colEmotions[hover.col] ? EMOTION_PALETTE[colEmotions[hover.col]]?.lit : '#00CED1') + '30'}`,
+              border: `1px solid ${'#00CED1'}30`,
               boxShadow: `0 0 8px ${defaultGlowColor(hover.intensity)}`,
               animation: `emotion-pulse ${pulseDuration(hover.intensity)} ease-in-out infinite`,
             }}
           >
-            <span
-              className="font-semibold block"
-              style={{
-                color: colEmotions[hover.col]
-                  ? (EMOTION_PALETTE[colEmotions[hover.col]]?.text ?? '#00CED1')
-                  : '#00CED1',
-              }}
-            >
-              {colEmotions[hover.col] ?? defaultLabel(hover.intensity)} — {Math.round(hover.intensity * 100)}%
+            <span className="font-semibold block" style={{ color: '#00CED1' }}>
+              {defaultLabel(hover.intensity)} — {Math.round(hover.intensity * 100)}%
             </span>
             <span className="text-slate-400 text-[10px]">{hover.t.toFixed(2)}s</span>
           </div>
