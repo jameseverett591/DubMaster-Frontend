@@ -999,12 +999,29 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         except Exception as _velma_err:
             logger.warning(f"Job {job_id}: Velma diarization failed: {_velma_err}")
 
+    _velma_is_primary = False
     if velma_result and velma_result.get("status") == "ok":
-        diarization_segments = velma_result.get("segments", [])
+        _velma_segs = velma_result.get("segments", [])
         logger.info(
-            f"Job {job_id}: using Velma diarization (primary) — "
-            f"{len(diarization_segments)} segments, {velma_result.get('unique_speakers', '?')} speakers"
+            f"Job {job_id}: Velma OK — {len(_velma_segs)} segments, "
+            f"{velma_result.get('unique_speakers', '?')} speakers. "
+            f"Using as PRIMARY transcript + diarization source."
         )
+        segments_data = [
+            {
+                "text": s.get("text", ""),
+                "start": s.get("start", 0),
+                "end": s.get("end", 0),
+                "speaker": s.get("speaker", "speaker-1"),
+                "velma_emotion": s.get("emotion"),
+                "velma_accent": s.get("accent"),
+                "velma_deepfake_score": s.get("deepfake_score"),
+            }
+            for s in _velma_segs
+            if (s.get("text") or "").strip()
+        ]
+        _velma_is_primary = True
+
         # Persist Velma scene context for use during translation
         _velma_context = {
             "summary": velma_result.get("summary"),
@@ -1020,7 +1037,8 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             with open(_velma_path, "w", encoding="utf-8") as _vf:
                 _json_velma.dump(_velma_context, _vf, ensure_ascii=False, indent=2)
             logger.info(f"Job {job_id}: Velma scene context saved to {_velma_path}")
-    # else: keep diarization_segments from RunPod as fallback (already set above)
+    else:
+        logger.info(f"Job {job_id}: Velma unavailable — falling back to Whisper/RunPod transcript")
 
     segments = [
         TranscriptSegment(
@@ -1047,7 +1065,9 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
                 )
             )
 
-    if diarization_segments and segments:
+    # Re-assign speakers from diarization only when Velma was NOT the
+    # primary transcript source (Velma segments already have correct speakers).
+    if not _velma_is_primary and diarization_segments and segments:
         unique_speakers = set((s.speaker or "speaker-1") for s in segments)
         diar_speakers = set((d.get("speaker") or "").strip() for d in diarization_segments if d.get("speaker"))
         if len(unique_speakers) <= 1 and len(diar_speakers) > 1:
@@ -1671,9 +1691,25 @@ async def process_video_pipeline(job_id: str, video_path: str):
                     except Exception as _velma_err:
                         logger.warning(f"Job {job_id}: Velma diarization failed: {_velma_err}")
 
+                _velma_is_primary_local = False
                 if velma_result and velma_result.get("status") == "ok":
-                    diarization_segments = velma_result.get("segments", [])
-                    logger.info(f"Job {job_id}: using Velma diarization — {len(diarization_segments)} segments")
+                    _velma_segs_local = velma_result.get("segments", [])
+                    logger.info(
+                        f"Job {job_id}: Velma OK — {len(_velma_segs_local)} segments. "
+                        f"Using as PRIMARY transcript + diarization source."
+                    )
+                    raw_segments = [
+                        {
+                            "text": s.get("text", ""),
+                            "start": s.get("start", 0),
+                            "end": s.get("end", 0),
+                            "speaker": s.get("speaker", "speaker-1"),
+                        }
+                        for s in _velma_segs_local
+                        if (s.get("text") or "").strip()
+                    ]
+                    _velma_is_primary_local = True
+
                     # Persist Velma scene context for use during translation
                     _velma_ctx = {
                         "summary": velma_result.get("summary"),
@@ -1688,7 +1724,8 @@ async def process_video_pipeline(job_id: str, video_path: str):
                             _json.dump(_velma_ctx, _vf2, ensure_ascii=False, indent=2)
                         logger.info(f"Job {job_id}: Velma scene context saved")
                 else:
-                    # Fall back to existing pyannote/cloud diarization
+                    # Velma unavailable — fall back to Whisper + pyannote/cloud diarization
+                    logger.info(f"Job {job_id}: Velma unavailable — falling back to Whisper + diarization")
                     if is_cloud_enabled() and vocals_path:
                         logger.info(f"Job {job_id}: using CLOUD GPU for diarization")
                         diarization_result = await asyncio.to_thread(
@@ -1715,7 +1752,19 @@ async def process_video_pipeline(job_id: str, video_path: str):
                             f"Diarization skipped: {diarization_result.get('reason', 'unknown')}"
                         )
 
-                segments = _assign_speakers_from_diarization(raw_segments, diarization_segments)
+                if _velma_is_primary_local:
+                    segments = [
+                        TranscriptSegment(
+                            text=s.get("text", ""),
+                            start=s.get("start", 0),
+                            end=s.get("end", 0),
+                            speaker=s.get("speaker", "speaker-1"),
+                        )
+                        for s in raw_segments
+                        if s.get("text", "").strip()
+                    ]
+                else:
+                    segments = _assign_speakers_from_diarization(raw_segments, diarization_segments)
 
                 # ── Re-transcribe split segments that have empty text ──
                 # When diarization splits a single blob, each segment needs

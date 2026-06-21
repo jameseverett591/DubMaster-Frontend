@@ -775,9 +775,12 @@ class DubbingService:
                 _cjk_chars = len(re.findall(
                     r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', text
                 ))
-                if _cjk_chars > 2:
+                _non_space = len(re.findall(r'\S', text))
+                _cjk_ratio = _cjk_chars / max(_non_space, 1)
+                if _cjk_ratio > 0.5:
                     logger.warning(
-                        f"[TTS] Segment {i}: text appears untranslated ({_cjk_chars} CJK chars) "
+                        f"[TTS] Segment {i}: text appears untranslated "
+                        f"({_cjk_chars} CJK / {_non_space} chars = {_cjk_ratio:.0%}) "
                         f"— skipping: '{text[:60]}'"
                     )
                     return {"index": i, "skipped": True, "reason": "untranslated"}
