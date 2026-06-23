@@ -670,18 +670,29 @@ class DubbingService:
                 if transcript:
                     logger.info(f"Sample translated text: {transcript[0].get('text', '')[:100]}")
 
-                # Drop segments whose translation is empty (glossary suppressed) or
-                # a single-token noise word (fight grunt residue, hallucination).
+                # Drop segments whose translation carries no speakable content:
+                # empty (glossary suppressed), or punctuation/whitespace-only such
+                # as a stray "." — TTS would otherwise synthesise junk audio from
+                # it. Also drop single-token noise words (fight grunt residue,
+                # hallucination). A punctuation-only result must never reach TTS,
+                # regardless of how it arose (glossary, LLM, or future pipeline).
                 _NOISE_WORDS = {
                     "you", "it", "he", "she", "they", "i", "we",
                     "sa", "ha", "oh", "ah", "uh", "bobo", "babo",
                     "the", "a", "an",
                 }
+
+                def _is_droppable(_raw: str) -> bool:
+                    _t = _raw.strip()
+                    # No letter / digit / CJK char → nothing TTS can voice
+                    # (covers ASCII and full-width punctuation, whitespace, "_").
+                    if not re.search(r"[^\W_]", _t, re.UNICODE):
+                        return True
+                    return _t.lower().rstrip(".,!?") in _NOISE_WORDS
+
                 before_drop = len(transcript)
                 transcript = [
-                    s for s in transcript
-                    if s.get("text", "").strip()
-                    and s.get("text", "").strip().lower().rstrip(".,!?") not in _NOISE_WORDS
+                    s for s in transcript if not _is_droppable(s.get("text", ""))
                 ]
                 if len(transcript) != before_drop:
                     logger.info(

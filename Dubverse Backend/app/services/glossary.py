@@ -173,18 +173,7 @@ _GLOSSARY_YUE: Dict[str, str] = {
 
     # ── Cantonese-specific Whisper artifacts ───────────────────────────────
     "男女路友": "male and female",
-    "路友": "",
     "男女老友": "men and women",
-    "我賠": "",
-    "我赔": "",
-    "你跑": "",
-    "我陪你": "",
-    "我陪": "",
-    "老闆": "",
-    "老板": "",
-    "我賠，": "",
-    "我赔，": "",
-    "行，": "",
 
     # ── Cantonese full-phrase overrides ────────────────────────────────────
     "龄春, 燕文": "Wing Chun, Ip Man",
@@ -192,7 +181,6 @@ _GLOSSARY_YUE: Dict[str, str] = {
     "荣春叶问": "Wing Chun, Ip Man",
     "詠春葉問": "Wing Chun, Ip Man",
     "咏春叶问": "Wing Chun, Ip Man",
-    "打開吧": "",
     "好的功夫是不分男女路友": "Good kung fu doesn't discriminate between men and women",
     "好功夫是不會分男女路友的": "Kung fu doesn't discriminate between male and female",
     "好功夫是不会分男女路友的": "Kung fu doesn't discriminate between male and female",
