@@ -770,11 +770,16 @@ class DubbingService:
 
                 # Safety net: skip repetitive-character hallucinations
                 # (e.g. "Aaaaaaaaa", "hhhhhhh") — fight grunt noise that Whisper
-                # or translation garbled into repeated chars.
+                # or translation garbled into repeated chars. Use a dominant-char
+                # test (does ONE character make up most of the text?), which is
+                # length-independent. A global unique-char ratio would falsely
+                # flag any sentence longer than ~104 chars, since the alphabet is
+                # finite — that silently dropped legitimate long translated lines.
                 _stripped = text.replace(' ', '')
                 if len(_stripped) >= 4:
-                    _unique_ratio = len(set(_stripped.lower())) / len(_stripped)
-                    if _unique_ratio < 0.25:
+                    _lower = _stripped.lower()
+                    _dominant_ratio = max(_lower.count(c) for c in set(_lower)) / len(_lower)
+                    if _dominant_ratio > 0.5:
                         logger.warning(
                             f"[TTS] Segment {i}: repetitive-char hallucination — skipping: '{text[:40]}'"
                         )
