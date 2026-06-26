@@ -168,6 +168,8 @@ interface SegmentContextMenuProps {
   onToggleLock: (index: number) => void
   onTogglePair: (index: number) => void
   onRevert: (index: number) => void
+  onUndoLastEdit: (index: number) => void
+  onClearSegment: (index: number) => void
   onSetEmotion: (index: number, emotion: string) => void
   onClearEmotion: (index: number) => void
   onSelect: (index: number) => void
@@ -189,6 +191,8 @@ function SegmentContextMenu({
   onToggleLock,
   onTogglePair,
   onRevert,
+  onUndoLastEdit,
+  onClearSegment,
   onSetEmotion,
   onClearEmotion,
   onSelect,
@@ -196,9 +200,11 @@ function SegmentContextMenu({
   onShowProfile,
 }: SegmentContextMenuProps) {
   const [showEmotions, setShowEmotions] = useState(false)
+  const [confirmClear, setConfirmClear] = useState(false)
+  const confirmClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const coordsRef = useRef({ x: 0, y: 0 })
   return (
-    <ContextMenu onOpenChange={(open) => { if (!open) setShowEmotions(false) }}>
+    <ContextMenu onOpenChange={(open) => { if (!open) { setShowEmotions(false); setConfirmClear(false); if (confirmClearTimer.current) clearTimeout(confirmClearTimer.current) } }}>
       <ContextMenuTrigger asChild>
         <span
           style={{ display: 'contents' }}
@@ -209,6 +215,10 @@ function SegmentContextMenu({
         </span>
       </ContextMenuTrigger>
       <ContextMenuContent className={cn("bg-neutral-900 border-neutral-700", showEmotions ? "w-72" : "w-52")}>
+        <ContextMenuItem onClick={(e) => { e.stopPropagation(); onUndoLastEdit(index) }} className="text-xs gap-2">
+          ↶ Undo Last Edit
+        </ContextMenuItem>
+        <ContextMenuSeparator />
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onSplit(index) }} className="text-xs gap-2">
           ✂️ Split at Playhead
           <ContextMenuShortcut>C</ContextMenuShortcut>
@@ -236,6 +246,22 @@ function SegmentContextMenu({
         <ContextMenuSeparator />
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onRevert(index) }} className="text-xs gap-2">
           ↩️ Revert to Original
+        </ContextMenuItem>
+        <ContextMenuItem
+          onSelect={(e) => {
+            if (!confirmClear) {
+              e.preventDefault()
+              setConfirmClear(true)
+              if (confirmClearTimer.current) clearTimeout(confirmClearTimer.current)
+              confirmClearTimer.current = setTimeout(() => setConfirmClear(false), 2000)
+            } else {
+              if (confirmClearTimer.current) clearTimeout(confirmClearTimer.current)
+              setConfirmClear(false)
+              onClearSegment(index)
+            }
+          }}
+          className="text-xs gap-2 text-red-400 focus:text-red-400">
+          {confirmClear ? 'Confirm Clear ↩' : '🧹 Clear Segment'}
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onRenameSpeaker(index) }} className="text-xs gap-2 text-purple-400 focus:text-purple-400">
@@ -2310,14 +2336,33 @@ export function DubVerseEditor({
     handleTimelineMouseUp(e)
   }, [groupMoveOffset, groupSelectedSegments, displaySegments])
 
+  // One-level undo: snapshot of each segment's text taken before its last edit.
+  const prevTextByIndex = useRef<Record<number, string>>({})
+  // Hume auto-fire guard, lifted out of FloatingEmotionChart so Clear Segment
+  // and text edits can reset it (re-fire emotion analysis on next dwell).
+  const emotionAutoFiredRef = useRef<Set<number>>(new Set())
+
+  const handleUndoLastEdit = useCallback((index: number) => {
+    const prev = prevTextByIndex.current[index]
+    if (prev === undefined) return
+    setPreviewText(index, prev)
+    updateSegment(index, { preview_text: prev, active_text: prev, isUserEdited: true })
+    setImportedSegments(p => p ? p.map((seg, i) => i === index ? { ...seg, preview_text: prev, active_text: prev } : seg) : p)
+    delete prevTextByIndex.current[index]
+  }, [setPreviewText, updateSegment])
+
   const handleClearSegment = useCallback((index: number) => {
     const original = initialSegments[index]
     const filename = (original?.audio_url ?? '').split('/').pop() ?? ''
     const audio_url = filename ? apiClient.getAudioFileUrl(jobId, filename) : undefined
+    // Full reset: text falls back to the original source transcription (not the
+    // translation). Split/new segments have no source_text — the empty value
+    // makes the row render its "Enter text…" placeholder.
+    const sourceText = displaySegments[index]?.source_text ?? original?.source_text ?? ''
     const clearedFields = {
-      target_text: original?.target_text ?? '',
-      active_text: original?.target_text ?? '',
-      variant_text: original?.target_text ?? '',
+      target_text: sourceText,
+      active_text: sourceText,
+      variant_text: sourceText,
       preview_text: null,
       isPreviewing: false,
       isUserEdited: false,
@@ -2332,7 +2377,13 @@ export function DubVerseEditor({
       committed_start_time: undefined,
       committed_end_time: undefined,
       attached_traits: null,
+      velma_emotion_curve: undefined,
+      velma_progression: undefined,
     }
+    // Voice → default, character profile + emotion staging + auto-fire guard cleared.
+    setStagedVoices(prev => { const next = { ...prev }; delete next[index]; return next })
+    setStagedEmotions(prev => { const next = { ...prev }; delete next[index]; return next })
+    emotionAutoFiredRef.current.delete(index)
     updateSegment(index, clearedFields)
     setImportedSegments(prev => {
       if (!prev) return prev
@@ -2760,6 +2811,10 @@ export function DubVerseEditor({
     if (editingSegmentIndex !== null) {
       const idx = editingSegmentIndex
       const text = editingText
+      // Snapshot pre-edit text for one-level Undo, and clear the Hume auto-fire
+      // guard so the emotion curve re-fires on next dwell after a text change.
+      prevTextByIndex.current[idx] = displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? ''
+      emotionAutoFiredRef.current.delete(idx)
       setPreviewText(idx, text)
       setImportedSegments(prev => {
         const base = prev ?? displaySegments
@@ -3355,6 +3410,8 @@ export function DubVerseEditor({
                   onToggleLock={(idx) => setLockedSegments(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
                   onTogglePair={(idx) => setLockedPairs(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
                   onRevert={() => handleRevert()}
+                  onUndoLastEdit={handleUndoLastEdit}
+                  onClearSegment={handleClearSegment}
                   onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
                   onClearEmotion={(idx) => {
                     setStagedEmotions(prev => ({ ...prev, [idx]: '' }))
@@ -3616,6 +3673,7 @@ export function DubVerseEditor({
                       >
                         <Input
                           value={editingText}
+                          placeholder="Enter text…"
                           onChange={(e) => {
                             setEditingText(e.target.value)
                           }}
@@ -3829,7 +3887,8 @@ export function DubVerseEditor({
                             onDoubleClick={() => !lockedSegments.has(index) && !segment.isPreviewing && startEditing(index)}
                           >
                             {lockedSegments.has(index) && <Lock className="h-3 w-3 shrink-0" />}
-                            {segment.preview_text ?? segment.active_text ?? segment.target_text}
+                            {(segment.preview_text ?? segment.active_text ?? segment.target_text)
+                              || <span className="text-slate-500 italic">Enter text…</span>}
                           </div>
                         )}
                         {/* Subtle QC icon on hover — clicking selects segment and opens Quality tab */}
@@ -4418,6 +4477,8 @@ export function DubVerseEditor({
             {floatingEmotionSegment !== null && displaySegments[floatingEmotionSegment] ? (
               <FloatingEmotionChart
                 embedded
+                active={videoSubTab === 'chord' && rightPanelTab === 'result'}
+                autoFiredRef={emotionAutoFiredRef}
                 segment={displaySegments[floatingEmotionSegment]}
                 segmentIndex={floatingEmotionSegment}
                 jobId={jobId}
@@ -5531,6 +5592,8 @@ export function DubVerseEditor({
                       onToggleLock={(idx) => setLockedSegments(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
                       onTogglePair={(idx) => setLockedPairs(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
                       onRevert={revertToOriginal}
+                      onUndoLastEdit={handleUndoLastEdit}
+                      onClearSegment={handleClearSegment}
                       onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
                       onClearEmotion={(idx) => {
                     setStagedEmotions(prev => ({ ...prev, [idx]: '' }))
@@ -5723,6 +5786,8 @@ export function DubVerseEditor({
                       onToggleLock={(idx) => setLockedSegments(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
                       onTogglePair={(idx) => setLockedPairs(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
                       onRevert={revertToOriginal}
+                      onUndoLastEdit={handleUndoLastEdit}
+                      onClearSegment={handleClearSegment}
                       onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
                       onClearEmotion={(idx) => {
                     setStagedEmotions(prev => ({ ...prev, [idx]: '' }))
