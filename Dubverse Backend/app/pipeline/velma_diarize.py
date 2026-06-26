@@ -87,7 +87,7 @@ FILM_DUBBING_CONFIG = {
         },
     ],
     "behaviors": [],
-    "transcription_options": {
+    "stt": {
         "speaker_diarization": True,
         "emotion_signal": True,
         "accent_signal": True,
@@ -223,6 +223,13 @@ def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
                     f"[VELMA] Job {job_id} role: {rp.get('speaker_label')} → "
                     f"{rp.get('name')} (confidence={rp.get('confidence', '?')})"
                 )
+
+        # Log emotion distribution for diagnostics
+        emotion_dist = {}
+        for s in segments:
+            e = s.get("emotion") or "null"
+            emotion_dist[e] = emotion_dist.get(e, 0) + 1
+        logger.info(f"[VELMA] Job {job_id} emotion distribution: {emotion_dist}")
 
         return {
             "status": "ok",
