@@ -5,18 +5,21 @@ import { Download, Loader2, AlertCircle, CheckCircle2, Play } from "lucide-react
 import { apiClient, JobNotFoundError, type JobStatusValue } from "@/lib/api-client"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { InlineTranscriptEditor, type InlineSegment } from "@/components/inline-editor"
 
 interface BasicVideoPanelProps {
   jobId: string
   onStale?: () => void
+  onReviewingChange?: (isReviewing: boolean) => void
 }
 
-type Phase = "transcribing" | "ready" | "dubbing" | "complete" | "error"
+type Phase = "transcribing" | "ready" | "reviewing" | "translating" | "reviewing_translation" | "dubbing" | "complete" | "error"
 
 function statusToPhase(status: JobStatusValue): Phase {
   if (status === "completed") return "complete"
   if (status === "failed" || status === "cancelled") return "error"
   if (status === "ready_for_voice_selection" || status === "ready") return "ready"
+  if (status === "ready_for_review") return "reviewing_translation"
   if (["translating", "synthesizing", "lip_syncing", "reassembling", "vozo_processing"].includes(status))
     return "dubbing"
   return "transcribing"
@@ -32,6 +35,7 @@ const STAGE_LABELS: Partial<Record<JobStatusValue, string>> = {
   transcribing:              "Transcribing dialogue...",
   ready_for_voice_selection: "Transcription complete",
   ready:                     "Ready to dub",
+  ready_for_review:          "Translation complete — review before rendering",
   translating:               "Translating dialogue...",
   synthesizing:              "Generating dubbed audio...",
   lip_syncing:               "Syncing lips...",
@@ -50,7 +54,7 @@ const TARGET_LANGUAGES = [
   { code: "zh", name: "Mandarin",   flag: "🇨🇳" },
 ]
 
-export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
+export function BasicVideoPanel({ jobId, onStale, onReviewingChange }: BasicVideoPanelProps) {
   const [phase, setPhase]             = useState<Phase>("transcribing")
   const [progress, setProgress]       = useState(0)
   const [stageLabel, setStageLabel]   = useState("Preparing your video...")
@@ -58,6 +62,11 @@ export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
   const [targetLang, setTargetLang]   = useState("en")
   const [launching, setLaunching]     = useState(false)
   const [errorMsg, setErrorMsg]       = useState<string | null>(null)
+  const [rawTranscript, setRawTranscript] = useState<Array<{ text: string; start: number; end: number; speaker: string; confidence?: number; confidence_tier?: "high" | "medium" | "low"; words?: Array<{ word: string; start: number; end: number; confidence: number }> }> | null>(null)
+  const [speakerGenders, setSpeakerGenders] = useState<Record<string, string>>({})
+  const [editedSegments, setEditedSegments] = useState<InlineSegment[] | null>(null)
+  const [translatedSegments, setTranslatedSegments] = useState<Array<{ text: string; start: number; end: number; speaker: string; source_text?: string; segment_id?: string }> | null>(null)
+  const [sourceLang, setSourceLang] = useState<string | null>(null)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
@@ -69,20 +78,14 @@ export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
 
         if (s.status === "completed") {
           if (s.dubbed_video_url) {
-            // Dubbing pipeline is fully done.
-            // dubbed_video_url is a relative path — prefix with API base so the
-            // <video> element loads from the backend, not the Next.js dev server.
             const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
             const url = s.dubbed_video_url
             setDubbedUrl(url.startsWith("http") ? url : `${apiBase}${url}`)
             setPhase("complete")
-            clearInterval(intervalRef.current!)
           } else {
-            // Transcription done, dubbing not yet started — but don't regress
-            // from "dubbing" back to "ready" if the backend hasn't picked up the
-            // new job yet (race between clicking Begin Dubbing and the next poll).
-            setPhase(prev => prev === "dubbing" ? "dubbing" : "ready")
+            setPhase(prev => prev === "dubbing" || prev === "reviewing" ? prev : "ready")
           }
+          clearInterval(intervalRef.current!)
           return
         }
 
@@ -94,8 +97,9 @@ export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
         }
 
         const next = statusToPhase(s.status)
-        // Don't regress from 'dubbing' back to 'ready' if polling catches an intermediate state
-        setPhase(prev => (prev === "dubbing" && next === "ready") ? "dubbing" : next)
+        // Don't regress from active phases back to 'ready' if polling catches an intermediate state
+        const activePhases: Phase[] = ["dubbing", "reviewing", "translating", "reviewing_translation"]
+        setPhase(prev => (activePhases.includes(prev) && next === "ready") ? prev : next)
       } catch (err) {
         if (err instanceof JobNotFoundError) {
           clearInterval(intervalRef.current!)
@@ -111,29 +115,158 @@ export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
     return () => clearInterval(intervalRef.current!)
   }, [jobId])
 
+  const fetchTranscript = async () => {
+    let transcript: typeof rawTranscript = null
+    let genders: Record<string, string> = {}
+    try {
+      const segData = await apiClient.getSegments(jobId)
+      const segAny = segData as unknown as { segments: Array<Record<string, unknown>>; speaker_genders?: Record<string, string> }
+      transcript = segAny.segments.map((seg) => ({
+        text:    String(seg.text ?? ""),
+        start:   Number(seg.start ?? 0),
+        end:     Number(seg.end ?? 0),
+        speaker: String(seg.speaker ?? "SPEAKER_0"),
+        confidence: typeof seg.confidence === "number" ? seg.confidence : undefined,
+        confidence_tier: seg.confidence_tier as "high" | "medium" | "low" | undefined,
+        words: Array.isArray(seg.words) ? (seg.words as Array<{ word: string; start: number; end: number; confidence: number }>) : undefined,
+      }))
+      genders = segAny.speaker_genders ?? {}
+    } catch {
+      const txData = await apiClient.getTranscript(jobId)
+      const txAny = txData as unknown as { segments: Array<Record<string, unknown>> }
+      transcript = txAny.segments.map((seg) => ({
+        text:    String(seg.text ?? ""),
+        start:   Number(seg.start ?? 0),
+        end:     Number(seg.end ?? 0),
+        speaker: String(seg.speaker ?? "SPEAKER_0"),
+        confidence: typeof seg.confidence === "number" ? seg.confidence : undefined,
+        confidence_tier: seg.confidence_tier as "high" | "medium" | "low" | undefined,
+        words: Array.isArray(seg.words) ? (seg.words as Array<{ word: string; start: number; end: number; confidence: number }>) : undefined,
+      }))
+    }
+    return { transcript, genders }
+  }
+
+  const handleReviewTranscript = async () => {
+    setLaunching(true)
+    try {
+      const { transcript, genders } = await fetchTranscript()
+      if (transcript) {
+        setRawTranscript(transcript)
+        setSpeakerGenders(genders)
+        setPhase("reviewing")
+        onReviewingChange?.(true)
+        if (intervalRef.current) clearInterval(intervalRef.current)
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to load transcript.")
+      setPhase("error")
+    } finally {
+      setLaunching(false)
+    }
+  }
+
+  const handleTranslateAndReview = async () => {
+    setLaunching(true)
+    try {
+      const { transcript } = await fetchTranscript()
+      if (!transcript) throw new Error("No transcript available")
+
+      setPhase("translating")
+      setStageLabel("Translating dialogue...")
+
+      const result = await apiClient.translateOnly({
+        job_id:          jobId,
+        target_language: targetLang,
+        transcript,
+        voice_mapping:   {},
+      })
+
+      setTranslatedSegments(result.segments)
+      setSourceLang(result.source_language)
+      if (result.speaker_genders) setSpeakerGenders(result.speaker_genders)
+      setPhase("reviewing_translation")
+      onReviewingChange?.(true)
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Translation failed.")
+      setPhase("error")
+    } finally {
+      setLaunching(false)
+    }
+  }
+
+  const handleConfirmAndTranslate = async (segments: InlineSegment[]) => {
+    setEditedSegments(segments)
+    setLaunching(true)
+    onReviewingChange?.(false)
+    try {
+      const transcript = segments
+        .filter((s) => s.status !== "rejected")
+        .map((s) => ({
+          text:    s.text,
+          start:   s.start,
+          end:     s.end,
+          speaker: s.speaker_id,
+        }))
+
+      setPhase("translating")
+      setStageLabel("Translating dialogue...")
+
+      const result = await apiClient.translateOnly({
+        job_id:          jobId,
+        target_language: targetLang,
+        transcript,
+        voice_mapping:   {},
+      })
+
+      setTranslatedSegments(result.segments)
+      setSourceLang(result.source_language)
+      setPhase("reviewing_translation")
+      onReviewingChange?.(true)
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Translation failed.")
+      setPhase("error")
+    } finally {
+      setLaunching(false)
+    }
+  }
+
+  const handleConfirmAndRender = async (segments: InlineSegment[]) => {
+    setLaunching(true)
+    onReviewingChange?.(false)
+    try {
+      const transcript = segments
+        .filter((s) => s.status !== "rejected")
+        .map((s) => ({
+          text:    s.text,
+          start:   s.start,
+          end:     s.end,
+          speaker: s.speaker_id,
+        }))
+
+      await apiClient.startRender({
+        job_id:          jobId,
+        target_language: targetLang,
+        source_language: sourceLang ?? undefined,
+        transcript,
+        voice_mapping:   {},
+      })
+
+      setPhase("dubbing")
+      setStageLabel("Generating dubbed audio...")
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Render failed.")
+      setPhase("error")
+    } finally {
+      setLaunching(false)
+    }
+  }
+
   const handleBeginDubbing = async () => {
     setLaunching(true)
     try {
-      // Try segments endpoint first (has diarization + positions).
-      // Fall back to raw transcript when segments aren't ready yet.
-      let transcript: { text: string; start: number; end: number; speaker: string }[]
-      try {
-        const segData = await apiClient.getSegments(jobId)
-        transcript = segData.segments.map((seg) => ({
-          text:    seg.text,
-          start:   seg.start,
-          end:     seg.end,
-          speaker: seg.speaker,
-        }))
-      } catch {
-        const txData = await apiClient.getTranscript(jobId)
-        transcript = txData.segments.map((seg) => ({
-          text:    seg.text,
-          start:   seg.start,
-          end:     seg.end,
-          speaker: seg.speaker || "SPEAKER_0",
-        }))
-      }
+      const { transcript } = await fetchTranscript()
+      if (!transcript) throw new Error("No transcript available")
 
       await apiClient.startDubbing({
         job_id:          jobId,
@@ -154,16 +287,21 @@ export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
 
   // ── Header label ────────────────────────────────────────────────────────────
   const headerIcon =
-    phase === "complete"    ? <CheckCircle2 className="h-4 w-4 text-green-400" />
-    : phase === "error"     ? <AlertCircle  className="h-4 w-4 text-red-400" />
-    : phase === "ready"     ? <CheckCircle2 className="h-4 w-4 text-[#22D3EE]" />
+    phase === "complete"               ? <CheckCircle2 className="h-4 w-4 text-green-400" />
+    : phase === "error"                ? <AlertCircle  className="h-4 w-4 text-red-400" />
+    : phase === "ready"                ? <CheckCircle2 className="h-4 w-4 text-[#22D3EE]" />
+    : phase === "reviewing"            ? <CheckCircle2 className="h-4 w-4 text-[#A855F7]" />
+    : phase === "reviewing_translation" ? <CheckCircle2 className="h-4 w-4 text-[#A855F7]" />
     : <Loader2 className="h-4 w-4 text-[#A855F7] animate-spin" />
 
   const headerText =
-    phase === "complete"    ? "Your Dub is Ready"
-    : phase === "error"     ? "Processing Failed"
-    : phase === "ready"     ? "Ready to Dub"
-    : phase === "dubbing"   ? "Dubbing in Progress"
+    phase === "complete"               ? "Your Dub is Ready"
+    : phase === "error"                ? "Processing Failed"
+    : phase === "ready"                ? "Ready to Dub"
+    : phase === "reviewing"            ? "Review Transcript"
+    : phase === "reviewing_translation" ? "Review Translation"
+    : phase === "translating"          ? "Translating..."
+    : phase === "dubbing"              ? "Dubbing in Progress"
     : "Transcribing Video"
 
   return (
@@ -175,7 +313,7 @@ export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
           {headerIcon}
           <span className="text-sm font-semibold text-white">{headerText}</span>
         </div>
-        {(phase === "transcribing" || phase === "dubbing") && (
+        {(phase === "transcribing" || phase === "translating" || phase === "dubbing") && (
           <span className="text-xs font-bold text-[#A855F7]">{Math.round(progress)}%</span>
         )}
       </div>
@@ -211,7 +349,7 @@ export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
           </div>
         )}
 
-        {/* ── Ready — Begin Dubbing ────────────────────────────────────── */}
+        {/* ── Ready — Translate & Review ────────────────────────────────── */}
         {phase === "ready" && (
           <div className="flex flex-col items-center gap-5 py-6">
             <div className="relative flex items-center justify-center">
@@ -222,7 +360,7 @@ export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
 
             <div className="text-center">
               <p className="text-sm font-semibold text-white mb-1">Transcription complete</p>
-              <p className="text-xs text-[#64748B]">Choose a target language and begin dubbing</p>
+              <p className="text-xs text-[#64748B]">Choose a target language to translate and review before rendering</p>
             </div>
 
             <div className="w-full space-y-3">
@@ -243,22 +381,90 @@ export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
               </Select>
 
               <Button
-                onClick={handleBeginDubbing}
+                onClick={handleTranslateAndReview}
                 disabled={launching}
                 className="w-full bg-gradient-to-r from-[#A855F7] to-[#22D3EE] text-white font-semibold hover:opacity-90 transition-opacity shadow-[0_0_20px_rgba(168,85,247,0.4)]"
               >
                 {launching ? (
-                  <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Starting...</>
+                  <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Translating...</>
                 ) : (
-                  <><Play className="mr-2 h-4 w-4" />Begin Dubbing</>
+                  <><Play className="mr-2 h-4 w-4" />Translate &amp; Review</>
                 )}
               </Button>
             </div>
           </div>
         )}
 
-        {/* ── Transcribing / Dubbing progress ─────────────────────────── */}
-        {(phase === "transcribing" || phase === "dubbing") && (
+        {/* ── Reviewing — Inline transcript editor ─────────────────────── */}
+        {phase === "reviewing" && rawTranscript && (
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-sm text-[#94A3B8]">
+                Double-click text to edit. Reject bad segments before dubbing.
+              </p>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-[#64748B]">Target:</span>
+                <Select value={targetLang} onValueChange={setTargetLang}>
+                  <SelectTrigger className="w-36 h-8 bg-[#0F172A]/60 border-[#A855F7]/30 text-white text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {TARGET_LANGUAGES.map((l) => (
+                      <SelectItem key={l.code} value={l.code}>
+                        <span className="mr-2">{l.flag}</span>{l.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <InlineTranscriptEditor
+              projectName={`Job ${jobId}`}
+              rawSegments={rawTranscript}
+              speakerGenders={speakerGenders}
+              onConfirm={handleConfirmAndTranslate}
+              onExport={(segs) => {
+                const blob = new Blob([JSON.stringify(segs, null, 2)], { type: "application/json" })
+                const url = URL.createObjectURL(blob)
+                const a = document.createElement("a")
+                a.href = url
+                a.download = `transcript-${jobId}.json`
+                a.click()
+                URL.revokeObjectURL(url)
+              }}
+            />
+          </div>
+        )}
+
+        {/* ── Reviewing translation — Inline editor with translated text ── */}
+        {phase === "reviewing_translation" && translatedSegments && (
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-sm text-[#94A3B8]">
+                Review the translated text. Edit or reject segments before rendering.
+              </p>
+            </div>
+            <InlineTranscriptEditor
+              projectName={`Job ${jobId}`}
+              rawSegments={translatedSegments}
+              speakerGenders={speakerGenders}
+              onConfirm={handleConfirmAndRender}
+              confirmLabel="Confirm & Render"
+              onExport={(segs) => {
+                const blob = new Blob([JSON.stringify(segs, null, 2)], { type: "application/json" })
+                const url = URL.createObjectURL(blob)
+                const a = document.createElement("a")
+                a.href = url
+                a.download = `translation-${jobId}.json`
+                a.click()
+                URL.revokeObjectURL(url)
+              }}
+            />
+          </div>
+        )}
+
+        {/* ── Transcribing / Translating / Dubbing progress ──────────── */}
+        {(phase === "transcribing" || phase === "translating" || phase === "dubbing") && (
           <div className="flex flex-col items-center gap-5 py-8">
             <div className="relative flex items-center justify-center">
               <div className="absolute h-20 w-20 rounded-full bg-[#A855F7]/20 animate-ping" />
@@ -279,12 +485,13 @@ export function BasicVideoPanel({ jobId, onStale }: BasicVideoPanelProps) {
             </div>
 
             <p className="text-xs text-[#64748B]">
-              {phase === "transcribing" ? "Usually takes 1–2 minutes" : "Usually takes 3–8 minutes"}
+              {phase === "transcribing" ? "Usually takes 1–2 minutes" : phase === "translating" ? "Usually takes 30–60 seconds" : "Usually takes 3–8 minutes"}
             </p>
           </div>
         )}
 
       </div>
+
     </div>
   )
 }

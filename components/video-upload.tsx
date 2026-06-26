@@ -469,11 +469,12 @@ export function VideoUpload({
     : null
 
   const showRightPanel = recordingState !== 'idle' || (hasFeature('pipelineMonitor') ? !!activeProcessingFile : !!basicPanelFile)
+  const [isReviewingTranscript, setIsReviewingTranscript] = useState(false)
 
   return (
     <div className="space-y-6">
-      {/* Top section: Upload Area + right panel side by side */}
-      <div className={`grid gap-6 transition-all duration-500 ${showRightPanel ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"}`}>
+      {/* Top section: Upload Area + right panel side by side (single column when reviewing) */}
+      <div className={`grid gap-6 transition-all duration-500 ${showRightPanel && !isReviewingTranscript ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"}`}>
       {/* Main Upload Area - Compact */}
       <div>
         <div className="text-center mb-4">
@@ -697,7 +698,7 @@ export function VideoUpload({
           {recordingState === 'idle' && (
             hasFeature('pipelineMonitor')
               ? <PipelineMonitor jobId={activeProcessingFile!.jobId!} />
-              : <BasicVideoPanel jobId={basicPanelFile!.jobId!} onStale={() => removeFile(basicPanelFile!.id)} />
+              : <BasicVideoPanel jobId={basicPanelFile!.jobId!} onStale={() => removeFile(basicPanelFile!.id)} onReviewingChange={setIsReviewingTranscript} />
           )}
 
         </div>
