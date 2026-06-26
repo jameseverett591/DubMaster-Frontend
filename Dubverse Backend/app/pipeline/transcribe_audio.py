@@ -217,6 +217,73 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
     return filtered
 
 
+def _filter_repetition_loops(segments: List[Dict]) -> List[Dict]:
+    """
+    Detect and truncate n-gram repetition loops within segment text.
+    Whisper produces loops like "male and female and male and female" when
+    context is lost. Detects repeating 2-6 gram patterns and keeps only
+    the first occurrence.
+    """
+    result = []
+    for seg in segments:
+        text = seg.get("text", "").strip()
+        if not text or len(text) < 10:
+            result.append(seg)
+            continue
+
+        truncated = _truncate_repetition(text)
+        if truncated != text:
+            logger.info(
+                f"[REPETITION] Truncated loop at {seg.get('start', '?')}-{seg.get('end', '?')}: "
+                f"'{text[:60]}' → '{truncated[:60]}'"
+            )
+            if len(truncated.strip()) < 2:
+                continue
+            seg = dict(seg)
+            seg["text"] = truncated
+            seg["repetition_truncated"] = True
+
+        result.append(seg)
+    return result
+
+
+def _truncate_repetition(text: str) -> str:
+    """Find the shortest repeating n-gram (2-6 tokens) and keep only the first occurrence."""
+    tokens = text.split()
+    if len(tokens) < 6:
+        return text
+
+    for n in range(2, 7):
+        if len(tokens) < n * 2:
+            continue
+        for start in range(len(tokens) - n * 2 + 1):
+            gram = tokens[start:start + n]
+            repeat_count = 1
+            pos = start + n
+            while pos + n <= len(tokens) and tokens[pos:pos + n] == gram:
+                repeat_count += 1
+                pos += n
+            if repeat_count >= 3:
+                kept = tokens[:start + n]
+                return " ".join(kept)
+
+    # CJK: character-level repetition (no spaces between words)
+    for n in range(2, 8):
+        if len(text) < n * 3:
+            continue
+        for start in range(len(text) - n * 3 + 1):
+            gram = text[start:start + n]
+            repeat_count = 1
+            pos = start + n
+            while pos + n <= len(text) and text[pos:pos + n] == gram:
+                repeat_count += 1
+                pos += n
+            if repeat_count >= 3:
+                return text[:start + n]
+
+    return text
+
+
 def _fix_timestamp_bleed(segments: List[Dict]) -> List[Dict]:
     """Fix Whisper timestamp bleed — segments whose duration far exceeds
     what the text content could plausibly occupy.
@@ -321,6 +388,9 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
                 word_timestamps=True,
                 condition_on_previous_text=False,
                 initial_prompt=INITIAL_PROMPT,
+                compression_ratio_threshold=1.8,
+                log_prob_threshold=-0.8,
+                no_speech_threshold=0.5,
             )
             if whisper_language:
                 transcribe_kwargs["language"] = whisper_language
@@ -342,8 +412,11 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
             vad_threshold = float(os.getenv("VAD_THRESHOLD", "0.20"))
             use_vad = vad_threshold > 0
         else:
-            vad_threshold = 0.0 if _is_yue else 0.05
-            use_vad = vad_threshold > 0
+            # Cantonese previously disabled VAD (0.0) but this causes hallucinations
+            # on silence/SFX regions. Use a moderate threshold — the two-pass gap
+            # recovery will catch real dialogue that VAD aggressively clips.
+            vad_threshold = 0.15 if _is_yue else 0.05
+            use_vad = True
 
         segments, info = _do_transcribe(use_vad, vad_threshold)
 
@@ -358,13 +431,31 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
                 if words and len(words) > 0:
                     seg_start = round(words[0].start, 3)
                     seg_end = round(words[-1].end, 3)
+                    word_list = [
+                        {
+                            "word": w.word.strip(),
+                            "start": round(w.start, 3),
+                            "end": round(w.end, 3),
+                            "confidence": round(w.probability, 3) if hasattr(w, "probability") else 0.5,
+                        }
+                        for w in words
+                        if w.word.strip()
+                    ]
                 else:
                     seg_start = round(seg.start, 3)
                     seg_end = round(seg.end, 3)
+                    word_list = []
+
+                avg_lp = getattr(seg, "avg_logprob", -0.5)
+                confidence = round(max(0.0, min(1.0, 1.0 + avg_lp)), 3)
+
                 raw.append({
                     "start": seg_start,
                     "end": seg_end,
                     "text": seg.text,
+                    "confidence": confidence,
+                    "avg_logprob": avg_lp,
+                    "words": word_list,
                 })
             return raw
 
@@ -456,7 +547,10 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
         if "VAD_TWO_PASS" in os.environ:
             two_pass = os.getenv("VAD_TWO_PASS", "0") == "1"
         else:
-            two_pass = True if (_is_yue and use_vad) or (info.language == "zh" and use_vad) else False
+            # Always run two-pass for CJK languages when VAD is active —
+            # VAD clips fight-scene dialogue that sits under SFX energy.
+            _is_cjk = _is_yue or (info.language or "") in ("zh", "yue", "ja", "ko")
+            two_pass = _is_cjk and use_vad
 
         if "VAD_GAP_THRESHOLD" in os.environ:
             gap_threshold = float(os.getenv("VAD_GAP_THRESHOLD", "3.0"))
@@ -494,19 +588,32 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
                     gap_gen, _ = model.transcribe(gap_waveform, **no_vad_kwargs)
                     gap_segs = list(gap_gen)
                     for seg in gap_segs:
-                        # Use word-level timestamps when available
                         words = getattr(seg, "words", None)
                         if words and len(words) > 0:
                             gs = round(words[0].start + gap_start, 3)
                             ge = round(words[-1].end + gap_start, 3)
+                            word_list = [
+                                {
+                                    "word": w.word.strip(),
+                                    "start": round(w.start + gap_start, 3),
+                                    "end": round(w.end + gap_start, 3),
+                                    "confidence": round(w.probability, 3) if hasattr(w, "probability") else 0.5,
+                                }
+                                for w in words
+                                if w.word.strip()
+                            ]
                         else:
                             gs = round(seg.start + gap_start, 3)
                             ge = round(seg.end + gap_start, 3)
+                            word_list = []
+                        avg_lp = getattr(seg, "avg_logprob", -0.5)
                         gap_segments_all.append({
                             "start": gs,
                             "end": ge,
                             "text": seg.text,
-                            "avg_logprob": getattr(seg, "avg_logprob", 0),
+                            "confidence": round(max(0.0, min(1.0, 1.0 + avg_lp)), 3),
+                            "avg_logprob": avg_lp,
+                            "words": word_list,
                         })
                 # Strict filtering for noisy no-VAD segments
                 gap_filtered = _filter_hallucinations(gap_segments_all, strict=True, source_language=_detected_lang)
@@ -516,7 +623,6 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
                         f"from gaps (before merge: {len(raw_segments)} segments)"
                     )
                     for seg in gap_filtered:
-                        seg.pop("avg_logprob", None)
                         logger.info(
                             f"[TWO-PASS]   {seg['start']:.1f}-{seg['end']:.1f}: "
                             f"{seg['text'][:80]}"
@@ -530,6 +636,9 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
                     logger.info("[TWO-PASS] No valid segments recovered from gaps")
             else:
                 logger.info(f"[TWO-PASS] No gaps > {gap_threshold}s found")
+
+        # ---------- Filter repetition loops ----------
+        raw_segments = _filter_repetition_loops(raw_segments)
 
         # ---------- Fix Whisper timestamp bleed ----------
         raw_segments = _fix_timestamp_bleed(raw_segments)

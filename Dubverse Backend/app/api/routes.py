@@ -25,6 +25,7 @@ from app.models import (
     AdaptResponse,
     Transcript,
     TranscriptSegment,
+    WordAlignment,
     RegenerateRequest,
 )
 from app.config import get_settings
@@ -95,6 +96,29 @@ def _find_uploaded_video(job_id: str) -> tuple[str, str] | None:
     return fallback.name, str(fallback)
 
 
+def _seg_dict_to_model(seg: dict) -> TranscriptSegment:
+    """Build a TranscriptSegment preserving all fields the pipeline wrote."""
+    words_raw = seg.get("words")
+    words = (
+        [WordAlignment(word=w["word"], start=w["start"], end=w["end"],
+                        confidence=w.get("confidence", 0.5))
+         for w in words_raw]
+        if words_raw else None
+    )
+    return TranscriptSegment(
+        text=seg.get("text", ""),
+        start=seg.get("start", 0),
+        end=seg.get("end", 0),
+        speaker=seg.get("speaker", "speaker-1"),
+        confidence=seg.get("confidence"),
+        confidence_tier=seg.get("confidence_tier"),
+        words=words,
+        velma_emotion=seg.get("velma_emotion"),
+        velma_accent=seg.get("velma_accent"),
+        velma_deepfake_score=seg.get("velma_deepfake_score"),
+    )
+
+
 def _load_transcript_from_disk(job_id: str) -> Transcript | None:
     transcript_path = Path("data/transcripts") / f"{job_id}.json"
     if not transcript_path.exists():
@@ -107,12 +131,7 @@ def _load_transcript_from_disk(job_id: str) -> Transcript | None:
             data = json.load(f)
 
         segments = [
-            TranscriptSegment(
-                text=seg.get("text", ""),
-                start=seg.get("start", 0),
-                end=seg.get("end", 0),
-                speaker=seg.get("speaker", "speaker-1"),
-            )
+            _seg_dict_to_model(seg)
             for seg in data.get("segments", [])
         ]
 
@@ -396,14 +415,9 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, **
             continue
         speaker = _best_speaker(seg) or last_speaker
         last_speaker = speaker
-        assigned.append(
-            TranscriptSegment(
-                text=seg.get("text", ""),
-                start=seg.get("start", 0),
-                end=seg.get("end", 0),
-                speaker=speaker or "speaker-1",
-            )
-        )
+        s = _seg_dict_to_model(seg)
+        s.speaker = speaker or "speaker-1"
+        assigned.append(s)
 
     return assigned
 
@@ -539,6 +553,12 @@ def _merge_close_transcript_segments(
                 start=prev.start,
                 end=seg.end,
                 speaker=prev_speaker,
+                confidence=min(c for c in (prev.confidence, seg.confidence) if c is not None) if (prev.confidence is not None or seg.confidence is not None) else None,
+                confidence_tier=prev.confidence_tier,
+                words=(prev.words or []) + (seg.words or []) if (prev.words or seg.words) else None,
+                velma_emotion=prev.velma_emotion,
+                velma_accent=prev.velma_accent,
+                velma_deepfake_score=prev.velma_deepfake_score,
             )
             merge_counts[-1] += 1
         else:
@@ -981,6 +1001,12 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
     transcript_data = result.get("transcript", {})
     speaker_genders = result.get("speaker_genders", {})
 
+    if segments_data:
+        _sample = segments_data[0]
+        logger.info(f"Job {job_id}: RunPod segment[0] keys={list(_sample.keys())}, "
+                     f"confidence={_sample.get('confidence')}, words={bool(_sample.get('words'))}")
+
+
     diarization_segments = (result.get("diarization", {}) or {}).get("segments", [])
 
     # Fetch expected speakers once — used by both Velma and F0 fallback below
@@ -1000,6 +1026,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             logger.warning(f"Job {job_id}: Velma diarization failed: {_velma_err}")
 
     _velma_is_primary = False
+    _runpod_segments = segments_data  # preserve RunPod confidence before Velma overwrites
     if velma_result and velma_result.get("status") == "ok":
         _velma_segs = velma_result.get("segments", [])
         logger.info(
@@ -1007,19 +1034,37 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             f"{velma_result.get('unique_speakers', '?')} speakers. "
             f"Using as PRIMARY transcript + diarization source."
         )
-        segments_data = [
-            {
+
+        def _match_runpod_confidence(velma_start, velma_end, rp_segs):
+            """Find best-overlapping RunPod segment and return its confidence + words."""
+            best_overlap, best_seg = 0, None
+            for rp in rp_segs:
+                rp_s, rp_e = float(rp.get("start", 0)), float(rp.get("end", 0))
+                overlap = max(0, min(velma_end, rp_e) - max(velma_start, rp_s))
+                if overlap > best_overlap:
+                    best_overlap, best_seg = overlap, rp
+            if best_seg and best_overlap > 0:
+                return best_seg.get("confidence"), best_seg.get("confidence_tier"), best_seg.get("words")
+            return None, None, None
+
+        segments_data = []
+        for s in _velma_segs:
+            if not (s.get("text") or "").strip():
+                continue
+            v_start, v_end = float(s.get("start", 0)), float(s.get("end", 0))
+            conf, tier, words = _match_runpod_confidence(v_start, v_end, _runpod_segments)
+            segments_data.append({
                 "text": s.get("text", ""),
-                "start": s.get("start", 0),
-                "end": s.get("end", 0),
+                "start": v_start,
+                "end": v_end,
                 "speaker": s.get("speaker", "speaker-1"),
+                "confidence": conf,
+                "confidence_tier": tier,
+                "words": words,
                 "velma_emotion": s.get("emotion"),
                 "velma_accent": s.get("accent"),
                 "velma_deepfake_score": s.get("deepfake_score"),
-            }
-            for s in _velma_segs
-            if (s.get("text") or "").strip()
-        ]
+            })
         _velma_is_primary = True
 
         # Persist Velma scene context for use during translation
@@ -1041,29 +1086,16 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         logger.info(f"Job {job_id}: Velma unavailable — falling back to Whisper/RunPod transcript")
 
     segments = [
-        TranscriptSegment(
-            text=seg.get("text", ""),
-            start=seg.get("start", 0),
-            end=seg.get("end", 0),
-            speaker=seg.get("speaker", "speaker-1"),
-            velma_emotion=seg.get("velma_emotion"),
-            velma_accent=seg.get("velma_accent"),
-            velma_deepfake_score=seg.get("velma_deepfake_score"),
-        )
+        _seg_dict_to_model(seg)
         for seg in segments_data
         if seg.get("text", "").strip()
     ]
 
     if not segments and transcript_data.get("segments"):
-        for seg in transcript_data["segments"]:
-            segments.append(
-                TranscriptSegment(
-                    text=seg.get("text", ""),
-                    start=seg.get("start", 0),
-                    end=seg.get("end", 0),
-                    speaker=seg.get("speaker", "speaker-1"),
-                )
-            )
+        segments = [
+            _seg_dict_to_model(seg)
+            for seg in transcript_data["segments"]
+        ]
 
     # Re-assign speakers from diarization only when Velma was NOT the
     # primary transcript source (Velma segments already have correct speakers).
@@ -1159,12 +1191,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             local_segments_raw = (local_result or {}).get("segments") or []
             if local_segments_raw:
                 segments = [
-                    TranscriptSegment(
-                        text=(s.get("text") or "").strip(),
-                        start=s.get("start", 0),
-                        end=s.get("end", 0),
-                        speaker=s.get("speaker", "speaker-1"),
-                    )
+                    _seg_dict_to_model(s)
                     for s in local_segments_raw
                     if (s.get("text") or "").strip()
                 ]
@@ -1227,12 +1254,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             local_segments_raw = (local_result or {}).get("segments") or []
             if local_segments_raw:
                 segments = [
-                    TranscriptSegment(
-                        text=(s.get("text") or "").strip(),
-                        start=s.get("start", 0),
-                        end=s.get("end", 0),
-                        speaker=s.get("speaker", "speaker-1"),
-                    )
+                    _seg_dict_to_model(s)
                     for s in local_segments_raw
                     if (s.get("text") or "").strip()
                 ]
@@ -1281,6 +1303,12 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
                 start=s.start,
                 end=s.end,
                 speaker=s.speaker or "speaker-1",
+                confidence=s.confidence,
+                confidence_tier=s.confidence_tier,
+                words=s.words,
+                velma_emotion=s.velma_emotion,
+                velma_accent=s.velma_accent,
+                velma_deepfake_score=s.velma_deepfake_score,
             )
             for s in segments
             if (s.text or "").strip()
@@ -1306,11 +1334,17 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
                 if ov > best_overlap:
                     best_overlap = ov
                     best_match = vs
+            _conf = seg.confidence if isinstance(seg, TranscriptSegment) else seg.get("confidence")
+            _tier = seg.confidence_tier if isinstance(seg, TranscriptSegment) else seg.get("confidence_tier")
+            _words = seg.words if isinstance(seg, TranscriptSegment) else None
             enriched_segments.append(TranscriptSegment(
                 text=txt,
                 start=s_start,
                 end=s_end,
                 speaker=spkr,
+                confidence=_conf,
+                confidence_tier=_tier,
+                words=_words,
                 velma_emotion=best_match.get("emotion") if best_match else None,
                 velma_accent=best_match.get("accent") if best_match else None,
                 velma_deepfake_score=best_match.get("deepfake_score") if best_match else None,
@@ -1754,12 +1788,7 @@ async def process_video_pipeline(job_id: str, video_path: str):
 
                 if _velma_is_primary_local:
                     segments = [
-                        TranscriptSegment(
-                            text=s.get("text", ""),
-                            start=s.get("start", 0),
-                            end=s.get("end", 0),
-                            speaker=s.get("speaker", "speaker-1"),
-                        )
+                        _seg_dict_to_model(s)
                         for s in raw_segments
                         if s.get("text", "").strip()
                     ]
@@ -1818,14 +1847,9 @@ async def process_video_pipeline(job_id: str, video_path: str):
                     segments = []
                     for i, seg in enumerate(raw_segments):
                         speaker_idx = min(i // segments_per_speaker, expected_speakers - 1)
-                        segments.append(
-                            TranscriptSegment(
-                                text=seg.get("text", ""),
-                                start=seg.get("start", 0),
-                                end=seg.get("end", 0),
-                                speaker=f"speaker-{speaker_idx + 1}"
-                            )
-                        )
+                        s = _seg_dict_to_model(seg)
+                        s.speaker = f"speaker-{speaker_idx + 1}"
+                        segments.append(s)
                 
                 segments = _smooth_speaker_assignments(segments)
                 segments = _normalize_speaker_labels(segments)
@@ -2099,6 +2123,9 @@ async def get_transcript(job_id: str):
                     "start": seg.start,
                     "end": seg.end,
                     "speaker": seg.speaker,
+                    "confidence": seg.confidence,
+                    "confidence_tier": seg.confidence_tier,
+                    "words": [w.model_dump() for w in seg.words] if seg.words else None,
                     "velma_emotion": seg.velma_emotion,
                     "velma_accent": seg.velma_accent,
                     "velma_deepfake_score": seg.velma_deepfake_score,
@@ -2993,6 +3020,212 @@ async def dub_video(request: DubRequest, background_tasks: BackgroundTasks):
         tts_engine=None,
         dubbing_engine="dubmaster",
         message="Dubbing started, poll /api/status for progress"
+    )
+
+
+@router.post("/translate-only")
+async def translate_only(request: DubRequest):
+    """Run translation + adaptation only — no TTS or mixing.
+
+    Returns the translated segments so the frontend can show them in the
+    inline editor for user review before rendering.
+    """
+    import json as _json_to
+    from app.services.translation_service import translation_service as _ts
+
+    job = await _get_or_rehydrate_job(request.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+
+    # Build a lookup from the job's stored transcript to carry confidence/words
+    _job_seg_lookup: Dict[str, dict] = {}
+    if job and job.transcript:
+        for js in job.transcript.segments:
+            _key = f"{js.start:.3f}_{js.end:.3f}"
+            _job_seg_lookup[_key] = {
+                "confidence": js.confidence,
+                "confidence_tier": js.confidence_tier,
+                "words": [w.model_dump() for w in js.words] if js.words else None,
+            }
+
+    transcript_dicts = []
+    for seg in request.transcript:
+        d: dict = {
+            "text": seg.text,
+            "start": seg.start,
+            "end": seg.end,
+            "speaker": seg.speaker,
+            "velma_emotion": seg.velma_emotion,
+            "velma_accent": seg.velma_accent,
+        }
+        _key = f"{seg.start:.3f}_{seg.end:.3f}"
+        if _key in _job_seg_lookup:
+            d.update(_job_seg_lookup[_key])
+        transcript_dicts.append(d)
+
+    detected_lang = job.transcript.language if job and job.transcript else None
+    source_lang = request.source_language
+    if (not source_lang) or normalize_language_code(source_lang, allow_auto=True) == "auto":
+        if job and getattr(job, "source_language", None):
+            source_lang = job.source_language
+        elif detected_lang:
+            source_lang = detected_lang
+        else:
+            source_lang = "auto"
+
+    target_lang = normalize_language_code(request.target_language)
+    source_lang = normalize_language_code(source_lang, allow_auto=True)
+
+    if detected_lang:
+        detected_norm = normalize_language_code(detected_lang, allow_auto=True)
+        if target_lang == "en" and source_lang in ("en", "auto") and detected_norm != "en":
+            source_lang = detected_norm
+
+    for i, seg in enumerate(transcript_dicts):
+        seg["segment_id"] = str(i)
+        seg["source_text"] = seg.get("text", "")
+
+    if source_lang != target_lang:
+        _velma_context = None
+        _velma_path = os.path.join("data", "velma", f"{request.job_id}.json")
+        if os.path.exists(_velma_path):
+            try:
+                with open(_velma_path, "r", encoding="utf-8") as _vf:
+                    _velma_context = _json_to.load(_vf)
+            except Exception:
+                pass
+
+        transcript_dicts = await _ts.translate_segments(
+            transcript_dicts,
+            source_lang,
+            target_lang,
+            character_profiles=request.character_profiles or (job.character_profiles if job else None),
+            velma_context=_velma_context,
+        )
+
+        _NOISE_WORDS = {
+            "you", "it", "he", "she", "they", "i", "we",
+            "sa", "ha", "oh", "ah", "uh", "bobo", "babo",
+            "the", "a", "an",
+        }
+        transcript_dicts = [
+            s for s in transcript_dicts
+            if s.get("text", "").strip()
+            and s.get("text", "").strip().lower().rstrip(".,!?") not in _NOISE_WORDS
+        ]
+
+        # Clear source-language word alignments — they don't match the
+        # translated text and would cause the editor to display Chinese
+        # characters instead of the English translation.
+        for s in transcript_dicts:
+            s.pop("words", None)
+
+    output_dir = os.path.join(settings.DUBBED_DIR, request.job_id)
+    os.makedirs(output_dir, exist_ok=True)
+    segments_path = os.path.join(output_dir, "segments.json")
+    payload = {
+        "job_id": request.job_id,
+        "language": target_lang,
+        "source_language": source_lang,
+        "generated_at": "",
+        "translated_only": True,
+        "segments": [
+            {
+                **seg,
+                "locked": False,
+                "candidates": [],
+                "edit_history": [],
+            }
+            for seg in transcript_dicts
+        ],
+    }
+    with open(segments_path, "w", encoding="utf-8") as f:
+        _json_to.dump(payload, f, indent=2, ensure_ascii=False)
+
+    await job_manager.update_job_status(
+        request.job_id,
+        JobStatus.READY_FOR_REVIEW,
+        progress=40,
+        current_stage="Translation complete — review before rendering",
+    )
+
+    _speaker_genders = job.speaker_genders if job else {}
+
+    return {
+        "job_id": request.job_id,
+        "status": "ready_for_review",
+        "target_language": target_lang,
+        "source_language": source_lang,
+        "speaker_genders": _speaker_genders or {},
+        "segments": transcript_dicts,
+    }
+
+
+@router.post("/render")
+async def render_dubbed_video(request: DubRequest, background_tasks: BackgroundTasks):
+    """Pick up translated (and user-edited) segments and run TTS + mix.
+
+    Called after the user reviews the translation in the inline editor.
+    The request.transcript contains the corrected translated text.
+    """
+    job = await _get_or_rehydrate_job(request.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+
+    transcript_dicts = [
+        {
+            "text": seg.text,
+            "start": seg.start,
+            "end": seg.end,
+            "speaker": seg.speaker,
+            "segment_id": str(i),
+            "source_text": getattr(seg, "source_text", None) or seg.text,
+        }
+        for i, seg in enumerate(request.transcript)
+    ]
+
+    target_lang = normalize_language_code(request.target_language)
+
+    detected_lang = job.transcript.language if job and job.transcript else None
+    source_lang = request.source_language
+    if (not source_lang) or normalize_language_code(source_lang, allow_auto=True) == "auto":
+        if job and getattr(job, "source_language", None):
+            source_lang = job.source_language
+        elif detected_lang:
+            source_lang = detected_lang
+        else:
+            source_lang = "auto"
+    source_lang = normalize_language_code(source_lang, allow_auto=True)
+
+    await job_manager.update_job_status(
+        request.job_id,
+        JobStatus.SYNTHESIZING,
+        progress=50,
+        current_stage="Generating dubbed audio with AI voices",
+    )
+
+    background_tasks.add_task(
+        process_dubbing_pipeline,
+        job_id=request.job_id,
+        video_path=job.video_path,
+        transcript_dicts=transcript_dicts,
+        target_lang=target_lang,
+        source_lang=target_lang,
+        voice_mapping=request.voice_mapping,
+        voice_settings=request.voice_settings,
+        speaker_genders=job.speaker_genders,
+        adaptation_selections=request.adaptation_selections,
+        traits_mapping=job.traits_mapping,
+        character_profiles=request.character_profiles or job.character_profiles,
+    )
+
+    return DubResponse(
+        job_id=request.job_id,
+        status="processing",
+        dubbed_video_url=None,
+        tts_engine=None,
+        dubbing_engine="dubmaster",
+        message="Rendering started, poll /api/status for progress",
     )
 
 

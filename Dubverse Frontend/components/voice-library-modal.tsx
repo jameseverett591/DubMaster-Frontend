@@ -154,6 +154,18 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned }: VoiceL
         current_voice_id: speakerVoiceMap[seg.speaker_id] || null,
       })
     }
+    // Ensure at least 7 speaker slots are available for assignment
+    for (let i = 1; result.length < 7; i++) {
+      const spkId = `speaker-${i}`
+      if (!seen.has(spkId)) {
+        seen.add(spkId)
+        result.push({
+          speaker_id: spkId,
+          display_name: `Speaker ${i}`,
+          current_voice_id: speakerVoiceMap[spkId] || null,
+        })
+      }
+    }
     return result
   }, [segments, speakerVoiceMap, isJobAware])
 

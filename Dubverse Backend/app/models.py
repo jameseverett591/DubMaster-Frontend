@@ -13,6 +13,7 @@ class JobStatus(str, Enum):
     DIARIZING = "diarizing"
     TRANSCRIBING = "transcribing"
     READY_FOR_VOICE_SELECTION = "ready_for_voice_selection"
+    READY_FOR_REVIEW = "ready_for_review"
     TRANSLATING = "translating"
     SYNTHESIZING = "synthesizing"
     LIP_SYNCING = "lip_syncing"
@@ -33,11 +34,21 @@ class VideoChunk(BaseModel):
     status: JobStatus = JobStatus.PENDING
 
 
+class WordAlignment(BaseModel):
+    word: str
+    start: float
+    end: float
+    confidence: float = 0.5
+
+
 class TranscriptSegment(BaseModel):
     text: str
     start: float
     end: float
     speaker: str = "speaker-1"
+    confidence: Optional[float] = None
+    confidence_tier: Optional[str] = None
+    words: Optional[List[WordAlignment]] = None
     velma_emotion: Optional[str] = None
     velma_accent: Optional[str] = None
     velma_deepfake_score: Optional[float] = None

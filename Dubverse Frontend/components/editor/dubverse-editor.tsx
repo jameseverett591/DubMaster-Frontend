@@ -1117,7 +1117,7 @@ export function DubVerseEditor({
       if (seg.speaker_id && !seen.has(seg.speaker_id)) {
         seen.set(seg.speaker_id, {
           id: seg.speaker_id,
-          label: seg.speaker_label || seg.speaker_id,
+          label: seg.speaker_label && !/^\d+$/.test(seg.speaker_label) ? seg.speaker_label : `Speaker ${seen.size + 1}`,
           gender: seg.speaker_gender || 'male',
         })
       }
@@ -3587,10 +3587,7 @@ export function DubVerseEditor({
                     </div>
                     {/* Speaker chip / dropdown — click to reassign */}
                     {renamingSpeakerId === segment.speaker_id ? (
-                      <div className={cn('flex items-center gap-1.5 pl-1 pr-4 py-1 rounded-full border text-xs font-medium shrink-0', speakerColor.bg, speakerColor.text, speakerColor.border)}>
-                        <span className="w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 bg-black/30">
-                          {speakerNumberMap[segment.speaker_id] ?? 1}
-                        </span>
+                      <div className={cn('flex items-center gap-2 px-5 py-2 rounded-full border text-sm font-semibold shrink-0', speakerColor.bg, speakerColor.text, speakerColor.border)}>
                         <input
                           autoFocus
                           aria-label={`Rename speaker ${speakerNumberMap[segment.speaker_id] ?? 1}`}
@@ -3609,14 +3606,11 @@ export function DubVerseEditor({
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <div
-                            className={cn('flex items-center gap-1.5 pl-1 pr-4 py-1 rounded-full border text-xs font-medium shrink-0 cursor-pointer', speakerColor.bg, speakerColor.text, speakerColor.border)}
+                            className={cn('flex items-center px-5 py-2 rounded-full border text-sm font-semibold shrink-0 cursor-pointer', speakerColor.bg, speakerColor.text, speakerColor.border)}
                             onClick={(e) => e.stopPropagation()}
                             title="Click to reassign speaker"
                           >
-                            <span className="w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 bg-black/30">
-                              {speakerNumberMap[segment.speaker_id] ?? 1}
-                            </span>
-                            <span>{segment.speaker_label || `Speaker ${speakerNumberMap[segment.speaker_id] ?? 1}`}</span>
+                            <span>{segment.speaker_label && !/^\d+$/.test(segment.speaker_label) ? segment.speaker_label : `speaker-${speakerNumberMap[segment.speaker_id] ?? 1}`}</span>
                           </div>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="start" className="w-44 bg-slate-900 border-slate-700">
@@ -4962,7 +4956,7 @@ export function DubVerseEditor({
           )} />
         </div>
         {/* Timeline toolbar */}
-        <div className="flex items-center justify-between px-4 py-2 border-b border-slate-800">
+        <div className="relative flex items-center justify-between px-4 py-2 border-b border-slate-800">
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
@@ -5017,8 +5011,8 @@ export function DubVerseEditor({
             </div>
           </div>
           
-          {/* Playback controls */}
-          <div className="flex items-center gap-2">
+          {/* Playback controls — absolute center */}
+          <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2">
             <span className="text-sm font-mono text-slate-400">
               {formatTime(currentTime)} / {formatTime(videoDuration)}
             </span>

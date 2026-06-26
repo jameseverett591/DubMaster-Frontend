@@ -624,12 +624,20 @@ class DubbingService:
             # Must happen BEFORE translation so the reference text matches the
             # language spoken in the vocal audio.
             _, provider_name_check = self._get_tts_provider()
-            # Inline voice cloning disabled — preset voices only.
-            # Zero-shot cloning from source audio produced inconsistent output
-            # because pyannote merges similar-sounding speakers, contaminating
-            # the reference clips with multiple actors' voices.
             speaker_voice_refs: Dict[str, List[Dict]] = {}
-            logger.info("[VOICE-CLONE] Preset-only mode — inline cloning disabled")
+            if provider_name_check == "fish-audio" and vocals_path and os.path.exists(vocals_path):
+                try:
+                    speaker_voice_refs = self._extract_speaker_references(
+                        transcript, vocals_path, output_dir
+                    )
+                    logger.info(
+                        f"[VOICE-CLONE] Extracted references for {len(speaker_voice_refs)} speakers"
+                    )
+                except Exception as _ref_err:
+                    logger.warning(f"[VOICE-CLONE] Extraction failed, using presets: {_ref_err}")
+                    speaker_voice_refs = {}
+            else:
+                logger.info("[VOICE-CLONE] Preset-only mode — no vocals or non-Fish provider")
 
             source_norm = normalize_language_code(source_language, allow_auto=True)
             target_norm = normalize_language_code(target_language)
@@ -883,8 +891,10 @@ class DubbingService:
                     tts_kwargs["traits_tag"] = " ".join(
                         f"[{t.lower()}]" for t in speaker_traits
                     ) if speaker_traits else ""
-                    # Preset-only: always use reference_id, never inline references.
-                    # voice_id is already set from the preset voice map above.
+                    # Pass inline voice references if extracted from source audio.
+                    _refs = speaker_voice_refs.get(speaker)
+                    if _refs:
+                        tts_kwargs["speaker_references"] = _refs
 
                     # Pre-compute Fish Audio speed parameter for duration targeting.
                     seg_slot = float(segment.get("end", 0)) - float(segment.get("start", 0))

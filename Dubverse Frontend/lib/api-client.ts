@@ -44,6 +44,7 @@ export type JobStatusValue =
   | 'diarizing'
   | 'transcribing'
   | 'ready_for_voice_selection'
+  | 'ready_for_review'
   | 'translating'
   | 'synthesizing'
   | 'lip_syncing'
@@ -513,6 +514,49 @@ class DubVerseAPIClient {
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }))
       throw new Error(error.detail || `Failed to start dubbing: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  async translateOnly(request: DubRequest): Promise<{
+    job_id: string
+    status: string
+    target_language: string
+    source_language: string
+    speaker_genders?: Record<string, string>
+    segments: Array<{
+      text: string
+      start: number
+      end: number
+      speaker: string
+      source_text?: string
+      segment_id?: string
+      confidence?: number
+      confidence_tier?: string
+      words?: Array<{ word: string; start: number; end: number; confidence: number }>
+    }>
+  }> {
+    const response = await fetch(`${this.baseURL}/api/translate-only`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Translation failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  async startRender(request: DubRequest): Promise<DubResponse> {
+    const response = await fetch(`${this.baseURL}/api/render`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Render failed: ${response.statusText}`)
     }
     return response.json()
   }

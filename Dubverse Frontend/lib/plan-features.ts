@@ -10,6 +10,7 @@ export const RECORDING_LIMITS: Record<PlanType, number> = {
 export const RECORDING_LIMIT_DEFAULT = 360 // fallback for null / unauthenticated
 
 export type FeatureKey =
+  | 'inlineEditor'
   | 'editor'
   | 'pipelineMonitor'
   | 'qcScoring'
@@ -29,6 +30,8 @@ export type FeatureKey =
   | 'voiceCloning'
 
 export const FEATURE_MATRIX: Record<FeatureKey, PlanType[]> = {
+  // All plans
+  inlineEditor:         ['basic'],
   // Premium + Professional
   editor:               ['premium', 'professional'],
   pipelineMonitor:      ['premium', 'professional'],
@@ -47,7 +50,7 @@ export const FEATURE_MATRIX: Record<FeatureKey, PlanType[]> = {
   studioCollaboration:  ['professional'],
   versioning:           ['professional'],
   performanceNotes:     ['professional'],
-  voiceCloning:         ['professional'],
+  voiceCloning:         ['basic', 'professional'],
 }
 
 export function planHasFeature(plan: PlanType | null, feature: FeatureKey): boolean {

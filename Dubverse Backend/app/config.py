@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 from functools import lru_cache
 
 
@@ -6,6 +7,13 @@ class Settings(BaseSettings):
     APP_NAME: str = "Dubverse Backend"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = True
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def _coerce_debug(cls, v):
+        if isinstance(v, str) and v.lower() not in ("true", "false", "1", "0", "yes", "no"):
+            return v.lower() not in ("release", "production", "prod")
+        return v
     
     CORS_ORIGINS: list[str] = ["*"]
     

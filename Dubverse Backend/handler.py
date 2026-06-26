@@ -214,6 +214,21 @@ def handler(event):
         for seg in segments:
             seg.setdefault("speaker", "SPEAKER_00")
 
+    # ── Confidence Tiering ────────────────────────────────────────────────
+    # Tag each segment so the editor can route low-confidence ones to review.
+    for seg in segments:
+        conf = float(seg.get("confidence", 0.0) or 0.0)
+        source = seg.get("source", "")
+        is_gap_fill = "gap_fill" in source or "whisper_gap" in source
+        is_truncated = seg.get("repetition_truncated", False)
+
+        if is_truncated or conf < 0.4 or is_gap_fill:
+            seg["confidence_tier"] = "low"
+        elif conf >= 0.85:
+            seg["confidence_tier"] = "high"
+        else:
+            seg["confidence_tier"] = "medium"
+
     timings["total"] = round(time.time() - t0, 2)
     logger.info(f"Handler v28 complete in {timings['total']}s — {len(segments)} segments, {len(diarization_segments)} diarization turns")
 
