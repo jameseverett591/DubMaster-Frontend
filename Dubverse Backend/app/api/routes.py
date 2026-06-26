@@ -3724,8 +3724,8 @@ async def rediarize_with_velma(job_id: str, request: Request):
 @router.post("/hume/analyze-segment/{job_id}")
 async def hume_analyze_segment(job_id: str, body: SegmentAnalyzeRequest):
     """
-    Read Velma emotion labels from transcript segments that overlap [start_time, end_time]
-    and return a 5-chord progression mapped to DubMaster's 50-chord model.
+    Build a 50-point emotion curve from Velma emotion labels on overlapping
+    transcript segments, mapped to DubMaster's 50-chord model.
     """
     # Velma emotion label → chord emotion name
     _VELMA_TO_CHORD: Dict[str, str] = {
@@ -3766,7 +3766,10 @@ async def hume_analyze_segment(job_id: str, body: SegmentAnalyzeRequest):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # Collect velma_emotion labels from overlapping transcript segments
+    if float(body.end_time) - float(body.start_time) < 0.5:
+        return {"status": "too_short", "reason": "Segment under 0.5s — too short to analyze"}
+
+    # Build curve from Velma emotion labels on overlapping transcript segments
     chord_votes: Dict[str, float] = {}
     if job.transcript and job.transcript.segments:
         overlapping = [
