@@ -4278,6 +4278,101 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     return {"status": "ok", "job_id": job_id, "index": index}
 
 
+class SyncSegmentsRequest(BaseModel):
+    segments: List[dict]
+
+
+@router.post("/segment/sync/{job_id}")
+async def sync_segments(job_id: str, body: SyncSegmentsRequest):
+    """Persist the frontend's current segment layout to segments.json.
+
+    Called after structural changes (split, add, delete). Assigns
+    transcript_index to new segments, merges updates onto existing ones,
+    and removes segments the frontend deleted.
+    """
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+
+    existing_segs = data.get("segments", [])
+
+    # Safety: reject if incoming is less than half the existing count —
+    # likely a frontend bug sending a partial array, not an intentional bulk delete.
+    if len(existing_segs) > 2 and len(body.segments) < len(existing_segs) // 2:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Sync rejected: incoming {len(body.segments)} segments vs {len(existing_segs)} existing — looks like a partial array"
+        )
+
+    existing_by_ti = {s["transcript_index"]: s for s in existing_segs if "transcript_index" in s}
+
+    max_ti = max((s.get("transcript_index", -1) for s in existing_segs), default=-1)
+
+    FRONTEND_FIELDS = {
+        "id", "start_time", "end_time", "start", "end",
+        "speaker_id", "speaker_label", "speaker_gender",
+        "source_text", "target_text", "active_text", "preview_text",
+        "committed_adapted_text", "committed_start_time", "committed_end_time",
+        "committed_audio_url", "committed_voice_id", "committed_emotion",
+        "committed_speed", "audio_url", "status",
+    }
+
+    result = []
+    for incoming in body.segments:
+        ti = incoming.get("transcript_index")
+
+        if ti is not None and ti in existing_by_ti:
+            merged = dict(existing_by_ti[ti])
+            for key in FRONTEND_FIELDS:
+                if key in incoming:
+                    merged[key] = incoming[key]
+            merged["start"] = incoming.get("start_time", merged.get("start", 0))
+            merged["end"] = incoming.get("end_time", merged.get("end", 0))
+            result.append(merged)
+        else:
+            max_ti += 1
+            new_seg = {k: v for k, v in incoming.items() if v is not None}
+            new_seg["transcript_index"] = max_ti
+            new_seg["start"] = incoming.get("start_time", 0)
+            new_seg["end"] = incoming.get("end_time", 0)
+            new_seg.setdefault("path", None)
+            new_seg.setdefault("voice_id", None)
+            new_seg.setdefault("speed", 1.0)
+            new_seg.setdefault("edit_history", [])
+            result.append(new_seg)
+
+    from datetime import datetime as _dt
+    data["segments"] = result
+    data["synced_at"] = _dt.utcnow().isoformat() + "Z"
+
+    with open(segments_path, "w", encoding="utf-8") as f:
+        _json.dump(data, f, indent=2, ensure_ascii=False)
+
+    response_segments = []
+    for seg in result:
+        response_segments.append({
+            "id": seg.get("id"),
+            "transcript_index": seg["transcript_index"],
+            "start_time": seg.get("start", seg.get("start_time", 0)),
+            "end_time": seg.get("end", seg.get("end_time", 0)),
+            "speaker_id": seg.get("speaker_id"),
+            "source_text": seg.get("source_text", ""),
+            "target_text": seg.get("target_text", ""),
+            "active_text": seg.get("active_text", ""),
+            "committed_adapted_text": seg.get("committed_adapted_text"),
+            "committed_audio_url": seg.get("committed_audio_url"),
+            "committed_voice_id": seg.get("committed_voice_id"),
+            "audio_url": seg.get("audio_url"),
+            "path": seg.get("path"),
+            "status": seg.get("status", "auto"),
+        })
+
+    return {"status": "ok", "segments": response_segments}
+
+
 @router.post("/segment/reset/{job_id}/{index}")
 async def reset_segment(job_id: str, index: int):
     """Clear all editor overrides on a segment — drops emotion + committed_* keys from segments.json.

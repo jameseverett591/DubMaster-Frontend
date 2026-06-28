@@ -923,6 +923,19 @@ class DubVerseAPIClient {
     })
   }
 
+  async syncSegments(
+    jobId: string,
+    segments: Array<Record<string, unknown>>
+  ): Promise<{ status: string; segments: Array<{ id: string; transcript_index: number; start_time: number; end_time: number; [key: string]: unknown }> }> {
+    const response = await fetch(`${this.baseURL}/api/segment/sync/${jobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ segments }),
+    })
+    if (!response.ok) throw new Error(`Sync failed: ${response.statusText}`)
+    return response.json()
+  }
+
   async askAI(request: {
     prompt: string
     model?: 'haiku' | 'sonnet' | 'opus'
