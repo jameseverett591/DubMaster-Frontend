@@ -567,6 +567,21 @@ export function DubVerseEditor({
     [setImportedSegmentsRaw, jobId],
   )
 
+  const syncSegmentsToBackend = useCallback((segments: Segment[]) => {
+    apiClient.syncSegments(jobId, segments as unknown as Array<Record<string, unknown>>).then(res => {
+      setImportedSegments(prev => {
+        if (!prev) return prev
+        return prev.map(seg => {
+          const synced = res.segments.find((s: { id: string }) => s.id === seg.id)
+          if (synced) {
+            return { ...seg, transcript_index: synced.transcript_index }
+          }
+          return seg
+        })
+      })
+    }).catch(err => console.warn('[SYNC]', err))
+  }, [jobId, setImportedSegments])
+
   const [showExportModal, setShowExportModal] = useState(false)
   const [layoutLocked, setLayoutLocked] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -1062,6 +1077,7 @@ export function DubVerseEditor({
   const [regeneratingSegmentIndex, setRegeneratingSegmentIndex] = useState<number | null>(null)
   const [confirmingSegmentIndex, setConfirmingSegmentIndex] = useState<number | null>(null)
   const [queuedSegmentIndex, setQueuedSegmentIndex] = useState<number | null>(null)
+  const [speakerRegenQueue, setSpeakerRegenQueue] = useState<Set<number>>(new Set())
   // Synchronous in-flight guard — avoids the stale-closure race that React state
   // alone can't prevent when draining the queue on the next macrotask.
   const isRegeneratingRef = useRef(false)
@@ -1110,6 +1126,17 @@ export function DubVerseEditor({
     ? importedSegments.filter(Boolean)
     : (Array.isArray(segments) ? segments : []).filter(Boolean)
 
+  // Keep the store's segments array in sync with importedSegments after
+  // structural edits (split, add, delete) so that commitPreview /
+  // commitSegmentChanges write to the correct segment at the correct index.
+  const prevSegCountRef = useRef(displaySegments.length)
+  useEffect(() => {
+    if (displaySegments.length !== prevSegCountRef.current && displaySegments.length > 0) {
+      useEditorStore.setState({ segments: displaySegments })
+    }
+    prevSegCountRef.current = displaySegments.length
+  }, [displaySegments])
+
   // Unique speakers across all segments — used for reassignment dropdown
   const uniqueSpeakers = useMemo(() => {
     const seen = new Map<string, { id: string; label: string; gender: 'male' | 'female' | 'child' }>()
@@ -1143,7 +1170,8 @@ export function DubVerseEditor({
       result.splice(index, 1, leftSegment, rightSegment)
       return result
     })
-  }, [displaySegments, currentTime])
+    setTimeout(() => syncSegmentsToBackend(displaySegmentsRef.current), 0)
+  }, [displaySegments, currentTime, syncSegmentsToBackend])
 
   const handleSplitAtWord = useCallback((index: number, wordIndex: number) => {
     const segment = displaySegments[index]
@@ -1153,13 +1181,9 @@ export function DubVerseEditor({
     const leftText = words.slice(0, wordIndex).join(' ')
     const rightText = words.slice(wordIndex).join(' ')
     const splitRatio = wordIndex / words.length
-    // Use full available space to next segment (not just this segment's narrow window)
-    // so split halves don't pile on each other when the original window is tight.
-    const nextSeg = displaySegments[index + 1]
-    const availableEnd = nextSeg ? nextSeg.start_time : segment.end_time
-    const splitTime = segment.start_time + splitRatio * (availableEnd - segment.start_time)
+    const splitTime = segment.start_time + splitRatio * (segment.end_time - segment.start_time)
     const leftSegment = { ...segment, end_time: splitTime, target_text: leftText, active_text: leftText, preview_text: null }
-    const rightSegment = { ...segment, id: `split-${Date.now()}`, start_time: splitTime, end_time: availableEnd, target_text: rightText, active_text: rightText, preview_text: null }
+    const rightSegment = { ...segment, id: `split-${Date.now()}`, start_time: splitTime, end_time: segment.end_time, target_text: rightText, active_text: rightText, preview_text: null }
     setImportedSegments(prev => {
       const base = prev ?? displaySegments
       const result = [...base]
@@ -1167,44 +1191,75 @@ export function DubVerseEditor({
       return result
     })
     setSplitWordMode(null)
-  }, [displaySegments])
+    setTimeout(() => syncSegmentsToBackend(displaySegmentsRef.current), 0)
+  }, [displaySegments, syncSegmentsToBackend])
 
   const handleAddSegmentAfter = useCallback((index: number) => {
-    const segment = displaySegments[index]
-    if (!segment) return
-    const newSegment = {
-      ...segment,
-      id: `new-${Date.now()}`,
-      index: index + 1,
-      start_time: segment.end_time,
-      end_time: segment.end_time + 2,
-      target_text: segment.target_text,
-      active_text: segment.active_text,
-      preview_text: null,
-      source_text: '',
-      audio_url: undefined,
-      committed_audio_url: undefined,
-      committed_start_time: undefined,
-      committed_end_time: undefined,
-      committed_adapted_text: undefined,
-      status: 'auto' as const,
-    }
-    const expectedLength = displaySegments.length + 1
     setImportedSegments(prev => {
       const base = prev ?? displaySegments
+      const segment = base[index]
+      if (!segment) return base
+      const nextSeg = base[index + 1]
+      const gapStart = segment.end_time
+      const gapEnd = nextSeg ? nextSeg.start_time : gapStart + 2
+      const availableGap = gapEnd - gapStart
+      // If no real gap exists, split the parent segment's duration in half
+      // so the new segment gets a fair share of the timeline space.
+      let actualStart = gapStart
+      let actualDuration: number
       const result = [...base]
+      if (availableGap < 0.5) {
+        const segDuration = segment.end_time - segment.start_time
+        const halfDuration = segDuration / 2
+        actualStart = segment.start_time + halfDuration
+        actualDuration = halfDuration
+        result[index] = { ...segment, end_time: actualStart }
+      } else {
+        actualDuration = Math.min(2, availableGap)
+      }
+      const duration = actualDuration
+      const newSegment = {
+        id: `new-${Date.now()}`,
+        index: index + 1,
+        transcript_index: undefined,
+        status: 'auto' as const,
+        start_time: actualStart,
+        end_time: actualStart + duration,
+        target_text: segment.target_text,
+        active_text: segment.active_text,
+        preview_text: null,
+        source_text: segment.source_text,
+        isPreviewing: false,
+        isUserEdited: false,
+        speaker_id: segment.speaker_id,
+        speaker_label: segment.speaker_label,
+        speaker_gender: segment.speaker_gender,
+        audio_url: undefined,
+        committed_audio_url: undefined,
+        committed_start_time: undefined,
+        committed_end_time: undefined,
+        committed_adapted_text: undefined,
+        committed_emotion: null,
+        committed_voice_id: null,
+        committed_speed: null,
+        velma_emotion: undefined,
+        velma_emotion_curve: undefined,
+        velma_progression: undefined,
+        qc_findings: [],
+        emotionalCurve: segment.emotionalCurve,
+      } as typeof segment
       result.splice(index + 1, 0, newSegment)
       return result
     })
+    setTimeout(() => syncSegmentsToBackend(displaySegmentsRef.current), 0)
     selectSegment(index + 1)
-    // Verify the splice actually rendered. On the next tick, displaySegments
-    // should have grown by 1. If it hasn't, the gate swallowed the write.
+    const expectedLen = displaySegments.length + 1
     setTimeout(() => {
-      const grew = displaySegmentsRef.current.length === expectedLength
+      const grew = displaySegmentsRef.current.length === expectedLen
       setAddSegmentFeedback(grew ? 'success' : 'error')
       setTimeout(() => setAddSegmentFeedback(null), grew ? 2000 : 4000)
     }, 50)
-  }, [displaySegments, selectSegment])
+  }, [displaySegments, selectSegment, syncSegmentsToBackend])
 
   const commitSpeakerRename = useCallback((speakerId: string, newLabel: string) => {
     if (!newLabel.trim()) return
@@ -2479,11 +2534,12 @@ export function DubVerseEditor({
       const audio_url = filename
         ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}`
         : segment.audio_url
+      // Keep the frontend's current timing as the source of truth.
+      // The backend response timing is unreliable for split/added segments
+      // because segments.json still holds the pre-split layout.
       updateSegment(activeIndex, {
         audio_url,
         status: 'edited',
-        start_time: response.segment.start ?? segment.start_time,
-        end_time: response.segment.end ?? segment.end_time,
       })
       setImportedSegments(prev => {
         if (!prev) return prev
@@ -2494,8 +2550,6 @@ export function DubVerseEditor({
               committed_audio_url: audio_url,
               status: 'edited' as const,
               committed_emotion: stagedEmotions[activeIndex] ?? seg.committed_emotion,
-              start_time: response.segment.start ?? seg.start_time,
-              end_time: response.segment.end ?? seg.end_time,
             }
           : seg)
       })
@@ -2526,8 +2580,8 @@ export function DubVerseEditor({
             committed_audio_url: isActiveSegment
               ? audio_url
               : resolveAudioUrl(seg.committed_audio_url),
-            start_time: isActiveSegment ? (response.segment.start ?? seg.start_time) : seg.start_time,
-            end_time: isActiveSegment ? (response.segment.end ?? seg.end_time) : seg.end_time,
+            start_time: seg.start_time,
+            end_time: seg.end_time,
           }
         }),
         videoDuration,
@@ -2584,6 +2638,22 @@ export function DubVerseEditor({
   handleGenerateSpeechRef.current = handleGenerateSpeech
   const displaySegmentsRef = useRef(displaySegments)
   displaySegmentsRef.current = displaySegments
+
+  const regenAllForSpeaker = useCallback(async (speakerId: string, voiceId: string) => {
+    const indices = displaySegmentsRef.current
+      .map((seg, i) => ({ seg, i }))
+      .filter(({ seg }) => seg.speaker_id === speakerId)
+      .map(({ i }) => i)
+    if (indices.length === 0) return
+    setSpeakerRegenQueue(new Set(indices))
+    for (const idx of indices) {
+      setSpeakerRegenQueue(prev => { const next = new Set(prev); next.delete(idx); return next })
+      selectSegment(idx)
+      await handleGenerateSpeechRef.current(idx, voiceId)
+    }
+    setSpeakerRegenQueue(new Set())
+  }, [selectSegment])
+
   // Preview speech — non-destructive TTS preview using preview_text
   const handlePreviewSpeech = useCallback(async (index: number) => {
     if (isRegenerating) return
@@ -3441,7 +3511,7 @@ export function DubVerseEditor({
                     draggedVoice !== null && 'ring-1 ring-cyan-500/40',
                     voiceDragOverIndex === index && 'ring-2 ring-emerald-500 bg-emerald-500/10 animate-pulse cursor-copy',
                     confirmingSegmentIndex === index && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-[pulse_0.35s_ease-in-out_2]',
-                    queuedSegmentIndex === index && 'ring-1 ring-cyan-400/60',
+                    (queuedSegmentIndex === index || speakerRegenQueue.has(index)) && 'ring-1 ring-cyan-400/60',
                   )}
                   onClick={() => {
                     selectSegment(index)
@@ -3498,16 +3568,11 @@ export function DubVerseEditor({
                           }
                           selectSegment(index)
                           setCurrentTime(displaySegments[index].start_time)
-                          console.log('[VOICE-DROP] calling handleGenerateSpeech', { index, voice_id: parsed.voice_id })
-                          handleGenerateSpeech(index, parsed.voice_id).then(ok => {
-                            if (ok) {
-                              console.log('[VOICE-DROP] regen succeeded — showing applied chip', { index, voiceName: parsed.name })
-                              setVoiceAppliedFeedback({ segmentIndex: index, voiceName: parsed.name })
-                              setTimeout(() => setVoiceAppliedFeedback(null), 2200)
-                            } else {
-                              console.warn('[VOICE-DROP] regen failed — no confirmation chip')
-                            }
-                          })
+                          if (speakerId) {
+                            regenAllForSpeaker(speakerId, parsed.voice_id)
+                          } else {
+                            handleGenerateSpeech(index, parsed.voice_id)
+                          }
                         } else {
                           console.warn('[VOICE-DROP] payload missing voice_id', parsed)
                         }
@@ -4183,6 +4248,7 @@ export function DubVerseEditor({
                     const base = prev ?? displaySegments
                     return base.filter((_, i) => i !== idx)
                   })
+                  setTimeout(() => syncSegmentsToBackend(displaySegmentsRef.current), 0)
                   setLockedSegments(prev => {
                     const next = new Set(prev)
                     next.delete(idx)
@@ -4437,7 +4503,7 @@ export function DubVerseEditor({
           {rightPanelTab === 'library' && (
             <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
               <VoiceLibraryPanel
-                onVoiceAssigned={(speakerId) => {
+                onVoiceAssigned={(speakerId, voiceId) => {
                   setStagedVoices(prev => {
                     const next = { ...prev }
                     displaySegments.forEach((seg, i) => {
@@ -4445,6 +4511,9 @@ export function DubVerseEditor({
                     })
                     return next
                   })
+                  if (voiceId) {
+                    regenAllForSpeaker(speakerId, voiceId)
+                  }
                 }}
               />
             </div>
@@ -5695,7 +5764,14 @@ export function DubVerseEditor({
                               return base.map((seg, i) => i === index ? { ...seg, start_time: newStart } : seg)
                             })
                           }
-                          const onMouseUp = () => {
+                          const onMouseUp = (ev: MouseEvent) => {
+                            const dx = ev.clientX - startX
+                            const newStart = Math.max(0, Math.min(segment.end_time - 0.1, originalStart + dx / PIXELS_PER_SECOND))
+                            updateSegment(index, { start_time: newStart })
+                            commitSegmentChanges(index, { committed_start_time: newStart })
+                            apiClient.commitSegmentTiming(jobId, index, {
+                              committed_start_time: newStart,
+                            }).catch(err => console.warn('[RESIZE-LEFT]', err))
                             document.removeEventListener('mousemove', onMouseMove)
                             document.removeEventListener('mouseup', onMouseUp)
                           }
@@ -5730,7 +5806,14 @@ export function DubVerseEditor({
                               return base.map((seg, i) => i === index ? { ...seg, end_time: newEnd } : seg)
                             })
                           }
-                          const onMouseUp = () => {
+                          const onMouseUp = (ev: MouseEvent) => {
+                            const dx = ev.clientX - startX
+                            const newEnd = Math.max(segment.start_time + 0.1, originalEnd + dx / PIXELS_PER_SECOND)
+                            updateSegment(index, { end_time: newEnd })
+                            commitSegmentChanges(index, { committed_end_time: newEnd })
+                            apiClient.commitSegmentTiming(jobId, index, {
+                              committed_end_time: newEnd,
+                            }).catch(err => console.warn('[RESIZE-RIGHT]', err))
                             document.removeEventListener('mousemove', onMouseMove)
                             document.removeEventListener('mouseup', onMouseUp)
                           }
@@ -5937,8 +6020,38 @@ export function DubVerseEditor({
                         dragUpListenerRef.current = onMouseUp
                       }}
                     >
-                      {/* Left stretch handle */}
-                      <div className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-l">
+                      {/* Left timing handle (green) */}
+                      <div
+                        data-resize-handle={true}
+                        className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-green-500/40 hover:bg-green-500/70 rounded-l transition-colors"
+                        onMouseDown={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          const startX = e.clientX
+                          const originalStart = segment.start_time
+                          const onMouseMove = (ev: MouseEvent) => {
+                            const dx = ev.clientX - startX
+                            const newStart = Math.max(0, Math.min(segment.end_time - 0.1, originalStart + dx / PIXELS_PER_SECOND))
+                            setImportedSegments(prev => {
+                              const base = prev ?? displaySegments
+                              return base.map((seg, i) => i === index ? { ...seg, start_time: newStart } : seg)
+                            })
+                          }
+                          const onMouseUp = (ev: MouseEvent) => {
+                            const dx = ev.clientX - startX
+                            const newStart = Math.max(0, Math.min(segment.end_time - 0.1, originalStart + dx / PIXELS_PER_SECOND))
+                            updateSegment(index, { start_time: newStart })
+                            commitSegmentChanges(index, { committed_start_time: newStart })
+                            apiClient.commitSegmentTiming(jobId, index, {
+                              committed_start_time: newStart,
+                            }).catch(err => console.warn('[DUBBED-RESIZE-LEFT]', err))
+                            document.removeEventListener('mousemove', onMouseMove)
+                            document.removeEventListener('mouseup', onMouseUp)
+                          }
+                          document.addEventListener('mousemove', onMouseMove)
+                          document.addEventListener('mouseup', onMouseUp)
+                        }}
+                      >
                         <GripHorizontal className="h-3 w-3 rotate-90" />
                       </div>
 
@@ -5961,28 +6074,31 @@ export function DubVerseEditor({
                         )}
                       </div>
 
-                      {/* Right stretch handle */}
+                      {/* Right timing handle (green) */}
                       <div
                         data-resize-handle={true}
-                        className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-r"
+                        className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-green-500/40 hover:bg-green-500/70 rounded-r transition-colors"
                         onMouseDown={(e) => {
                           e.preventDefault()
                           e.stopPropagation()
                           const startX = e.clientX
-                          const originalDuration = segment.end_time - segment.start_time
+                          const originalEnd = segment.end_time
                           const onMouseMove = (ev: MouseEvent) => {
                             const dx = ev.clientX - startX
-                            const newDuration = Math.max(0.1, originalDuration + dx / PIXELS_PER_SECOND)
-                            const newSpeed = Math.min(2.0, Math.max(0.5, originalDuration / newDuration))
-                            setDragSpeedPreview({ index, speed: newSpeed })
-                          }
-                          const onMouseUp = () => {
-                            setDragSpeedPreview(prev => {
-                              if (prev?.index === index) {
-                                setStagedSpeeds(s => ({ ...s, [index]: prev.speed }))
-                              }
-                              return null
+                            const newEnd = Math.max(segment.start_time + 0.1, originalEnd + dx / PIXELS_PER_SECOND)
+                            setImportedSegments(prev => {
+                              const base = prev ?? displaySegments
+                              return base.map((seg, i) => i === index ? { ...seg, end_time: newEnd } : seg)
                             })
+                          }
+                          const onMouseUp = (ev: MouseEvent) => {
+                            const dx = ev.clientX - startX
+                            const newEnd = Math.max(segment.start_time + 0.1, originalEnd + dx / PIXELS_PER_SECOND)
+                            updateSegment(index, { end_time: newEnd })
+                            commitSegmentChanges(index, { committed_end_time: newEnd })
+                            apiClient.commitSegmentTiming(jobId, index, {
+                              committed_end_time: newEnd,
+                            }).catch(err => console.warn('[DUBBED-RESIZE-RIGHT]', err))
                             document.removeEventListener('mousemove', onMouseMove)
                             document.removeEventListener('mouseup', onMouseUp)
                           }
@@ -6012,14 +6128,14 @@ export function DubVerseEditor({
                       data-segment-drop-zone
                       data-index={i}
                       className={cn(
-                        'absolute top-1 bottom-1 rounded opacity-70 transition-all',
+                        'absolute top-1 bottom-1 rounded opacity-70 transition-all group',
                         voiceDragOverIndex === i
                           ? 'bg-emerald-500/70 border-2 border-emerald-400 ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.7)] animate-pulse'
                           : !hasAudio
                           ? 'bg-neutral-500/30 border border-neutral-600/50'
                           : regeneratingSegmentIndex === i
                           ? 'bg-amber-500/70 border border-amber-400 animate-pulse shadow-[0_0_8px_rgba(251,191,36,0.8)]'
-                          : queuedSegmentIndex === i
+                          : (queuedSegmentIndex === i || speakerRegenQueue.has(i))
                           ? 'bg-cyan-500/40 border border-cyan-400/70 border-dashed animate-pulse'
                           : confirmingSegmentIndex === i
                           ? 'bg-amber-400/80 border border-amber-300 animate-[pulse_0.3s_ease-in-out_2]'
@@ -6041,7 +6157,70 @@ export function DubVerseEditor({
                         )
                       }}
                       title={seg.committed_adapted_text ?? seg.active_text ?? seg.target_text}
-                    />
+                    >
+                      {/* Left speed handle (blue) */}
+                      <div
+                        data-resize-handle={true}
+                        className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-blue-500/40 hover:bg-blue-500/70 rounded-l transition-colors z-10"
+                        onMouseDown={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          const startX = e.clientX
+                          const originalDuration = endT - startT
+                          const onMouseMove = (ev: MouseEvent) => {
+                            const dx = ev.clientX - startX
+                            const newDuration = Math.max(0.1, originalDuration - dx / PIXELS_PER_SECOND)
+                            const newSpeed = Math.min(2.0, Math.max(0.5, originalDuration / newDuration))
+                            setDragSpeedPreview({ index: i, speed: newSpeed })
+                          }
+                          const onMouseUp = () => {
+                            setDragSpeedPreview(prev => {
+                              if (prev?.index === i) {
+                                setStagedSpeeds(s => ({ ...s, [i]: prev.speed }))
+                              }
+                              return null
+                            })
+                            document.removeEventListener('mousemove', onMouseMove)
+                            document.removeEventListener('mouseup', onMouseUp)
+                          }
+                          document.addEventListener('mousemove', onMouseMove)
+                          document.addEventListener('mouseup', onMouseUp)
+                        }}
+                      >
+                        <GripHorizontal className="h-3 w-3 rotate-90" />
+                      </div>
+                      {/* Right speed handle (blue) */}
+                      <div
+                        data-resize-handle={true}
+                        className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-blue-500/40 hover:bg-blue-500/70 rounded-r transition-colors z-10"
+                        onMouseDown={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          const startX = e.clientX
+                          const originalDuration = endT - startT
+                          const onMouseMove = (ev: MouseEvent) => {
+                            const dx = ev.clientX - startX
+                            const newDuration = Math.max(0.1, originalDuration + dx / PIXELS_PER_SECOND)
+                            const newSpeed = Math.min(2.0, Math.max(0.5, originalDuration / newDuration))
+                            setDragSpeedPreview({ index: i, speed: newSpeed })
+                          }
+                          const onMouseUp = () => {
+                            setDragSpeedPreview(prev => {
+                              if (prev?.index === i) {
+                                setStagedSpeeds(s => ({ ...s, [i]: prev.speed }))
+                              }
+                              return null
+                            })
+                            document.removeEventListener('mousemove', onMouseMove)
+                            document.removeEventListener('mouseup', onMouseUp)
+                          }
+                          document.addEventListener('mousemove', onMouseMove)
+                          document.addEventListener('mouseup', onMouseUp)
+                        }}
+                      >
+                        <GripHorizontal className="h-3 w-3 rotate-90" />
+                      </div>
+                    </div>
                   )
                 })}
                 {rptStitching && (
@@ -6286,10 +6465,10 @@ export function DubVerseEditor({
                     })
                     const filename = response.segment.path.split('/').pop() ?? ''
                     const audio_url = filename ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}` : seg.audio_url
-                    updateSegment(idx, { audio_url, status: 'edited', start_time: response.segment.start ?? seg.start_time, end_time: response.segment.end ?? seg.end_time })
+                    updateSegment(idx, { audio_url, status: 'edited' })
                     setImportedSegments(prev => {
                       if (!prev) return prev
-                      return prev.map((s, i) => i === idx ? { ...s, audio_url, committed_audio_url: audio_url, status: 'edited' as const, start_time: response.segment.start ?? s.start_time, end_time: response.segment.end ?? s.end_time } : s)
+                      return prev.map((s, i) => i === idx ? { ...s, audio_url, committed_audio_url: audio_url, status: 'edited' as const } : s)
                     })
                     commitSegmentChanges(idx, { committed_audio_url: audio_url })
                   } catch (err: any) {
