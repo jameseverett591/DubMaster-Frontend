@@ -57,7 +57,8 @@ import { apiClient } from '@/lib/api-client'
 import { VoiceLibraryPanel } from '@/components/voice-library-modal'
 import { CharacterProfilePopover } from '@/components/editor/character-profile-popover'
 import { useEditorStore, type SidebarTab } from '@/lib/editor-store'
-import type { Segment, QCScore, QCFinding, QCFindingType, QCReport } from '@/lib/editor-types'
+import type { Segment, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType } from '@/lib/editor-types'
+import { DEFAULT_NUANCES, NUANCE_MARKER_META } from '@/lib/editor-types'
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
 import { buildMockQCReport } from '@/lib/qc-mock-data'
 import { applyQCFix } from '@/lib/qc-fixes'
@@ -115,7 +116,7 @@ import {
 } from '@/components/ui/context-menu'
 
 // Additional QC tab icons not in main import block
-import { LayoutList, AudioLines, Zap, GitBranch } from 'lucide-react'
+import { LayoutList, AudioLines, Zap, GitBranch, Sliders } from 'lucide-react'
 import { usePlan } from '@/lib/use-plan'
 
 // QC Tab definitions - main navigation tabs + QC-specific tabs
@@ -600,7 +601,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'chord' | 'advanced' | 'characters'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'nuances' | 'chord' | 'advanced' | 'characters'>('result')
   const [velmaEnrichLoading, setVelmaEnrichLoading] = useState(false)
   const [velmaEnrichResult, setVelmaEnrichResult] = useState<{ patched: number; total: number } | null>(null)
 
@@ -733,6 +734,8 @@ export function DubVerseEditor({
   const [renamingSpeakerId, setRenamingSpeakerId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [stagedPitches, setStagedPitches] = useState<Record<number, number>>({})
+  const [stagedNuances, setStagedNuances] = useState<Record<number, Partial<SegmentNuances>>>({})
+  const [nuancesAdvanced, setNuancesAdvanced] = useState(false)
   const [draggedVoice, setDraggedVoice] = useState<string | null>(null)
   const [groupSelectedSegments, setGroupSelectedSegments] = useState<Set<number>>(new Set())
   const [selectionDrag, setSelectionDrag] = useState<{
@@ -2535,6 +2538,8 @@ export function DubVerseEditor({
         voice_key: voiceOverride ?? stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id],
         pitch: stagedPitches[activeIndex] ?? speakerPitchMap[segment.speaker_id] ?? 0,
         emotionIntensity,
+        nuances: stagedNuances[activeIndex] ?? segment.nuances,
+        nuance_markers: segment.nuance_markers,
       })
       console.log('[REGEN] backend response', { path: response.segment.path, voice_id: response.segment.voice_id, status: response.status })
       if (response.segment.timing_exclusion) {
@@ -4196,6 +4201,15 @@ export function DubVerseEditor({
             <Button
               variant="ghost"
               size="sm"
+              className={cn("h-8 text-xs", rightPanelTab === 'nuances' ? "text-violet-400 bg-violet-500/10" : "text-slate-400")}
+              onClick={() => setRightPanelTab('nuances')}
+            >
+              <Sliders className="h-4 w-4 mr-1" />
+              Nuances
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               className={cn("h-8 text-xs", askAiOpen ? "text-amber-400 bg-amber-500/10" : "text-slate-400")}
               onClick={() => {
                 setAskAiOpen(p => !p)
@@ -4557,6 +4571,206 @@ export function DubVerseEditor({
               />
             </div>
           )}
+
+          {rightPanelTab === 'nuances' && (() => {
+            const nIdx = selectedSegmentIndex ?? 0
+            const seg = displaySegments[nIdx]
+            const cur = { ...DEFAULT_NUANCES, ...seg?.nuances, ...stagedNuances[nIdx] }
+            const setN = (key: keyof SegmentNuances, val: number) =>
+              setStagedNuances(prev => ({ ...prev, [nIdx]: { ...prev[nIdx], [key]: val } }))
+            const tier1: Array<{ key: keyof SegmentNuances; labels: string[] }> = [
+              { key: 'pace', labels: ['Rushed', 'Measured', 'Deliberate'] },
+              { key: 'weight', labels: ['Light', 'Normal', 'Heavy'] },
+              { key: 'breath', labels: ['Clipped', 'Natural', 'Breathy'] },
+              { key: 'delivery', labels: ['Intimate', 'Neutral', 'Projected'] },
+              { key: 'tail', labels: ['Sharp', 'Natural', 'Trailing'] },
+            ]
+            const tier2: Array<{ key: keyof SegmentNuances; min: string; max: string }> = [
+              { key: 'prosody', min: 'Flat', max: 'Expressive' },
+              { key: 'pitchContour', min: 'Flat', max: 'Melodic' },
+              { key: 'volumeDynamics', min: 'Compressed', max: 'Dynamic' },
+              { key: 'tempoPacing', min: 'Slow', max: 'Fast' },
+              { key: 'pauses', min: 'None', max: 'Heavy' },
+              { key: 'breathSounds', min: 'None', max: 'Prominent' },
+              { key: 'voiceQuality', min: 'Smooth', max: 'Textured' },
+              { key: 'microIntonation', min: 'Robotic', max: 'Human' },
+            ]
+            const segText = seg?.preview_text ?? seg?.active_text ?? seg?.target_text ?? ''
+            const markers: NuanceMarker[] = seg?.nuance_markers ?? []
+            const addMarker = (type: NuanceMarkerType) => {
+              const el = document.getElementById('nuance-text-display')
+              if (!el) return
+              const sel = window.getSelection()
+              if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return
+              const range = sel.getRangeAt(0)
+              if (!el.contains(range.commonAncestorContainer)) return
+              const preRange = document.createRange()
+              preRange.setStart(el, 0)
+              preRange.setEnd(range.startContainer, range.startOffset)
+              const startChar = preRange.toString().length
+              const endChar = startChar + range.toString().length
+              if (endChar <= startChar) return
+              const newMarker: NuanceMarker = {
+                id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                startChar,
+                endChar,
+                type,
+                intensity: 70,
+              }
+              setImportedSegments(prev => {
+                if (!prev) return prev
+                return prev.map((s, i) => i === nIdx
+                  ? { ...s, nuance_markers: [...(s.nuance_markers ?? []), newMarker] }
+                  : s)
+              })
+              sel.removeAllRanges()
+            }
+            const removeMarker = (markerId: string) => {
+              setImportedSegments(prev => {
+                if (!prev) return prev
+                return prev.map((s, i) => i === nIdx
+                  ? { ...s, nuance_markers: (s.nuance_markers ?? []).filter(m => m.id !== markerId) }
+                  : s)
+              })
+            }
+            const renderMarkedText = () => {
+              if (markers.length === 0) return <span>{segText}</span>
+              const sorted = [...markers].sort((a, b) => a.startChar - b.startChar)
+              const parts: React.ReactNode[] = []
+              let cursor = 0
+              sorted.forEach((m, mi) => {
+                if (m.startChar > cursor) parts.push(<span key={`t${mi}`}>{segText.slice(cursor, m.startChar)}</span>)
+                const meta = NUANCE_MARKER_META[m.type]
+                parts.push(
+                  <span
+                    key={m.id}
+                    className={cn('underline decoration-2 cursor-pointer', meta?.color ?? 'text-white')}
+                    title={`${meta?.label} — click to remove`}
+                    onClick={() => removeMarker(m.id)}
+                  >
+                    {segText.slice(m.startChar, m.endChar)}
+                  </span>
+                )
+                cursor = m.endChar
+              })
+              if (cursor < segText.length) parts.push(<span key="tail">{segText.slice(cursor)}</span>)
+              return <>{parts}</>
+            }
+            return (
+              <div className="flex-1 min-h-0 flex flex-col overflow-y-auto p-3 space-y-3">
+                <div className="text-xs text-slate-400">
+                  <span className="font-semibold text-white">{nIdx + 1}</span>
+                  {' '}{seg?.speaker_label ?? seg?.speaker_id}
+                </div>
+
+                {/* Selectable text with visual markers */}
+                <div
+                  id="nuance-text-display"
+                  className="text-sm text-slate-200 bg-slate-800/50 rounded px-3 py-2 border border-slate-700 select-text cursor-text leading-relaxed"
+                >
+                  {renderMarkedText()}
+                </div>
+
+                {/* Marker toolbar */}
+                <div className="flex flex-wrap gap-1">
+                  {(Object.keys(NUANCE_MARKER_META) as NuanceMarkerType[]).map(type => {
+                    const meta = NUANCE_MARKER_META[type]
+                    return (
+                      <button
+                        key={type}
+                        type="button"
+                        className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] border border-slate-700 bg-slate-800 hover:bg-slate-700 transition-colors text-slate-400 hover:text-slate-200"
+                        title={`Select text above, then click to add ${meta.label} marker`}
+                        onClick={() => addMarker(type)}
+                      >
+                        <span>{meta.icon}</span>
+                        <span>{meta.label}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+
+                {markers.length > 0 && (
+                  <div className="text-[9px] text-slate-600">
+                    Click a colored span to remove its marker
+                  </div>
+                )}
+
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold pt-1">Basic</div>
+                {tier1.map(({ key, labels }) => (
+                  <div key={key} className="space-y-1">
+                    <div className="text-[11px] text-slate-400 capitalize">{key}</div>
+                    <div className="flex gap-1">
+                      {labels.map((label, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          className={cn(
+                            'flex-1 px-1.5 py-1 rounded text-[10px] border transition-colors',
+                            cur[key] === i
+                              ? 'bg-violet-500/30 border-violet-400/60 text-violet-300'
+                              : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'
+                          )}
+                          onClick={() => setN(key, i)}
+                        >{label}</button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+
+                <div className="flex items-center gap-2 pt-2">
+                  <button
+                    type="button"
+                    className={cn(
+                      'text-[9px] px-2 py-0.5 rounded font-semibold transition-colors',
+                      nuancesAdvanced
+                        ? 'bg-violet-400/20 text-violet-300 border border-violet-400/40'
+                        : 'text-slate-500 border border-slate-700'
+                    )}
+                    onClick={() => setNuancesAdvanced(p => !p)}
+                  >Advanced</button>
+                </div>
+
+                {nuancesAdvanced && (
+                  <div className="space-y-3 pt-1">
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">Advanced</div>
+                    {tier2.map(({ key, min, max }) => (
+                      <div key={key} className="space-y-0.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] text-slate-400">{key.replace(/([A-Z])/g, ' $1').trim()}</span>
+                          <span className="text-[10px] text-violet-400 font-mono">{cur[key]}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[9px] text-slate-600 w-16 text-right shrink-0">{min}</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            value={cur[key]}
+                            onChange={(e) => setN(key, Number(e.target.value))}
+                            title={key.replace(/([A-Z])/g, ' $1').trim()}
+                            className="flex-1 h-1.5 accent-violet-500 cursor-pointer"
+                          />
+                          <span className="text-[9px] text-slate-600 w-16 shrink-0">{max}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="pt-3">
+                  <Button
+                    size="sm"
+                    className="w-full h-8 text-xs bg-violet-500/20 text-violet-400 hover:bg-violet-500/30"
+                    onClick={() => handleGenerateSpeech(nIdx)}
+                    disabled={isRegenerating}
+                  >
+                    {isRegenerating ? 'Generating...' : 'Regenerate with Nuances'}
+                  </Button>
+                </div>
+              </div>
+            )
+          })()}
 
           {rightPanelTab === 'emotions' && hasFeature('emotionalIntelligence') && (
             <EmotionalIntelligencePanel

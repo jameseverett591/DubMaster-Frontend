@@ -195,3 +195,5 @@ class RegenerateRequest(BaseModel):
     traits: Optional[List[str]] = None
     voice_params: Optional[VoiceParams] = None
     force_timing: Optional[bool] = None
+    nuances: Optional[Dict] = None
+    nuance_markers: Optional[List[Dict]] = None

@@ -178,6 +178,8 @@ export interface RegenerateSegmentRequest {
   traits?: string[]
   emotionIntensity?: number
   force_timing?: boolean
+  nuances?: Record<string, number>
+  nuance_markers?: Array<{ id: string; startChar: number; endChar: number; type: string; intensity: number }>
 }
 
 export interface RegenerateSegmentResponse {

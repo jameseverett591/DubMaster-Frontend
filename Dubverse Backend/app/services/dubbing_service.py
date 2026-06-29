@@ -2117,6 +2117,173 @@ class DubbingService:
         except RuntimeError:
             pass  # No running event loop — skip Supabase upsert
 
+    class NuanceTranslator:
+        """Translates UI nuance descriptors to TTS engine directives.
+
+        Adapter pattern — subclass for ElevenLabs or other engines.
+        """
+
+        def translate_for_fish_audio(self, nuances: dict) -> dict:
+            directives: List[str] = []
+            speed_modifier = 1.0
+
+            pace = nuances.get("pace", 1)
+            if pace == 0:
+                speed_modifier *= 1.2
+            elif pace == 2:
+                speed_modifier *= 0.85
+
+            weight = nuances.get("weight", 1)
+            if weight == 2:
+                directives.append("heavy")
+
+            breath = nuances.get("breath", 1)
+            if breath == 2:
+                directives.append("breathy")
+
+            delivery = nuances.get("delivery", 1)
+            if delivery == 0:
+                directives.append("whispered")
+            elif delivery == 2:
+                directives.append("projected")
+
+            tail = nuances.get("tail", 1)
+            if tail == 0:
+                directives.append("clipped")
+            elif tail == 2:
+                directives.append("trailing")
+
+            prosody = nuances.get("prosody", 50)
+            if prosody > 75:
+                directives.append("expressive")
+
+            pitch_contour = nuances.get("pitchContour", 50)
+            if pitch_contour > 75:
+                directives.append("melodic")
+
+            volume_dynamics = nuances.get("volumeDynamics", 50)
+            if volume_dynamics > 75:
+                directives.append("dynamic")
+
+            tempo_pacing = nuances.get("tempoPacing", 50)
+            if tempo_pacing > 70:
+                speed_modifier *= 1.1
+            elif tempo_pacing < 30:
+                speed_modifier *= 0.9
+
+            # pauses handled by preprocess_text_pauses, not bracket tags
+
+            voice_quality = nuances.get("voiceQuality", 50)
+            if voice_quality > 75:
+                directives.append("gravelly")
+
+            micro = nuances.get("microIntonation", 50)
+            if micro > 75:
+                directives.append("natural")
+
+            return {
+                "directives": directives,
+                "speed_modifier": round(speed_modifier, 3),
+            }
+
+        def preprocess_text_pauses(self, text: str, pause_level: int, engine: str = "fish_audio") -> str:
+            """Insert pauses at punctuation based on slider intensity.
+
+            pause_level 0-25: strip commas (no pauses)
+            pause_level 26-50: leave as-is (natural)
+            pause_level 51-75: moderate pauses at commas/periods
+            pause_level 76-100: heavy dramatic pauses
+            """
+            import re
+
+            if engine == "fish_audio":
+                if pause_level <= 25:
+                    return re.sub(r",\s*", " ", text)
+                if pause_level <= 50:
+                    return text
+                if pause_level <= 75:
+                    text = re.sub(r",\s*", "... ", text)
+                    text = re.sub(r"\.\s+", "... ", text)
+                    text = re.sub(r";\s*", "... ", text)
+                    return text
+                # 76-100: heavy
+                text = re.sub(r",\s*", "... ... ", text)
+                text = re.sub(r"\.\s+", "... ... ... ", text)
+                text = re.sub(r";\s*", "... ... ", text)
+                text = re.sub(r"—\s*", "... ... ", text)
+                return text
+
+            elif engine == "elevenlabs":
+                if pause_level <= 25:
+                    return re.sub(r",\s*", " ", text)
+                if pause_level <= 50:
+                    return text
+                ms = int(200 + (pause_level - 50) * 12)
+                text = re.sub(r",\s*", f', <break time="{ms}ms"/> ', text)
+                text = re.sub(r"\.\s+", f'. <break time="{ms + 200}ms"/> ', text)
+                return text
+
+            # generic_ssml fallback
+            if pause_level <= 50:
+                return text
+            ms = int(200 + (pause_level - 50) * 12)
+            text = re.sub(r",\s*", f', <break time="{ms}ms"/> ', text)
+            text = re.sub(r"\.\s+", f'. <break time="{ms + 200}ms"/> ', text)
+            return text
+
+        def apply_markers_to_text(self, text: str, markers: list, engine: str = "fish_audio") -> str:
+            """Apply intra-segment nuance markers to text spans."""
+            if not markers:
+                return text
+            for marker in sorted(markers, key=lambda m: m.get("startChar", 0), reverse=True):
+                start = marker.get("startChar", 0)
+                end = marker.get("endChar", len(text))
+                mtype = marker.get("type", "")
+                if start < 0 or end > len(text) or start >= end:
+                    continue
+                span = text[start:end]
+
+                if engine == "fish_audio":
+                    if mtype == "rise":
+                        replacement = f"[excited]{span}"
+                    elif mtype == "drop":
+                        replacement = f"{span}..."
+                    elif mtype == "stress":
+                        replacement = f"[emphasized]{span}"
+                    elif mtype == "pause_before":
+                        replacement = f"... {span}"
+                    elif mtype == "whisper":
+                        replacement = f"[whispered]{span}"
+                    elif mtype == "breathy":
+                        replacement = f"[breathy]{span}"
+                    else:
+                        continue
+
+                elif engine == "elevenlabs":
+                    intensity = marker.get("intensity", 50)
+                    ms = int(100 + intensity * 5)
+                    if mtype == "rise":
+                        replacement = f'<prosody pitch="+{intensity // 10}%">{span}</prosody>'
+                    elif mtype == "drop":
+                        replacement = f'<prosody pitch="-{intensity // 10}%">{span}</prosody>'
+                    elif mtype == "stress":
+                        replacement = f"<emphasis>{span}</emphasis>"
+                    elif mtype == "pause_before":
+                        replacement = f'<break time="{ms}ms"/>{span}'
+                    elif mtype == "whisper":
+                        replacement = f'<amazon:effect name="whispered">{span}</amazon:effect>'
+                    elif mtype == "breathy":
+                        replacement = f'<prosody volume="soft">{span}</prosody>'
+                    else:
+                        continue
+                else:
+                    continue
+
+                text = text[:start] + replacement + text[end:]
+            return text
+
+    _nuance_translator = NuanceTranslator()
+
     async def regenerate_segment(
         self,
         job_id: str,
@@ -2129,6 +2296,8 @@ class DubbingService:
         traits: Optional[List[str]] = None,
         pitch: Optional[int] = None,
         force_timing: Optional[bool] = None,
+        nuances: Optional[Dict] = None,
+        nuance_markers: Optional[List[Dict]] = None,
     ) -> Dict:
         output_dir = os.path.join(self.dubbed_dir, job_id)
         segments_path = os.path.join(output_dir, "segments.json")
@@ -2181,13 +2350,30 @@ class DubbingService:
         emotion_tag = f"[{emotion.lower()}]" if emotion else ""
         # Multiple traits → multiple bracket pairs. Fish normalizes commas to this anyway.
         traits_tag = " ".join(f"[{t.lower()}]" for t in traits) if traits else ""
+        # Nuance directives — translated to Fish Audio bracket tags + speed modifier
+        nuance_tag = ""
+        tts_text = use_text
+        if nuances:
+            translated = self._nuance_translator.translate_for_fish_audio(nuances)
+            if translated["directives"]:
+                nuance_tag = " ".join(f"[{d}]" for d in translated["directives"])
+            use_speed = max(0.5, min(2.0, use_speed * translated["speed_modifier"]))
+            pause_level = nuances.get("pauses", 50)
+            if pause_level != 50:
+                tts_text = self._nuance_translator.preprocess_text_pauses(
+                    tts_text, pause_level, engine="fish_audio"
+                )
+        if nuance_markers:
+            tts_text = self._nuance_translator.apply_markers_to_text(
+                tts_text, nuance_markers, engine="fish_audio"
+            )
         result = await fish_audio_tts.text_to_speech(
-            text=use_text,
+            text=tts_text,
             voice_id=use_voice_id,
             output_path=audio_path,
             speed=use_speed,
             emotion_tags=emotion_tag,
-            traits_tag=traits_tag,
+            traits_tag=f"{traits_tag} {nuance_tag}".strip() if nuance_tag else traits_tag,
             pitch=pitch,
         )
         if not result:

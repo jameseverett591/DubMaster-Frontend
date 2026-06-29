@@ -4449,6 +4449,8 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
             traits=body.traits,
             pitch=body.pitch,
             force_timing=body.force_timing,
+            nuances=body.nuances,
+            nuance_markers=body.nuance_markers,
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
