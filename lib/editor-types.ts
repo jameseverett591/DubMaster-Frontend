@@ -24,6 +24,49 @@ export interface QCFinding {
   details?: Record<string, unknown>
 }
 
+export type NuanceMarkerType = 'rise' | 'drop' | 'stress' | 'whisper' | 'pause_before' | 'breathy'
+
+export interface NuanceMarker {
+  id: string
+  startChar: number
+  endChar: number
+  type: NuanceMarkerType
+  intensity: number
+}
+
+export const NUANCE_MARKER_META: Record<NuanceMarkerType, { label: string; icon: string; color: string }> = {
+  rise: { label: 'Rise', icon: '🔺', color: 'text-yellow-400' },
+  drop: { label: 'Drop', icon: '🔻', color: 'text-blue-400' },
+  stress: { label: 'Stress', icon: '⚡', color: 'text-orange-400' },
+  whisper: { label: 'Whisper', icon: '🤫', color: 'text-gray-400' },
+  pause_before: { label: 'Pause', icon: '⏸', color: 'text-violet-400' },
+  breathy: { label: 'Breathy', icon: '💨', color: 'text-cyan-400' },
+}
+
+export interface SegmentNuances {
+  // Tier 1 — Basic (0=left, 1=center, 2=right)
+  pace: number
+  weight: number
+  breath: number
+  delivery: number
+  tail: number
+  // Tier 2 — Advanced (0-100)
+  prosody: number
+  pitchContour: number
+  volumeDynamics: number
+  tempoPacing: number
+  pauses: number
+  breathSounds: number
+  voiceQuality: number
+  microIntonation: number
+}
+
+export const DEFAULT_NUANCES: SegmentNuances = {
+  pace: 1, weight: 1, breath: 1, delivery: 1, tail: 1,
+  prosody: 50, pitchContour: 50, volumeDynamics: 50, tempoPacing: 50,
+  pauses: 50, breathSounds: 50, voiceQuality: 50, microIntonation: 50,
+}
+
 export interface Segment {
   id: string
   index: number
@@ -68,6 +111,8 @@ export interface Segment {
   dubEmotion?: string
   voiceAccent?: string
   was_truncated?: boolean
+  nuances?: Partial<SegmentNuances>
+  nuance_markers?: NuanceMarker[]
 }
 
 export interface QCScore {
