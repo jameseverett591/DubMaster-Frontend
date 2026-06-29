@@ -67,6 +67,7 @@ export interface Segment {
   velma_progression?: Array<{ emotion: string; intensity: number; color: string }>
   dubEmotion?: string
   voiceAccent?: string
+  was_truncated?: boolean
 }
 
 export interface QCScore {

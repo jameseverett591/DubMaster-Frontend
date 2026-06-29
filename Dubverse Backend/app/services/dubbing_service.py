@@ -1077,6 +1077,7 @@ class DubbingService:
                     if trimmed and os.path.exists(trimmed_path):
                         final_path = trimmed_path
                         actual_duration = target_duration
+                        seg["was_truncated"] = True
                         logger.warning(
                             f"[FIT] seg={i} hard-trimmed to {target_duration:.2f}s "
                             f"(needed {_speed_applied:.2f}x — tail may be cut)"
@@ -2272,10 +2273,19 @@ class DubbingService:
                         f"{actual_dur:.2f}s exceeds {available_dur:.2f}s by {overlap:.2f}s"
                     )
 
+        # Always measure final audio duration so the frontend can auto-shrink
+        # slots that are longer than the actual speech.
+        try:
+            _final_dur = actual_dur
+        except NameError:
+            _final_dur = await asyncio.to_thread(self._get_audio_duration, final_path)
+        seg["audio_duration"] = round(_final_dur, 3)
+
         seg["path"] = final_path
         seg["voice_id"] = use_voice_id
         seg["speed"] = use_speed
         seg["text"] = use_text
+        seg["was_truncated"] = False
         seg["committed_audio_url"] = final_path
         seg["committed_adapted_text"] = use_text
         # Contract: "" = explicit clear (drop seg["emotion"]); None = no change; non-empty = set

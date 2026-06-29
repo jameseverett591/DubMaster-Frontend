@@ -193,6 +193,7 @@ export interface RegenerateSegmentResponse {
     end: number
     duration: number
     locked: boolean
+    audio_duration?: number
   }
 }
 

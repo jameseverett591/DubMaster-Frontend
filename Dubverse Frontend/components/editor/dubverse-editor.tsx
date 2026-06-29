@@ -567,6 +567,15 @@ export function DubVerseEditor({
     [setImportedSegmentsRaw, jobId],
   )
 
+  const getTrailingBuffer = (text: string): number => {
+    const trimmed = text.trim()
+    const wordCount = trimmed.split(/\s+/).length
+    if (wordCount <= 3) return 0.4
+    if (trimmed.endsWith('?')) return 0.25
+    if (trimmed.endsWith('!')) return 0.2
+    return 0.3
+  }
+
   const syncSegmentsToBackend = useCallback((segments: Segment[]) => {
     apiClient.syncSegments(jobId, segments as unknown as Array<Record<string, unknown>>).then(res => {
       setImportedSegments(prev => {
@@ -1081,6 +1090,8 @@ export function DubVerseEditor({
   // Synchronous in-flight guard — avoids the stale-closure race that React state
   // alone can't prevent when draining the queue on the next macrotask.
   const isRegeneratingRef = useRef(false)
+  const isPlayingRef = useRef(isPlaying)
+  isPlayingRef.current = isPlaying
   // Pending regen while one is in flight (depth 1, last-write-wins).
   const regenQueueRef = useRef<{ segIdx?: number; voiceOverride?: string; textOverride?: string } | null>(null)
   const autoRegenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1982,8 +1993,8 @@ export function DubVerseEditor({
         rptSourceRef.current = null
       }
 
-      // Only restart if video is playing
-      if (!isPlaying) return
+      // Only restart if video is playing (read ref to avoid stale closure)
+      if (!isPlayingRef.current) return
 
       const ctx = audioContextRef.current
       if (ctx.state === 'suspended') ctx.resume()
@@ -2071,6 +2082,11 @@ export function DubVerseEditor({
   // Segment click — always just select; QC is shown in the docked right panel
   const handleSegmentClick = useCallback((index: number) => {
     selectSegment(index)
+    const seg = displaySegmentsRef.current[index]
+    if (seg) {
+      setCurrentTime(seg.start_time)
+      if (videoRef.current) videoRef.current.currentTime = seg.start_time
+    }
   }, [selectSegment])
   
   // Handle preview panel resize
@@ -2540,7 +2556,27 @@ export function DubVerseEditor({
       updateSegment(activeIndex, {
         audio_url,
         status: 'edited',
+        was_truncated: false,
       })
+      const audioDur = response.segment.audio_duration
+      const slotDur = segment.end_time - segment.start_time
+      const shouldShrink = audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
+      let shrunkEnd = segment.end_time
+      if (shouldShrink) {
+        const buffer = getTrailingBuffer(segment.preview_text ?? segment.active_text ?? segment.target_text ?? '')
+        shrunkEnd = segment.start_time + audioDur + buffer
+        shrunkEnd = Math.min(shrunkEnd, segment.end_time)
+        const nextSeg = displaySegments[activeIndex + 1]
+        if (nextSeg) {
+          shrunkEnd = Math.min(shrunkEnd, nextSeg.start_time - 0.05)
+        }
+        shrunkEnd = Math.max(shrunkEnd, segment.start_time + 0.1)
+        updateSegment(activeIndex, { end_time: shrunkEnd })
+        commitSegmentChanges(activeIndex, { committed_end_time: shrunkEnd })
+        apiClient.commitSegmentTiming(jobId, activeIndex, {
+          committed_end_time: shrunkEnd,
+        }).catch(err => console.warn('[AUTO-SHRINK]', err))
+      }
       setImportedSegments(prev => {
         if (!prev) return prev
         return prev.map((seg, i) => i === activeIndex
@@ -2549,7 +2585,9 @@ export function DubVerseEditor({
               audio_url,
               committed_audio_url: audio_url,
               status: 'edited' as const,
+              was_truncated: false,
               committed_emotion: stagedEmotions[activeIndex] ?? seg.committed_emotion,
+              ...(shouldShrink ? { end_time: shrunkEnd } : {}),
             }
           : seg)
       })
@@ -3516,6 +3554,7 @@ export function DubVerseEditor({
                   onClick={() => {
                     selectSegment(index)
                     setCurrentTime(displaySegments[index].start_time)
+                    if (videoRef.current) videoRef.current.currentTime = displaySegments[index].start_time
                     editorContainerRef.current?.focus()
                   }}
                   onDragEnter={(e) => {
@@ -6074,6 +6113,20 @@ export function DubVerseEditor({
                         )}
                       </div>
 
+                      {/* Truncated flag */}
+                      {segment.was_truncated && (
+                        <div
+                          className="absolute top-0 right-0 w-4 h-4 flex items-center justify-center cursor-pointer z-10 text-yellow-400 hover:text-yellow-300 hover:scale-110 transition-transform"
+                          title="Truncated — click to regenerate"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            handleGenerateSpeech(index)
+                          }}
+                        >
+                          <span className="text-[10px] drop-shadow">&#9873;</span>
+                        </div>
+                      )}
+
                       {/* Right timing handle (green) */}
                       <div
                         data-resize-handle={true}
@@ -6465,10 +6518,29 @@ export function DubVerseEditor({
                     })
                     const filename = response.segment.path.split('/').pop() ?? ''
                     const audio_url = filename ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}` : seg.audio_url
-                    updateSegment(idx, { audio_url, status: 'edited' })
+                    const audioDur = response.segment.audio_duration
+                    const slotDur = seg.end_time - seg.start_time
+                    const shouldShrink = audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
+                    let shrunkEnd = seg.end_time
+                    if (shouldShrink) {
+                      const buffer = getTrailingBuffer(seg.preview_text ?? seg.active_text ?? seg.target_text ?? '')
+                      shrunkEnd = seg.start_time + audioDur + buffer
+                      shrunkEnd = Math.min(shrunkEnd, seg.end_time)
+                      const nextSeg = displaySegments[idx + 1]
+                      if (nextSeg) {
+                        shrunkEnd = Math.min(shrunkEnd, nextSeg.start_time - 0.05)
+                      }
+                      shrunkEnd = Math.max(shrunkEnd, seg.start_time + 0.1)
+                      updateSegment(idx, { end_time: shrunkEnd })
+                      commitSegmentChanges(idx, { committed_end_time: shrunkEnd })
+                      apiClient.commitSegmentTiming(jobId, idx, {
+                        committed_end_time: shrunkEnd,
+                      }).catch(err => console.warn('[AUTO-SHRINK]', err))
+                    }
+                    updateSegment(idx, { audio_url, status: 'edited', was_truncated: false })
                     setImportedSegments(prev => {
                       if (!prev) return prev
-                      return prev.map((s, i) => i === idx ? { ...s, audio_url, committed_audio_url: audio_url, status: 'edited' as const } : s)
+                      return prev.map((s, i) => i === idx ? { ...s, audio_url, committed_audio_url: audio_url, status: 'edited' as const, was_truncated: false, ...(shouldShrink ? { end_time: shrunkEnd } : {}) } : s)
                     })
                     commitSegmentChanges(idx, { committed_audio_url: audio_url })
                   } catch (err: any) {
