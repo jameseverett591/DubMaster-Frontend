@@ -313,9 +313,11 @@ export function FloatingEmotionChart({
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const svgRef = useRef<SVGSVGElement>(null)
 
-  const [curveState, setCurveState] = useState<number[]>(
-    segment.velma_emotion_curve?.length ? segment.velma_emotion_curve : Array(50).fill(0.25)
-  )
+  const [curveState, setCurveState] = useState<number[]>(() => {
+    const raw = segment.velma_emotion_curve
+    const valid = Array.isArray(raw) && raw.length > 1 && raw.every(v => typeof v === 'number' && Number.isFinite(v))
+    return valid ? raw : Array(50).fill(0.25)
+  })
   const isDraggingRef = useRef(false)
   const didDragRef = useRef(false)
   const mouseDownPosRef = useRef({ x: 0, y: 0 })
@@ -361,14 +363,54 @@ export function FloatingEmotionChart({
   const [clickFlash, setClickFlash] = useState<{ svgX: number; svgY: number; chord: Chord; id: number } | null>(null)
   const [pendingChord, setPendingChord] = useState<{ chordIndex: number; chord: Chord; intensity: number; t: number } | null>(null)
   const [chordName, setChordName] = useState('')
+  const [librarySaveName, setLibrarySaveName] = useState('')
 
   const trackDuration = Math.max(segment.end_time - segment.start_time, 0.01)
   const avg = curveState.length > 0 ? curveState.reduce((a, b) => a + b, 0) / curveState.length : 0
   const avgChord = CHORDS[Math.min(NUM_CHORDS - 1, Math.round(avg * (NUM_CHORDS - 1)))]
 
-  const smoothCurvePath = curveState.length > 1 ? (() => {
-    const pts = curveState.map((v, i) => ({
-      x: (i / (curveState.length - 1)) * SVG_W,
+  // Weighted moving-average smoothing — reduces sample-to-sample jaggedness
+  // from real per-window analysis while preserving the overall shape.
+  const smoothedCurve = curveState.length > 2 ? (() => {
+    const win = 2
+    return curveState.map((_, i) => {
+      let sum = 0, weightSum = 0
+      for (let j = -win; j <= win; j++) {
+        const idx = i + j
+        if (idx < 0 || idx >= curveState.length) continue
+        const weight = win + 1 - Math.abs(j)
+        sum += curveState[idx] * weight
+        weightSum += weight
+      }
+      return weightSum > 0 ? sum / weightSum : curveState[i]
+    })
+  })() : curveState
+
+  // Intensity → color: blue (low) → green → yellow → red (high)
+  const intensityToColor = (v: number): string => {
+    const clamped = Math.max(0, Math.min(1, v))
+    const stops = [
+      { t: 0,    c: [59, 130, 246] },  // blue
+      { t: 0.33, c: [34, 197, 94] },   // green
+      { t: 0.66, c: [234, 179, 8] },   // yellow
+      { t: 1,    c: [239, 68, 68] },   // red
+    ]
+    let lo = stops[0], hi = stops[stops.length - 1]
+    for (let i = 0; i < stops.length - 1; i++) {
+      if (clamped >= stops[i].t && clamped <= stops[i + 1].t) {
+        lo = stops[i]; hi = stops[i + 1]
+        break
+      }
+    }
+    const range = hi.t - lo.t || 1
+    const frac = (clamped - lo.t) / range
+    const rgb = lo.c.map((v0, i) => Math.round(v0 + (hi.c[i] - v0) * frac))
+    return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`
+  }
+
+  const smoothCurvePath = smoothedCurve.length > 1 ? (() => {
+    const pts = smoothedCurve.map((v, i) => ({
+      x: (i / (smoothedCurve.length - 1)) * SVG_W,
       y: SVG_H * (1 - v),
     }))
     let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`
@@ -380,6 +422,50 @@ export function FloatingEmotionChart({
   })() : ''
 
   const areaPath = smoothCurvePath ? `${smoothCurvePath} L ${SVG_W} ${SVG_H} L 0 ${SVG_H} Z` : ''
+
+  // Per-segment colored line pieces — avoids relying on SVG <linearGradient>
+  // url(#id) resolution, which proved unreliable in this environment.
+  const coloredSegments = smoothedCurve.length > 1 ? (() => {
+    const pts = smoothedCurve.map((v, i) => ({
+      x: (i / (smoothedCurve.length - 1)) * SVG_W,
+      y: SVG_H * (1 - v),
+      v,
+    }))
+    const segs: Array<{ d: string; color: string }> = []
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i]
+      const cpx = (a.x + b.x) / 2
+      const d = `M ${a.x.toFixed(1)} ${a.y.toFixed(1)} C ${cpx.toFixed(1)} ${a.y.toFixed(1)}, ${cpx.toFixed(1)} ${b.y.toFixed(1)}, ${b.x.toFixed(1)} ${b.y.toFixed(1)}`
+      segs.push({ d, color: intensityToColor((a.v + b.v) / 2) })
+    }
+    return segs
+  })() : []
+
+  // Peak/valley markers — local extrema with >15% relative change from neighbors
+  const peakValleyMarkers = smoothedCurve.length > 2 ? (() => {
+    const found: Array<{ x: number; y: number; v: number; label: string; color: string }> = []
+    for (let i = 1; i < smoothedCurve.length - 1; i++) {
+      const prev = smoothedCurve[i - 1]
+      const cur = smoothedCurve[i]
+      const next = smoothedCurve[i + 1]
+      const isPeak = cur > prev && cur > next
+      const isValley = cur < prev && cur < next
+      if (!isPeak && !isValley) continue
+      const deltaPrev = Math.abs(cur - prev) / Math.max(0.01, prev)
+      const deltaNext = Math.abs(cur - next) / Math.max(0.01, next)
+      if (deltaPrev < 0.15 && deltaNext < 0.15) continue
+      const chordIdx = Math.max(0, Math.min(NUM_CHORDS - 1, Math.round((i / (smoothedCurve.length - 1)) * (NUM_CHORDS - 1))))
+      const chord = CHORDS[chordIdx]
+      found.push({
+        x: (i / (smoothedCurve.length - 1)) * SVG_W,
+        y: SVG_H * (1 - cur),
+        v: cur,
+        label: isPeak ? chord.emotion : chord.state,
+        color: intensityToColor(cur),
+      })
+    }
+    return found
+  })() : []
 
   const ZONE_H = SVG_H / 3
 
@@ -632,6 +718,46 @@ export function FloatingEmotionChart({
             {humeLoading ? '⏳ Analysing…' : '🎙 Analyze Emotion'}
           </button>
         )}
+        {curveState.length > 0 && (
+          <div className="flex items-center gap-1 ml-2 shrink-0">
+            <input
+              type="text"
+              placeholder="Name this curve…"
+              value={librarySaveName}
+              onChange={e => setLibrarySaveName(e.target.value)}
+              onMouseDown={(e) => e.stopPropagation()}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && librarySaveName.trim()) {
+                  onSaveChord?.(librarySaveName.trim(), avgChord, avg, curveState)
+                  setLibrarySaveName('')
+                }
+              }}
+              className="rounded px-2 py-0.5 text-[9px] text-white placeholder-emerald-400/50 outline-none w-32"
+              style={{
+                background: 'rgba(52,211,153,0.08)',
+                border: '1px solid rgba(52,211,153,0.35)',
+              }}
+            />
+            <button
+              type="button"
+              disabled={!librarySaveName.trim()}
+              className="shrink-0 px-2 py-0.5 rounded text-[8px] font-bold tracking-wide transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{
+                color: '#34d399',
+                background: 'rgba(52,211,153,0.12)',
+                border: '1px solid rgba(52,211,153,0.4)',
+              }}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={() => {
+                if (!librarySaveName.trim()) return
+                onSaveChord?.(librarySaveName.trim(), avgChord, avg, curveState)
+                setLibrarySaveName('')
+              }}
+            >
+              💾 Save to Library
+            </button>
+          </div>
+        )}
         <button
           type="button"
           className="text-slate-600 hover:text-slate-300 text-sm leading-none px-1 ml-2 shrink-0 transition-colors"
@@ -684,13 +810,35 @@ export function FloatingEmotionChart({
           {/* Area fill */}
           {areaPath && <path d={areaPath} fill="rgba(245,158,11,0.06)" style={{ pointerEvents: 'none' }} />}
 
-          {/* Amber curve — glow + smooth bezier */}
-          {smoothCurvePath && (
+          {/* Curve — glow + per-segment solid color by intensity (blue→green→yellow→red) */}
+          {coloredSegments.length > 0 && (
             <g style={{ pointerEvents: 'none' }}>
-              <path d={smoothCurvePath} fill="none" stroke="rgba(245,158,11,0.18)" strokeWidth={8} strokeLinecap="round" strokeLinejoin="round" />
-              <path d={smoothCurvePath} fill="none" stroke="#F59E0B" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+              {coloredSegments.map((seg, i) => (
+                <path key={`glow-${i}`} d={seg.d} fill="none" stroke={seg.color} strokeWidth={8} strokeLinecap="round" strokeLinejoin="round" opacity={0.25} />
+              ))}
+              {coloredSegments.map((seg, i) => (
+                <path key={`line-${i}`} d={seg.d} fill="none" stroke={seg.color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+              ))}
             </g>
           )}
+
+          {/* Peak/valley emotion markers */}
+          {peakValleyMarkers.map((m, i) => (
+            <g key={i} style={{ pointerEvents: 'none' }}>
+              <circle cx={m.x} cy={m.y} r={3} fill={m.color} stroke="rgba(0,0,0,0.4)" strokeWidth={0.5} />
+              <text
+                x={m.x}
+                y={m.y < SVG_H / 2 ? m.y - 7 : m.y + 13}
+                textAnchor="middle"
+                fill={m.color}
+                fontSize={7}
+                fontFamily="monospace"
+                fontWeight="bold"
+              >
+                {m.label}
+              </text>
+            </g>
+          ))}
 
           {/* Hover column highlight */}
           {hud && (
