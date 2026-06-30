@@ -3991,12 +3991,25 @@ async def _analyze_segment_with_emotion2vec(job, start_time: float, end_time: fl
         if duration < 0.5:
             return None
 
+        # Prefer Demucs-separated vocals (cached from the main dub pipeline)
+        # over the raw mixed track. Background score / fight-scene effects
+        # dilute the vocal emotional signal and bias the model toward
+        # "neutral" — see _analyze_segment_with_emotion2vec investigation.
+        # No on-demand Demucs here (3-8 min run) — only use if already cached.
+        job_id = getattr(job, "job_id", None)
+        source_path = video_path
+        if job_id:
+            vocals_candidate = os.path.join("data", "separated", f"{job_id}_vocals.wav")
+            if os.path.exists(vocals_candidate) and os.path.getsize(vocals_candidate) > 1000:
+                source_path = vocals_candidate
+                logger.info(f"[EMOTION2VEC-CHORD] using cached separated vocals for {job_id}")
+
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = tmp.name
         try:
             cmd = [
                 "ffmpeg", "-y", "-ss", str(start_time), "-t", str(duration),
-                "-i", video_path, "-vn", "-ar", "16000", "-ac", "1", "-f", "wav", tmp_path,
+                "-i", source_path, "-vn", "-ar", "16000", "-ac", "1", "-f", "wav", tmp_path,
             ]
             proc = await asyncio.to_thread(
                 subprocess.run, cmd, capture_output=True, timeout=30
