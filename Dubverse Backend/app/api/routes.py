@@ -4604,12 +4604,17 @@ async def save_ei_curve(request: Request):
     user_id = verify_jwt(token)
     body = await request.json()
     from app.services.supabase_client import supabase_writer
+    core_emotion = body.get("core_emotion", "") or "neutral"
     result = supabase_writer.table("emotional_library").insert({
         "user_id": user_id,
         "name": body.get("name", "Unnamed Curve"),
+        "emotion": core_emotion,
+        "state": "",
+        "trait": "",
+        "intensity": 0.5,
         "curve": body.get("curve", []),
         "duration": body.get("duration", 0),
-        "core_emotion": body.get("core_emotion", ""),
+        "core_emotion": core_emotion,
         "source_segment_text": body.get("source_segment_text", ""),
         "tags": body.get("tags", []),
         "description": body.get("description", ""),
