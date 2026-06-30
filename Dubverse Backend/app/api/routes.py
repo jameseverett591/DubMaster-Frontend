@@ -13,6 +13,8 @@ import torchaudio
 import re
 import hashlib
 import traceback
+import subprocess
+import tempfile
 
 from app.models import (
     UploadResponse,
@@ -3954,6 +3956,148 @@ async def rediarize_with_velma(job_id: str, request: Request):
     }
 
 
+# emotion2vec label → chord emotion name (frame-level real analysis path)
+_E2V_TO_CHORD_ROUTE: Dict[str, str] = {
+    "angry": "Anger",
+    "disgusted": "Contempt",
+    "fearful": "Fear",
+    "happy": "Excitement",
+    "neutral": "Serenity",
+    "other": "Serenity",
+    "sad": "Sadness",
+    "surprised": "Surprise",
+    "unknown": "Serenity",
+}
+
+
+async def _analyze_segment_with_emotion2vec(job, start_time: float, end_time: float) -> Optional[Dict]:
+    """
+    Real frame-level emotion curve: slice the segment's audio out of the
+    source video, run emotion2vec in a sliding window across it, map each
+    window's dominant emotion to the chord scale, and resample into the
+    50-point curve. Returns None (caller falls back to Velma synthesis)
+    if the source audio is unavailable or analysis fails.
+    """
+    try:
+        from app.services import emotion2vec_service
+        if not emotion2vec_service.is_enabled():
+            return None
+
+        video_path = getattr(job, "video_path", None)
+        if not video_path or not os.path.exists(video_path):
+            return None
+
+        duration = end_time - start_time
+        if duration < 0.5:
+            return None
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            cmd = [
+                "ffmpeg", "-y", "-ss", str(start_time), "-t", str(duration),
+                "-i", video_path, "-vn", "-ar", "16000", "-ac", "1", "-f", "wav", tmp_path,
+            ]
+            proc = await asyncio.to_thread(
+                subprocess.run, cmd, capture_output=True, timeout=30
+            )
+            if proc.returncode != 0 or not os.path.exists(tmp_path) or os.path.getsize(tmp_path) < 1000:
+                logger.warning(f"[EMOTION2VEC-CHORD] audio slice extraction failed: {proc.stderr.decode(errors='ignore')[:200]}")
+                return None
+
+            windows = await asyncio.to_thread(
+                emotion2vec_service.analyze_sliding_window, tmp_path, 200, 200
+            )
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+        if not windows or len(windows) < 2:
+            return None
+
+        # Resample window-level dominant emotions into a 50-point curve
+        curve = [0.05] * 50
+        chord_at_point: List[str] = []
+        for w in windows:
+            scores = w["scores"]
+            top_label = max(scores, key=lambda k: scores[k])
+            top_score = scores[top_label]
+            chord_emotion = _E2V_TO_CHORD_ROUTE.get(top_label, "Serenity")
+            chord_at_point.append(chord_emotion)
+            idx = min(49, int(w["t"] * 49))
+            intensity = max(0.05, min(1.0, top_score))
+            curve[idx] = max(curve[idx], intensity)
+
+        # Fill gaps between sampled points by linear interpolation
+        known = [i for i in range(50) if curve[i] > 0.05]
+        if known:
+            for i in range(50):
+                if curve[i] <= 0.05:
+                    prev_pts = [k for k in known if k <= i]
+                    next_pts = [k for k in known if k >= i]
+                    if prev_pts and next_pts:
+                        p, n = prev_pts[-1], next_pts[0]
+                        if n == p:
+                            curve[i] = curve[p]
+                        else:
+                            frac = (i - p) / (n - p)
+                            curve[i] = curve[p] * (1 - frac) + curve[n] * frac
+
+        # Ease in/out from a neutral baseline at the very start and end —
+        # matches the old synthetic curves' 10% lead-in/lead-out margin so
+        # the line doesn't start or end "hot" from the first/last raw sample.
+        baseline = 0.08
+        ease_points = 5  # 10% of 50
+        anchor_start = curve[ease_points]
+        anchor_end = curve[49 - ease_points]
+        for i in range(ease_points):
+            frac = i / ease_points
+            curve[i] = baseline * (1 - frac) + anchor_start * frac
+        for i in range(50 - ease_points, 50):
+            frac = (49 - i) / ease_points
+            curve[i] = baseline * (1 - frac) + anchor_end * frac
+
+        # Primary emotion = most frequent dominant chord across windows
+        from collections import Counter
+        counts = Counter(chord_at_point)
+        primary, primary_count = counts.most_common(1)[0]
+        primary_score = round(primary_count / len(chord_at_point), 4)
+
+        # Markers — local peaks in the curve, labeled with the nearest window's chord
+        markers = []
+        seen_chords: set = set()
+        for w in windows:
+            chord_emotion = _E2V_TO_CHORD_ROUTE.get(max(w["scores"], key=lambda k: w["scores"][k]), "Serenity")
+            if chord_emotion in seen_chords:
+                continue
+            seen_chords.add(chord_emotion)
+            idx = min(49, int(w["t"] * 49))
+            markers.append({
+                "emotion": chord_emotion,
+                "intensity": round(curve[idx], 4),
+                "color": _EMOTION_COLOR.get(chord_emotion, "#60a5fa"),
+                "xFrac": round(w["t"], 4),
+            })
+
+        return {
+            "status": "ok",
+            "primary_emotion": primary,
+            "primary_score": primary_score,
+            "chain": list(dict.fromkeys(chord_at_point)),  # dedupe, preserve order
+            "curve": [round(v, 4) for v in curve],
+            "markers": markers,
+            "top_emotions": counts.most_common(8),
+            "analysis_method": "emotion2vec-sliding-window",
+            "window_count": len(windows),
+        }
+
+    except Exception as exc:
+        logger.warning(f"[EMOTION2VEC-CHORD] analysis failed, falling back to Velma: {exc}")
+        return None
+
+
 @router.post("/hume/analyze-segment/{job_id}")
 async def hume_analyze_segment(job_id: str, body: SegmentAnalyzeRequest):
     """
@@ -4002,6 +4146,14 @@ async def hume_analyze_segment(job_id: str, body: SegmentAnalyzeRequest):
     if float(body.end_time) - float(body.start_time) < 0.5:
         return {"status": "too_short", "reason": "Segment under 0.5s — too short to analyze"}
 
+    # --- Try real frame-level analysis first: emotion2vec sliding window ---
+    e2v_curve_result = await _analyze_segment_with_emotion2vec(
+        job, float(body.start_time), float(body.end_time)
+    )
+    if e2v_curve_result:
+        return e2v_curve_result
+
+    # --- Fallback: synthesize curve from Velma's per-utterance labels ---
     # Build curve from Velma emotion labels on overlapping transcript segments
     chord_votes: Dict[str, float] = {}
     if job.transcript and job.transcript.segments:

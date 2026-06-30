@@ -2391,8 +2391,20 @@ class DubbingService:
         # If the TTS audio overflows the segment slot, time-stretch it with
         # rubberband (formant-preserving) so the editor regen is never worse
         # than re-running a full dub.
-        slot_start = float(seg.get("start", 0))
-        slot_end   = float(seg.get("end", 0))
+        # Honor timeline drag/resize: committed_* is the source of truth once
+        # the user has moved this segment's slot, even before the post-fit
+        # sync-back below runs. Without this, a resized segment's fit check
+        # uses its original (pre-resize) transcript timing.
+        def _effective_start(s: Dict) -> float:
+            v = s.get("committed_start_time")
+            return float(v) if v is not None else float(s.get("start", 0))
+
+        def _effective_end(s: Dict) -> float:
+            v = s.get("committed_end_time")
+            return float(v) if v is not None else float(s.get("end", 0))
+
+        slot_start = _effective_start(seg)
+        slot_end   = _effective_end(seg)
         slot_dur   = slot_end - slot_start
         if slot_dur > 0.2:
             trimmed_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen_notrim.mp3")
@@ -2411,10 +2423,10 @@ class DubbingService:
             if actual_dur > slot_dur + 0.05:
                 # Check how much room exists before the next segment starts
                 next_seg = next(
-                    (s for s in segments if float(s.get("start", 0)) > slot_end + 0.01),
+                    (s for s in segments if _effective_start(s) > slot_end + 0.01),
                     None
                 )
-                next_start = float(next_seg["start"]) if next_seg else slot_end + 999.0
+                next_start = _effective_start(next_seg) if next_seg else slot_end + 999.0
                 available_dur = next_start - slot_start
 
                 overlap = actual_dur - available_dur

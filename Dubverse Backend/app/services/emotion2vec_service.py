@@ -152,6 +152,95 @@ def analyze_single_segment(audio_path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def analyze_sliding_window(
+    audio_path: str,
+    window_ms: int = 200,
+    hop_ms: int = 200,
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Run emotion analysis on successive windows of an audio clip to produce
+    a real frame-level emotion time series (instead of one label for the
+    whole clip).
+
+    Returns a list of {"t": float (0-1 fraction through clip), "scores": {label: score}}
+    or None on failure. Falls back to acoustic-feature heuristics per window
+    when the full emotion2vec model isn't available — still genuinely
+    per-window, just less precise than the trained model.
+    """
+    if not os.path.exists(audio_path):
+        logger.warning(f"[EMOTION2VEC] File not found: {audio_path}")
+        return None
+
+    try:
+        import numpy as np
+        import soundfile as sf
+
+        audio, sr = sf.read(audio_path)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        audio = audio.astype(np.float32)
+
+        total_samples = len(audio)
+        duration = total_samples / sr
+        if duration < 0.15:
+            return None
+
+        win_samples = max(1, int(window_ms / 1000 * sr))
+        hop_samples = max(1, int(hop_ms / 1000 * sr))
+
+        use_model = _check_emotion2vec()
+        model = None
+        if use_model:
+            try:
+                from funasr import AutoModel
+                global _MODEL
+                if _MODEL is None:
+                    logger.info("[EMOTION2VEC] Loading emotion2vec model...")
+                    _MODEL = AutoModel(model="iic/emotion2vec_plus_base")
+                    logger.info("[EMOTION2VEC] Model loaded")
+                model = _MODEL
+            except Exception as exc:
+                logger.warning(f"[EMOTION2VEC] Model load failed, using features: {exc}")
+                use_model = False
+
+        results: List[Dict[str, Any]] = []
+        pos = 0
+        while pos < total_samples:
+            window = audio[pos:min(total_samples, pos + win_samples)]
+            if len(window) < sr * 0.05:  # skip trailing scrap < 50ms
+                break
+            t_center = (pos + len(window) / 2) / total_samples
+
+            scores: Optional[Dict[str, float]] = None
+            if use_model and model is not None:
+                try:
+                    result = model.generate(window, output_dir=None, granularity="utterance", extract_embedding=False)
+                    if result and result[0].get("scores"):
+                        labels = result[0].get("labels", _E2V_LABELS)
+                        raw = result[0]["scores"]
+                        total = sum(raw) or 1.0
+                        scores = {str(lbl): float(sc) / total for lbl, sc in zip(labels, raw)}
+                except Exception as exc:
+                    logger.debug(f"[EMOTION2VEC] Window inference failed at t={t_center:.2f}: {exc}")
+
+            if scores is None:
+                audio_data = {"audio": window, "sr": sr}
+                features = _extract_emotion_features(audio_data, 0.0, len(window) / sr)
+                if features is not None:
+                    scores = _features_to_emotion_scores(features)
+
+            if scores:
+                results.append({"t": round(t_center, 4), "scores": scores})
+
+            pos += hop_samples
+
+        return results if results else None
+
+    except Exception as e:
+        logger.error(f"[EMOTION2VEC] analyze_sliding_window failed: {e}", exc_info=True)
+        return None
+
+
 def _check_emotion2vec() -> bool:
     """Check if the full emotion2vec model is available."""
     global _MODEL_AVAILABLE
