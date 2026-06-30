@@ -74,7 +74,6 @@ import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import VelmaPanel from '@/components/editor/velma-panel'
 import { HeatmapBar } from '@/components/timeline/HeatmapBar'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
-import { EmotionalIntelligencePanel } from '@/components/editor/emotional-intelligence-panel'
 import { ExportModal } from '@/components/editor/export-modal'
 import { requestRPTStitch, stitchRPT, invalidateCache, scheduleRPTPlayback } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
@@ -4407,8 +4406,7 @@ export function DubVerseEditor({
                 { id: 'adaptation', label: 'Adaptation' },
                 { id: 'speakers',   label: 'Speakers' },
                 { id: 'library',    label: 'Voice Library' },
-                { id: 'emotions',   label: 'E.I.',         feature: 'emotionalIntelligence' },
-                { id: 'ei-library', label: 'EI Library',   feature: 'emotionalIntelligence' },
+                { id: 'ei-library', label: 'E.I. Library', feature: 'emotionalIntelligence' },
               ] as const).filter((t) => !('feature' in t) || hasFeature(t.feature as any)).map((t) => (
                 <button
                   type="button"
@@ -4792,19 +4790,6 @@ export function DubVerseEditor({
               </div>
             )
           })()}
-
-          {rightPanelTab === 'emotions' && hasFeature('emotionalIntelligence') && (
-            <EmotionalIntelligencePanel
-              jobId={jobId}
-              selectedSegmentIndex={selectedSegmentIndex}
-              onApplyChord={(emotion, state, trait, intensity) => {
-                if (selectedSegmentIndex !== null) {
-                  setStagedEmotions(prev => ({ ...prev, [selectedSegmentIndex]: emotion }))
-                  updateSegment(selectedSegmentIndex, { committed_emotion: emotion })
-                }
-              }}
-            />
-          )}
 
           {/* Chord tab — always mounted to preserve curve state; hidden when not active */}
           <div
