@@ -363,7 +363,6 @@ export function FloatingEmotionChart({
   const [clickFlash, setClickFlash] = useState<{ svgX: number; svgY: number; chord: Chord; id: number } | null>(null)
   const [pendingChord, setPendingChord] = useState<{ chordIndex: number; chord: Chord; intensity: number; t: number } | null>(null)
   const [chordName, setChordName] = useState('')
-  const [librarySaveName, setLibrarySaveName] = useState('')
 
   const trackDuration = Math.max(segment.end_time - segment.start_time, 0.01)
   const avg = curveState.length > 0 ? curveState.reduce((a, b) => a + b, 0) / curveState.length : 0
@@ -717,46 +716,6 @@ export function FloatingEmotionChart({
           >
             {humeLoading ? '⏳ Analysing…' : '🎙 Analyze Emotion'}
           </button>
-        )}
-        {curveState.length > 0 && (
-          <div className="flex items-center gap-1 ml-2 shrink-0">
-            <input
-              type="text"
-              placeholder="Name this curve…"
-              value={librarySaveName}
-              onChange={e => setLibrarySaveName(e.target.value)}
-              onMouseDown={(e) => e.stopPropagation()}
-              onKeyDown={e => {
-                if (e.key === 'Enter' && librarySaveName.trim()) {
-                  onSaveChord?.(librarySaveName.trim(), avgChord, avg, curveState)
-                  setLibrarySaveName('')
-                }
-              }}
-              className="rounded px-2 py-0.5 text-[9px] text-white placeholder-emerald-400/50 outline-none w-32"
-              style={{
-                background: 'rgba(52,211,153,0.08)',
-                border: '1px solid rgba(52,211,153,0.35)',
-              }}
-            />
-            <button
-              type="button"
-              disabled={!librarySaveName.trim()}
-              className="shrink-0 px-2 py-0.5 rounded text-[8px] font-bold tracking-wide transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{
-                color: '#34d399',
-                background: 'rgba(52,211,153,0.12)',
-                border: '1px solid rgba(52,211,153,0.4)',
-              }}
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={() => {
-                if (!librarySaveName.trim()) return
-                onSaveChord?.(librarySaveName.trim(), avgChord, avg, curveState)
-                setLibrarySaveName('')
-              }}
-            >
-              💾 Save to Library
-            </button>
-          </div>
         )}
         <button
           type="button"

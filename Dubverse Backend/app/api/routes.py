@@ -4065,20 +4065,25 @@ async def _analyze_segment_with_emotion2vec(job, start_time: float, end_time: fl
         primary, primary_count = counts.most_common(1)[0]
         primary_score = round(primary_count / len(chord_at_point), 4)
 
-        # Markers — local peaks in the curve, labeled with the nearest window's chord
+        # Markers — sample 5 evenly-spaced points (matches the old Velma
+        # chain's fixed step count, which the bottom strip/chip UI expects)
+        # using the REAL measured dominant chord nearest each position,
+        # not a synthetic progression. Guarantees a non-empty marker set
+        # even when the audio is dominated by one or two repeating chords.
+        NUM_MARKER_POINTS = 5
         markers = []
-        seen_chords: set = set()
-        for w in windows:
-            chord_emotion = _E2V_TO_CHORD_ROUTE.get(max(w["scores"], key=lambda k: w["scores"][k]), "Serenity")
-            if chord_emotion in seen_chords:
-                continue
-            seen_chords.add(chord_emotion)
-            idx = min(49, int(w["t"] * 49))
+        for i in range(NUM_MARKER_POINTS):
+            xfrac = i / (NUM_MARKER_POINTS - 1) if NUM_MARKER_POINTS > 1 else 0.5
+            nearest_w = min(windows, key=lambda w: abs(w["t"] - xfrac))
+            chord_emotion = _E2V_TO_CHORD_ROUTE.get(
+                max(nearest_w["scores"], key=lambda k: nearest_w["scores"][k]), "Serenity"
+            )
+            idx = min(49, int(xfrac * 49))
             markers.append({
                 "emotion": chord_emotion,
                 "intensity": round(curve[idx], 4),
                 "color": _EMOTION_COLOR.get(chord_emotion, "#60a5fa"),
-                "xFrac": round(w["t"], 4),
+                "xFrac": round(xfrac, 4),
             })
 
         return {
