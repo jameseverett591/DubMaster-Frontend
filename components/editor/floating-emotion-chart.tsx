@@ -277,7 +277,7 @@ interface FloatingEmotionChartProps {
   onClose: () => void
   onCommitEmotion: (segmentIndex: number, emotion: string, intensity: number) => void
   onUpdateCurve: (segmentIndex: number, curve: number[]) => void
-  onSaveChord?: (name: string, chord: Chord, intensity: number) => void
+  onSaveChord?: (name: string, chord: Chord, intensity: number, curve: number[]) => void
   onUpdateProgression?: (segmentIndex: number, markers: Array<{ emotion: string; intensity: number; color: string }>) => void
   /** When true, renders inline (fills container) instead of as a floating overlay */
   embedded?: boolean
@@ -945,7 +945,7 @@ export function FloatingEmotionChart({
               onChange={e => setChordName(e.target.value)}
               onKeyDown={e => {
                 if (e.key === 'Enter' && chordName.trim()) {
-                  onSaveChord?.(chordName.trim(), pendingChord.chord, pendingChord.intensity)
+                  onSaveChord?.(chordName.trim(), pendingChord.chord, pendingChord.intensity, curveState)
                   setMarkers(prev => [...prev, pendingChord])
                   setPendingChord(null)
                   setChordName('')
@@ -964,7 +964,7 @@ export function FloatingEmotionChart({
             />
             <button type="button" onClick={() => {
               if (chordName.trim()) {
-                onSaveChord?.(chordName.trim(), pendingChord.chord, pendingChord.intensity)
+                onSaveChord?.(chordName.trim(), pendingChord.chord, pendingChord.intensity, curveState)
                 setMarkers(prev => [...prev, pendingChord])
               }
               setPendingChord(null)

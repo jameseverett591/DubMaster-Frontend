@@ -601,7 +601,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'nuances' | 'chord' | 'advanced' | 'characters'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'ei-library' | 'nuances' | 'chord' | 'advanced' | 'characters'>('result')
   const [velmaEnrichLoading, setVelmaEnrichLoading] = useState(false)
   const [velmaEnrichResult, setVelmaEnrichResult] = useState<{ patched: number; total: number } | null>(null)
 
@@ -736,6 +736,19 @@ export function DubVerseEditor({
   const [stagedPitches, setStagedPitches] = useState<Record<number, number>>({})
   const [stagedNuances, setStagedNuances] = useState<Record<number, Partial<SegmentNuances>>>({})
   const [nuancesAdvanced, setNuancesAdvanced] = useState(false)
+  const [savedCurves, setSavedCurves] = useState<Array<{
+    id: string; name: string; description?: string; tags?: string[]
+    curve: import('@/lib/editor-types').EmotionalCurvePoint[]
+    duration: number; core_emotion: string; source_segment_text?: string; created_at: string
+  }>>([])
+  const [saveCurveOpen, setSaveCurveOpen] = useState(false)
+  const [saveCurveName, setSaveCurveName] = useState('')
+  const [saveCurveDesc, setSaveCurveDesc] = useState('')
+  const [saveCurveTags, setSaveCurveTags] = useState('')
+  const [saveCurveSegIdx, setSaveCurveSegIdx] = useState<number | null>(null)
+  const [curveSaveStatus, setCurveSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle')
+  const [deleteConfirmCurveId, setDeleteConfirmCurveId] = useState<string | null>(null)
+  const [curveSearchQuery, setCurveSearchQuery] = useState('')
   const [draggedVoice, setDraggedVoice] = useState<string | null>(null)
   const [groupSelectedSegments, setGroupSelectedSegments] = useState<Set<number>>(new Set())
   const [selectionDrag, setSelectionDrag] = useState<{
@@ -1533,6 +1546,13 @@ export function DubVerseEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId, title, sourceLanguage, targetLanguage, videoUrl, dubbedVideoUrl, videoDuration, initialSegments, setJobData, setSpeakerVoiceMap, setSpeakerTraitsMap, speakerGenders, initialTraitsMapping, setImportedSegments])
   
+  // Load saved emotion curves on mount
+  useEffect(() => {
+    apiClient.listEmotionCurves().then(res => {
+      setSavedCurves(res.curves as typeof savedCurves)
+    }).catch(() => {})
+  }, [])
+
   // Handle video import and automatic transcription
   const handleVideoImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -4388,6 +4408,7 @@ export function DubVerseEditor({
                 { id: 'speakers',   label: 'Speakers' },
                 { id: 'library',    label: 'Voice Library' },
                 { id: 'emotions',   label: 'E.I.',         feature: 'emotionalIntelligence' },
+                { id: 'ei-library', label: 'EI Library',   feature: 'emotionalIntelligence' },
               ] as const).filter((t) => !('feature' in t) || hasFeature(t.feature as any)).map((t) => (
                 <button
                   type="button"
@@ -4809,7 +4830,7 @@ export function DubVerseEditor({
                 onUpdateProgression={(idx, markers) => {
                   updateSegment(idx, { velma_progression: markers })
                 }}
-                onSaveChord={async (name, chord, intensity) => {
+                onSaveChord={async (name, chord, intensity, curve) => {
                   await apiClient.saveEmotionalChord({
                     name,
                     emotion: chord.emotion,
@@ -4817,6 +4838,17 @@ export function DubVerseEditor({
                     trait: chord.trait,
                     intensity,
                   })
+                  if (curve?.length) {
+                    const seg = floatingEmotionSegment !== null ? displaySegments[floatingEmotionSegment] : null
+                    const saved = await apiClient.saveEmotionCurve({
+                      name,
+                      curve,
+                      duration: seg ? seg.end_time - seg.start_time : 0,
+                      core_emotion: chord.emotion,
+                      source_segment_text: seg?.active_text ?? seg?.target_text ?? '',
+                    })
+                    setSavedCurves(prev => [saved as typeof prev[0], ...prev])
+                  }
                 }}
                 onAnalyzeWithHume={async () => {
                   const seg = displaySegments[floatingEmotionSegment!]
@@ -4863,6 +4895,116 @@ export function DubVerseEditor({
               <CharacterProfilesPanel jobId={jobId} />
             </div>
           )}
+
+          {/* EI Library panel */}
+          {rightPanelTab === 'ei-library' && hasFeature('emotionalIntelligence') && (() => {
+            const filtered = savedCurves.filter(c =>
+              !curveSearchQuery ||
+              c.name.toLowerCase().includes(curveSearchQuery.toLowerCase()) ||
+              (c.tags ?? []).some(t => t.toLowerCase().includes(curveSearchQuery.toLowerCase()))
+            )
+            const applyCurve = (saved: typeof savedCurves[0]) => {
+              if (selectedSegmentIndex === null) return
+              const seg = displaySegments[selectedSegmentIndex]
+              if (!seg) return
+              const targetDur = seg.end_time - seg.start_time
+              const ratio = saved.duration > 0 ? targetDur / saved.duration : 1
+              const stretched = saved.curve.map((v: number, i: number) => v)
+              setImportedSegments(prev => {
+                if (!prev) return prev
+                return prev.map((s, i) => i === selectedSegmentIndex
+                  ? { ...s, velma_emotion_curve: stretched }
+                  : s)
+              })
+            }
+            const deleteCurve = async (id: string) => {
+              await apiClient.deleteEmotionCurve(id)
+              setSavedCurves(prev => prev.filter(c => c.id !== id))
+              setDeleteConfirmCurveId(null)
+            }
+            const Sparkline = ({ curve }: { curve: number[] }) => {
+              if (!curve.length) return null
+              const w = 80, h = 28
+              const pts = curve.map((v, i) => `${(i / (curve.length - 1)) * w},${h - v * h}`)
+              return (
+                <svg width={w} height={h} className="shrink-0">
+                  <polyline points={pts.join(' ')} fill="none" stroke="#a78bfa" strokeWidth="1.5" />
+                </svg>
+              )
+            }
+            const EMOTION_COLORS: Record<string, string> = {
+              Excitement: 'bg-orange-500', Euphoria: 'bg-violet-500', Empathy: 'bg-green-500',
+              Anger: 'bg-red-500', Sadness: 'bg-blue-500', Fear: 'bg-gray-500',
+              Joy: 'bg-yellow-400', Trust: 'bg-teal-500', Anticipation: 'bg-amber-500',
+            }
+            return (
+              <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                <div className="px-3 pt-2 pb-1">
+                  <input
+                    type="text"
+                    placeholder="Search curves..."
+                    value={curveSearchQuery}
+                    onChange={e => setCurveSearchQuery(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white placeholder-slate-500 outline-none focus:border-violet-500"
+                  />
+                </div>
+                {filtered.length === 0 ? (
+                  <div className="flex-1 flex items-center justify-center p-6 text-center">
+                    <p className="text-xs text-slate-500">
+                      {savedCurves.length === 0
+                        ? 'No saved curves yet. Set an emotion curve on a segment, name it in the Chord view, and click Save.'
+                        : 'No curves match your search.'}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex-1 overflow-y-auto px-2 py-1 space-y-2">
+                    {filtered.map(curve => (
+                      <div key={curve.id} className="bg-slate-800 border border-slate-700 rounded-lg p-2 space-y-1.5">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs font-semibold text-white truncate">{curve.name}</div>
+                            {curve.source_segment_text && (
+                              <div className="text-[10px] text-slate-500 italic truncate">&ldquo;{curve.source_segment_text}&rdquo;</div>
+                            )}
+                          </div>
+                          <Sparkline curve={curve.curve as number[]} />
+                        </div>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {curve.core_emotion && (
+                            <span className={cn('text-[9px] px-1.5 py-0.5 rounded text-white font-semibold', EMOTION_COLORS[curve.core_emotion] ?? 'bg-violet-600')}>
+                              {curve.core_emotion}
+                            </span>
+                          )}
+                          <span className="text-[9px] text-slate-500">{curve.duration?.toFixed(1)}s</span>
+                          {(curve.tags ?? []).map(tag => (
+                            <span key={tag} className="text-[9px] px-1 py-0.5 rounded bg-slate-700 text-slate-400">{tag}</span>
+                          ))}
+                        </div>
+                        <div className="flex items-center gap-1 pt-0.5">
+                          <button
+                            type="button"
+                            className="flex-1 py-0.5 rounded text-[10px] bg-violet-500/20 text-violet-300 border border-violet-500/40 hover:bg-violet-500/40 transition-colors"
+                            onClick={() => applyCurve(curve)}
+                            disabled={selectedSegmentIndex === null}
+                          >
+                            Apply
+                          </button>
+                          {deleteConfirmCurveId === curve.id ? (
+                            <>
+                              <button type="button" className="px-2 py-0.5 rounded text-[10px] bg-red-500/30 text-red-300 border border-red-500/40 hover:bg-red-500/50 transition-colors" onClick={() => deleteCurve(curve.id)}>Confirm</button>
+                              <button type="button" className="px-2 py-0.5 rounded text-[10px] text-slate-400 border border-slate-700 hover:text-slate-200 transition-colors" onClick={() => setDeleteConfirmCurveId(null)}>Cancel</button>
+                            </>
+                          ) : (
+                            <button type="button" className="px-2 py-0.5 rounded text-[10px] text-slate-500 border border-slate-700 hover:text-red-400 hover:border-red-500/40 transition-colors" onClick={() => setDeleteConfirmCurveId(curve.id)}>Delete</button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })()}
 
           {/* Advanced tab — embedded chord browser in panel */}
           <div

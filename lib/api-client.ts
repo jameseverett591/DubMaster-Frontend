@@ -1031,6 +1031,49 @@ class DubVerseAPIClient {
       headers: { ...this._authHeaders() },
     })
   }
+
+  async saveEmotionCurve(payload: {
+    name: string
+    description?: string
+    tags?: string[]
+    curve: unknown[]
+    duration: number
+    core_emotion: string
+    source_segment_text?: string
+  }): Promise<{ id: string; name: string }> {
+    const res = await fetch(`${this.baseURL}/api/ei/curves`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify(payload),
+    })
+    if (!res.ok) throw new Error('Failed to save curve')
+    return res.json()
+  }
+
+  async listEmotionCurves(): Promise<{ curves: Array<{
+    id: string
+    name: string
+    description?: string
+    tags?: string[]
+    curve: unknown[]
+    duration: number
+    core_emotion: string
+    source_segment_text?: string
+    created_at: string
+  }> }> {
+    const res = await fetch(`${this.baseURL}/api/ei/curves`, {
+      headers: { ...this._authHeaders() },
+    })
+    if (!res.ok) return { curves: [] }
+    return res.json()
+  }
+
+  async deleteEmotionCurve(id: string): Promise<void> {
+    await fetch(`${this.baseURL}/api/ei/curves/${id}`, {
+      method: 'DELETE',
+      headers: { ...this._authHeaders() },
+    })
+  }
 }
 
 // ============================================================================
