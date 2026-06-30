@@ -4595,6 +4595,60 @@ async def clear_emotional_library(request: Request):
     return {"status": "ok"}
 
 
+@router.post("/ei/curves")
+async def save_ei_curve(request: Request):
+    """Save a named emotion curve to the user's EI library."""
+    from datetime import datetime as _dt
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+    body = await request.json()
+    from app.services.supabase_client import supabase_writer
+    result = supabase_writer.table("emotional_library").insert({
+        "user_id": user_id,
+        "name": body.get("name", "Unnamed Curve"),
+        "curve": body.get("curve", []),
+        "duration": body.get("duration", 0),
+        "core_emotion": body.get("core_emotion", ""),
+        "source_segment_text": body.get("source_segment_text", ""),
+        "tags": body.get("tags", []),
+        "description": body.get("description", ""),
+        "created_at": _dt.utcnow().isoformat() + "Z",
+    }).execute()
+    return result.data[0] if result.data else {}
+
+
+@router.get("/ei/curves")
+async def list_ei_curves(request: Request):
+    """Return all saved emotion curves for the authenticated user."""
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+    from app.services.supabase_client import supabase_writer
+    result = supabase_writer.table("emotional_library") \
+        .select("id, name, curve, duration, core_emotion, source_segment_text, tags, description, created_at") \
+        .eq("user_id", user_id) \
+        .not_.is_("curve", "null") \
+        .order("created_at", desc=True) \
+        .execute()
+    return {"curves": result.data or []}
+
+
+@router.delete("/ei/curves/{curve_id}")
+async def delete_ei_curve(curve_id: str, request: Request):
+    """Delete a saved emotion curve by ID."""
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+    from app.services.supabase_client import supabase_writer
+    supabase_writer.table("emotional_library") \
+        .delete() \
+        .eq("id", curve_id) \
+        .eq("user_id", user_id) \
+        .execute()
+    return {"status": "ok"}
+
+
 @router.get("/jobs/{job_id}/character-profiles")
 async def get_character_profiles(job_id: str, request: Request):
     """Return the per-job character profiles."""
