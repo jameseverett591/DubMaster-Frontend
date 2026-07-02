@@ -135,6 +135,8 @@ _GLOSSARY_YUE: Dict[str, str] = {
     "甘师父": "Master Shin",
     "甘師":   "Master Shin",
     "金山找": "Master Shin",
+    "金山沼": "Master Shin",   # Velma transcribes 沼 (swamp) for 找 (seek) — same Mandarin sound
+    "金山照": "Master Shin",   # third common variant from other ASR engines
     "心師傅": "Master Shin",
     "心师傅": "Master Shin",
     "心師父": "Master Shin",
