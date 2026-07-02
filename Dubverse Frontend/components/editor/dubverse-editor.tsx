@@ -694,6 +694,7 @@ export function DubVerseEditor({
   const [activeDubbedVideoUrl, setActiveDubbedVideoUrl] = useState(dubbedVideoUrl)
   const [isRebuilding, setIsRebuilding] = useState(false)
   const [rebuildError, setRebuildError] = useState<string | null>(null)
+  const [isRetranslating, setIsRetranslating] = useState(false)
   const [rebuildProgress, setRebuildProgress] = useState(0)
   const rebuildIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [draggingSegment, setDraggingSegment] = useState<{
@@ -2965,6 +2966,24 @@ export function DubVerseEditor({
     }
   }, [jobId, setPlaybackMode, setCurrentTime, isMuted, masterVolume, setRebuildStatus, clearAllDirty])
 
+  const handleRetranslate = useCallback(async () => {
+    if (isRetranslating) return
+    setIsRetranslating(true)
+    try {
+      const result = await apiClient.retranslateJob(jobId)
+      // Refresh segments in the editor from the response
+      const updatedSegs = result.segments as any[]
+      if (updatedSegs?.length) {
+        setImportedSegments(updatedSegs)
+      }
+      alert(`Re-translation complete — ${result.segments_updated} segments updated. Review the script then Rebuild to generate new audio.`)
+    } catch (err: any) {
+      alert(`Re-translate failed: ${err.message || 'Unknown error'}`)
+    } finally {
+      setIsRetranslating(false)
+    }
+  }, [jobId, isRetranslating, setImportedSegments])
+
   const handleTimelineDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
@@ -3465,6 +3484,14 @@ export function DubVerseEditor({
               >
                 <Plus className="h-4 w-4 mr-2" />
                 Add Segment
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={handleRetranslate}
+                disabled={isRetranslating}
+                className="cursor-pointer hover:bg-slate-800"
+              >
+                <RefreshCw className={cn("h-4 w-4 mr-2", isRetranslating && "animate-spin")} />
+                {isRetranslating ? 'Re-translating…' : 'Re-translate Script'}
               </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => setShowRevertAllConfirm(true)}

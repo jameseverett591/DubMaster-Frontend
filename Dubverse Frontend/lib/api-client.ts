@@ -208,6 +208,14 @@ export interface RemixResponse {
   segments_used: number
 }
 
+export interface RetranslateResponse {
+  job_id: string
+  source_language: string
+  target_language: string
+  segments_updated: number
+  segments: Array<Record<string, unknown>>
+}
+
 // Quality Analysis types
 export interface TimingIssue {
   segment: number
@@ -960,6 +968,18 @@ class DubVerseAPIClient {
     if (!res.ok) return []
     const data = await res.json()
     return data.projects ?? []
+  }
+
+  async retranslateJob(jobId: string): Promise<RetranslateResponse> {
+    const response = await fetch(`${this.baseURL}/api/jobs/${jobId}/retranslate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Re-translate failed: ${response.statusText}`)
+    }
+    return response.json()
   }
 
   async remixDub(jobId: string): Promise<RemixResponse> {

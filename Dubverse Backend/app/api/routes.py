@@ -4512,6 +4512,184 @@ async def remix_dub(job_id: str, request: Request):
     return result
 
 
+@router.post("/jobs/{job_id}/retranslate")
+async def retranslate_job(job_id: str, request: Request):
+    """Re-run translation only against the existing Velma transcript stored in Supabase.
+
+    Does NOT trigger TTS or audio rebuild. Updates translated_text, adapted_text,
+    and committed_adapted_text on every segment so the next remix picks up the
+    corrected script. Returns the updated segment array in ~10 seconds.
+    """
+    import json as _json
+    from app.services.supabase_client import supabase, supabase_writer, verify_jwt
+    from app.services.translation_service import translation_service as _ts
+
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    verify_jwt(token)
+
+    # 1. Load job for language info and character profiles
+    job = await _get_or_rehydrate_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    target_lang = normalize_language_code(
+        getattr(job, "target_language", None) or "en"
+    )
+
+    # Determine source language — prefer the on-disk transcript's detected language
+    # over the job object's stored value, since Velma's direct detection is more
+    # accurate than what the UI might have stored (e.g. "zh-TW" vs "yue").
+    _transcript_lang = None
+    _tr_lang_path = os.path.join("data", "transcripts", f"{job_id}.json")
+    if os.path.exists(_tr_lang_path):
+        try:
+            with open(_tr_lang_path, "r", encoding="utf-8") as _tlf:
+                _tr_lang_data = _json.load(_tlf)
+            _transcript_lang = _tr_lang_data.get("language") or _tr_lang_data.get("source_language")
+        except Exception:
+            pass
+
+    _job_source = getattr(job, "source_language", None)
+    _raw_source = _transcript_lang or _job_source or "yue"
+    source_lang = normalize_language_code(_raw_source, allow_auto=True)
+
+    # If normalized to generic "zh" but transcript explicitly detected Cantonese,
+    # upgrade to "yue" so the LLM path triggers correctly.
+    if source_lang == "zh" and _transcript_lang and "yue" in _transcript_lang.lower():
+        source_lang = "yue"
+
+    logger.info(f"[RETRANSLATE] job={job_id} source: transcript={_transcript_lang!r} job={_job_source!r} → using {source_lang!r}")
+
+    if source_lang == target_lang:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Source and target language are the same ({source_lang}); nothing to translate"
+        )
+
+    # 2. Load Cantonese source from the on-disk transcript (authoritative source).
+    # NOTE: Supabase segments.source_text holds the post-translation English because
+    # upsert_segments is called after TTS, not before — so we MUST read the original
+    # transcript file to get the CJK source text for re-translation.
+    _transcript_path = os.path.join("data", "transcripts", f"{job_id}.json")
+    _segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+
+    segments = []
+
+    if os.path.exists(_transcript_path):
+        try:
+            with open(_transcript_path, "r", encoding="utf-8") as tf:
+                _tr = _json.load(tf)
+            _tr_segs = _tr.get("segments", [])
+            for i, s in enumerate(_tr_segs):
+                src = s.get("text", "").strip()
+                if not src:
+                    continue
+                segments.append({
+                    "segment_id": str(i),
+                    "text": src,
+                    "source_text": src,
+                    "start": s.get("start", 0.0),
+                    "end": s.get("end", 0.0),
+                    "speaker": s.get("speaker", "speaker-1"),
+                    "velma_emotion": s.get("velma_emotion"),
+                    "velma_accent": s.get("velma_accent"),
+                })
+            logger.info(f"[RETRANSLATE] Loaded {len(segments)} source segments from transcript file")
+        except Exception as exc:
+            logger.warning(f"[RETRANSLATE] Could not load transcript file: {exc}")
+
+    if not segments:
+        raise HTTPException(
+            status_code=404,
+            detail="No source transcript found for this job. Re-run the full pipeline first."
+        )
+
+    # 3. Load Velma context if available (feeds character/scene context into prompt)
+    velma_context = None
+    _velma_path = os.path.join("data", "velma", f"{job_id}.json")
+    if os.path.exists(_velma_path):
+        try:
+            with open(_velma_path, "r", encoding="utf-8") as vf:
+                velma_context = _json.load(vf)
+        except Exception:
+            pass
+
+    # 4. Run translation
+    logger.info(f"[RETRANSLATE] job={job_id} segments={len(segments)} {source_lang}→{target_lang}")
+    try:
+        translated = await _ts.translate_segments(
+            segments,
+            source_lang,
+            target_lang,
+            character_profiles=getattr(job, "character_profiles", None),
+            velma_context=velma_context,
+        )
+    except Exception as exc:
+        logger.error(f"[RETRANSLATE] Translation failed for job {job_id}: {exc}")
+        raise HTTPException(status_code=500, detail=f"Translation failed: {exc}")
+
+    # 5a. Write updated translations to on-disk segments.json so the editor sees
+    # them immediately without waiting for a full audio rebuild.
+    try:
+        if os.path.exists(_segments_path):
+            with open(_segments_path, "r", encoding="utf-8") as sf:
+                _seg_data = _json.load(sf)
+            _disk_segs = _seg_data.get("segments", [])
+            # Build lookup: segment_id → new text
+            _new_text_map = {
+                int(s.get("segment_id", -1)): (s.get("text") or "")
+                for s in translated
+            }
+            for disk_seg in _disk_segs:
+                # Match by index (segments.json is index-ordered)
+                _idx = _disk_segs.index(disk_seg)
+                if _idx in _new_text_map and _new_text_map[_idx]:
+                    disk_seg["text"] = _new_text_map[_idx]
+                    disk_seg["original_text"] = disk_seg.get("original_text") or disk_seg["text"]
+            with open(_segments_path, "w", encoding="utf-8") as sf:
+                _json.dump(_seg_data, sf, indent=2, ensure_ascii=False)
+            logger.info(f"[RETRANSLATE] Updated {len(_new_text_map)} segments in segments.json")
+    except Exception as exc:
+        logger.warning(f"[RETRANSLATE] Could not update segments.json: {exc}")
+
+    # 5b. Upsert to Supabase with correct source_text (CJK) and new translated_text
+    try:
+        rows = []
+        for seg in translated:
+            idx = int(seg.get("segment_id", -1))
+            if idx < 0:
+                continue
+            new_text = seg.get("text") or ""
+            src_text = seg.get("source_text") or seg.get("original_text") or ""
+            rows.append({
+                "job_id": job_id,
+                "sequence": idx,
+                "source_text": src_text,
+                "translated_text": new_text,
+                "adapted_text": new_text,
+                "committed_adapted_text": new_text,
+                "start_time": seg.get("start", 0.0),
+                "end_time": seg.get("end", 0.0),
+                "speaker": seg.get("speaker", "speaker-1"),
+            })
+        if rows:
+            supabase_writer.table("segments").upsert(
+                rows, on_conflict="job_id,sequence"
+            ).execute()
+        logger.info(f"[RETRANSLATE] Upserted {len(rows)} segments to Supabase")
+    except Exception as exc:
+        logger.warning(f"[RETRANSLATE] Supabase write failed (non-fatal): {exc}")
+
+    return {
+        "job_id": job_id,
+        "source_language": source_lang,
+        "target_language": target_lang,
+        "segments_updated": len(translated),
+        "segments": translated,
+    }
+
+
 class ExportRequest(BaseModel):
     resolution: str = "1080p"   # "720p" | "1080p" | "4k"
     aspect: str = "widescreen"  # "widescreen" | "fill"
