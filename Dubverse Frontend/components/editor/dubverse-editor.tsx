@@ -1107,6 +1107,8 @@ export function DubVerseEditor({
   const isRegeneratingRef = useRef(false)
   const isPlayingRef = useRef(isPlaying)
   isPlayingRef.current = isPlaying
+  // Tracks where playback started so Stop returns to that position (not 0)
+  const lastStartPosRef = useRef(0)
   // Pending regen while one is in flight (depth 1, last-write-wins).
   const regenQueueRef = useRef<{ segIdx?: number; voiceOverride?: string; textOverride?: string } | null>(null)
   const autoRegenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1134,7 +1136,18 @@ export function DubVerseEditor({
   const [importedVideoFile, setImportedVideoFile] = useState<File | null>(null)
   const videoInputRef = useRef<HTMLInputElement>(null)
   const transcriptInputRef = useRef<HTMLInputElement>(null)
-  
+
+  // Reference import state (transcribe-only, for emotion analysis / EI Library)
+  type RefSegment = { id: string; index: number; start: number; end: number; text: string; speaker_id: string }
+  const [referenceSegments, setReferenceSegments] = useState<RefSegment[] | null>(null)
+  const [referenceJobId, setReferenceJobId] = useState<string | null>(null)
+  const [referenceDetectedLang, setReferenceDetectedLang] = useState<string | null>(null)
+  const [selectedReferenceIndex, setSelectedReferenceIndex] = useState<number | null>(null)
+
+  // Active source/target language (user-selectable, initialized from job props)
+  const [activeSrcLang, setActiveSrcLang] = useState(sourceLanguage || 'yue')
+  const [activeTgtLang, setActiveTgtLang] = useState(targetLanguage || 'en')
+
   // Transcription state
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null)
@@ -1552,19 +1565,67 @@ export function DubVerseEditor({
     }).catch(() => {})
   }, [])
 
-  // Handle video import and automatic transcription
+  // Handle video import: upload to /transcribe-video, return segments for Reference track
   const handleVideoImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
-    
-// Set video URL for preview and store file for waveform extraction
-  const url = URL.createObjectURL(file)
-  setImportedVideoUrl(url)
-  setImportedVideoFile(file)
-  
-  // Clear previous data
-  }, [])
-  
+
+    // Local preview immediately
+    const url = URL.createObjectURL(file)
+    setImportedVideoUrl(url)
+    setImportedVideoFile(file)
+
+    // Reset previous reference state
+    setReferenceSegments(null)
+    setReferenceJobId(null)
+    setReferenceDetectedLang(null)
+    setSelectedReferenceIndex(null)
+    setTranscriptionError(null)
+    setIsTranscribing(true)
+
+    try {
+      const initial = await apiClient.transcribeVideo(file, activeSrcLang || undefined)
+      setReferenceJobId(initial.ref_job_id)
+
+      if (initial.status === 'complete' && initial.segments.length > 0) {
+        // Local CPU fallback returned segments immediately
+        setReferenceDetectedLang(initial.detected_language)
+        setReferenceSegments(initial.segments)
+        return
+      }
+
+      // RunPod async path — poll until complete
+      const poll = async (): Promise<void> => {
+        const MAX_WAIT_MS = 10 * 60 * 1000  // 10 minutes
+        const INTERVAL_MS = 3000
+        const deadline = Date.now() + MAX_WAIT_MS
+
+        while (Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, INTERVAL_MS))
+          const result = await apiClient.getRefTranscript(initial.ref_job_id)
+          if (result.status === 'complete') {
+            setReferenceDetectedLang(result.detected_language ?? '')
+            setReferenceSegments(result.segments)
+            return
+          }
+          if (result.status === 'error') {
+            throw new Error(result.error || 'Transcription failed on GPU')
+          }
+          // still "processing" — keep polling
+        }
+        throw new Error('Transcription timed out after 10 minutes')
+      }
+
+      await poll()
+    } catch (err: any) {
+      setTranscriptionError(err.message || 'Transcription failed')
+    } finally {
+      setIsTranscribing(false)
+      // Reset file input so the same file can be re-imported if needed
+      if (videoInputRef.current) videoInputRef.current.value = ''
+    }
+  }, [activeSrcLang])
+
   // Parse time string (MM:SS or HH:MM:SS) to seconds
   const parseTimeToSeconds = (timeStr: string): number => {
     const parts = timeStr.split(':').map(p => parseFloat(p))
@@ -3027,20 +3088,32 @@ export function DubVerseEditor({
     setDragReorder(null)
   }, [displaySegments])
   
+  const LANGUAGE_LIST: { code: string; label: string }[] = [
+    { code: 'yue', label: 'Cantonese (YUE)' },
+    { code: 'zh',  label: 'Mandarin (ZH)' },
+    { code: 'en',  label: 'English (EN)' },
+    { code: 'es',  label: 'Spanish (ES)' },
+    { code: 'fr',  label: 'French (FR)' },
+    { code: 'de',  label: 'German (DE)' },
+    { code: 'ja',  label: 'Japanese (JA)' },
+    { code: 'ko',  label: 'Korean (KO)' },
+    { code: 'vi',  label: 'Vietnamese (VI)' },
+    { code: 'th',  label: 'Thai (TH)' },
+    { code: 'hi',  label: 'Hindi (HI)' },
+    { code: 'gu',  label: 'Gujarati (GU)' },
+    { code: 'ta',  label: 'Tamil (TA)' },
+    { code: 'ar',  label: 'Arabic (AR)' },
+    { code: 'pt',  label: 'Portuguese (PT)' },
+    { code: 'ru',  label: 'Russian (RU)' },
+    { code: 'it',  label: 'Italian (IT)' },
+    { code: 'id',  label: 'Indonesian (ID)' },
+    { code: 'ms',  label: 'Malay (MS)' },
+    { code: 'tr',  label: 'Turkish (TR)' },
+  ]
+
   // Get language display name
   const getLanguageName = (code: string) => {
-    const names: Record<string, string> = {
-      'zh': 'Cantonese (China)',
-      'zh-CN': 'Cantonese (China)',
-      'en': 'English',
-      'en-US': 'English',
-      'es': 'Spanish',
-      'fr': 'French',
-      'de': 'German',
-      'ja': 'Japanese',
-      'ko': 'Korean',
-    }
-    return names[code] || code
+    return LANGUAGE_LIST.find(l => l.code === code)?.label ?? code
   }
   
   const EMOTIONS = ['Neutral', 'Happy', 'Excited', 'Calm', 'Sad', 'Angry', 'Fearful', 'Surprised', 'Disgusted', 'Professional', 'Casual', 'Formal', 'Intimate', 'Defiant', 'Confused', 'Whisper', 'Shout', 'Sarcastic', 'Hopeful', 'Melancholic']
@@ -3458,7 +3531,17 @@ export function DubVerseEditor({
                 <SelectItem value="warnings">Warnings</SelectItem>
               </SelectContent>
             </Select>
-            <div className="text-sm font-medium text-slate-300">{getLanguageName(sourceLanguage)}</div>
+            {/* Source language selector */}
+            <Select value={activeSrcLang} onValueChange={setActiveSrcLang}>
+              <SelectTrigger className="w-44 h-8 bg-slate-800 border-slate-700 text-slate-200 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="max-h-72 overflow-y-auto">
+                {LANGUAGE_LIST.map(l => (
+                  <SelectItem key={l.code} value={l.code}>{l.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <div className="flex-1 flex items-center justify-center min-w-0">
               <QCTicker
                 segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
@@ -3483,7 +3566,23 @@ export function DubVerseEditor({
                 }}
               />
             </div>
-            <div className="text-sm font-medium text-slate-300">{getLanguageName(targetLanguage)}</div>
+            {/* Target language selector */}
+            <Select
+              value={activeTgtLang}
+              onValueChange={async (val) => {
+                setActiveTgtLang(val)
+                try { await apiClient.saveProject(jobId, { target_language: val }) } catch {}
+              }}
+            >
+              <SelectTrigger className="w-44 h-8 bg-slate-800 border-slate-700 text-slate-200 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="max-h-72 overflow-y-auto">
+                {LANGUAGE_LIST.map(l => (
+                  <SelectItem key={l.code} value={l.code}>{l.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           
 {/* Transcription status */}
@@ -4362,6 +4461,11 @@ export function DubVerseEditor({
                   setInlineEmotionPicker(null)
                   setInlineEmotionWriteIn(null)
                   setSplitWordMode(null)
+                  // Clear Reference track (local state, not in Zustand store)
+                  setReferenceSegments(null)
+                  setReferenceJobId(null)
+                  setReferenceDetectedLang(null)
+                  setSelectedReferenceIndex(null)
                   revertToOriginal()
                   if (videoRef.current) {
                     videoRef.current.pause()
@@ -4796,26 +4900,55 @@ export function DubVerseEditor({
             className="flex-1 min-h-0 flex flex-col overflow-hidden"
             style={{ display: videoSubTab === 'chord' && rightPanelTab === 'result' ? 'flex' : 'none' }}
           >
-            {floatingEmotionSegment !== null && displaySegments[floatingEmotionSegment] ? (
+            {(() => {
+              // Reference segment takes priority when one is selected
+              const refSeg = selectedReferenceIndex !== null ? referenceSegments?.[selectedReferenceIndex] : null
+              const activeJobId = refSeg ? (referenceJobId ?? jobId) : jobId
+              // Build a minimal Segment-compatible object for FloatingEmotionChart
+              const chartSegment = refSeg
+                ? {
+                    id: refSeg.id,
+                    index: refSeg.index,
+                    start_time: refSeg.start,
+                    end_time: refSeg.end,
+                    source_text: refSeg.text,
+                    target_text: refSeg.text,
+                    active_text: refSeg.text,
+                    preview_text: null,
+                    isPreviewing: false,
+                    speaker_id: refSeg.speaker_id,
+                    speaker_label: refSeg.speaker_id,
+                    audio_url: undefined,
+                    committed_audio_url: undefined,
+                    status: 'auto' as const,
+                    qc_findings: [],
+                    emotionalCurve: { combined: [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }], locked: false, analysis: { facial: [], vocal: [], scene: [] } },
+                  }
+                : (floatingEmotionSegment !== null ? displaySegments[floatingEmotionSegment] : null)
+
+              return chartSegment ? (
               <FloatingEmotionChart
                 embedded
                 active={videoSubTab === 'chord' && rightPanelTab === 'result'}
                 autoFiredRef={emotionAutoFiredRef}
-                segment={displaySegments[floatingEmotionSegment]}
-                segmentIndex={floatingEmotionSegment}
-                jobId={jobId}
-                onClose={() => { setFloatingEmotionSegment(null); setVideoSubTab(null) }}
+                segment={chartSegment as any}
+                segmentIndex={refSeg ? -1 : floatingEmotionSegment!}
+                jobId={activeJobId}
+                onClose={() => { setFloatingEmotionSegment(null); setSelectedReferenceIndex(null); setVideoSubTab(null) }}
                 onCommitEmotion={(idx, emotion) => {
+                  if (refSeg) return // reference segments don't update the job
                   setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))
                   updateSegment(idx, { committed_emotion: emotion })
                 }}
                 onUpdateCurve={(idx, curve) => {
+                  if (refSeg) return
                   updateSegment(idx, { velma_emotion_curve: curve })
                 }}
                 onUpdateProgression={(idx, markers) => {
+                  if (refSeg) return
                   updateSegment(idx, { velma_progression: markers })
                 }}
-                onSaveChord={async (name, chord, intensity, curve) => {
+                onSaveChord={async (name, description, chord, intensity, curve) => {
                   await apiClient.saveEmotionalChord({
                     name,
                     emotion: chord.emotion,
@@ -4824,23 +4957,27 @@ export function DubVerseEditor({
                     intensity,
                   })
                   if (curve?.length) {
-                    const seg = floatingEmotionSegment !== null ? displaySegments[floatingEmotionSegment] : null
+                    const seg = refSeg ?? (floatingEmotionSegment !== null ? displaySegments[floatingEmotionSegment] : null)
+                    const duration = refSeg ? refSeg.end - refSeg.start : seg ? (seg as any).end_time - (seg as any).start_time : 0
+                    const text = refSeg ? refSeg.text : (seg as any)?.active_text ?? (seg as any)?.target_text ?? ''
                     const saved = await apiClient.saveEmotionCurve({
                       name,
+                      description: description || undefined,
                       curve,
-                      duration: seg ? seg.end_time - seg.start_time : 0,
+                      duration,
                       core_emotion: chord.emotion,
-                      source_segment_text: seg?.active_text ?? seg?.target_text ?? '',
+                      source_segment_text: text,
                     })
                     setSavedCurves(prev => [saved as typeof prev[0], ...prev])
                   }
                 }}
                 onAnalyzeWithHume={async () => {
-                  const seg = displaySegments[floatingEmotionSegment!]
-                  return apiClient.analyzeSegmentEmotion(jobId, seg.start_time, seg.end_time)
+                  const startT = refSeg ? refSeg.start : displaySegments[floatingEmotionSegment!].start_time
+                  const endT = refSeg ? refSeg.end : displaySegments[floatingEmotionSegment!].end_time
+                  return apiClient.analyzeSegmentEmotion(activeJobId, startT, endT)
                 }}
               />
-            ) : (
+              ) : (
               <div className="flex-1 flex flex-col items-center justify-center gap-4 p-6 text-center">
                 <div className="border border-slate-700 rounded-lg p-4 w-full max-w-xs flex flex-col gap-3">
                   {velmaEnrichResult && (
@@ -4871,7 +5008,8 @@ export function DubVerseEditor({
                   </button>
                 </div>
               </div>
-            )}
+              )
+            })()}
           </div>
 
           {/* Characters tab — per-job character profiles for translation */}
@@ -4948,6 +5086,18 @@ export function DubVerseEditor({
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1 min-w-0">
                             <div className="text-xs font-semibold text-white truncate">{curve.name}</div>
+                            {curve.description && (
+                              <div
+                                className="text-[10px] text-slate-400 italic mt-0.5"
+                                title={curve.description}
+                                style={{
+                                  display: '-webkit-box',
+                                  WebkitLineClamp: 2,
+                                  WebkitBoxOrient: 'vertical',
+                                  overflow: 'hidden',
+                                }}
+                              >{curve.description}</div>
+                            )}
                             {curve.source_segment_text && (
                               <div className="text-[10px] text-slate-500 italic truncate">&ldquo;{curve.source_segment_text}&rdquo;</div>
                             )}
@@ -5476,8 +5626,12 @@ export function DubVerseEditor({
                 // Drive video play/pause synchronously BEFORE any await
                 // so Chrome's autoplay policy isn't violated for audio
                 if (videoRef.current) {
-                  if (isPlaying) videoRef.current.pause()
-                  else videoRef.current.play().catch(() => {})
+                  if (isPlaying) {
+                    videoRef.current.pause()
+                  } else {
+                    lastStartPosRef.current = currentTime  // save start pos for Stop
+                    videoRef.current.play().catch(() => {})
+                  }
                 }
                 // Create and resume AudioContext inside user gesture
                 // to satisfy browser autoplay policy
@@ -5489,6 +5643,7 @@ export function DubVerseEditor({
                 }
                 // If in Preview and buffer not ready, stitch first
                 if (playbackMode === 'preview' && !isPlaying && !rptBufferRef.current) {
+                  lastStartPosRef.current = currentTime
                   const ctx = audioContextRef.current
                   const resolved = segments.map(seg => {
                     const resolveUrl = (url: string | undefined) => {
@@ -5523,13 +5678,18 @@ export function DubVerseEditor({
                   : <Play className={playbackMode === 'preview' ? 'h-4 w-4 text-amber-400' : 'h-4 w-4'} />
               }
             </Button>
-            <Button 
-              variant="ghost" 
-              size="sm" 
+            <Button
+              variant="ghost"
+              size="sm"
               className="h-8 w-8 p-0"
               onClick={() => {
+                const returnTo = lastStartPosRef.current
+                if (videoRef.current) {
+                  videoRef.current.pause()
+                  videoRef.current.currentTime = returnTo
+                }
                 setIsPlaying(false)
-                setCurrentTime(0)
+                setCurrentTime(returnTo)
               }}
             >
               <Square className="h-3.5 w-3.5 fill-current" />
@@ -5793,6 +5953,16 @@ export function DubVerseEditor({
                 className="w-full h-1"
               />
             </div>
+            {/* Reference track label — shown only when a reference video has been imported */}
+            {referenceSegments && referenceSegments.length > 0 && (
+              <div className="h-14 shrink-0 flex flex-col justify-center px-2 text-xs border-b border-amber-800/40 gap-0.5 bg-amber-950/20">
+                <span className="truncate text-amber-400/80 font-medium">Reference</span>
+                {referenceDetectedLang && (
+                  <span className="text-[10px] text-neutral-500 uppercase">{referenceDetectedLang}</span>
+                )}
+              </div>
+            )}
+
             <div className="h-14 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1">
@@ -6208,6 +6378,37 @@ export function DubVerseEditor({
                   )
                 })}
               </div>
+
+              {/* Reference track — shown only when a video has been imported for transcription */}
+              {referenceSegments && referenceSegments.length > 0 && (
+                <div className="h-14 shrink-0 bg-amber-950/20 border-b border-amber-800/40 relative" data-timeline-track>
+                  {referenceSegments.map((seg, i) => (
+                    <div
+                      key={seg.id}
+                      title={seg.text}
+                      className={cn(
+                        'absolute top-1 bottom-1 border rounded cursor-pointer group transition-colors',
+                        selectedReferenceIndex === i
+                          ? 'bg-amber-500/40 border-amber-400 ring-1 ring-amber-400/60'
+                          : 'bg-amber-500/15 border-amber-600/50 hover:bg-amber-500/25'
+                      )}
+                      style={{ left: seg.start * PIXELS_PER_SECOND, width: Math.max(4, (seg.end - seg.start) * PIXELS_PER_SECOND) }}
+                      onClick={() => {
+                        setSelectedReferenceIndex(i)
+                        // Seek video to this segment
+                        if (videoRef.current) videoRef.current.currentTime = seg.start
+                        // Open chord tab to show emotion analysis
+                        setRightPanelTab('result')
+                        setVideoSubTab('chord')
+                      }}
+                    >
+                      <div className="px-1.5 truncate text-[10px] h-full flex items-center text-amber-200/80 pointer-events-none">
+                        {seg.text}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
 
 {/* Dubbed audio track with stretch/squeeze handles */}
               <div

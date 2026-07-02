@@ -67,7 +67,7 @@ def handler(event):
     job_input = event.get("input", event)
     file_url       = job_input.get("file_url", "")
     video_path     = job_input.get("video_path", file_url)
-    language       = job_input.get("language", job_input.get("source_language", "yue"))
+    language       = job_input.get("language", job_input.get("source_language")) or None
     min_speakers   = int(job_input.get("min_speakers", 1))
     max_speakers   = int(job_input.get("max_speakers", 6))
     # When caller specifies an exact count (min==max), honour it strictly.
@@ -131,10 +131,14 @@ def handler(event):
         logger.info(f"[3b/4] Transcribing (language={language})")
         t_tr = time.time()
 
-        # Set language env var so both transcribe_audio and transcribe_cantonese pick it up
+        # Set language env var so both transcribe_audio and transcribe_cantonese pick it up.
+        # Always write it explicitly — even empty string — to prevent stale yue from a
+        # prior job on the same worker process bleeding into this transcription.
         prev_lang = os.environ.get("WHISPER_LANGUAGE")
         if language:
             os.environ["WHISPER_LANGUAGE"] = language
+        else:
+            os.environ.pop("WHISPER_LANGUAGE", None)
 
         _lang_norm = (language or "").lower().strip()
         if _lang_norm in _CJK_LANGS:

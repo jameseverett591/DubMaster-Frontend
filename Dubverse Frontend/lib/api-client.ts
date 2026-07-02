@@ -506,6 +506,72 @@ class DubVerseAPIClient {
   }
 
   /**
+   * Transcribe a video without dubbing (GPU-backed async flow).
+   * Returns {ref_job_id, status: "processing"} immediately for RunPod path,
+   * or {ref_job_id, status: "complete", segments: [...]} for the local CPU fallback.
+   * Poll getRefTranscript() every 3s until status === "complete".
+   */
+  async transcribeVideo(
+    file: File,
+    language?: string,
+  ): Promise<{
+    ref_job_id: string
+    status: string
+    detected_language: string
+    segment_count?: number
+    segments: Array<{
+      id: string
+      index: number
+      start: number
+      end: number
+      text: string
+      speaker_id: string
+    }>
+  }> {
+    const form = new FormData()
+    form.append('file', file)
+    if (language) form.append('language', language)
+    const response = await fetch(`${this.baseURL}/api/transcribe-video`, {
+      method: 'POST',
+      body: form,
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Transcription failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  /**
+   * Poll for reference transcription result. Returns:
+   * - {status: "processing"} while RunPod is working
+   * - {status: "complete", segments: [...], detected_language: "en"} when done
+   * - {status: "error", error: "..."} on failure
+   */
+  async getRefTranscript(refJobId: string): Promise<{
+    status: string
+    ref_job_id: string
+    detected_language?: string
+    segment_count?: number
+    segments: Array<{
+      id: string
+      index: number
+      start: number
+      end: number
+      text: string
+      speaker_id: string
+    }>
+    error?: string
+  }> {
+    const response = await fetch(`${this.baseURL}/api/ref-transcript/${refJobId}`)
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Poll failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  /**
    * Start the dubbing pipeline for a job
    */
   async startDubbing(request: DubRequest): Promise<DubResponse> {

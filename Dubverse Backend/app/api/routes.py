@@ -2022,6 +2022,241 @@ async def upload_video(
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
+def _build_ref_segments(raw_segments: list, ref_id: str, lang: str) -> list:
+    """Convert raw Whisper segments to the ref segment schema."""
+    out = []
+    for i, seg in enumerate(raw_segments):
+        if isinstance(seg, dict):
+            text = seg.get("text", "").strip()
+            start = float(seg.get("start", 0))
+            end = float(seg.get("end", 0))
+            speaker = seg.get("speaker") or f"SPEAKER_{i % 2:02d}"
+        else:
+            text = getattr(seg, "text", "").strip()
+            start = float(getattr(seg, "start", 0))
+            end = float(getattr(seg, "end", 0))
+            speaker = getattr(seg, "speaker", None) or f"SPEAKER_{i % 2:02d}"
+        if not text or end <= start:
+            continue
+        out.append({"id": f"{ref_id}_{i}", "index": i, "start": start, "end": end,
+                    "text": text, "speaker_id": speaker})
+    return out
+
+
+async def _transcribe_ref_runpod_bg(ref_id: str, video_path: str, lang: str):
+    """
+    Background task: submit transcription-only job to RunPod GPU, wait for result,
+    write segments to disk so GET /transcript/{ref_id} can return them.
+    """
+    from app.services.runpod_service import runpod_service
+    out_path = os.path.join("data", "jobs", ref_id, "ref_transcript.json")
+    try:
+        await job_manager.update_job_status(
+            ref_id, JobStatus.PROCESSING, progress=10,
+            current_stage="Uploading to GPU cloud"
+        )
+        file_url = await _get_runpod_file_url(ref_id, video_path)
+
+        env_vars: Dict[str, str] = {}
+        # Always send WHISPER_LANGUAGE explicitly — empty string clears any stale
+        # value left on the RunPod worker from a previous Cantonese/other-language job.
+        env_vars["WHISPER_LANGUAGE"] = lang if lang else ""
+        for k in ("HF_TOKEN", "HUGGING_FACE_TOKEN", "HUGGINGFACE_TOKEN",
+                  "HUGGINGFACE_HUB_TOKEN", "PUBLIC_BASE_URL"):
+            v = os.getenv(k, "").strip()
+            if v:
+                env_vars.setdefault("HF_TOKEN" if "HF" in k or "HUGGING" in k else k, v)
+
+        await job_manager.update_job_status(
+            ref_id, JobStatus.PROCESSING, progress=20,
+            current_stage="Waiting for GPU worker"
+        )
+        submit_result = await runpod_service.submit_job(
+            file_url=file_url,
+            job_id=ref_id,
+            language=lang or "",
+            min_speakers=1,
+            max_speakers=6,
+            steps=["transcribe"],   # skip separation and diarization
+            env_vars=env_vars,
+        )
+        runpod_job_id = submit_result.get("id")
+        if not runpod_job_id:
+            raise RuntimeError(f"RunPod did not return a job ID: {submit_result}")
+
+        job_obj = await job_manager.get_job(ref_id)
+        if job_obj:
+            job_obj.runpod_job_id = runpod_job_id
+
+        async def _prog(pct):
+            await job_manager.update_job_status(
+                ref_id, JobStatus.TRANSCRIBING, progress=20 + int(pct * 0.7),
+                current_stage="Transcribing on GPU" if pct > 15 else "Waiting for GPU worker"
+            )
+
+        result = await runpod_service.poll_until_complete(
+            runpod_job_id=runpod_job_id,
+            timeout=int(os.getenv("RUNPOD_POLL_TIMEOUT_SEC", "1800")),
+            progress_callback=_prog,
+        )
+
+        if result.get("error"):
+            raise RuntimeError(f"RunPod transcription failed: {result['error']}")
+
+        # For steps=["transcribe"], transcript is in result["transcript"]["segments"]
+        transcript = result.get("transcript", {})
+        raw_segs = transcript.get("segments", []) or result.get("segments", [])
+        detected_lang = (transcript.get("language") or lang or "en")
+
+        segments_out = _build_ref_segments(raw_segs, ref_id, detected_lang)
+        payload = {"ref_job_id": ref_id, "detected_language": detected_lang,
+                   "segment_count": len(segments_out), "segments": segments_out}
+
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as fh:
+            _json.dump(payload, fh)
+
+        await job_manager.update_job_status(
+            ref_id, JobStatus.READY_FOR_REVIEW, progress=100,
+            current_stage="Transcription complete"
+        )
+        logger.info(f"[TRANSCRIBE-VIDEO] {ref_id}: RunPod done — {len(segments_out)} segments, lang={detected_lang}")
+
+    except Exception as e:
+        logger.error(f"[TRANSCRIBE-VIDEO] {ref_id}: RunPod background task failed: {e}", exc_info=True)
+        # Write an error marker so the GET endpoint can report failure
+        try:
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as fh:
+                _json.dump({"error": str(e), "ref_job_id": ref_id, "segments": []}, fh)
+        except Exception:
+            pass
+        await job_manager.update_job_status(
+            ref_id, JobStatus.ERROR, progress=0,
+            current_stage=f"Transcription failed: {e}"
+        )
+
+
+@router.post("/transcribe-video")
+async def transcribe_video_only(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    language: Optional[str] = Form(None),
+):
+    """
+    Transcribe a video without dubbing for reference import and EI Library building.
+    Routes through RunPod GPU for production-grade speed (~10-20s on GPU).
+    Returns {ref_job_id, status: "processing"} immediately; poll
+    GET /api/transcript/{ref_job_id} until status is "complete".
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    file_ext = Path(file.filename).suffix.lower()
+    if file_ext not in settings.ALLOWED_VIDEO_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file format. Allowed: {', '.join(settings.ALLOWED_VIDEO_FORMATS)}",
+        )
+
+    lang: Optional[str] = None
+    if language:
+        normalized = normalize_language_code(language, allow_auto=True)
+        if normalized and normalized != "auto":
+            lang = normalized
+
+    ref_id = f"ref_{uuid.uuid4().hex[:12]}"
+
+    try:
+        video_path = storage.get_upload_path(ref_id, file.filename)
+        await job_manager.create_job(
+            job_id=ref_id,
+            video_filename=file.filename,
+            video_path=video_path,
+            video_size=0,
+            user_id="ref",
+        )
+        if lang:
+            job_obj = await job_manager.get_job(ref_id)
+            if job_obj:
+                job_obj.source_language = lang
+
+        with open(video_path, "wb") as fh:
+            while chunk := await file.read(1024 * 1024):
+                fh.write(chunk)
+
+        from app.services.runpod_service import runpod_service
+        if runpod_service.is_available():
+            # Production path: GPU via RunPod
+            background_tasks.add_task(_transcribe_ref_runpod_bg, ref_id, video_path, lang or "")
+            logger.info(f"[TRANSCRIBE-VIDEO] {ref_id}: submitted to RunPod GPU (lang={lang})")
+            return {"ref_job_id": ref_id, "status": "processing", "segments": [], "detected_language": lang or ""}
+        else:
+            # Dev/offline fallback: local CPU (medium model)
+            logger.warning(f"[TRANSCRIBE-VIDEO] {ref_id}: RunPod not configured — falling back to local CPU")
+            extract_result = extract_audio(video_path)
+            if extract_result.get("status") != "ok":
+                raise HTTPException(status_code=500, detail="Audio extraction failed")
+
+            os.environ.pop("WHISPER_LANGUAGE", None)
+            if lang:
+                os.environ["WHISPER_LANGUAGE"] = lang
+
+            transcript_result = transcribe_audio(extract_result, job_id=ref_id)
+
+            os.environ.pop("WHISPER_LANGUAGE", None)
+
+            if transcript_result.get("status") != "ok":
+                raise HTTPException(status_code=500,
+                    detail=f"Transcription failed: {transcript_result.get('reason', 'unknown')}")
+
+            transcript_path = transcript_result.get("transcript_path", "")
+            if not transcript_path or not os.path.exists(transcript_path):
+                raise HTTPException(status_code=500, detail="Transcript file missing")
+
+            with open(transcript_path, "r", encoding="utf-8") as fh:
+                td = _json.load(fh)
+
+            detected_lang = td.get("language", lang or "en")
+            segments_out = _build_ref_segments(td.get("segments", []), ref_id, detected_lang)
+
+            out_path = os.path.join("data", "jobs", ref_id, "ref_transcript.json")
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            payload = {"ref_job_id": ref_id, "detected_language": detected_lang,
+                       "segment_count": len(segments_out), "segments": segments_out}
+            with open(out_path, "w", encoding="utf-8") as fh:
+                _json.dump(payload, fh)
+
+            logger.info(f"[TRANSCRIBE-VIDEO] {ref_id}: local CPU done — {len(segments_out)} segments")
+            return {"ref_job_id": ref_id, "status": "complete",
+                    "detected_language": detected_lang,
+                    "segment_count": len(segments_out), "segments": segments_out}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"transcribe_video_only failed for {ref_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+
+@router.get("/ref-transcript/{ref_job_id}")
+async def get_ref_transcript(ref_job_id: str):
+    """Poll endpoint for reference transcription status. Returns segments when ready."""
+    out_path = os.path.join("data", "jobs", ref_job_id, "ref_transcript.json")
+    if os.path.exists(out_path):
+        with open(out_path, "r", encoding="utf-8") as fh:
+            data = _json.load(fh)
+        if data.get("error"):
+            return {"status": "error", "error": data["error"], "ref_job_id": ref_job_id, "segments": []}
+        return {"status": "complete", **data}
+    # Check if job errored out without writing the file
+    job = await _get_or_rehydrate_job(ref_job_id)
+    if job and str(getattr(job, "status", "")).lower() == "error":
+        return {"status": "error", "error": getattr(job, "current_stage", "Unknown error"),
+                "ref_job_id": ref_job_id, "segments": []}
+    return {"status": "processing", "ref_job_id": ref_job_id, "segments": []}
+
+
 @router.get("/status/{job_id}", response_model=StatusResponse)
 async def get_job_status(job_id: str):
     job = await _get_or_rehydrate_job(job_id)

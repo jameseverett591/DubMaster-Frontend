@@ -277,7 +277,7 @@ interface FloatingEmotionChartProps {
   onClose: () => void
   onCommitEmotion: (segmentIndex: number, emotion: string, intensity: number) => void
   onUpdateCurve: (segmentIndex: number, curve: number[]) => void
-  onSaveChord?: (name: string, chord: Chord, intensity: number, curve: number[]) => void
+  onSaveChord?: (name: string, description: string, chord: Chord, intensity: number, curve: number[]) => void
   onUpdateProgression?: (segmentIndex: number, markers: Array<{ emotion: string; intensity: number; color: string }>) => void
   /** When true, renders inline (fills container) instead of as a floating overlay */
   embedded?: boolean
@@ -363,6 +363,7 @@ export function FloatingEmotionChart({
   const [clickFlash, setClickFlash] = useState<{ svgX: number; svgY: number; chord: Chord; id: number } | null>(null)
   const [pendingChord, setPendingChord] = useState<{ chordIndex: number; chord: Chord; intensity: number; t: number } | null>(null)
   const [chordName, setChordName] = useState('')
+  const [chordDescription, setChordDescription] = useState('')
 
   const trackDuration = Math.max(segment.end_time - segment.start_time, 0.01)
   const avg = curveState.length > 0 ? curveState.reduce((a, b) => a + b, 0) / curveState.length : 0
@@ -1003,13 +1004,14 @@ export function FloatingEmotionChart({
 
       {/* Footer */}
       <div
-        className="shrink-0 flex items-center gap-1.5 px-3 overflow-x-auto"
+        className="shrink-0 flex flex-col px-3"
         style={{
-          height: FOOTER_H,
+          minHeight: FOOTER_H,
           background: 'rgba(0,5,10,0.65)',
           borderTop: '1px solid rgba(255,255,255,0.05)',
         }}
       >
+      <div className="flex items-center gap-1.5 overflow-x-auto" style={{ minHeight: FOOTER_H }}>
         {autoMarkers.length > 0 ? (
           autoMarkers.map((m, i) => {
             const c = m.color
@@ -1042,42 +1044,40 @@ export function FloatingEmotionChart({
             )
           })
         )}
-        {pendingChord && (
-          <>
-            <input
-              autoFocus
-              type="text"
-              placeholder="Name this chord…"
-              value={chordName}
-              onChange={e => setChordName(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter' && chordName.trim()) {
-                  onSaveChord?.(chordName.trim(), pendingChord.chord, pendingChord.intensity, curveState)
-                  setMarkers(prev => [...prev, pendingChord])
-                  setPendingChord(null)
-                  setChordName('')
-                }
-                if (e.key === 'Escape') {
-                  setPendingChord(null)
-                  setChordName('')
-                }
-              }}
-              className="flex-1 rounded px-2 py-1 text-xs text-white placeholder-violet-400/60 outline-none"
-              style={{
-                background: 'rgba(139,92,246,0.12)',
-                border: '1px solid rgba(139,92,246,0.6)',
-                boxShadow: '0 0 8px rgba(139,92,246,0.35), inset 0 0 6px rgba(139,92,246,0.08)',
-              }}
-            />
-            <button type="button" onClick={() => {
-              if (chordName.trim()) {
-                onSaveChord?.(chordName.trim(), pendingChord.chord, pendingChord.intensity, curveState)
-                setMarkers(prev => [...prev, pendingChord])
+        {(autoMarkers.length > 0 || markers.length > 0) && (
+          <input
+            type="text"
+            placeholder="Name this chord…"
+            value={chordName}
+            onChange={e => setChordName(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && chordName.trim()) {
+                const primary = pendingChord ?? autoMarkers[0] ?? markers[0]
+                if (primary) onSaveChord?.(chordName.trim(), chordDescription.trim(), primary.chord, primary.intensity, curveState)
+                if (pendingChord) { setMarkers(prev => [...prev, pendingChord]); setPendingChord(null) }
+                setChordName('')
+                setChordDescription('')
               }
-              setPendingChord(null)
-              setChordName('')
-            }} className="text-[9px] font-semibold text-violet-300 hover:text-white bg-violet-600/30 hover:bg-violet-600/60 border border-violet-500/50 px-2 py-1 rounded shrink-0 transition-colors">Save</button>
-          </>
+              if (e.key === 'Escape') { setPendingChord(null); setChordName(''); setChordDescription('') }
+            }}
+            className="flex-1 rounded px-2 py-1 text-xs text-white placeholder-violet-400/60 outline-none"
+            style={{
+              background: 'rgba(139,92,246,0.12)',
+              border: '1px solid rgba(139,92,246,0.6)',
+              boxShadow: '0 0 8px rgba(139,92,246,0.35), inset 0 0 6px rgba(139,92,246,0.08)',
+            }}
+          />
+        )}
+        {(autoMarkers.length > 0 || markers.length > 0) && (
+          <button type="button" onClick={() => {
+            if (chordName.trim()) {
+              const primary = pendingChord ?? autoMarkers[0] ?? markers[0]
+              if (primary) onSaveChord?.(chordName.trim(), chordDescription.trim(), primary.chord, primary.intensity, curveState)
+              if (pendingChord) { setMarkers(prev => [...prev, pendingChord]); setPendingChord(null) }
+            }
+            setChordName('')
+            setChordDescription('')
+          }} className="text-[9px] font-semibold text-violet-300 hover:text-white bg-violet-600/30 hover:bg-violet-600/60 border border-violet-500/50 px-2 py-1 rounded shrink-0 transition-colors">Save</button>
         )}
         <button
           type="button"
@@ -1092,6 +1092,22 @@ export function FloatingEmotionChart({
             onUpdateCurve(segmentIndex, flat)
           }}
         >Clear</button>
+      </div>
+      {(autoMarkers.length > 0 || markers.length > 0) && (
+        <div className="pb-2">
+          <textarea
+            placeholder="Optional description for EI Library…"
+            value={chordDescription}
+            onChange={e => setChordDescription(e.target.value)}
+            rows={2}
+            className="w-full rounded px-2 py-1 text-xs text-slate-300 placeholder-slate-600 outline-none resize-none"
+            style={{
+              background: 'rgba(139,92,246,0.06)',
+              border: '1px solid rgba(139,92,246,0.3)',
+            }}
+          />
+        </div>
+      )}
       </div>
     </div>
   )
