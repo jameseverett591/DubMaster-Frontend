@@ -15,7 +15,7 @@ Adding a new language: add a new key to GLOSSARIES with a dict of terms.
 The get_glossary() function handles all language code normalization.
 """
 
-from typing import Dict
+from typing import Dict, List, Tuple, Optional
 
 # ---------------------------------------------------------------------------
 # CJK SHARED — terms common to both Cantonese (yue) and Mandarin (zh)
@@ -581,3 +581,43 @@ def get_glossary(source_language: str) -> Dict[str, str]:
     lang = (source_language or "").lower().strip()
     lang = _LANG_ALIASES.get(lang, lang)
     return GLOSSARIES.get(lang, {})
+
+
+# ---------------------------------------------------------------------------
+# Phonetic index — maps pinyin key → (canonical_source, target, term_len)
+# Enables fuzzy matching when ASR writes a homophone of the glossary entry.
+# ---------------------------------------------------------------------------
+
+def _is_cjk(ch: str) -> bool:
+    return '一' <= ch <= '鿿' or '㐀' <= ch <= '䶿'
+
+
+def _cjk_pinyin(text: str) -> Optional[str]:
+    """
+    Convert a string to a space-joined pinyin key using pypinyin.
+    Returns None if pypinyin is unavailable or text contains no CJK.
+    Only applied to entries where >50% of characters are CJK.
+    """
+    try:
+        from pypinyin import lazy_pinyin, Style
+    except ImportError:
+        return None
+    cjk_count = sum(1 for c in text if _is_cjk(c))
+    if cjk_count < len(text) * 0.5:
+        return None
+    return ' '.join(lazy_pinyin(text, style=Style.NORMAL, errors='ignore'))
+
+
+def build_phonetic_index(glossary: Dict[str, str]) -> Dict[str, Tuple[str, str, int]]:
+    """
+    Build pinyin_key → (canonical_source_term, target_term, char_length).
+    Only CJK-dominant entries are indexed. Longer entries take priority when
+    two terms share the same pinyin key (longest match wins, hence sorted).
+    """
+    index: Dict[str, Tuple[str, str, int]] = {}
+    # Process longest terms first so shorter overlapping keys don't overwrite.
+    for src, tgt in sorted(glossary.items(), key=lambda kv: len(kv[0]), reverse=True):
+        key = _cjk_pinyin(src)
+        if key and key not in index:
+            index[key] = (src, tgt, len(src))
+    return index

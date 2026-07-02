@@ -73,6 +73,7 @@ deep-translator>=1.11.4
 # HTTP requests
 requests>=2.31.0
 httpx>=0.25.0
+pypinyin>=0.50.0
 
 # Cloud GPU (Replicate)
 replicate>=0.25.0

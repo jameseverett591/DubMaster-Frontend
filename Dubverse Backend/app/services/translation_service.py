@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 from app.config import get_settings
 from app.utils.language import normalize_language_code, LANGUAGE_NAMES
-from app.services.glossary import get_glossary
+from app.services.glossary import get_glossary, build_phonetic_index, _cjk_pinyin, _is_cjk
 from app.services.adaptation_engine.policy import (
     DUBBING_SYSTEM_PROMPT,
     NO_HALLUCINATION_GUARDS,
@@ -27,37 +27,107 @@ class TranslationService:
         self.google_api_key = os.getenv("GOOGLE_TRANSLATE_API_KEY")
         # Glossary is loaded dynamically per source language in translate_segments.
         # Initialise with the Cantonese glossary as a safe default.
-        self._glossary_sorted = sorted(get_glossary("yue").items(), key=lambda kv: len(kv[0]), reverse=True)
+        _yue_glossary = get_glossary("yue")
+        self._glossary_sorted = sorted(_yue_glossary.items(), key=lambda kv: len(kv[0]), reverse=True)
+        # Phonetic index: pinyin_key → (src, tgt, char_len) for fuzzy CJK matching
+        self._phonetic_index = build_phonetic_index(_yue_glossary)
 
-    def _apply_glossary_pre(self, text: str) -> Tuple[str, List[Tuple[str, str]]]:
-        """Replace glossary source terms with placeholder tokens before translation."""
-        # Collapse spaces between CJK characters — Whisper sometimes inserts
-        # spurious whitespace (e.g. "金 師傅" instead of "金師傅"), breaking
-        # glossary matching.
-        _cjk_space_re = re.compile(r'(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])')
+    def _reload_glossary(self, source_language: str) -> None:
+        """Reload glossary and phonetic index when source language changes."""
+        glossary = get_glossary(source_language)
+        self._glossary_sorted = sorted(glossary.items(), key=lambda kv: len(kv[0]), reverse=True)
+        self._phonetic_index = build_phonetic_index(glossary)
+
+    def _apply_glossary_pre(self, text: str):
+        """
+        Replace glossary source terms with placeholder tokens before translation.
+
+        Returns (protected_text, replacements, fuzzy_match_log).
+        fuzzy_match_log lists phonetic substitutions made for director review.
+        """
+        import re as _re2
+        _cjk_space_re = _re2.compile(r'(?<=[一-鿿])\s+(?=[一-鿿])')
+        _cjk_punct_re = _re2.compile(r'(?<=[一-鿿])[,，、;；]\s*(?=[一-鿿])')
         text = _cjk_space_re.sub('', text)
-        # Also strip commas/punctuation sandwiched between CJK characters —
-        # Whisper vocal recovery inserts "金師父, 沒事吧" with a comma that
-        # prevents glossary matching against "金師父沒事吧".
-        _cjk_punct_re = re.compile(r'(?<=[\u4e00-\u9fff])[,，、;；]\s*(?=[\u4e00-\u9fff])')
         text = _cjk_punct_re.sub('', text)
-        replacements: List[Tuple[str, str]] = []
+
+        replacements = []
+        fuzzy_log = []
+        phon_idx = len(self._glossary_sorted)
+
+        # Pass 1: exact match (existing behaviour)
         for i, (src_term, tgt_term) in enumerate(self._glossary_sorted):
-            # Also collapse CJK spaces in glossary keys so we don't need
-            # separate with-space/without-space duplicate entries.
             src_collapsed = _cjk_space_re.sub('', src_term)
             if src_collapsed in text:
-                # Use CAPITALIZED token that translation engines won't mangle.
-                # Double-underscores get stripped by DeepL.
                 placeholder = f"XGLO{i:03d}X"
                 text = text.replace(src_collapsed, placeholder)
                 replacements.append((placeholder, tgt_term))
-        # Insert a space between any two adjacent XGLO tokens so that when they
-        # are restored the word-boundary check in _apply_glossary_post always has
-        # a gap character — prevents "Brother Wenmy master" when 文哥 and 我師父
-        # are adjacent in the source and both get replaced.
-        text = re.sub(r'(XGLO\d{3}X)(?=XGLO\d{3}X)', r'\1 ', text)
-        return text, replacements
+
+        # Pass 2: phonetic (fuzzy) match for remaining CJK spans.
+        # Walks character-by-character; for each CJK run not already replaced,
+        # compares pinyin against every glossary term of matching length.
+        # e.g. 金山沼 / 金山找 / 金山照 all yield "jin shan zhao" and hit the same entry.
+        if self._phonetic_index:
+            term_lengths = sorted(set(v[2] for v in self._phonetic_index.values()), reverse=True)
+            chars = list(text)
+            replaced_spans = []
+
+            def _in_span(s, e, spans=replaced_spans):
+                return any(rs <= s < re_ or rs < e <= re_ for rs, re_ in spans)
+
+            rebuilt = []
+            pos = 0
+            while pos < len(chars):
+                ch = chars[pos]
+                if not _is_cjk(ch) or _in_span(pos, pos + 1):
+                    rebuilt.append(ch)
+                    pos += 1
+                    continue
+                matched = False
+                for tlen in term_lengths:
+                    if pos + tlen > len(chars):
+                        continue
+                    span = ''.join(chars[pos:pos + tlen])
+                    if not all(_is_cjk(c) for c in span):
+                        continue
+                    if _in_span(pos, pos + tlen):
+                        continue
+                    key = _cjk_pinyin(span)
+                    if key and key in self._phonetic_index:
+                        canonical_src, tgt_term, _ = self._phonetic_index[key]
+                        if span != canonical_src:
+                            placeholder = f"XFUZ{phon_idx:03d}X"
+                            phon_idx += 1
+                            rebuilt.append(placeholder)
+                            replacements.append((placeholder, tgt_term))
+                            replaced_spans.append((pos, pos + tlen))
+                            fuzzy_log.append(
+                                f"fuzzy: {span!r} -> {canonical_src!r} -> {tgt_term!r} (pinyin: {key})"
+                            )
+                            pos += tlen
+                            matched = True
+                            break
+                if not matched:
+                    rebuilt.append(ch)
+                    pos += 1
+
+            text = ''.join(rebuilt)
+
+        text = _re2.sub(r'(X(?:GLO|FUZ)\d{3}X)(?=X(?:GLO|FUZ)\d{3}X)', r' ', text)
+        return text, replacements, fuzzy_log
+
+    def _verify_translation(self, translated_text: str, replacements: list):
+        """
+        Post-translation verification: confirm every substituted glossary target
+        appears in the translated output. If missing, inject it at sentence start.
+        Returns (corrected_text, warnings).
+        """
+        warnings = []
+        for _ph, tgt_term in replacements:
+            if tgt_term.lower() not in translated_text.lower():
+                warnings.append(f"verify: {tgt_term!r} missing from output — injecting")
+                translated_text = f"{tgt_term}, {translated_text}"
+        return translated_text, warnings
 
     def _apply_glossary_post(self, text: str, replacements: List[Tuple[str, str]]) -> str:
         """Replace placeholder tokens with correct target-language terms after translation."""
@@ -298,7 +368,7 @@ class TranslationService:
         if self.deepl_api_key and not is_cantonese:
             result = await self._translate_segments_deepl_batch(segments, source_norm, target_norm)
             glossary_baselines = [
-                self._apply_glossary_post(*self._apply_glossary_pre(seg.get("text", "")))
+                self._apply_glossary_post(*self._apply_glossary_pre(seg.get("text", ""))[:2])
                 for seg in segments
             ]
             change_ratio = sum(
@@ -366,7 +436,9 @@ class TranslationService:
         replacements_per_seg: List[List[Tuple[str, str]]] = []
         entity_replacements_per_seg: List[List[Tuple[str, str]]] = []
         for t in texts:
-            p, r = self._apply_glossary_pre(t)
+            p, r, _fuzz = self._apply_glossary_pre(t)
+            if _fuzz:
+                logger.info("[GLOSSARY-FUZZY] %s", " | ".join(_fuzz))
             p2, r2 = protect_entities(p)
             protected.append(p2)
             replacements_per_seg.append(r)
@@ -545,6 +617,8 @@ class TranslationService:
                     raw = restore_entities(raw, entity_replacements_per_seg[i])
                     raw = fix_translation_names(raw)
                     final = self._apply_glossary_post(raw, replacements_per_seg[i])
+                    final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
+                    for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
                     if raw.strip() != protected[i].strip():
                         changed += 1
                 else:
@@ -651,7 +725,9 @@ class TranslationService:
         replacements_per_seg: List[List[Tuple[str, str]]] = []
         entity_replacements_per_seg: List[List[Tuple[str, str]]] = []
         for t in texts:
-            p, r = self._apply_glossary_pre(t)
+            p, r, _fuzz = self._apply_glossary_pre(t)
+            if _fuzz:
+                logger.info("[GLOSSARY-FUZZY] %s", " | ".join(_fuzz))
             p2, r2 = protect_entities(p)
             protected.append(p2)
             replacements_per_seg.append(r)
@@ -792,6 +868,8 @@ class TranslationService:
                     raw = restore_entities(raw, entity_replacements_per_seg[i])
                     raw = fix_translation_names(raw)
                     final = self._apply_glossary_post(raw, replacements_per_seg[i])
+                    final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
+                    for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
                     if raw.strip() != protected[i].strip():
                         changed += 1
                 else:
@@ -889,7 +967,9 @@ class TranslationService:
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
         for t in texts:
-            p, r = self._apply_glossary_pre(t)
+            p, r, _fuzz = self._apply_glossary_pre(t)
+            if _fuzz:
+                logger.info("[GLOSSARY-FUZZY] %s", " | ".join(_fuzz))
             protected.append(p)
             replacements_per_seg.append(r)
 
@@ -918,6 +998,8 @@ class TranslationService:
         for i, seg in enumerate(segments):
             raw = (translations[i]["text"] if i < len(translations) else None) or protected[i]
             final = self._apply_glossary_post(raw, replacements_per_seg[i])
+            final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
+            for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
             result.append({**seg, "original_text": seg.get("text", ""), "text": final})
 
         return result
@@ -938,7 +1020,9 @@ class TranslationService:
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
         for t in texts:
-            p, r = self._apply_glossary_pre(t)
+            p, r, _fuzz = self._apply_glossary_pre(t)
+            if _fuzz:
+                logger.info("[GLOSSARY-FUZZY] %s", " | ".join(_fuzz))
             protected.append(p)
             replacements_per_seg.append(r)
 
@@ -994,6 +1078,8 @@ class TranslationService:
                     else protected[i]
                 )
                 final = self._apply_glossary_post(raw, replacements_per_seg[i])
+                final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
+                for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
                 if raw.strip() != protected[i].strip():
                     changed += 1
                 result.append({**seg, "original_text": seg.get("text", ""), "text": final})
@@ -1022,7 +1108,9 @@ class TranslationService:
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
         for t in texts:
-            p, r = self._apply_glossary_pre(t)
+            p, r, _fuzz = self._apply_glossary_pre(t)
+            if _fuzz:
+                logger.info("[GLOSSARY-FUZZY] %s", " | ".join(_fuzz))
             protected.append(p)
             replacements_per_seg.append(r)
 
@@ -1082,6 +1170,8 @@ class TranslationService:
             else:
                 raw_translated = translated_map.get(i) or protected[i]
                 final = self._apply_glossary_post(raw_translated, replacements_per_seg[i])
+                final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
+                for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
                 if raw_translated.strip() != protected[i].strip():
                     changed_count += 1
                 result.append({**seg, "original_text": seg.get("text", ""), "text": final})
@@ -1219,7 +1309,9 @@ class TranslationService:
             return text
 
         # Protect glossary terms with placeholders before translation
-        protected_text, replacements = self._apply_glossary_pre(text)
+        protected_text, replacements, _fuzz_single = self._apply_glossary_pre(text)
+        if _fuzz_single:
+            logger.info("[GLOSSARY-FUZZY] %s", " | ".join(_fuzz_single))
         if replacements:
             logger.debug(f"Glossary: protected {len(replacements)} terms in '{text[:60]}'")
 
@@ -1233,6 +1325,8 @@ class TranslationService:
         # Restore glossary terms in translated output
         if replacements:
             translated = self._apply_glossary_post(translated, replacements)
+            translated, _v_warns = self._verify_translation(translated, replacements)
+            for _w in _v_warns: logger.warning("[VERIFY] single: %s", "; ".join(_v_warns))
             logger.debug(f"Glossary: restored terms -> '{translated[:80]}'")
 
         return translated
