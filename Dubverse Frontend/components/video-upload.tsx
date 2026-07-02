@@ -18,6 +18,7 @@ import { usePlan } from "@/lib/use-plan"
 
 const STORAGE_KEY = "dubverse_uploaded_files"
 const SOURCE_LANG_STORAGE_KEY = "dubverse_source_language"
+const TARGET_LANG_STORAGE_KEY = "dubverse_target_language"
 
 // Source languages the ASR pipeline supports. "auto" lets Whisper detect.
 // "yue" (Cantonese) is critical — it's distinct from "zh" (Mandarin) and the
@@ -34,6 +35,22 @@ const SOURCE_LANGUAGES: { code: string; name: string; flag: string }[] = [
   { code: "de", name: "German", flag: "🇩🇪" },
   { code: "it", name: "Italian", flag: "🇮🇹" },
   { code: "pt", name: "Portuguese", flag: "🇵🇹" },
+  { code: "ar", name: "Arabic", flag: "🇸🇦" },
+  { code: "hi", name: "Hindi", flag: "🇮🇳" },
+  { code: "ru", name: "Russian", flag: "🇷🇺" },
+  { code: "nl", name: "Dutch", flag: "🇳🇱" },
+]
+
+const TARGET_LANGUAGES: { code: string; name: string; flag: string }[] = [
+  { code: "en", name: "English", flag: "🇺🇸" },
+  { code: "es", name: "Spanish", flag: "🇪🇸" },
+  { code: "fr", name: "French", flag: "🇫🇷" },
+  { code: "de", name: "German", flag: "🇩🇪" },
+  { code: "it", name: "Italian", flag: "🇮🇹" },
+  { code: "pt", name: "Portuguese", flag: "🇵🇹" },
+  { code: "ja", name: "Japanese", flag: "🇯🇵" },
+  { code: "ko", name: "Korean", flag: "🇰🇷" },
+  { code: "zh", name: "Mandarin", flag: "🇨🇳" },
   { code: "ar", name: "Arabic", flag: "🇸🇦" },
   { code: "hi", name: "Hindi", flag: "🇮🇳" },
   { code: "ru", name: "Russian", flag: "🇷🇺" },
@@ -76,11 +93,12 @@ export function VideoUpload({
 }: VideoUploadProps) {
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
   const [sourceLanguage, setSourceLanguage] = useState<string>("auto")
+  const [targetLanguage, setTargetLanguage] = useState<string>(() => localStorage.getItem(TARGET_LANG_STORAGE_KEY) ?? "en")
   const [numSpeakers, setNumSpeakers] = useState<string>("auto")
   const numSpeakersRef = useRef<string>("auto")
-  // Ref mirror so the dropzone callback (created once) always sees the
-  // current selection without forcing the dropzone to be re-created.
+  // Ref mirrors so dropzone/upload callbacks always see current selections.
   const sourceLanguageRef = useRef<string>("auto")
+  const targetLanguageRef = useRef<string>(localStorage.getItem(TARGET_LANG_STORAGE_KEY) ?? "en")
   const t = useTranslations('upload')
   const ts = useTranslations('studio')
   const { hasFeature, recordingLimit } = usePlan()
@@ -184,6 +202,11 @@ export function VideoUpload({
   }, [sourceLanguage])
 
   useEffect(() => {
+    targetLanguageRef.current = targetLanguage
+    localStorage.setItem(TARGET_LANG_STORAGE_KEY, targetLanguage)
+  }, [targetLanguage])
+
+  useEffect(() => {
     numSpeakersRef.current = numSpeakers
   }, [numSpeakers])
 
@@ -247,9 +270,10 @@ export function VideoUpload({
     // Snapshot language + speaker count for this batch so UI changes mid-upload
     // don't affect in-flight requests.
     const langForBatch = sourceLanguageRef.current
+    const targetForBatch = targetLanguageRef.current
     const speakersForBatch = numSpeakersRef.current
     newFiles.forEach((uploadedFile) => {
-      startUpload(uploadedFile.id, uploadedFile.file, langForBatch, speakersForBatch)
+      startUpload(uploadedFile.id, uploadedFile.file, langForBatch, targetForBatch, speakersForBatch)
     })
   }, [])
 
@@ -270,9 +294,10 @@ export function VideoUpload({
     return `${mins}:${secs.toString().padStart(2, "0")}`
   }
 
-  const startUpload = async (tempId: string, file: File, langOverride?: string, speakersOverride?: string) => {
+  const startUpload = async (tempId: string, file: File, langOverride?: string, targetLangOverride?: string, speakersOverride?: string) => {
     try {
       const lang = langOverride ?? sourceLanguageRef.current
+      const targetLang = targetLangOverride ?? targetLanguageRef.current
       const spkRaw = speakersOverride ?? numSpeakersRef.current
       const numSpk = spkRaw && spkRaw !== 'auto' ? parseInt(spkRaw, 10) : undefined
       const response = await apiClient.uploadVideo(
@@ -284,6 +309,7 @@ export function VideoUpload({
         },
         lang,
         numSpk,
+        targetLang,
       )
 
       // Upload received by backend — now it's processing
@@ -498,6 +524,26 @@ export function VideoUpload({
               </SelectTrigger>
               <SelectContent>
                 {SOURCE_LANGUAGES.map((lang) => (
+                  <SelectItem key={lang.code} value={lang.code}>
+                    <span className="mr-2">{lang.flag}</span>
+                    {lang.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <label className="text-sm text-[#94A3B8] font-medium whitespace-nowrap">
+              Target language:
+            </label>
+            <Select value={targetLanguage} onValueChange={setTargetLanguage}>
+              <SelectTrigger className="w-[180px] h-9 text-sm bg-[#0F172A]/60 border-[#A855F7]/30">
+                <Languages className="mr-2 h-3.5 w-3.5 text-[#A855F7]" />
+                <SelectValue placeholder="English" />
+              </SelectTrigger>
+              <SelectContent>
+                {TARGET_LANGUAGES.map((lang) => (
                   <SelectItem key={lang.code} value={lang.code}>
                     <span className="mr-2">{lang.flag}</span>
                     {lang.name}

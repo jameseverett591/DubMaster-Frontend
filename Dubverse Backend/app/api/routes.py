@@ -1920,6 +1920,7 @@ async def upload_video(
     file: UploadFile = File(...),
     source_language: Optional[str] = Form(None),
     num_speakers: Optional[int] = Form(None),
+    target_language: Optional[str] = Form(None),
 ):
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.removeprefix("Bearer ").strip()
@@ -1967,12 +1968,21 @@ async def upload_video(
 
         # Persist source language and expected speaker count on the job so
         # the transcription and diarization stages can use them.
-        if src_lang or (num_speakers is not None and 1 <= num_speakers <= 10):
+        tgt_lang: Optional[str] = None
+        if target_language:
+            _tgt_norm = normalize_language_code(target_language, allow_auto=False)
+            if _tgt_norm and _tgt_norm != "auto":
+                tgt_lang = _tgt_norm
+
+        if src_lang or tgt_lang or (num_speakers is not None and 1 <= num_speakers <= 10):
             job_for_lang = await job_manager.get_job(job_id)
             if job_for_lang:
                 if src_lang:
                     job_for_lang.source_language = src_lang
                     logger.info(f"Job {job_id}: source_language set to {src_lang!r} from upload request")
+                if tgt_lang:
+                    job_for_lang.target_language = tgt_lang
+                    logger.info(f"Job {job_id}: target_language set to {tgt_lang!r} from upload request")
                 if num_speakers is not None and 1 <= num_speakers <= 10:
                     job_for_lang.expected_speakers = num_speakers
                     logger.info(f"Job {job_id}: expected_speakers set to {num_speakers} from upload request")
