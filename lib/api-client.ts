@@ -426,6 +426,7 @@ class DubVerseAPIClient {
     onProgress?: (progress: number) => void,
     sourceLanguage?: string,
     numSpeakers?: number,
+    targetLanguage?: string,
   ): Promise<UploadResponse> {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
@@ -436,6 +437,9 @@ class DubVerseAPIClient {
       }
       if (numSpeakers && numSpeakers >= 1 && numSpeakers <= 10) {
         formData.append('num_speakers', String(numSpeakers))
+      }
+      if (targetLanguage) {
+        formData.append('target_language', targetLanguage)
       }
 
       xhr.upload.addEventListener('progress', (e) => {

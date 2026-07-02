@@ -3633,11 +3633,14 @@ export function DubVerseEditor({
           
           {/* Empty state - no segments */}
           {!isTranscribing && !transcriptionError && displaySegments.length === 0 && (
-            <div className="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
-              <Upload className="h-12 w-12 text-neutral-500" />
+            <div
+              className="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center cursor-pointer hover:bg-slate-800/40 transition-colors rounded-lg"
+              onClick={() => videoInputRef.current?.click()}
+            >
+              <Upload className="h-12 w-12 text-[#A855F7]" />
               <div>
-                <p className="text-lg font-medium text-neutral-300">Please upload a video</p>
-                <p className="text-sm text-neutral-500 mt-1">Click "Import Video" to upload a video and automatically transcribe it</p>
+                <p className="text-lg font-medium text-neutral-300">Click to upload a video</p>
+                <p className="text-sm text-neutral-500 mt-1">Select a video file to upload and automatically transcribe it</p>
               </div>
             </div>
           )}
@@ -5696,13 +5699,13 @@ export function DubVerseEditor({
                 }
               }}
             >
-              {selectedSegmentIndex !== null
-                ? isSegmentPreviewing
+              {isPlaying
+                ? <Pause className={playbackMode === 'preview' ? 'h-4 w-4 text-amber-400' : 'h-4 w-4'} />
+                : isSegmentPreviewing
                   ? <Pause className="h-4 w-4 text-amber-400" />
-                  : <PlayCircle className="h-4 w-4 text-amber-400" />
-                : isPlaying
-                  ? <Pause className={playbackMode === 'preview' ? 'h-4 w-4 text-amber-400' : 'h-4 w-4'} />
-                  : <Play className={playbackMode === 'preview' ? 'h-4 w-4 text-amber-400' : 'h-4 w-4'} />
+                  : selectedSegmentIndex !== null
+                    ? <PlayCircle className="h-4 w-4 text-amber-400" />
+                    : <Play className={playbackMode === 'preview' ? 'h-4 w-4 text-amber-400' : 'h-4 w-4'} />
               }
             </Button>
             <Button
