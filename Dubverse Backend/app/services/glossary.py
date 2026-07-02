@@ -67,7 +67,9 @@ _CJK_SHARED: Dict[str, str] = {
     "大哥": "Big brother",
     "臭小子": "You little brat",
     "老婆大人": "My dear wife",
-    "老婆": "wife",
+    # NOTE: bare 老婆 intentionally excluded — Claude translates it with correct
+    # possessive pronoun (your/his/their) from context. Glossary replacement strips
+    # the surrounding pronouns, producing "afraid of wife" instead of "afraid of your wife".
     "老公": "husband",
     "親愛的": "Darling",
     "亲爱的": "Darling",
@@ -239,6 +241,14 @@ _GLOSSARY_YUE: Dict[str, str] = {
     "怎么样金师傅": "Master Shin, are you alright?",
     "怎麼樣金師傅沒事吧": "How's it going? Master Shin, are you okay?",
     "怎么样金师傅没事吧": "How's it going? Master Shin, are you okay?",
+
+    # ── Cantonese character names ───────────────────────────────────────────
+    "黄少三": "Huang Shaosan",
+    "黃少三": "Huang Shaosan",
+
+    # ── Cantonese idiomatic expressions ────────────────────────────────────
+    "武打郎几啲嘢": "What kind of nonsense is this",
+    "武打郎幾啲嘢": "What kind of nonsense is this",
 
     # ── Cantonese final-section dialogue ───────────────────────────────────
     "今天北拳": "Today, Northern Fist",
