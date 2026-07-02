@@ -965,7 +965,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                     </p>
                     <Button className="mt-4 gap-2 text-sm h-8" onClick={handleStartDubbing} disabled={isAnalyzing}>
                       <Sparkles className="h-3.5 w-3.5" />
-                      Generate Dub Now
+                      Open in Editor
                     </Button>
                   </div>
                 )}

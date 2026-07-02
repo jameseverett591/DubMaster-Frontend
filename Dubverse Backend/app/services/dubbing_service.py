@@ -1077,7 +1077,7 @@ class DubbingService:
                     if trimmed and os.path.exists(trimmed_path):
                         final_path = trimmed_path
                         actual_duration = target_duration
-                        seg["was_truncated"] = True
+                        segment["was_truncated"] = True
                         logger.warning(
                             f"[FIT] seg={i} hard-trimmed to {target_duration:.2f}s "
                             f"(needed {_speed_applied:.2f}x — tail may be cut)"
