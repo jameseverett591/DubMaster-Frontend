@@ -39,9 +39,6 @@ class Settings(BaseSettings):
     SYNCLABS_API_KEY: str = ""
     PUBLIC_BASE_URL: str = ""  # e.g. https://your-server.com — needed for Sync.Labs media access
 
-    # Hume AI (emotion/prosody analysis)
-    HUME_API_KEY: str = ""
-
     # Azure Speech (pronunciation assessment)
     AZURE_SPEECH_KEY: str = ""
     AZURE_SPEECH_REGION: str = ""

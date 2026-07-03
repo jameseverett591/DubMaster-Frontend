@@ -120,7 +120,6 @@ def analyze_dub(
             seg.get("text", "") for seg in dubbed_segments
         ).strip()
 
-        analysis["emotion"] = _analyze_emotion(str(dubbed_video))
         analysis["pronunciation"] = _assess_pronunciation(
             str(dubbed_video), dubbed_text
         )
@@ -538,30 +537,8 @@ def _screenapp_analyze(video_path: str, label: str) -> Optional[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# AI-powered analyses (Hume, Azure Speech, Azure OpenAI)
+# AI-powered analyses (Azure Speech, Azure OpenAI)
 # ---------------------------------------------------------------------------
-
-
-def _analyze_emotion(dubbed_video_path: str) -> Dict[str, Any]:
-    """Analyze emotional expression/prosody using Hume AI."""
-    try:
-        from app.services.hume_service import is_enabled, analyze_prosody, compute_emotion_scores
-
-        if not is_enabled():
-            return {"status": "skipped", "reason": "Hume AI not configured"}
-
-        logger.info("[ANALYSIS] Running Hume emotion analysis")
-        results = analyze_prosody(dubbed_video_path)
-        if results is None:
-            return {"status": "error", "reason": "Hume returned no results"}
-
-        scores = compute_emotion_scores(results)
-        return {"status": "ok", **scores}
-    except ImportError:
-        return {"status": "skipped", "reason": "hume_service not available"}
-    except Exception as e:
-        logger.warning(f"[ANALYSIS] Emotion analysis failed: {e}")
-        return {"status": "error", "reason": str(e)}
 
 
 def _assess_pronunciation(
@@ -698,18 +675,13 @@ def _compute_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
     else:
         scores["silences"] = 50
 
-    # --- Hume emotion scores (optional) ---
-    emotion = analysis.get("emotion", {})
-    if emotion.get("status") == "ok":
-        scores["emotion_variance"] = emotion.get("emotion_variance", 0)
-        scores["emotion_intensity"] = emotion.get("emotion_intensity", 0)
-    else:
-        # Redistribute Hume weight to technical metrics
-        hume_weight = weights.pop("emotion_variance", 0) + weights.pop("emotion_intensity", 0)
-        weights["timing"] += hume_weight // 4
-        weights["speed"] += hume_weight // 4
-        weights["silences"] += hume_weight // 4
-        weights["loudness"] += hume_weight - 3 * (hume_weight // 4)
+    # emotion_variance and emotion_intensity (Hume) permanently removed —
+    # API discontinued. Redistribute their weight to technical metrics.
+    hume_weight = weights.pop("emotion_variance", 0) + weights.pop("emotion_intensity", 0)
+    weights["timing"] += hume_weight // 4
+    weights["speed"] += hume_weight // 4
+    weights["silences"] += hume_weight // 4
+    weights["loudness"] += hume_weight - 3 * (hume_weight // 4)
 
     # --- Azure Speech pronunciation scores (optional) ---
     pronunciation = analysis.get("pronunciation", {})
@@ -784,7 +756,6 @@ def _compute_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
 
     # Track which AI services contributed
     services_available = {
-        "hume": emotion.get("status") == "ok",
         "azure_speech": pronunciation.get("status") == "ok",
         "azure_openai": translation.get("status") == "ok",
         "screenapp": (analysis.get("screenapp_dubbed") or {}).get("status") == "ok",

@@ -3957,70 +3957,8 @@ async def get_analysis(job_id: str, language: str):
 
 
 # ---------------------------------------------------------------------------
-# Hume per-segment emotion analysis — maps to 50-chord model
+# Per-segment emotion analysis — emotion2vec + Velma fallback, 50-chord model
 # ---------------------------------------------------------------------------
-
-# Hume returns ~48 raw emotion names. Map them to the 50 emotions in our chord model.
-_HUME_TO_CHORD: Dict[str, str] = {
-    # Direct matches
-    "Anger": "Anger", "Fear": "Fear", "Joy": "Joy", "Sadness": "Sadness",
-    "Surprise": "Surprise", "Disgust": "Disgust", "Contempt": "Contempt",
-    "Awe": "Awe", "Confusion": "Confusion", "Pride": "Pride",
-    "Shame": "Shame", "Guilt": "Guilt", "Love": "Love", "Hope": "Hope",
-    "Grief": "Grief", "Curiosity": "Curiosity", "Anxiety": "Anxiety",
-    "Nostalgia": "Nostalgia", "Relief": "Relief", "Serenity": "Serenity",
-    "Determination": "Determination", "Boredom": "Boredom",
-    # Hume name -> our chord emotion
-    "Admiration": "Gratitude",
-    "Adoration": "Love",
-    "Aesthetic Appreciation": "Awe",
-    "Amusement": "Joy",
-    "Annoyance": "Frustration",
-    "Anticipation": "Anticipation",
-    "Awkwardness": "Shame",
-    "Calmness": "Serenity",
-    "Concentration": "Determination",
-    "Contemplation": "Melancholy",
-    "Contentment": "Contentment",
-    "Craving": "Anticipation",
-    "Desire": "Love",
-    "Disappointment": "Sadness",
-    "Disapproval": "Contempt",
-    "Disgust": "Disgust",
-    "Distress": "Anxiety",
-    "Doubt": "Confusion",
-    "Ecstasy": "Euphoria",
-    "Embarrassment": "Shame",
-    "Empathic Pain": "Empathy",
-    "Enthusiasm": "Zeal",
-    "Entrancement": "Wonder",
-    "Envy": "Jealousy",
-    "Excitement": "Excitement",
-    "Exhaustion": "Indifference",
-    "Fear": "Fear",
-    "Frustration": "Frustration",
-    "Horror": "Fear",
-    "Interest": "Curiosity",
-    "Ire": "Anger",
-    "Irritability": "Irritation",
-    "Jealousy": "Jealousy",
-    "Loneliness": "Loneliness",
-    "Melancholy": "Melancholy",
-    "Nervousness": "Anxiety",
-    "Pain": "Grief",
-    "Pleasure": "Delight",
-    "Realization": "Surprise",
-    "Regret": "Regret",
-    "Relief": "Relief",
-    "Romance": "Love",
-    "Satisfaction": "Contentment",
-    "Sympathy": "Compassion",
-    "Tenderness": "Tenderness",
-    "Tiredness": "Indifference",
-    "Triumph": "Pride",
-    "Vulnerability": "Vulnerability",
-    "Wonder": "Wonder",
-}
 
 # Natural next-emotion progression (mirrors frontend NEXT_EMOTION)
 _NEXT_CHORD: Dict[str, str] = {
@@ -4248,6 +4186,10 @@ async def _analyze_segment_with_emotion2vec(job, start_time: float, end_time: fl
             if os.path.exists(vocals_candidate) and os.path.getsize(vocals_candidate) > 1000:
                 source_path = vocals_candidate
                 logger.info(f"[EMOTION2VEC-CHORD] using cached separated vocals for {job_id}")
+            else:
+                logger.info(f"[EMOTION2VEC-CHORD] no vocals cache — using raw video for {job_id}")
+
+        logger.info(f"[EMOTION2VEC] analyzing file: {source_path} (seg {start_time:.2f}–{end_time:.2f}s)")
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = tmp.name
@@ -4361,8 +4303,8 @@ async def _analyze_segment_with_emotion2vec(job, start_time: float, end_time: fl
         return None
 
 
-@router.post("/hume/analyze-segment/{job_id}")
-async def hume_analyze_segment(job_id: str, body: SegmentAnalyzeRequest):
+@router.post("/emotion/analyze-segment/{job_id}")
+async def emotion_analyze_segment(job_id: str, body: SegmentAnalyzeRequest):
     """
     Build a 50-point emotion curve from Velma emotion labels on overlapping
     transcript segments, mapped to DubMaster's 50-chord model.

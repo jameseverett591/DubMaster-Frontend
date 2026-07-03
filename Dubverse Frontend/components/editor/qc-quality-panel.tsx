@@ -72,9 +72,9 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
       <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-4">
         <div className="flex items-center justify-between mb-3">
           <div className="text-sm font-semibold text-white">Quality Score</div>
-          {report.emotion_provider === 'hume' && (
-            <span className="text-[10px] px-2 py-0.5 rounded-full border border-purple-500/40 text-purple-300 bg-purple-500/10">
-              ♥ Hume
+          {report.emotion_provider === 'emotion2vec' && (
+            <span className="text-[10px] px-2 py-0.5 rounded-full border border-blue-500/40 text-blue-300 bg-blue-500/10">
+              ⟁ emotion2vec
             </span>
           )}
         </div>

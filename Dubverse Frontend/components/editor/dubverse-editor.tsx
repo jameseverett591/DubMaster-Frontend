@@ -5001,7 +5001,7 @@ export function DubVerseEditor({
                     setSavedCurves(prev => [saved as typeof prev[0], ...prev])
                   }
                 }}
-                onAnalyzeWithHume={async () => {
+                onAnalyzeEmotion={async () => {
                   const startT = refSeg ? refSeg.start : displaySegments[floatingEmotionSegment!].start_time
                   const endT = refSeg ? refSeg.end : displaySegments[floatingEmotionSegment!].end_time
                   return apiClient.analyzeSegmentEmotion(activeJobId, startT, endT)

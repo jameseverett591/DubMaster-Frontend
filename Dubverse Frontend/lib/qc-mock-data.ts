@@ -81,7 +81,7 @@ export function buildMockQCReport(jobId: string): QCReport {
       lip_sync: 26,
       emotion_preservation: 72,
     },
-    emotion_provider: 'hume',
+    emotion_provider: 'emotion2vec',
     timing: { status: 'ok' },
     speed: { status: 'ok', mean: 1.0, std_dev: 0 },
     silence_gaps: {

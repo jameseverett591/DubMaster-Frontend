@@ -285,7 +285,7 @@ interface FloatingEmotionChartProps {
   active?: boolean
   /** Shared auto-fire guard, lifted to the parent so Clear Segment / text edits can reset it */
   autoFiredRef?: React.MutableRefObject<Set<number>>
-  onAnalyzeWithHume?: () => Promise<{
+  onAnalyzeEmotion?: () => Promise<{
     curve: number[]
     markers: Array<{ emotion: string; intensity: number; color: string; xFrac: number }>
     primary_emotion: string
@@ -300,7 +300,7 @@ export function FloatingEmotionChart({
   onUpdateCurve,
   onSaveChord,
   onUpdateProgression,
-  onAnalyzeWithHume,
+  onAnalyzeEmotion,
   embedded = false,
   active = false,
   autoFiredRef: externalAutoFiredRef,
@@ -356,7 +356,7 @@ export function FloatingEmotionChart({
     dragOffsetRef.current = { x: e.clientX - posRef.current.x, y: e.clientY - posRef.current.y }
   }, [])
 
-  const [humeLoading, setHumeLoading] = useState(false)
+  const [emotionLoading, setEmotionLoading] = useState(false)
   const [markers, setMarkers] = useState<Marker[]>([])
   const [autoMarkers, setAutoMarkers] = useState<AutoMarker[]>([])
   const [hud, setHud] = useState<HudState | null>(null)
@@ -593,11 +593,11 @@ export function FloatingEmotionChart({
 
   // Shared Hume analysis flow — used by both the header button (force refresh)
   // and the on-select auto-fire below.
-  const runHumeAnalysis = useCallback(async () => {
-    if (!onAnalyzeWithHume || humeLoading) return
-    setHumeLoading(true)
+  const runEmotionAnalysis = useCallback(async () => {
+    if (!onAnalyzeEmotion || emotionLoading) return
+    setEmotionLoading(true)
     try {
-      const result = await onAnalyzeWithHume()
+      const result = await onAnalyzeEmotion()
       const newMarkers: AutoMarker[] = result.markers.map(m => ({
         chordIndex: Math.round(m.xFrac * NUM_CHORDS),
         chord: CHORDS.find(c => c.emotion === m.emotion) ?? CHORDS[0],
@@ -615,9 +615,9 @@ export function FloatingEmotionChart({
     } catch (err) {
       console.error('[Hume]', err)
     } finally {
-      setHumeLoading(false)
+      setEmotionLoading(false)
     }
-  }, [onAnalyzeWithHume, humeLoading, segmentIndex, trackDuration, onUpdateCurve, onUpdateProgression, onCommitEmotion])
+  }, [onAnalyzeEmotion, emotionLoading, segmentIndex, trackDuration, onUpdateCurve, onUpdateProgression, onCommitEmotion])
 
   // On-select auto-fire: when the panel is active on a segment that has no curve
   // yet, analyze it after a 400ms dwell. The debounce prevents spraying Hume
@@ -626,15 +626,15 @@ export function FloatingEmotionChart({
   const localAutoFiredRef = useRef<Set<number>>(new Set())
   const autoFiredRef = externalAutoFiredRef ?? localAutoFiredRef
   useEffect(() => {
-    if (!active || !onAnalyzeWithHume) return
+    if (!active || !onAnalyzeEmotion) return
     if (segment.velma_emotion_curve?.length) return
     if (autoFiredRef.current.has(segmentIndex)) return
     const t = setTimeout(() => {
       autoFiredRef.current.add(segmentIndex)
-      runHumeAnalysis()
+      runEmotionAnalysis()
     }, 400)
     return () => clearTimeout(t)
-  }, [active, segmentIndex, onAnalyzeWithHume, segment.velma_emotion_curve, runHumeAnalysis])
+  }, [active, segmentIndex, onAnalyzeEmotion, segment.velma_emotion_curve, runEmotionAnalysis])
 
   if (!ready && !embedded) return null
 
@@ -701,21 +701,21 @@ export function FloatingEmotionChart({
             onUpdateCurve(segmentIndex, flat)
           }}
         >↺</button>
-        {onAnalyzeWithHume && (
+        {onAnalyzeEmotion && (
           <button
             type="button"
-            disabled={humeLoading}
+            disabled={emotionLoading}
             className="shrink-0 ml-2 px-2 py-0.5 rounded text-[8px] font-bold tracking-wide transition-all"
             style={{
-              color: humeLoading ? 'rgba(167,139,250,0.5)' : '#a78bfa',
-              background: humeLoading ? 'rgba(167,139,250,0.06)' : 'rgba(167,139,250,0.12)',
+              color: emotionLoading ? 'rgba(167,139,250,0.5)' : '#a78bfa',
+              background: emotionLoading ? 'rgba(167,139,250,0.06)' : 'rgba(167,139,250,0.12)',
               border: '1px solid rgba(167,139,250,0.35)',
-              cursor: humeLoading ? 'wait' : 'pointer',
+              cursor: emotionLoading ? 'wait' : 'pointer',
             }}
             onMouseDown={(e) => e.stopPropagation()}
-            onClick={runHumeAnalysis}
+            onClick={runEmotionAnalysis}
           >
-            {humeLoading ? '⏳ Analysing…' : '🎙 Analyze Emotion'}
+            {emotionLoading ? '⏳ Analysing…' : '🎙 Analyze Emotion'}
           </button>
         )}
         <button
@@ -995,7 +995,7 @@ export function FloatingEmotionChart({
           )}
         </svg>
 
-        {humeLoading && (
+        {emotionLoading && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ background: 'rgba(0,5,10,0.55)' }}>
             <span className="text-[11px] font-semibold tracking-wide text-violet-300 animate-pulse">🎙 Analysing emotion…</span>
           </div>
