@@ -149,7 +149,7 @@ export interface QCReport {
     emotion_preservation: number
   }
   // Provider for emotion analysis
-  emotion_provider?: 'hume' | 'emotion2vec' | string
+  emotion_provider?: 'emotion2vec' | string
   // Section data
   timing: { status: 'ok' | 'warn' | 'fail'; details?: string }
   speed: { status: 'ok' | 'warn' | 'fail'; mean: number; std_dev: number }

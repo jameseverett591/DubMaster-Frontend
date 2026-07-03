@@ -836,16 +836,16 @@ class DubVerseAPIClient {
     chain: string[]
     curve: number[]
     markers: Array<{ emotion: string; intensity: number; color: string; xFrac: number }>
-    hume_top: Array<[string, number]>
+    top_emotions: Array<[string, number]>
   }> {
-    const response = await fetch(`${this.baseURL}/api/hume/analyze-segment/${jobId}`, {
+    const response = await fetch(`${this.baseURL}/api/emotion/analyze-segment/${jobId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ start_time: startTime, end_time: endTime }),
     })
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }))
-      throw new Error(error.detail || `Hume analysis failed: ${response.statusText}`)
+      throw new Error(error.detail || `Emotion analysis failed: ${response.statusText}`)
     }
     return response.json()
   }
