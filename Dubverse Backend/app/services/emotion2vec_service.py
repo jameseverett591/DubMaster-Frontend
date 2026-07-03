@@ -25,6 +25,16 @@ _MODEL = None
 _MODEL_AVAILABLE = None
 
 
+def _norm_label(lbl: str) -> str:
+    """Normalize emotion2vec label strings.
+    Handles: '<neutral>' → 'neutral', '其他/other' → 'other', 'NEUTRAL' → 'neutral'
+    """
+    s = str(lbl).strip("<>")
+    if "/" in s:
+        s = s.split("/")[-1]  # bilingual "中立/neutral" → "neutral"
+    return s.strip().lower()
+
+
 def is_enabled() -> bool:
     """Check if emotion analysis is available (needs numpy + torchaudio)."""
     try:
@@ -120,7 +130,7 @@ def analyze_single_segment(audio_path: str) -> Optional[Dict[str, Any]]:
                     labels = result[0].get("labels", _E2V_LABELS)
                     raw_scores = result[0]["scores"]
                     emotion_scores = {
-                        str(lbl): float(sc)
+                        _norm_label(lbl): float(sc)
                         for lbl, sc in zip(labels, raw_scores)
                     }
                     total = sum(emotion_scores.values()) or 1.0
@@ -219,7 +229,8 @@ def analyze_sliding_window(
                         labels = result[0].get("labels", _E2V_LABELS)
                         raw = result[0]["scores"]
                         total = sum(raw) or 1.0
-                        scores = {str(lbl): float(sc) / total for lbl, sc in zip(labels, raw)}
+                        scores = {_norm_label(lbl): float(sc) / total for lbl, sc in zip(labels, raw)}
+                        logger.info(f"[EMOTION2VEC] window t={t_center:.2f} scores: {sorted(scores.items(), key=lambda x: x[1], reverse=True)[:4]}")
                 except Exception as exc:
                     logger.debug(f"[EMOTION2VEC] Window inference failed at t={t_center:.2f}: {exc}")
 

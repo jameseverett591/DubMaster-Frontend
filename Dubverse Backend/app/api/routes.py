@@ -4218,11 +4218,16 @@ async def _analyze_segment_with_emotion2vec(job, start_time: float, end_time: fl
             return None
 
         # Resample window-level dominant emotions into a 50-point curve
+        _SKIP_LABELS = {"neutral", "other", "unknown"}
         curve = [0.05] * 50
         chord_at_point: List[str] = []
         for w in windows:
             scores = w["scores"]
-            top_label = max(scores, key=lambda k: scores[k])
+            top_label = max(
+                (k for k in scores if k not in _SKIP_LABELS),
+                key=lambda k: scores[k],
+                default=max(scores, key=lambda k: scores[k]),
+            )
             top_score = scores[top_label]
             chord_emotion = _E2V_TO_CHORD_ROUTE.get(top_label, "Serenity")
             chord_at_point.append(chord_emotion)
@@ -4275,9 +4280,13 @@ async def _analyze_segment_with_emotion2vec(job, start_time: float, end_time: fl
         for i in range(NUM_MARKER_POINTS):
             xfrac = i / (NUM_MARKER_POINTS - 1) if NUM_MARKER_POINTS > 1 else 0.5
             nearest_w = min(windows, key=lambda w: abs(w["t"] - xfrac))
-            chord_emotion = _E2V_TO_CHORD_ROUTE.get(
-                max(nearest_w["scores"], key=lambda k: nearest_w["scores"][k]), "Serenity"
+            _ns = nearest_w["scores"]
+            _marker_label = max(
+                (k for k in _ns if k not in _SKIP_LABELS),
+                key=lambda k: _ns[k],
+                default=max(_ns, key=lambda k: _ns[k]),
             )
+            chord_emotion = _E2V_TO_CHORD_ROUTE.get(_marker_label, "Serenity")
             idx = min(49, int(xfrac * 49))
             markers.append({
                 "emotion": chord_emotion,
