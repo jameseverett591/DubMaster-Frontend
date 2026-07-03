@@ -76,6 +76,7 @@ class Job(BaseModel):
     video_size: int
     expected_speakers: int = 2
     source_language: Optional[str] = None  # ISO code (e.g. "yue", "en") or None for auto-detect
+    target_language: Optional[str] = None  # ISO code (e.g. "en", "es") set at upload time
     
     chunks: List[VideoChunk] = []
     total_chunks: int = 0
