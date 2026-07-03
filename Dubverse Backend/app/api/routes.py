@@ -3975,9 +3975,11 @@ _NEXT_CHORD: Dict[str, str] = {
     "Awe": "Wonder", "Wonder": "Curiosity", "Curiosity": "Surprise",
     "Pride": "Confidence", "Confidence": "Determination", "Determination": "Courage",
     "Courage": "Pride", "Humility": "Acceptance", "Relief": "Contentment",
-    "Sadness": "Grief", "Grief": "Loneliness", "Loneliness": "Melancholy",
-    "Melancholy": "Nostalgia", "Nostalgia": "Regret", "Regret": "Vulnerability",
-    "Vulnerability": "Humility", "Shame": "Guilt", "Guilt": "Regret",
+    "Sadness": "Grief", "Grief": "Loneliness", "Loneliness": "Longing",
+    "Longing": "Yearning", "Yearning": "Pleading", "Pleading": "Desperation",
+    "Desperation": "Despair", "Melancholy": "Longing", "Nostalgia": "Longing",
+    "Regret": "Longing", "Vulnerability": "Pleading",
+    "Shame": "Guilt", "Guilt": "Regret",
     "Despair": "Sadness", "Indifference": "Boredom",
 }
 
@@ -3995,6 +3997,7 @@ _EMOTION_INTENSITY: Dict[str, float] = {
     "Loneliness": 0.30, "Melancholy": 0.35, "Nostalgia": 0.42, "Regret": 0.38,
     "Vulnerability": 0.40, "Shame": 0.42, "Guilt": 0.38, "Despair": 0.20,
     "Indifference": 0.25, "Resentment": 0.72,
+    "Longing": 0.45, "Yearning": 0.60, "Pleading": 0.75, "Desperation": 0.90,
 }
 
 _EMOTION_COLOR: Dict[str, str] = {
@@ -4014,6 +4017,8 @@ _EMOTION_COLOR: Dict[str, str] = {
     "Guilt": "#a78bfa", "Loneliness": "#a78bfa", "Nostalgia": "#a78bfa",
     "Regret": "#a78bfa", "Melancholy": "#a78bfa", "Vulnerability": "#a78bfa",
     "Despair": "#a78bfa", "Grief": "#a78bfa", "Indifference": "#a78bfa",
+    "Longing": "#6B48FF", "Yearning": "#8B2FC9",
+    "Pleading": "#F59E0B", "Desperation": "#DC2626",
 }
 
 
@@ -4351,6 +4356,9 @@ async def emotion_analyze_segment(job_id: str, body: SegmentAnalyzeRequest):
         "grief": "Grief", "grieving": "Grief",
         "melancholy": "Melancholy",
         "delight": "Delight", "delighted": "Delight",
+        "longing": "Longing", "yearning": "Yearning",
+        "pleading": "Pleading", "begging": "Pleading", "imploring": "Pleading",
+        "desperate": "Desperation", "desperation": "Desperation", "frantic": "Desperation",
     }
 
     job = await _get_or_rehydrate_job(job_id)
