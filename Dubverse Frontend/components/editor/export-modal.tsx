@@ -186,12 +186,11 @@ export function ExportModal({ jobId, title, onClose }: ExportModalProps) {
               </div>
             </div>
           </div>
-          {stage === 'config' && (
-            <button type="button" onClick={onClose} aria-label="Close export dialog"
-              className="w-6 h-6 rounded-md flex items-center justify-center text-neutral-500 hover:text-white hover:bg-white/8 transition-colors">
-              <X className="h-3.5 w-3.5" />
-            </button>
-          )}
+          <button type="button" onClick={stage === 'exporting' ? handleCancel : onClose}
+            aria-label="Close export dialog"
+            className="w-6 h-6 rounded-md flex items-center justify-center text-neutral-500 hover:text-white hover:bg-white/8 transition-colors">
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
 
         {/* ── CONFIG PANEL ── */}
