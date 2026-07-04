@@ -4689,8 +4689,9 @@ FORMAT_MAP = {
 
 @router.post("/dub/export/{job_id}")
 async def export_video(job_id: str, body: ExportRequest, request: Request):
-    """Re-encode the dubbed video with selected resolution, aspect and format."""
+    """Export the dubbed video — stream-copies when no re-encode is needed, re-encodes otherwise."""
     import subprocess as _sp
+    import json as _json
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.removeprefix("Bearer ").strip()
     verify_jwt(token)
@@ -4699,7 +4700,6 @@ async def export_video(job_id: str, body: ExportRequest, request: Request):
     if not os.path.isdir(output_dir):
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
-    # Find master dubbed video
     candidates = [
         f for f in os.listdir(output_dir)
         if f.startswith("dubbed_") and f.endswith(".mp4")
@@ -4720,23 +4720,63 @@ async def export_video(job_id: str, body: ExportRequest, request: Request):
         raise HTTPException(status_code=400, detail=f"Unknown format: {body.format}")
     fmap = FORMAT_MAP[fmt]
 
-    # Build vf filter
-    if body.aspect == "fill":
-        vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
-    else:
-        vf = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"
-
     out_filename = f"export_{res}_{body.aspect}.{fmap['ext']}"
     out_path = os.path.join(output_dir, out_filename)
 
-    cmd = [
-        "ffmpeg", "-y", "-i", src,
-        "-vf", vf,
-        "-vcodec", fmap["vcodec"],
-        "-acodec", fmap["acodec"],
-        "-preset", "fast",
-        "-crf", "18",
-    ] + fmap["extra"] + [out_path]
+    # ── Probe source dimensions and codec ───────────────────────────────────
+    src_w, src_h, src_vcodec = 0, 0, ""
+    try:
+        probe = await asyncio.to_thread(
+            _sp.run,
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height,codec_name",
+             "-of", "json", src],
+            capture_output=True, text=True, timeout=30,
+        )
+        streams = _json.loads(probe.stdout).get("streams", [{}])
+        if streams:
+            src_w      = streams[0].get("width", 0)
+            src_h      = streams[0].get("height", 0)
+            src_vcodec = streams[0].get("codec_name", "")
+    except Exception as _pe:
+        logger.warning(f"[EXPORT] ffprobe failed ({_pe}), falling back to re-encode")
+
+    # ── Decide: stream copy vs re-encode ────────────────────────────────────
+    # Stream copy is safe when:
+    #   1. Requested dimensions match the source (no scaling needed)
+    #   2. Output container accepts H264/AAC streams (mp4/mov/mkv — not avi/webm)
+    #   3. Source video is H264 (the standard output from our pipeline)
+    _COPY_SAFE_FORMATS = {"mp4", "mov", "mkv"}
+    dimensions_match = (src_w == w and src_h == h)
+    format_compatible = fmt in _COPY_SAFE_FORMATS
+    codec_compatible  = src_vcodec in ("h264", "hevc", "")
+
+    use_stream_copy = dimensions_match and format_compatible and codec_compatible
+
+    if use_stream_copy:
+        cmd = [
+            "ffmpeg", "-y", "-i", src,
+            "-vcodec", "copy",
+            "-acodec", "copy",
+        ] + fmap["extra"] + [out_path]
+        logger.info(f"[EXPORT] job={job_id} stream-copy → {out_filename} "
+                    f"(src={src_w}×{src_h} {src_vcodec})")
+    else:
+        # Re-encode with ultrafast preset and CRF 23 (broadcast quality, fast)
+        if body.aspect == "fill":
+            vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+        else:
+            vf = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"
+        cmd = [
+            "ffmpeg", "-y", "-i", src,
+            "-vf", vf,
+            "-vcodec", fmap["vcodec"],
+            "-acodec", fmap["acodec"],
+            "-preset", "ultrafast",
+            "-crf", "23",
+        ] + fmap["extra"] + [out_path]
+        logger.info(f"[EXPORT] job={job_id} re-encode {res} {body.aspect} → {out_filename} "
+                    f"(src={src_w}×{src_h} {src_vcodec}, copy={use_stream_copy})")
 
     try:
         proc = await asyncio.to_thread(
@@ -4750,7 +4790,6 @@ async def export_video(job_id: str, body: ExportRequest, request: Request):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    logger.info(f"[EXPORT] job={job_id} res={res} aspect={body.aspect} fmt={fmt}")
     return {
         "job_id": job_id,
         "download_url": f"/api/dub/export/download/{job_id}/{out_filename}",
