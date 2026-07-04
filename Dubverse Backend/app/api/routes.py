@@ -4359,6 +4359,14 @@ async def emotion_analyze_segment(job_id: str, body: SegmentAnalyzeRequest):
         "longing": "Longing", "yearning": "Yearning",
         "pleading": "Pleading", "begging": "Pleading", "imploring": "Pleading",
         "desperate": "Desperation", "desperation": "Desperation", "frantic": "Desperation",
+        # Velma-specific title-case labels (lowercased before lookup)
+        "confident": "Confidence", "amused": "Delight",
+        "afraid": "Fear", "contemptuous": "Contempt",
+        "nervous": "Anxiety", "sarcastic": "Contempt",
+        "excited": "Excitement", "indifferent": "Indifference",
+        "sympathetic": "Compassion", "empathetic": "Empathy",
+        "disappointed": "Sadness", "regretful": "Regret",
+        "disgusted": "Disgust", "condescending": "Contempt",
     }
 
     job = await _get_or_rehydrate_job(job_id)

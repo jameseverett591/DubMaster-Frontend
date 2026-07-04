@@ -1,23 +1,26 @@
 """
 Velma (Modulate) conversation intelligence service.
-Uses the velma-2-batch endpoint which returns diarized transcription + speaker roles,
-emotion, accent, deepfake scores, scene summary, topics, and per-speaker sentiment.
+
+Two parallel calls per job:
+  1. velma-2-batch (Triage) — diarized transcript + scene context (roles, summary, topics)
+  2. velma-2-stt-batch (STT) — same audio with emotion_signal=true for per-utterance emotions
+
+Triage provides the authoritative speaker assignments and scene metadata.
+STT provides the emotion labels (Triage ignores emotion_signal in its config).
+Emotions are merged onto Triage segments by closest start_ms match (±300ms).
 """
 import json
 import os
 import logging
-import uuid
+import concurrent.futures
 import requests
 
 logger = logging.getLogger(__name__)
 
 VELMA_BATCH_URL = "https://platform.modulate.ai/api/velma-2-batch"
+VELMA_STT_URL   = "https://platform.modulate.ai/api/velma-2-stt-batch"
 
 # ── Film dubbing BatchConfig ─────────────────────────────────────────────────
-# Conversation type and participant roles for scripted film/TV dialogue.
-# Custom behaviors are intentionally omitted — they require iterative tuning
-# and will be added in a dedicated session.
-
 _FILM_CONVERSATION_TYPE_UUID = "09ad66af-f9c2-4462-a2f9-350c41cfb908"
 _ROLE_AUTHORITY_UUID         = "3375959c-e221-47ab-bc9c-b6c22eecdcde"
 _ROLE_CHALLENGER_UUID        = "5663029e-0075-4208-a666-5dcf7556fb2d"
@@ -89,7 +92,6 @@ FILM_DUBBING_CONFIG = {
     "behaviors": [],
     "stt": {
         "speaker_diarization": True,
-        "emotion_signal": True,
         "accent_signal": True,
         "deepfake_signal": True,
     },
@@ -99,27 +101,86 @@ FILM_DUBBING_CONFIG = {
 }
 
 
+def _call_triage(audio_path: str, api_key: str, job_id: str) -> dict:
+    """Call velma-2-batch (Triage) for transcript + scene context."""
+    config_json = json.dumps(FILM_DUBBING_CONFIG)
+    with open(audio_path, "rb") as f:
+        resp = requests.post(
+            VELMA_BATCH_URL,
+            headers={"X-API-Key": api_key},
+            files={"upload_file": f},
+            data={"config": config_json},
+            timeout=600,
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Triage HTTP {resp.status_code}: {resp.text[:200]}")
+    return resp.json()
+
+
+def _call_stt_emotions(audio_path: str, api_key: str, job_id: str) -> dict:
+    """Call velma-2-stt-batch with emotion_signal=true for per-utterance emotion labels."""
+    try:
+        with open(audio_path, "rb") as f:
+            resp = requests.post(
+                VELMA_STT_URL,
+                headers={"X-API-Key": api_key},
+                files={"upload_file": ("audio.wav", f, "audio/wav")},
+                data={
+                    "speaker_diarization": "true",
+                    "emotion_signal": "true",
+                    "accent_signal": "true",
+                },
+                timeout=300,
+            )
+        if resp.status_code == 200:
+            return resp.json()
+        logger.warning(f"[VELMA-STT] Job {job_id}: HTTP {resp.status_code} — emotions unavailable")
+        return {}
+    except Exception as exc:
+        logger.warning(f"[VELMA-STT] Job {job_id}: emotion call failed ({exc}) — continuing without emotions")
+        return {}
+
+
+def _build_emotion_index(stt_data: dict) -> dict:
+    """Build {start_ms: emotion_label} from the STT response for fast merging."""
+    utts = stt_data.get("utterances", stt_data.get("clips", []))
+    index = {}
+    for utt in utts:
+        emotion = utt.get("emotion")
+        if emotion:
+            index[int(utt.get("start_ms", 0))] = emotion
+    return index
+
+
+def _merge_emotion(seg_start_ms: int, emotion_index: dict, tolerance_ms: int = 300) -> str | None:
+    """Return the emotion label from the STT index closest to seg_start_ms, or None."""
+    if not emotion_index:
+        return None
+    closest = min(emotion_index.keys(), key=lambda ms: abs(ms - seg_start_ms))
+    if abs(closest - seg_start_ms) <= tolerance_ms:
+        return emotion_index[closest]
+    return None
+
+
 def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
     """
-    Send audio to Velma batch conversation intelligence and return diarized
-    segments plus scene context in DubMaster format.
+    Send audio to Velma and return diarized segments with emotions + scene context.
 
-    Args:
-        audio_path: Path to audio file (WAV, MP3, etc.)
-        job_id: Job ID for logging
-        num_speakers: Expected number of speakers (0 = auto-detect)
+    Runs two API calls in parallel:
+    - Triage (velma-2-batch): authoritative speaker diarization + scene context
+    - STT (velma-2-stt-batch): emotion labels per utterance
 
     Returns on success:
         {
             "status": "ok",
             "segments": [...],           # per-utterance with speaker/emotion/accent
-            "transcript": str,           # full transcript text
+            "transcript": str,
             "duration_ms": int,
             "unique_speakers": int,
-            "summary": str | None,       # scene summary from Velma
-            "topics": [str, ...],        # extracted topics
-            "topic_sentiments": [...],   # per-speaker sentiment per topic
-            "role_picks": [...],         # per-speaker role assignments
+            "summary": str | None,
+            "topics": [str, ...],
+            "topic_sentiments": [...],
+            "role_picks": [...],
         }
     Returns on failure:
         {"status": "skipped", "reason": str, "error_message": str}
@@ -134,37 +195,21 @@ def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
         return {"status": "skipped", "reason": "file_not_found", "error_message": f"Audio file not found: {audio_path}"}
 
     try:
-        logger.info(f"[VELMA] Job {job_id}: sending {audio_path} to Velma batch (full config)")
+        logger.info(f"[VELMA] Job {job_id}: running Triage + STT-emotion in parallel")
 
-        config_json = json.dumps(FILM_DUBBING_CONFIG)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            triage_future = pool.submit(_call_triage, audio_path, api_key, job_id)
+            stt_future    = pool.submit(_call_stt_emotions, audio_path, api_key, job_id)
+            triage_data = triage_future.result()  # raises on HTTP error
+            stt_data    = stt_future.result()     # never raises — returns {} on failure
 
-        with open(audio_path, "rb") as f:
-            response = requests.post(
-                VELMA_BATCH_URL,
-                headers={"X-API-Key": api_key},
-                files={"upload_file": f},
-                data={"config": config_json},
-                timeout=600,
-            )
+        emotion_index = _build_emotion_index(stt_data)
+        logger.info(f"[VELMA] Job {job_id}: STT emotion index built — {len(emotion_index)} labeled utterances")
 
-        if response.status_code != 200:
-            logger.error(f"[VELMA] Job {job_id}: API error {response.status_code}: {response.text[:500]}")
-            return {
-                "status": "skipped",
-                "reason": "velma_api_error",
-                "error_message": f"HTTP {response.status_code}: {response.text[:200]}"
-            }
-
-        data = response.json()
-
-        # ── Parse clips (the new response format for transcribed segments) ────
-        clips = data.get("clips", [])
+        # ── Parse Triage clips ───────────────────────────────────────────────
+        clips = triage_data.get("clips", triage_data.get("utterances", []))
         if not clips:
-            # Fallback: try old "utterances" key in case endpoint returns legacy format
-            clips = data.get("utterances", [])
-
-        if not clips:
-            logger.warning(f"[VELMA] Job {job_id}: no clips/utterances returned")
+            logger.warning(f"[VELMA] Job {job_id}: no clips/utterances returned from Triage")
             return {"status": "skipped", "reason": "no_utterances", "error_message": "Velma returned no clips"}
 
         segments = []
@@ -175,24 +220,26 @@ def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
                 full_text_parts.append(text)
 
             speaker_label = clip.get("speaker_label") or clip.get("speaker") or "Speaker_1"
-            # Normalize "Speaker_1" → "speaker-1" for DubMaster compatibility
             if isinstance(speaker_label, str) and speaker_label.startswith("Speaker_"):
                 try:
-                    speaker_num = int(speaker_label.split("_")[1])
-                    speaker_label = f"speaker-{speaker_num}"
+                    speaker_label = f"speaker-{int(speaker_label.split('_')[1])}"
                 except (IndexError, ValueError):
                     speaker_label = "speaker-1"
             elif isinstance(speaker_label, int):
                 speaker_label = f"speaker-{speaker_label}"
 
-            start_ms = clip.get("start_ms", 0)
+            start_ms   = clip.get("start_ms", 0)
             duration_ms = clip.get("duration_ms", 0)
+
+            # Triage emotion is null — get from STT emotion index
+            emotion = clip.get("emotion") or _merge_emotion(start_ms, emotion_index)
+
             segments.append({
                 "start": start_ms / 1000.0,
                 "end": (start_ms + duration_ms) / 1000.0,
                 "speaker": speaker_label,
                 "text": text,
-                "emotion": clip.get("emotion"),
+                "emotion": emotion,
                 "accent": clip.get("accent"),
                 "deepfake_score": clip.get("deepfake_score"),
                 "language": clip.get("language"),
@@ -200,18 +247,15 @@ def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
 
         unique_speakers = len(set(s["speaker"] for s in segments))
 
-        # ── Extract scene context outputs ────────────────────────────────────
-        summary = data.get("summary")
-        topics = data.get("topics", [])
-        topic_sentiments = data.get("topic_sentiments", [])
-        role_picks = data.get("participant_role_picks", [])
+        # ── Scene context from Triage ────────────────────────────────────────
+        summary          = triage_data.get("summary")
+        topics           = triage_data.get("topics", [])
+        topic_sentiments = triage_data.get("topic_sentiments", [])
+        role_picks       = triage_data.get("participant_role_picks", [])
 
         logger.info(
             f"[VELMA] Job {job_id}: {len(segments)} segments, {unique_speakers} speakers | "
-            f"summary={'yes' if summary else 'no'}, "
-            f"topics={len(topics)}, "
-            f"roles={len(role_picks)}, "
-            f"sentiments={len(topic_sentiments)}"
+            f"summary={'yes' if summary else 'no'}, topics={len(topics)}, roles={len(role_picks)}"
         )
         if summary:
             logger.info(f"[VELMA] Job {job_id} summary: {summary[:200]}")
@@ -224,7 +268,6 @@ def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
                     f"{rp.get('name')} (confidence={rp.get('confidence', '?')})"
                 )
 
-        # Log emotion distribution for diagnostics
         emotion_dist = {}
         for s in segments:
             e = s.get("emotion") or "null"
@@ -235,7 +278,7 @@ def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
             "status": "ok",
             "segments": segments,
             "transcript": " ".join(full_text_parts),
-            "duration_ms": data.get("duration_ms", 0),
+            "duration_ms": triage_data.get("duration_ms", 0),
             "unique_speakers": unique_speakers,
             "summary": summary,
             "topics": topics,
@@ -244,8 +287,8 @@ def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
         }
 
     except requests.Timeout:
-        logger.error(f"[VELMA] Job {job_id}: request timed out after 600s")
+        logger.error(f"[VELMA] Job {job_id}: Triage request timed out")
         return {"status": "skipped", "reason": "timeout", "error_message": "Velma API request timed out"}
-    except Exception as e:
-        logger.error(f"[VELMA] Job {job_id}: unexpected error: {e}", exc_info=True)
-        return {"status": "skipped", "reason": "velma_failed", "error_message": str(e)}
+    except Exception as exc:
+        logger.error(f"[VELMA] Job {job_id}: unexpected error: {exc}", exc_info=True)
+        return {"status": "skipped", "reason": "velma_failed", "error_message": str(exc)}
