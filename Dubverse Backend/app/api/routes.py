@@ -4673,6 +4673,9 @@ class ExportRequest(BaseModel):
     format: str = "mp4"         # "mp4" | "mov" | "avi" | "mkv"
 
 
+# In-memory export progress store: export_id → {status, pct, filename, download_url, job_id}
+_export_progress: Dict[str, Dict] = {}
+
 RESOLUTION_MAP = {
     "720p":  (1280, 720),
     "1080p": (1920, 1080),
@@ -4778,23 +4781,99 @@ async def export_video(job_id: str, body: ExportRequest, request: Request):
         logger.info(f"[EXPORT] job={job_id} re-encode {res} {body.aspect} → {out_filename} "
                     f"(src={src_w}×{src_h} {src_vcodec}, copy={use_stream_copy})")
 
+    # Get source duration for progress percentage calculation
+    src_duration = 0.0
     try:
-        proc = await asyncio.to_thread(
-            _sp.run, cmd, capture_output=True, text=True, timeout=600
+        dur_probe = await asyncio.to_thread(
+            _sp.run,
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "json", src],
+            capture_output=True, text=True, timeout=30,
         )
-        if proc.returncode != 0:
-            logger.error(f"[EXPORT] ffmpeg failed: {proc.stderr[-500:]}")
-            raise RuntimeError("FFmpeg encode failed")
-    except _sp.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Export timed out")
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        src_duration = float(_json.loads(dur_probe.stdout).get("format", {}).get("duration", 0))
+    except Exception:
+        pass
 
-    return {
-        "job_id": job_id,
-        "download_url": f"/api/dub/export/download/{job_id}/{out_filename}",
+    # Write ffmpeg progress to a temp file so we can track it without piping
+    import tempfile as _tmp
+    progress_file = _tmp.mktemp(suffix=".txt")
+    full_cmd = cmd[:-1] + ["-progress", progress_file, "-nostats"] + [cmd[-1]]
+
+    export_id = str(uuid.uuid4())
+    _export_progress[export_id] = {
+        "status": "preparing", "pct": 0,
         "filename": out_filename,
+        "download_url": f"/api/dub/export/download/{job_id}/{out_filename}",
+        "job_id": job_id,
     }
+
+    async def _run_export():
+        try:
+            _export_progress[export_id]["status"] = "exporting"
+            proc = await asyncio.to_thread(
+                _sp.run, full_cmd, capture_output=True, text=True, timeout=600
+            )
+            if proc.returncode != 0:
+                logger.error(f"[EXPORT] ffmpeg failed: {proc.stderr[-300:]}")
+                _export_progress[export_id]["status"] = "error"
+                _export_progress[export_id]["error"] = "FFmpeg encode failed"
+            else:
+                _export_progress[export_id]["status"] = "done"
+                _export_progress[export_id]["pct"] = 100
+        except Exception as exc:
+            _export_progress[export_id]["status"] = "error"
+            _export_progress[export_id]["error"] = str(exc)
+        finally:
+            try:
+                os.unlink(progress_file)
+            except OSError:
+                pass
+
+    async def _poll_progress():
+        while _export_progress.get(export_id, {}).get("status") in ("preparing", "exporting"):
+            await asyncio.sleep(0.5)
+            try:
+                if os.path.exists(progress_file) and src_duration > 0:
+                    with open(progress_file, "r") as pf:
+                        content = pf.read()
+                    for line in reversed(content.splitlines()):
+                        if line.startswith("out_time_ms="):
+                            ms = int(line.split("=")[1])
+                            pct = min(95, int(ms / (src_duration * 1000) * 100))
+                            _export_progress[export_id]["pct"] = pct
+                            break
+            except Exception:
+                pass
+
+    asyncio.create_task(_run_export())
+    asyncio.create_task(_poll_progress())
+
+    return {"export_id": export_id, "filename": out_filename}
+
+
+@router.get("/dub/export/progress/{export_id}")
+async def export_progress(export_id: str):
+    """Poll export progress. Returns status, pct, filename, download_url."""
+    info = _export_progress.get(export_id)
+    if info is None:
+        raise HTTPException(status_code=404, detail="Export not found")
+    return info
+
+
+@router.delete("/dub/export/progress/{export_id}")
+async def cancel_export(export_id: str):
+    """Cancel an in-progress export."""
+    info = _export_progress.get(export_id)
+    if info and info.get("status") in ("preparing", "exporting"):
+        _export_progress[export_id]["status"] = "cancelled"
+        # Remove output file if partial
+        try:
+            out = os.path.join(settings.DUBBED_DIR, info["job_id"], info["filename"])
+            if os.path.exists(out):
+                os.unlink(out)
+        except OSError:
+            pass
+    return {"status": "cancelled"}
 
 
 @router.get("/dub/export/download/{job_id}/{filename}")

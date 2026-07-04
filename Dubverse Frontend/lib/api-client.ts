@@ -928,7 +928,7 @@ class DubVerseAPIClient {
     resolution: '720p' | '1080p' | '4k',
     aspect: 'widescreen' | 'fill',
     format: 'mp4' | 'mov' | 'avi' | 'mkv',
-  ): Promise<{ download_url: string; filename: string }> {
+  ): Promise<{ export_id: string; filename: string }> {
     const res = await fetch(`${this.baseURL}/api/dub/export/${jobId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
@@ -943,6 +943,23 @@ class DubVerseAPIClient {
 
   getExportDownloadUrl(jobId: string, filename: string): string {
     return `${this.baseURL}/api/dub/export/download/${jobId}/${filename}`
+  }
+
+  async getExportProgress(exportId: string): Promise<{
+    status: 'preparing' | 'exporting' | 'done' | 'error' | 'cancelled'
+    pct: number
+    filename: string
+    download_url: string
+    job_id: string
+    error?: string
+  }> {
+    const res = await fetch(`${this.baseURL}/api/dub/export/progress/${exportId}`)
+    if (!res.ok) throw new Error('Export not found')
+    return res.json()
+  }
+
+  async cancelExport(exportId: string): Promise<void> {
+    await fetch(`${this.baseURL}/api/dub/export/progress/${exportId}`, { method: 'DELETE' })
   }
 
   async saveProject(jobId: string, meta: { title?: string; target_language?: string; thumbnail_url?: string }): Promise<void> {
