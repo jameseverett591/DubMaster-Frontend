@@ -896,20 +896,6 @@ class DubbingService:
                     if _refs:
                         tts_kwargs["speaker_references"] = _refs
 
-                    # Pre-compute Fish Audio speed parameter for duration targeting.
-                    seg_slot = float(segment.get("end", 0)) - float(segment.get("start", 0))
-                    if seg_slot > 0.3:
-                        word_count = len(text.split())
-                        est_tts_dur = max(0.5, word_count / 3.5)
-                        if est_tts_dur > seg_slot * 1.25:
-                            speed_hint = min(1.5, max(1.0, est_tts_dur / seg_slot))
-                            tts_kwargs["speed"] = round(speed_hint, 2)
-                            fish_speed_applied = True
-                            logger.info(
-                                f"[FISH-SPEED] seg {i}: est={est_tts_dur:.1f}s slot={seg_slot:.1f}s "
-                                f"-> speed={speed_hint:.2f}x"
-                            )
-
                     logger.info(
                         f"[FISH-TTS] seg {i} speaker={speaker} gender={speaker_gender} "
                         f"voice_id={voice_id!r} text={text[:60]!r}"
