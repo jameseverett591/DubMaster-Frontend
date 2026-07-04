@@ -2944,6 +2944,7 @@ export function DubVerseEditor({
       setActiveDubbedVideoUrl(absUrl)
       setRebuildStatus('complete')
       clearAllDirty()
+      setShowExportModal(true)
       setTimeout(() => setRebuildStatus('idle'), 5000)
       if (videoRef.current) {
         videoRef.current.volume = isMuted ? 0 : masterVolume / 100
