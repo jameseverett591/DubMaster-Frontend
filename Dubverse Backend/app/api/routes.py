@@ -4976,6 +4976,8 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     committed_end_time = body.get("committed_end_time")
     committed_audio_url = body.get("committed_audio_url")
     committed_adapted_text = body.get("committed_adapted_text")
+    flag_status = body.get("flag_status")
+    correction_type = body.get("correction_type")
     # Update Supabase
     update_data = {"sequence": index}
     if committed_start_time is not None:
@@ -4986,6 +4988,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         update_data["committed_audio_url"] = committed_audio_url
     if committed_adapted_text is not None:
         update_data["committed_adapted_text"] = committed_adapted_text
+    if flag_status is not None:
+        update_data["flag_status"] = flag_status
+    if "correction_type" in body:
+        update_data["correction_type"] = correction_type
     try:
         supabase_writer.table("segments").update(update_data).eq("job_id", job_id).eq("sequence", index).execute()
     except Exception as e:
@@ -5005,6 +5011,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
                 segs[index]["committed_audio_url"] = committed_audio_url
             if committed_adapted_text is not None:
                 segs[index]["committed_adapted_text"] = committed_adapted_text
+            if flag_status is not None:
+                segs[index]["flag_status"] = flag_status
+            if "correction_type" in body:
+                segs[index]["correction_type"] = correction_type
             data["segments"] = segs
             with open(segments_path, "w", encoding="utf-8") as f:
                 _json.dump(data, f, indent=2, ensure_ascii=False)
