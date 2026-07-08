@@ -64,6 +64,8 @@ async def upsert_segments(job_id: str, segments: list) -> None:
                 "emotion_tag": seg.get("emotion"),
                 "tts_audio_path": seg.get("tts_audio_path"),
                 "is_locked": seg.get("locked", False),
+                "confidence": seg.get("confidence"),
+                "confidence_tier": seg.get("confidence_tier"),
             })
         if rows:
             supabase_writer.table("segments").upsert(

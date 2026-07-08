@@ -3158,8 +3158,21 @@ async def dub_video(request: DubRequest, background_tasks: BackgroundTasks):
     # text being written to the fresh job's segments.json.
     transcript_source = request.transcript
 
-    transcript_dicts = [
-        {
+    # Build confidence lookup from stored transcript so ASR confidence scores
+    # survive the frontend round-trip (the frontend doesn't send them back).
+    # Keyed by timestamp to match Velma segments; split sub-segments that don't
+    # match fall back to None gracefully.
+    _conf_lookup: Dict[str, tuple] = {}
+    if job and job.transcript and job.transcript.segments:
+        for _js in job.transcript.segments:
+            _k = f"{_js.start:.3f}_{_js.end:.3f}"
+            _conf_lookup[_k] = (_js.confidence, _js.confidence_tier)
+
+    transcript_dicts = []
+    for seg in transcript_source:
+        _k = f"{seg.start:.3f}_{seg.end:.3f}"
+        _conf, _tier = _conf_lookup.get(_k, (None, None))
+        transcript_dicts.append({
             "text": seg.text,
             "start": seg.start,
             "end": seg.end,
@@ -3167,9 +3180,9 @@ async def dub_video(request: DubRequest, background_tasks: BackgroundTasks):
             "velma_emotion": seg.velma_emotion,
             "velma_accent": seg.velma_accent,
             "velma_deepfake_score": seg.velma_deepfake_score,
-        }
-        for seg in transcript_source
-    ]
+            "confidence": seg.confidence if getattr(seg, "confidence", None) is not None else _conf,
+            "confidence_tier": seg.confidence_tier if getattr(seg, "confidence_tier", None) is not None else _tier,
+        })
 
     detected_lang = job.transcript.language if job and job.transcript else None
 
@@ -3419,17 +3432,26 @@ async def render_dubbed_video(request: DubRequest, background_tasks: BackgroundT
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
 
-    transcript_dicts = [
-        {
+    _render_conf_lookup: Dict[str, tuple] = {}
+    if job and job.transcript and job.transcript.segments:
+        for _js in job.transcript.segments:
+            _k = f"{_js.start:.3f}_{_js.end:.3f}"
+            _render_conf_lookup[_k] = (_js.confidence, _js.confidence_tier)
+
+    transcript_dicts = []
+    for i, seg in enumerate(request.transcript):
+        _k = f"{seg.start:.3f}_{seg.end:.3f}"
+        _conf, _tier = _render_conf_lookup.get(_k, (None, None))
+        transcript_dicts.append({
             "text": seg.text,
             "start": seg.start,
             "end": seg.end,
             "speaker": seg.speaker,
             "segment_id": str(i),
             "source_text": getattr(seg, "source_text", None) or seg.text,
-        }
-        for i, seg in enumerate(request.transcript)
-    ]
+            "confidence": seg.confidence if getattr(seg, "confidence", None) is not None else _conf,
+            "confidence_tier": seg.confidence_tier if getattr(seg, "confidence_tier", None) is not None else _tier,
+        })
 
     target_lang = normalize_language_code(request.target_language)
 
@@ -4606,27 +4628,60 @@ async def retranslate_job(job_id: str, request: Request):
         logger.error(f"[RETRANSLATE] Translation failed for job {job_id}: {exc}")
         raise HTTPException(status_code=500, detail=f"Translation failed: {exc}")
 
-    # 5a. Write updated translations to on-disk segments.json so the editor sees
-    # them immediately without waiting for a full audio rebuild.
+    # Sentence split: expand multi-sentence segments into one per sentence.
+    # Build the original-id → sub-segments map BEFORE re-indexing so we can
+    # reconstruct segments.json correctly.
+    from app.services.translation_service import split_translated_sentences
+    _pre_split = len(translated)
+    translated = split_translated_sentences(translated)
+    _orig_to_new: dict = {}
+    for _seg in translated:
+        _orig_id = _seg.get("original_segment_id") or _seg.get("segment_id", "")
+        try:
+            _orig_idx = int(str(_orig_id))
+        except (ValueError, TypeError):
+            _orig_idx = -1
+        if _orig_idx >= 0:
+            _orig_to_new.setdefault(_orig_idx, []).append(_seg)
+    if len(translated) != _pre_split:
+        logger.info(f"[RETRANSLATE] Sentence split: {_pre_split} → {len(translated)} segments")
+    # Re-index sequentially after split so Supabase sequence numbers are contiguous
+    for _i, _seg in enumerate(translated):
+        _seg["segment_id"] = str(_i)
+
+    # 5a. Rebuild on-disk segments.json — replace split parent entries with sub-segments
+    # so the editor sees one bubble per sentence without waiting for a full rebuild.
     try:
         if os.path.exists(_segments_path):
             with open(_segments_path, "r", encoding="utf-8") as sf:
                 _seg_data = _json.load(sf)
             _disk_segs = _seg_data.get("segments", [])
-            # Build lookup: segment_id → new text
-            _new_text_map = {
-                int(s.get("segment_id", -1)): (s.get("text") or "")
-                for s in translated
-            }
-            for disk_seg in _disk_segs:
-                # Match by index (segments.json is index-ordered)
-                _idx = _disk_segs.index(disk_seg)
-                if _idx in _new_text_map and _new_text_map[_idx]:
-                    disk_seg["text"] = _new_text_map[_idx]
+            new_disk_segs: list = []
+            for _idx, disk_seg in enumerate(_disk_segs):
+                sub_segs = _orig_to_new.get(_idx)
+                if not sub_segs:
+                    new_disk_segs.append(disk_seg)
+                    continue
+                if len(sub_segs) == 1 and not sub_segs[0].get("auto_split"):
+                    # No split — just update text in place
+                    disk_seg["text"] = sub_segs[0].get("text", disk_seg.get("text", ""))
                     disk_seg["original_text"] = disk_seg.get("original_text") or disk_seg["text"]
+                    new_disk_segs.append(disk_seg)
+                else:
+                    # Sentence was split — insert one disk entry per sub-sentence,
+                    # inheriting all audio/speaker metadata from the parent.
+                    for sub in sub_segs:
+                        new_disk_segs.append({
+                            **disk_seg,
+                            "text":       sub.get("text", ""),
+                            "start":      sub.get("start", disk_seg.get("start")),
+                            "end":        sub.get("end",   disk_seg.get("end")),
+                            "auto_split": True,
+                        })
+            _seg_data["segments"] = new_disk_segs
             with open(_segments_path, "w", encoding="utf-8") as sf:
                 _json.dump(_seg_data, sf, indent=2, ensure_ascii=False)
-            logger.info(f"[RETRANSLATE] Updated {len(_new_text_map)} segments in segments.json")
+            logger.info(f"[RETRANSLATE] Rebuilt segments.json: {len(_disk_segs)} → {len(new_disk_segs)} entries")
     except Exception as exc:
         logger.warning(f"[RETRANSLATE] Could not update segments.json: {exc}")
 

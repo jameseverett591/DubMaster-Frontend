@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 #   F0_FEMALE_THRESHOLD=185   (was 165 — raised to handle shouting males)
 #   F0_CHILD_THRESHOLD=220    (was 230 — lowered to catch more child voices)
 F0_FEMALE_THRESHOLD = float(os.getenv("F0_FEMALE_THRESHOLD", "185"))
-F0_CHILD_THRESHOLD  = float(os.getenv("F0_CHILD_THRESHOLD",  "220"))
+F0_CHILD_THRESHOLD  = float(os.getenv("F0_CHILD_THRESHOLD",  "250"))  # raised from 220 — adult tenors peak 200-230 Hz
 
 # RMS threshold: frames below this energy level are silence/noise, not speech.
 RMS_VOICED_THRESHOLD = float(os.getenv("RMS_VOICED_THRESHOLD", "0.01"))

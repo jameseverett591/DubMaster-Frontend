@@ -136,9 +136,10 @@ _GLOSSARY_YUE: Dict[str, str] = {
     "甘師父": "Master Shin",
     "甘师父": "Master Shin",
     "甘師":   "Master Shin",
-    "金山找": "Master Shin",
-    "金山沼": "Master Shin",   # Velma transcribes 沼 (swamp) for 找 (seek) — same Mandarin sound
-    "金山照": "Master Shin",   # third common variant from other ASR engines
+    "金山找": "Jin Shan Zhao",
+    "金山沼": "Jin Shan Zhao",  # Velma transcribes 沼 (swamp) for 找 (seek) — same Mandarin sound
+    "金山照": "Jin Shan Zhao",  # third common variant from other ASR engines
+    "金山爪": "Jin Shan Zhao",  # Velma transcribes 爪 (claw) for 找 — confirmed in job summary logs
     "心師傅": "Master Shin",
     "心师傅": "Master Shin",
     "心師父": "Master Shin",
@@ -171,6 +172,10 @@ _GLOSSARY_YUE: Dict[str, str] = {
     "武次林": "Lam",
     "武慈林": "Lam",
     "李钊": "Li Zhao",
+    "葉太": "Mrs. Yip",           # Ip Man's wife — 葉 (Yip) + 太 (wife/Mrs.)
+    "葉太太": "Mrs. Yip",        # full Cantonese form for Mrs. Yip
+    "叶太": "Mrs. Yip",           # simplified Chinese variant
+    "叶太太": "Mrs. Yip",         # simplified Chinese full form
     "文叔": "Uncle Ip",           # Ah Jun's term for Ip Man (文=Wen, 叔=uncle)
     "文哥": "Brother Wen",
     "文嗯": "Brother Wen",      # Whisper mishearing of 文哥
@@ -196,6 +201,35 @@ _GLOSSARY_YUE: Dict[str, str] = {
     "係你嘅問題": "It's your problem.",
     "大哥 大哥 大哥": "Big brother",
     "大哥大哥大哥": "Big brother",
+
+    # ── Ip Man clip: full-sentence overrides (pre-substitute before LLM sees them) ──
+    # Line 1 opener — Claude drops "famous for" when translating 之地 (land/place of) literally.
+    # Lock the whole sentence so Claude never sees the individual fragments.
+    "久闻佛山是武术之地": "I have long heard that Foshan is famous for its martial arts",
+    "久聞佛山是武術之地": "I have long heard that Foshan is famous for its martial arts",
+    "久闻佛山武术之地":   "I have long heard that Foshan is famous for its martial arts",
+    "久聞佛山武術之地":   "I have long heard that Foshan is famous for its martial arts",
+    # Line 15 — Mrs. Yip: yells at Master Shin ("Shut your mouth!"), then turns
+    # to Ip Man and whispers ("Don't break my things."). These are two utterances
+    # in one Velma segment. The second clause is the quiet permission to fight.
+    # Velma transcribes the first part as 没打冷气的东西 across multiple runs.
+    # Full-sentence overrides (Shut your mouth + don't break) — both punct variants:
+    "你闭嘴。没打冷气的东西。": "Shut your mouth! Don't break my things.",
+    "你閉嘴。沒打冷氣的東西。": "Shut your mouth! Don't break my things.",
+    "你闭嘴！没打冷气的东西。": "Shut your mouth! Don't break my things.",
+    "你閉嘴！沒打冷氣的東西。": "Shut your mouth! Don't break my things.",
+    "你闭嘴没打冷气的东西":     "Shut your mouth! Don't break my things.",
+    "你閉嘴沒打冷氣的東西":     "Shut your mouth! Don't break my things.",
+    # Without 你 prefix (Velma may drop the pronoun):
+    "闭嘴。没打冷气的东西。":   "Shut your mouth! Don't break my things.",
+    "閉嘴。沒打冷氣的東西。":   "Shut your mouth! Don't break my things.",
+    "闭嘴！没打冷气的东西。":   "Shut your mouth! Don't break my things.",
+    "閉嘴！沒打冷氣的東西。":   "Shut your mouth! Don't break my things.",
+    # Bare second clause only (when Velma splits the segment or transcribes separately):
+    "没打冷气的东西":           "Don't break my things",
+    "沒打冷氣的東西":           "Don't break my things",
+    "没打冷气的东西！":         "Don't break my things!",
+    "沒打冷氣的東西！":         "Don't break my things!",
 
     # ── Cantonese phrases with known translation issues ─────────────────────
     "大哥没事吧": "Brother, are you okay?",

@@ -6,13 +6,28 @@ from typing import Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
-# Proper noun context seed for Whisper — biases the model toward correct CJK
-# characters for names and martial arts terms that appear in Ip Man content.
-# This is passed as initial_prompt to every model.transcribe() call.
-INITIAL_PROMPT = (
-    "葉問，詠春，師父，金山找，三浦，木人樁，黐手，北拳，南拳，功夫，武術，葉師傅，"
-    "請，我賠，我畀錢，夠了，沒事，好呀，豁出去"
+# Proper noun context seed for Whisper — reduces hallucinations by biasing the model
+# toward film-relevant names, titles, and martial arts terms.
+# Build dynamically from the project character roster; falls back to general martial arts terms.
+_MARTIAL_ARTS_FALLBACK = (
+    "師父，功夫，武術，請，好呀，沒事，Master, Sifu, Mrs., Mr., "
+    "Yip Man, Wing Chun, Foshan, Jin Shan Zhao"
 )
+
+
+def build_initial_prompt(character_roster: list | None = None) -> str:
+    """Build Whisper initial_prompt from a project character roster, or use the fallback."""
+    if not character_roster:
+        return _MARTIAL_ARTS_FALLBACK
+    names = ", ".join(
+        f"{c.get('cantonese_name', '')} {c.get('english_name', '')}".strip()
+        for c in character_roster
+        if c.get("cantonese_name") or c.get("english_name")
+    )
+    return f"{names}, {_MARTIAL_ARTS_FALLBACK}" if names else _MARTIAL_ARTS_FALLBACK
+
+
+INITIAL_PROMPT = build_initial_prompt()
 
 _WHISPER_MODEL = None
 

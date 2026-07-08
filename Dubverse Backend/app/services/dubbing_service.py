@@ -12,7 +12,12 @@ import json
 
 from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
-from app.services.translation_service import translation_service
+from app.services.translation_service import (
+    translation_service,
+    natural_duration,
+    MAX_SPEED_RATIO,
+    MIN_SPEED_RATIO,
+)
 from app.config import get_settings
 from app.utils.language import normalize_language_code
 from app.utils.emotion import analyze_emotion, analyze_emotion_fish
@@ -656,6 +661,19 @@ class DubbingService:
 
             if source_norm != target_norm:
                 logger.info(f"Translating transcript from {source_norm} to {target_norm}")
+
+                # Stamp speaker_gender onto each segment so the translation prompt
+                # gets correct pronoun data — speaker_genders is F0-classified upstream
+                # but was never reaching Claude before this fix.
+                if speaker_genders:
+                    _stamped = 0
+                    for _seg in transcript:
+                        _spk = _seg.get("speaker", "")
+                        if _spk and _spk in speaker_genders:
+                            _seg["speaker_gender"] = speaker_genders[_spk]
+                            _stamped += 1
+                    logger.info(f"[DUB] Stamped speaker_gender on {_stamped} segments: {speaker_genders}")
+
                 # Load Velma scene context if available
                 _velma_context = None
                 _velma_path = os.path.join("data", "velma", f"{job_id}.json")
@@ -677,6 +695,15 @@ class DubbingService:
                 logger.info(f"Translation complete for {len(transcript)} segments")
                 if transcript:
                     logger.info(f"Sample translated text: {transcript[0].get('text', '')[:100]}")
+
+                # Sentence split: expand multi-sentence segments into one per sentence
+                from app.services.translation_service import split_translated_sentences
+                _pre_split = len(transcript)
+                transcript = split_translated_sentences(transcript)
+                if len(transcript) != _pre_split:
+                    logger.info(f"[SPLIT] Sentence split: {_pre_split} → {len(transcript)} segments")
+                    for _i, _seg in enumerate(transcript):
+                        _seg["segment_id"] = str(_i)
 
                 # Drop segments whose translation carries no speakable content:
                 # empty (glossary suppressed), or punctuation/whitespace-only such
@@ -983,9 +1010,12 @@ class DubbingService:
                 if next_start is not None:
                     segment_duration = end_time - start_time
                     gap_to_next = next_start - end_time  # natural silence in original film
-                    # Level 1 — comfortable slot: original duration + up to 150ms for
-                    # translation length growth.  Natural pause is preserved here.
-                    expansion = min(0.15, gap_to_next * 0.5) if gap_to_next > 0 else 0.0
+                    # Level 1 — expand toward natural speech duration for translated text.
+                    # Uses the shared _CHARS_PER_SECOND constant so this floor matches
+                    # the split function and editor regen path exactly.
+                    _nat_dur = natural_duration(text)
+                    _needed  = max(0.0, _nat_dur - segment_duration)
+                    expansion = min(_needed, gap_to_next * 0.8) if gap_to_next > 0 else 0.0
                     comfortable_duration = max(0.2, segment_duration + expansion)
                     # Level 2 — hard ceiling: never overflow into the next segment.
                     max_slot = max(0.2, next_start - start_time - 0.05)
@@ -1040,12 +1070,16 @@ class DubbingService:
                 _speed_applied = 1.0
                 if actual_duration > target_duration + _atempo_tolerance and target_duration > 0.2:
                     _speed_applied = actual_duration / target_duration
-                    # Allow up to 3x via chained atempo (2.0 × 1.5).  Beyond 3x,
-                    # speech is unintelligible — hard-trim handles the remainder.
+                    if _speed_applied > MAX_SPEED_RATIO:
+                        logger.warning(
+                            f"[FIT] seg={i} needs {_speed_applied:.2f}x speedup "
+                            f"(exceeds MAX_SPEED_RATIO={MAX_SPEED_RATIO}) — "
+                            f"capping at {MAX_SPEED_RATIO}x; slot may hard-trim remainder"
+                        )
                     adjusted = await asyncio.to_thread(
                         self._adjust_audio_duration,
                         final_path, adjusted_audio_path, target_duration,
-                        min_speed=0.8, max_speed=1.5,
+                        min_speed=MIN_SPEED_RATIO, max_speed=MAX_SPEED_RATIO,
                     )
                     if adjusted and os.path.exists(adjusted_audio_path):
                         final_path = adjusted_audio_path
@@ -1098,6 +1132,8 @@ class DubbingService:
                     "velma_emotion": segment.get("velma_emotion"),
                     "velma_accent": segment.get("velma_accent"),
                     "velma_deepfake_score": segment.get("velma_deepfake_score"),
+                    "confidence": segment.get("confidence"),
+                    "confidence_tier": segment.get("confidence_tier"),
                 })
                 logger.info(f"Generated TTS for segment {i}: {text[:50]}...")
             
@@ -1192,6 +1228,7 @@ class DubbingService:
         transcript: List[Dict],
         vocals_path: str,
         duration: float,
+        character_roster: list | None = None,
     ) -> List[Dict]:
         """
         Use Demucs-separated vocals to recover dialogue in gaps where VAD
@@ -1318,10 +1355,12 @@ class DubbingService:
                     f"[VOCAL-GAP] Transcribing gap {gap_start:.1f}s-{gap_end:.1f}s "
                     f"({gap_end - gap_start:.1f}s, RMS={rms:.4f}) using separated vocals"
                 )
+                from app.pipeline.transcribe_audio import build_initial_prompt
                 gap_gen, _ = model.transcribe(
                     gap_waveform,
                     beam_size=5,
                     condition_on_previous_text=False,
+                    initial_prompt=build_initial_prompt(character_roster),
                 )
                 for seg in gap_gen:
                     text = seg.text.strip()

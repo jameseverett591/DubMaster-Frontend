@@ -20,6 +20,84 @@ from app.services.adaptation_engine.policy import (
     fix_translation_names,
 )
 
+# Split after .!? followed by whitespace + uppercase letter.
+# Em-dash variant catches ". — Next sentence" patterns from some LLM outputs.
+_SENTENCE_SPLIT_RE = re.compile(
+    r'(?<=[.!?])\s+(?=[A-Z])'
+    r'|\s+—\s+(?=[A-Z])'
+)
+
+# ── Natural speech rate constants ─────────────────────────────────────────────
+# All tunable via environment variables so RunPod instances can be dialled in
+# without a code deploy — just update the env var and restart the container.
+#
+# 14 chars/sec ≈ 3.5 words/sec at avg 4-char word+space — comfortable dubbed
+# dialogue pace matching the baseline set in the editor's handleGenerateSpeech.
+NATURAL_SPEECH_RATE = float(os.getenv("DUBMASTER_NATURAL_SPEECH_RATE", "3.5"))  # words/sec
+FAST_SPEECH_RATE    = float(os.getenv("DUBMASTER_FAST_SPEECH_RATE",    "4.5"))  # words/sec
+SLOW_SPEECH_RATE    = float(os.getenv("DUBMASTER_SLOW_SPEECH_RATE",    "2.5"))  # words/sec
+MAX_SPEED_RATIO     = float(os.getenv("DUBMASTER_MAX_SPEED_RATIO",     "1.15")) # 15% above natural
+MIN_SPEED_RATIO     = float(os.getenv("DUBMASTER_MIN_SPEED_RATIO",     "0.85")) # 15% below natural
+_CHARS_PER_SECOND   = float(os.getenv("DUBMASTER_CHARS_PER_SECOND",   "14.0")) # chars/sec
+_MIN_SEGMENT_SECS   = float(os.getenv("DUBMASTER_MIN_SEGMENT_SECS",    "0.8"))  # absolute floor
+
+
+def natural_duration(text: str) -> float:
+    """Minimum comfortable TTS duration for this text at natural speech rate.
+    'My name is Jin Shan Zhao.' = 26 chars → 1.86 s minimum at 14 chars/s."""
+    return max(_MIN_SEGMENT_SECS, len(text) / _CHARS_PER_SECOND)
+
+
+def split_translated_sentences(segments: list) -> list:
+    """
+    Expand segments whose translated text spans multiple sentences into one
+    segment per sentence. Time windows are allocated proportionally by natural
+    speech duration (character-rate based), so each sentence gets time in
+    proportion to how long it takes to say — not raw character count.
+    Each sub-segment carries auto_split=True.
+    Non-split segments pass through unchanged.
+    """
+    # Mask title/honorific abbreviations before splitting so their periods
+    # are never treated as sentence boundaries.  Restored after split.
+    _TITLE_ABBREV_RE = re.compile(r'\b(Mr|Mrs|Ms|Dr|Prof|Jr|Sr|St|Lt|Sgt|Gen|Col|Maj|Capt)\.')
+    out: list = []
+    for seg in segments:
+        text = (seg.get("translated_text") or seg.get("text") or "").strip()
+        text = _TITLE_ABBREV_RE.sub(lambda m: m.group(1) + '\x00', text)
+        sentences = [s.replace('\x00', '.').strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
+        if len(sentences) <= 1:
+            out.append(seg)
+            continue
+        n       = len(sentences)
+        start   = float(seg.get("start", 0.0))
+        end     = float(seg.get("end", start))
+        duration = end - start
+        orig_id = seg.get("segment_id", "")
+
+        # Allocate time proportional to natural speaking duration per sentence.
+        # This ensures short sentences ("Yes.") and long ones get fair shares —
+        # raw character count underweights short function words.
+        nat_durs   = [natural_duration(s) for s in sentences]
+        total_nat  = sum(nat_durs)
+        fracs      = [d / total_nat for d in nat_durs]
+
+        cursor = start
+        for i, (sentence, frac) in enumerate(zip(sentences, fracs)):
+            seg_end = (cursor + duration * frac) if i < n - 1 else end
+            out.append({
+                **seg,
+                "text":                sentence,
+                "translated_text":     sentence,
+                "start":               round(cursor, 3),
+                "end":                 round(seg_end, 3),
+                "auto_split":          True,
+                "original_segment_id": orig_id,
+                "split_index":         i,
+            })
+            cursor = seg_end
+    return out
+
+
 class TranslationService:
     def __init__(self):
         settings = get_settings()
@@ -153,6 +231,15 @@ class TranslationService:
         if re.search(r'XGLO\d{3}X', text, re.IGNORECASE):
             logger.warning(f"[GLOSSARY] Unresolved placeholder(s) in post-pass: '{text}' — stripping")
             text = re.sub(r'XGLO\d{3}X', '', text, flags=re.IGNORECASE).strip()
+        # Strip bare comma left when a glossary placeholder was stripped mid-sentence
+        text = re.sub(r'([!?.])\s*,\s*', r'\1 ', text).strip()
+        # Recapitalize first letter of any word that now directly follows terminal
+        # punctuation — the comma-strip above can leave lowercase sentence starts.
+        text = re.sub(r'([.!?])\s+([a-z])', lambda m: m.group(1) + ' ' + m.group(2).upper(), text)
+        # Clean up punctuation artifacts from post-fix values colliding with
+        # Claude's surrounding sentence context.
+        text = re.sub(r',\s*\.', '.', text)                          # ,. → .
+        text = re.sub(r'(?<!\.)\.\s*\.(?!\.)', '.', text)            # .. → . (ellipsis-aware)
         # Fix concatenated English words from adjacent glossary replacements
         # e.g. "Wing ChunIp Man" → "Wing Chun Ip Man"
         text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
@@ -207,10 +294,60 @@ class TranslationService:
             "uncle man":     "Uncle Ip",
             "Uncle IP":      "Uncle Ip",   # LLM/adaptation caps both letters
             "uncle ip":      "Uncle Ip",
+            # Mrs. Ip — Claude romanizes 葉 as "Ye" (Mandarin) instead of "Yip" (Cantonese)
+            "Mrs. Ye":       "Mrs. Yip",
+            "Mrs Ye":        "Mrs. Yip",
+            "mrs. ye":       "Mrs. Yip",
+            # Line 1 — 久闻佛山武术之地: 之地 ("land of") implies fame; Claude drops "famous for"
+            # and produces various phrasings — catch all observed variants.
+            "that Foshan is martial arts":    "that Foshan is famous for martial arts",
+            "Foshan is martial arts":         "Foshan is famous for martial arts",
+            "that martial arts is in Foshan": "that Foshan is famous for martial arts",
+            "martial arts is in Foshan":      "Foshan is famous for martial arts",
+            # Line 12 — challenger boasting to Mrs. Yip (self-handicap threat, not
+            # an offer to Ip Man). Specific/longer patterns MUST come before bare
+            # patterns — Python applies these sequentially and "let him use one hand"
+            # firing inside "I'll let him use one hand" produces "I'll I'll use…".
+            "won't beat her to death":      "won't beat him to death",
+            "she'll lose":                  "he'll lose",
+            # Specific (with leading "I'll") — must precede bare variants.
+            # No trailing comma/prefix in values: Claude's surrounding sentence already
+            # provides context ("If you're afraid he'll lose, ..."), so embedding those
+            # in the replacement produces doubled phrases and ,. artifacts.
+            "I'll let her use one hand":    "I'll use only one hand",
+            "I'll let him use one hand":    "I'll use only one hand",
+            "I'll let her use both hands":  "I'll beat him with no hands.",
+            "I'll let him use both hands":  "I'll beat him with no hands.",
+            # Bare fallback (translation omits leading "I'll")
+            "let her use one hand":         "use only one hand",
+            "let him use one hand":         "use only one hand",
+            "let her use both hands":       "I'll beat him with no hands.",
+            "let him use both hands":       "I'll beat him with no hands.",
+            # Line 15 — Mrs. Yip: 你闭嘴。没打冷气的东西。 Velma transcribes inconsistently;
+            # Claude mis-translates 冷气 (air-con/cold) in several ways. Catch all observed variants.
+            "Shut your mouth! , remember your things.":        "Shut your mouth! Don't break my things.",
+            "shut your mouth! , remember your things.":        "Shut your mouth! Don't break my things.",
+            "A thing that hasn't been beaten cold.":           "Don't break my things.",
+            "a thing that hasn't been beaten cold.":           "Don't break my things.",
+            "thing that hasn't been beaten cold":              "Don't break my things.",
+            "Shut your mouth. A thing that hasn't been beaten cold.": "Shut your mouth! Don't break my things.",
+            # ASR safety net — Velma mishearing of 没打冷气的东西 produces English "remember
+            # your things" via Claude when the Cantonese source doesn't match any glossary key.
+            # Log fires tracked so we can identify additional source variants slipping through.
+            "Remember your things.":  "__LOG_POSTFIX__Don't break my things.",
+            "remember your things.":  "__LOG_POSTFIX__Don't break my things.",
+            "Remember your things!":  "__LOG_POSTFIX__Don't break my things.",
         }
         for wrong, correct in _POST_FIXES.items():
             if wrong in text:
+                if correct.startswith("__LOG_POSTFIX__"):
+                    correct = correct[len("__LOG_POSTFIX__"):]
+                    logger.warning(f"[POSTFIX_NET] Caught ASR mishearing safety-net: '{wrong}' → '{correct}' in: {text!r}")
                 text = text.replace(wrong, correct)
+        # Second pass: catch ,. and .. artifacts introduced by post-fix replacements
+        # (a replacement value ending in "." collides with the source text's existing period).
+        text = re.sub(r',\s*\.', '.', text)
+        text = re.sub(r'(?<!\.)\.\s*\.(?!\.)', '.', text)
         # Plural fix — word-boundary regex prevents "masters" → "masterss" double-s
         # when the translation engine already pluralised correctly.
         text = re.sub(r'\b(so many|plenty of|many) master\b', r'\1 masters', text)
@@ -542,6 +679,21 @@ class TranslationService:
                     "but do NOT add information not present in the source text."
                 )
 
+        # Speaker gender map — prevents him/her pronoun errors in translation
+        _gender_map: dict = {}
+        for _seg in segments:
+            _spk = _seg.get("speaker") or _seg.get("speaker_label", "")
+            _gender = (_seg.get("speaker_gender") or _seg.get("gender") or "").lower().strip()
+            if _spk and _gender and _spk not in _gender_map:
+                _gender_map[_spk] = _gender
+        if _gender_map:
+            system_prompt_parts.append("")
+            system_prompt_parts.append("SPEAKER GENDERS — use correct pronouns when referring to each speaker:")
+            for _spk, _g in _gender_map.items():
+                _pronoun = "he/him" if _g in ("male", "m", "man", "child") else "she/her" if _g in ("female", "f", "woman") else "he/him"
+                system_prompt_parts.append(f"- {_spk}: {_pronoun}")
+            system_prompt_parts.append("NEVER use 'her' or 'she' for a male speaker, or 'him'/'he' for a female speaker.")
+
         system_prompt_parts.append("")
         system_prompt_parts.append("DOMAIN-SPECIFIC RULES:")
         system_prompt_parts.append("- These are SPOKEN Cantonese martial arts film dialogue lines.")
@@ -783,6 +935,21 @@ class TranslationService:
                 style = cp.get("speech_style", "")
                 system_prompt_parts.append(f"- {name}: traits=[{traits}]. Speech style: {style}")
             system_prompt_parts.append("Apply these character voices consistently across all lines.")
+
+        # Speaker gender map — prevents him/her pronoun errors in translation
+        _gender_map_gpt: dict = {}
+        for _seg in segments:
+            _spk = _seg.get("speaker") or _seg.get("speaker_label", "")
+            _gender = (_seg.get("speaker_gender") or _seg.get("gender") or "").lower().strip()
+            if _spk and _gender and _spk not in _gender_map_gpt:
+                _gender_map_gpt[_spk] = _gender
+        if _gender_map_gpt:
+            system_prompt_parts.append("")
+            system_prompt_parts.append("SPEAKER GENDERS — use correct pronouns when referring to each speaker:")
+            for _spk, _g in _gender_map_gpt.items():
+                _pronoun = "he/him" if _g in ("male", "m", "man", "child") else "she/her" if _g in ("female", "f", "woman") else "he/him"
+                system_prompt_parts.append(f"- {_spk}: {_pronoun}")
+            system_prompt_parts.append("NEVER use 'her' or 'she' for a male speaker, or 'him'/'he' for a female speaker.")
 
         system_prompt_parts.append("")
         system_prompt_parts.append("DOMAIN-SPECIFIC RULES:")
