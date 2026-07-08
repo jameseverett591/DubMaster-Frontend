@@ -1024,6 +1024,8 @@ class DubVerseAPIClient {
       committed_end_time?: number
       committed_audio_url?: string
       committed_adapted_text?: string
+      flag_status?: string
+      correction_type?: string | null
     }
   ): Promise<void> {
     await fetch(`${this.baseURL}/api/segment/commit/${jobId}/${index}`, {

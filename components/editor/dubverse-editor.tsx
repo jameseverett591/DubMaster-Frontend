@@ -49,6 +49,7 @@ import {
   Instagram,
   Save,
   Loader2,
+  AlertTriangle,
 } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -75,6 +76,7 @@ import VelmaPanel from '@/components/editor/velma-panel'
 import { HeatmapBar } from '@/components/timeline/HeatmapBar'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { ExportModal } from '@/components/editor/export-modal'
+import { ReviewQueuePanel } from '@/components/editor/review-queue-panel'
 import { requestRPTStitch, stitchRPT, invalidateCache, scheduleRPTPlayback } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { createClient } from '@/lib/supabase/client'
@@ -773,6 +775,7 @@ export function DubVerseEditor({
   const [customEmotionDrafts, setCustomEmotionDrafts] = useState<Record<number, string>>({})
   const [userInitials, setUserInitials] = useState("JA")
   const [showRevertAllConfirm, setShowRevertAllConfirm] = useState(false)
+  const [showReviewQueue, setShowReviewQueue] = useState(false)
   const [contextSegmentIndex, setContextSegmentIndex] = useState<number | null>(null)
   const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
   const [isSegmentPreviewing, setIsSegmentPreviewing] = useState(false)
@@ -845,6 +848,7 @@ export function DubVerseEditor({
           committed_start_time: newStart,
           committed_end_time: newEnd,
         })
+        applyFlagOutcome(drag.index, 'timing')
         apiClient.commitSegmentTiming(jobId, drag.index, {
           committed_start_time: newStart,
           committed_end_time: newEnd,
@@ -2684,6 +2688,7 @@ export function DubVerseEditor({
         committed_speed: stagedSpeeds[activeIndex] ?? 1.0,
         committed_emotion: stagedEmotions[activeIndex],
       })
+      applyFlagOutcome(activeIndex, 'voice')
       requestRPTStitch(
         displaySegments.map((seg, segArrayIdx) => {
           const resolveAudioUrl = (url: string | undefined) => {
@@ -2913,6 +2918,8 @@ export function DubVerseEditor({
               committed_adapted_text: seg.committed_adapted_text,
               committed_start_time: seg.committed_start_time,
               committed_end_time: seg.committed_end_time,
+              flag_status: seg.flag_status,
+              correction_type: seg.correction_type,
             }),
           })
         )
@@ -2926,6 +2933,20 @@ export function DubVerseEditor({
       setIsSaving(false)
     }
   }, [isSaving, displaySegments, jobId, title, targetLanguage])
+
+  // Flag outcome helpers — set both flag_status and correction_type together,
+  // only on segments that are currently unreviewed and have flags.
+  const applyFlagOutcome = useCallback((idx: number, correctionType: 'text' | 'timing' | 'voice' | 'emotion') => {
+    const seg = displaySegments[idx]
+    if (!seg?.flags?.length || seg.flag_status !== 'unreviewed') return
+    updateSegment(idx, { flag_status: 'reviewed_corrected', correction_type: correctionType })
+  }, [displaySegments, updateSegment])
+
+  const handleMarkOk = useCallback((idx: number) => {
+    updateSegment(idx, { flag_status: 'reviewed_no_change', correction_type: null })
+    apiClient.commitSegmentTiming(jobId, idx, { flag_status: 'reviewed_no_change', correction_type: null })
+      .catch(err => console.warn('[REVIEW-QUEUE] mark-ok persist failed:', err))
+  }, [jobId, updateSegment])
 
   const handleRebuildVideo = useCallback(async () => {
     setRebuildError(null)
@@ -3039,6 +3060,7 @@ export function DubVerseEditor({
       setEditingText('')
       setEditingSegmentIndex(null)
       // Persist edited text to disk so regenerate_segment reads it from committed_adapted_text
+      applyFlagOutcome(idx, 'text')
       apiClient.commitSegmentTiming(jobId, idx, { committed_adapted_text: text }).catch(err =>
         console.warn('[saveEditing] failed to persist text to disk:', err)
       )
@@ -3459,6 +3481,23 @@ export function DubVerseEditor({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48 bg-slate-900 border-slate-700">
+              {hasFeature('reviewQueue') && (() => {
+                const unreviewedCount = displaySegments.filter(s => s.flags?.length && s.flag_status === 'unreviewed').length
+                return (
+                  <DropdownMenuItem
+                    onClick={() => setShowReviewQueue(true)}
+                    className="cursor-pointer hover:bg-slate-800"
+                  >
+                    <AlertTriangle className="h-4 w-4 mr-2 text-amber-400" />
+                    <span className="flex-1">Review Queue</span>
+                    {unreviewedCount > 0 && (
+                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">
+                        {unreviewedCount}
+                      </span>
+                    )}
+                  </DropdownMenuItem>
+                )
+              })()}
               <DropdownMenuItem
                 onClick={() => transcriptInputRef.current?.click()}
                 className="cursor-pointer hover:bg-slate-800"
@@ -4970,6 +5009,7 @@ export function DubVerseEditor({
                   if (refSeg) return // reference segments don't update the job
                   setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))
                   updateSegment(idx, { committed_emotion: emotion })
+                  applyFlagOutcome(idx, 'emotion')
                 }}
                 onUpdateCurve={(idx, curve) => {
                   if (refSeg) return
@@ -7214,6 +7254,18 @@ export function DubVerseEditor({
         <ExportModal
           jobId={jobId}
           onClose={() => setShowExportModal(false)}
+        />
+      )}
+
+      {showReviewQueue && (
+        <ReviewQueuePanel
+          segments={displaySegments}
+          onClose={() => setShowReviewQueue(false)}
+          onJumpToSegment={(idx) => {
+            selectSegment(idx)
+            setCurrentTime(displaySegments[idx]?.start_time ?? 0)
+          }}
+          onMarkOk={handleMarkOk}
         />
       )}
     </div>

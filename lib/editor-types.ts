@@ -113,6 +113,9 @@ export interface Segment {
   was_truncated?: boolean
   nuances?: Partial<SegmentNuances>
   nuance_markers?: NuanceMarker[]
+  flags?: Array<{ code: string; score: number | null; threshold: number }>
+  flag_status?: 'unreviewed' | 'reviewed_no_change' | 'reviewed_corrected'
+  correction_type?: 'timing' | 'text' | 'voice' | 'emotion' | null
 }
 
 export interface QCScore {

@@ -17,6 +17,7 @@ export type FeatureKey =
   | 'askAI'
   | 'voiceLibrary'
   | 'emotionWriteIn'
+  | 'reviewQueue'
   | 'emotionalCurveEditor'
   | 'lipSyncScoring'
   | 'heatmaps'
@@ -39,6 +40,7 @@ export const FEATURE_MATRIX: Record<FeatureKey, PlanType[]> = {
   askAI:                ['premium', 'professional'],
   voiceLibrary:         ['premium', 'professional'],
   emotionWriteIn:       ['premium', 'professional'],
+  reviewQueue:          ['premium', 'professional'],
   // Professional only
   emotionalCurveEditor: ['professional'],
   lipSyncScoring:       ['professional'],
