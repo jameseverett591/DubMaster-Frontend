@@ -1134,6 +1134,9 @@ class DubbingService:
                     "velma_deepfake_score": segment.get("velma_deepfake_score"),
                     "confidence": segment.get("confidence"),
                     "confidence_tier": segment.get("confidence_tier"),
+                    "flags": [],
+                    "flag_status": "unreviewed",
+                    "correction_type": None,
                 })
                 logger.info(f"Generated TTS for segment {i}: {text[:50]}...")
             
