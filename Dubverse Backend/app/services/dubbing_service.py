@@ -35,6 +35,10 @@ _VOICES_BY_GENDER: Dict[str, List[str]] = {
     "child":  ["child-1",  "child-2",  "child-3"],
 }
 
+# Provisional velma_low_confidence threshold. Revisit after 2-3 real review
+# sessions using flag_status/correction_type outcome data.
+CONFIDENCE_FLAG_THRESHOLD = 0.5
+
 
 class DubbingService:
     def __init__(self):
@@ -1119,6 +1123,18 @@ class DubbingService:
                     f"{overlap_with_prev}"
                 )
 
+                # --- Flag generation ---
+                _flags = []
+                _adapted = segment.get("adapted_text") or text
+                if len(_adapted.split()) >= 2:
+                    _conf = segment.get("confidence")
+                    if _conf is None or _conf < CONFIDENCE_FLAG_THRESHOLD:
+                        _flags.append({
+                            "code": "velma_low_confidence",
+                            "score": _conf,
+                            "threshold": CONFIDENCE_FLAG_THRESHOLD,
+                        })
+
                 audio_segments.append({
                     "transcript_index": i,
                     "text": text,
@@ -1134,7 +1150,7 @@ class DubbingService:
                     "velma_deepfake_score": segment.get("velma_deepfake_score"),
                     "confidence": segment.get("confidence"),
                     "confidence_tier": segment.get("confidence_tier"),
-                    "flags": [],
+                    "flags": _flags,
                     "flag_status": "unreviewed",
                     "correction_type": None,
                 })

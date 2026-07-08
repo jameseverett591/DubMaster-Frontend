@@ -337,6 +337,9 @@ class TranslationService:
             "Remember your things.":  "__LOG_POSTFIX__Don't break my things.",
             "remember your things.":  "__LOG_POSTFIX__Don't break my things.",
             "Remember your things!":  "__LOG_POSTFIX__Don't break my things.",
+            # Challenger boast — Claude appends a colloquial flourish not in source.
+            " — how about that?":     "",
+            " — How about that?":     "",
         }
         for wrong, correct in _POST_FIXES.items():
             if wrong in text:
