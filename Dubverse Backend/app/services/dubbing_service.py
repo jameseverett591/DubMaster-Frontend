@@ -984,7 +984,7 @@ class DubbingService:
                     return (None, None)
                 payload = {
                     "model": "claude-sonnet-4-6",
-                    "max_tokens": 80,
+                    "max_tokens": 300,
                     "temperature": 0,
                     "messages": [{"role": "user", "content": (
                         "You are evaluating whether an English dubbing translation preserves "
@@ -1032,13 +1032,40 @@ class DubbingService:
             )
             logger.info("[TTS] All parallel TTS calls complete — running fit/trim pass")
 
-            logger.info(f"[MEANING-DIVERGENCE] Running {len(transcript)} checks in parallel...")
-            divergence_scores = await asyncio.gather(
-                *[_check_meaning_divergence(
-                    seg.get("source_text", ""),
-                    seg.get("adapted_text") or seg.get("text", "")
-                ) for seg in transcript]
-            )
+            # Group segments by original_segment_id (split children share this)
+            # or segment_id (standalone segments). Avoids penalising legitimate
+            # sentence splits by evaluating the full concatenated English output
+            # against the shared Cantonese source, not each fragment in isolation.
+            from collections import defaultdict as _dd
+            _grp_map: dict = _dd(list)
+            for _si, _seg in enumerate(transcript):
+                _grp = _seg.get("original_segment_id") or _seg.get("segment_id", str(_si))
+                _ada = _seg.get("adapted_text") or _seg.get("text", "")
+                _src = _seg.get("source_text", "")
+                if _src.strip() and len(_ada.split()) >= 2:
+                    _grp_map[_grp].append((_si, _src, _ada))
+
+            _unique_grps = list(_grp_map.keys())
+            _div_by_grp: dict = {}
+            if _unique_grps:
+                logger.info(f"[MEANING-DIVERGENCE] Running {len(_unique_grps)} checks ({len(transcript)} segments, {len(transcript) - len(_unique_grps)} split fragments grouped)...")
+                _grp_results = await asyncio.gather(*[
+                    _check_meaning_divergence(
+                        _grp_map[_grp][0][1],
+                        " ".join(_ada for _, _, _ada in _grp_map[_grp])
+                    )
+                    for _grp in _unique_grps
+                ])
+                for _grp, _res in zip(_unique_grps, _grp_results):
+                    _div_by_grp[_grp] = _res
+
+            divergence_scores = [
+                _div_by_grp.get(
+                    _seg.get("original_segment_id") or _seg.get("segment_id", str(_si)),
+                    (None, None)
+                )
+                for _si, _seg in enumerate(transcript)
+            ]
             logger.info("[MEANING-DIVERGENCE] All checks complete")
 
             # ------------------------------------------------------------------
