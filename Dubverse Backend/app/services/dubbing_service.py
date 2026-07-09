@@ -39,6 +39,10 @@ _VOICES_BY_GENDER: Dict[str, List[str]] = {
 # sessions using flag_status/correction_type outcome data.
 CONFIDENCE_FLAG_THRESHOLD = 0.65
 
+# Provisional meaning_divergence threshold. Recalibrate after reviewing real
+# score distributions from the first batch of review sessions.
+MEANING_DIVERGENCE_THRESHOLD = 0.7
+
 
 class DubbingService:
     def __init__(self):
@@ -970,12 +974,71 @@ class DubbingService:
                     logger.warning(f"Failed to generate TTS for segment {i}")
                     return {"index": i, "failed": True}
 
+            async def _check_meaning_divergence(source: str, adapted: str) -> tuple:
+                """Check if English translation preserves Cantonese meaning. Returns (score, reason)."""
+                if len(adapted.split()) < 2 or not source.strip():
+                    return (None, None)
+                api_key = os.getenv("ANTHROPIC_API_KEY", "")
+                if not api_key:
+                    return (None, None)
+                payload = {
+                    "model": "claude-sonnet-4-6",
+                    "max_tokens": 80,
+                    "temperature": 0,
+                    "messages": [{"role": "user", "content": (
+                        "You are evaluating whether an English dubbing translation preserves "
+                        "the meaning and emotional register of the original Cantonese dialogue.\n\n"
+                        f"Original Cantonese: {source}\n"
+                        f"English translation: {adapted}\n\n"
+                        "Score semantic faithfulness 0.0–1.0. Consider: idioms, implied threats, "
+                        "cultural references, emotional register, power dynamics.\n"
+                        "Note: proper names and titles may be rendered as established English "
+                        "equivalents (e.g. Cantonese names in English or Mandarin transliteration) "
+                        "— do not flag name substitutions as divergent.\n"
+                        'Return ONLY valid JSON: {"score": <float 0-1>, "reason": "<one sentence if diverged, else null>"}'
+                    )}],
+                }
+                headers = {
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                }
+                try:
+                    response = await asyncio.to_thread(
+                        lambda: httpx.post(
+                            "https://api.anthropic.com/v1/messages",
+                            json=payload, headers=headers, timeout=30.0,
+                        )
+                    )
+                    if response.status_code != 200:
+                        logger.warning(f"[MEANING-DIVERGENCE] Claude failed: {response.status_code} {response.text[:200]}")
+                        return (None, None)
+                    raw_text = response.json()["content"][0]["text"].strip()
+                    try:
+                        result = json.loads(raw_text)
+                        return (float(result["score"]), result.get("reason"))
+                    except json.JSONDecodeError:
+                        logger.warning(f"[MEANING-DIVERGENCE] non-JSON response: {raw_text[:200]}")
+                        return (None, None)
+                except Exception as e:
+                    logger.warning(f"[MEANING-DIVERGENCE] check failed: {e}")
+                    return (None, None)
+
             logger.info(f"[TTS] Launching {len(transcript)} TTS calls in parallel...")
             tts_results = await asyncio.gather(
                 *[_synthesise_one(i, seg) for i, seg in enumerate(transcript)],
                 return_exceptions=False,
             )
             logger.info("[TTS] All parallel TTS calls complete — running fit/trim pass")
+
+            logger.info(f"[MEANING-DIVERGENCE] Running {len(transcript)} checks in parallel...")
+            divergence_scores = await asyncio.gather(
+                *[_check_meaning_divergence(
+                    seg.get("source_text", ""),
+                    seg.get("adapted_text") or seg.get("text", "")
+                ) for seg in transcript]
+            )
+            logger.info("[MEANING-DIVERGENCE] All checks complete")
 
             # ------------------------------------------------------------------
             # Phase B: sequential fit/trim pass using the raw TTS audio on disk.
@@ -1133,6 +1196,14 @@ class DubbingService:
                             "code": "velma_low_confidence",
                             "score": _conf,
                             "threshold": CONFIDENCE_FLAG_THRESHOLD,
+                        })
+                    _div_score, _div_reason = divergence_scores[i]
+                    if _div_score is not None and _div_score < MEANING_DIVERGENCE_THRESHOLD:
+                        _flags.append({
+                            "code": "meaning_divergence",
+                            "score": _div_score,
+                            "reason": _div_reason,
+                            "threshold": MEANING_DIVERGENCE_THRESHOLD,
                         })
 
                 audio_segments.append({
