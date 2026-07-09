@@ -86,21 +86,23 @@ export function ReviewQueuePanel({
           )}
 
           {flagged.map((seg) => {
-            const flag = seg.flags![0]
-            const score = flag.score
             return (
               <div
                 key={seg.index}
                 className="rounded-md border border-amber-500/25 bg-amber-500/5 p-3 space-y-2"
               >
-                {/* Top row: timestamp + badge */}
-                <div className="flex items-center justify-between">
+                {/* Top row: timestamp + badges */}
+                <div className="flex items-center justify-between gap-2">
                   <span className="text-xs text-neutral-500 font-mono">
                     {formatTime(seg.start_time)} — {seg.speaker_label || seg.speaker_id}
                   </span>
-                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 uppercase tracking-wide">
-                    low confidence
-                  </span>
+                  <div className="flex gap-1 flex-wrap justify-end">
+                    {seg.flags!.map((flag, fi) => (
+                      <span key={fi} className="text-[10px] font-medium px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 uppercase tracking-wide whitespace-nowrap">
+                        {flag.code === 'meaning_divergence' ? 'meaning divergence' : 'low confidence'}
+                      </span>
+                    ))}
+                  </div>
                 </div>
 
                 {/* Segment text */}
@@ -108,11 +110,20 @@ export function ReviewQueuePanel({
                   {seg.target_text || seg.source_text}
                 </p>
 
-                {/* Confidence score */}
-                <p className={cn('text-xs font-mono', confidenceColor(score))}>
-                  Velma confidence: {score !== null && score !== undefined ? score.toFixed(3) : 'N/A'}
-                  {' / '}threshold {flag.threshold.toFixed(2)}
-                </p>
+                {/* Per-flag details */}
+                {seg.flags!.map((flag, fi) => (
+                  <div key={fi}>
+                    {flag.reason && (
+                      <p className="text-xs text-amber-300/80 italic">{flag.reason}</p>
+                    )}
+                    <p className={cn('text-xs font-mono', confidenceColor(flag.score))}>
+                      {flag.code === 'meaning_divergence' ? 'Divergence score' : 'Velma confidence'}
+                      {': '}
+                      {flag.score !== null && flag.score !== undefined ? flag.score.toFixed(3) : 'N/A'}
+                      {' / threshold '}{flag.threshold.toFixed(2)}
+                    </p>
+                  </div>
+                ))}
 
                 {/* Actions */}
                 <div className="flex gap-2 pt-1">
