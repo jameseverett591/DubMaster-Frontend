@@ -157,6 +157,9 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             velma_emotion_curve: seg.velma_emotion
               ? Array.from({ length: 20 }, () => velmaEmotionToIntensity(seg.velma_emotion))
               : undefined,
+            flags: seg.flags ?? [],
+            flag_status: seg.flag_status ?? 'unreviewed',
+            correction_type: seg.correction_type ?? null,
             qc_findings: seg.qc_findings ?? [],
             emotionalCurve: {
               combined: [
