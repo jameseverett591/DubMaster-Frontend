@@ -9,6 +9,7 @@ import logging
 from typing import Optional, List, Dict
 import asyncio
 import json
+import httpx
 
 from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
