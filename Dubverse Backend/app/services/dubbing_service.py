@@ -37,7 +37,7 @@ _VOICES_BY_GENDER: Dict[str, List[str]] = {
 
 # Provisional velma_low_confidence threshold. Revisit after 2-3 real review
 # sessions using flag_status/correction_type outcome data.
-CONFIDENCE_FLAG_THRESHOLD = 0.5
+CONFIDENCE_FLAG_THRESHOLD = 0.65
 
 
 class DubbingService:
