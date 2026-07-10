@@ -49,7 +49,7 @@ export const FEATURE_MATRIX: Record<FeatureKey, PlanType[]> = {
   velmaPanel:           ['professional'],
   characterProfiles:    ['professional'],
   emotionalIntelligence:['professional'],
-  studioCollaboration:  ['professional'],
+  studioCollaboration:  ['premium', 'professional'],
   versioning:           ['professional'],
   performanceNotes:     ['professional'],
   voiceCloning:         ['basic', 'professional'],
