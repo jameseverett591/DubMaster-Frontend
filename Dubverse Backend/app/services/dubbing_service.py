@@ -706,6 +706,11 @@ class DubbingService:
                     logger.info(f"Sample translated text: {transcript[0].get('text', '')[:100]}")
 
                 # Sentence split: expand multi-sentence segments into one per sentence
+                # Stamp stable namespaced IDs before split so split children's
+                # original_segment_id ("pre:N") never collides with the post-split
+                # numeric segment_ids ("0", "1", ...) assigned below.
+                for _pi, _ps in enumerate(transcript):
+                    _ps["segment_id"] = f"pre:{_pi}"
                 from app.services.translation_service import split_translated_sentences
                 _pre_split = len(transcript)
                 transcript = split_translated_sentences(transcript)
