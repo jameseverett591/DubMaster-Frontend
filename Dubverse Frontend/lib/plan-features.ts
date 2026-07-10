@@ -40,7 +40,7 @@ export const FEATURE_MATRIX: Record<FeatureKey, PlanType[]> = {
   askAI:                ['premium', 'professional'],
   voiceLibrary:         ['premium', 'professional'],
   emotionWriteIn:       ['premium', 'professional'],
-  reviewQueue:          ['premium', 'professional'],
+  reviewQueue:          ['professional'],
   // Professional only
   emotionalCurveEditor: ['professional'],
   lipSyncScoring:       ['professional'],
