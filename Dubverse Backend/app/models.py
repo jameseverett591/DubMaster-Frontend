@@ -198,3 +198,8 @@ class RegenerateRequest(BaseModel):
     force_timing: Optional[bool] = None
     nuances: Optional[Dict] = None
     nuance_markers: Optional[List[Dict]] = None
+    # Live timeline boundaries from the frontend at the moment of regen — see
+    # dubbing_service.regenerate_segment for why these can beat segments.json.
+    live_segment_start: Optional[float] = None
+    live_segment_end: Optional[float] = None
+    live_next_segment_start: Optional[float] = None

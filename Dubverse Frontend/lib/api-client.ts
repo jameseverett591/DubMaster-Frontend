@@ -180,6 +180,12 @@ export interface RegenerateSegmentRequest {
   force_timing?: boolean
   nuances?: Record<string, number>
   nuance_markers?: Array<{ id: string; startChar: number; endChar: number; type: string; intensity: number }>
+  // Live timeline boundaries at the moment of regen — segments.json can go stale
+  // after a split/resize whose commitSegmentTiming call hasn't landed yet (it's
+  // fire-and-forget). Backend validates these before trusting them.
+  live_segment_start?: number
+  live_segment_end?: number
+  live_next_segment_start?: number
 }
 
 export interface RegenerateSegmentResponse {

@@ -1,6 +1,7 @@
 import subprocess
 import os
 import re
+import math
 import shutil
 import tempfile
 from datetime import datetime
@@ -2446,6 +2447,9 @@ class DubbingService:
         force_timing: Optional[bool] = None,
         nuances: Optional[Dict] = None,
         nuance_markers: Optional[List[Dict]] = None,
+        live_segment_start: Optional[float] = None,
+        live_segment_end: Optional[float] = None,
+        live_next_segment_start: Optional[float] = None,
     ) -> Dict:
         output_dir = os.path.join(self.dubbed_dir, job_id)
         segments_path = os.path.join(output_dir, "segments.json")
@@ -2551,9 +2555,34 @@ class DubbingService:
             v = s.get("committed_end_time")
             return float(v) if v is not None else float(s.get("end", 0))
 
-        slot_start = _effective_start(seg)
-        slot_end   = _effective_end(seg)
-        slot_dur   = slot_end - slot_start
+        backend_slot_start = _effective_start(seg)
+        backend_slot_end   = _effective_end(seg)
+
+        # The frontend's live timeline can be ahead of segments.json — a split/resize's
+        # commitSegmentTiming sync is fire-and-forget (see dubverse-editor.tsx), so this
+        # persisted copy is sometimes stale. Prefer what the user is actually looking at,
+        # but only if it's sane; never trust a malformed value from the wire outright.
+        def _is_finite_number(v: Optional[float]) -> bool:
+            return v is not None and isinstance(v, (int, float)) and math.isfinite(v)
+
+        if (
+            _is_finite_number(live_segment_start)
+            and _is_finite_number(live_segment_end)
+            and live_segment_start >= 0
+            and live_segment_end > live_segment_start
+        ):
+            slot_start = float(live_segment_start)
+            slot_end = float(live_segment_end)
+            if abs(slot_start - backend_slot_start) > 0.01 or abs(slot_end - backend_slot_end) > 0.01:
+                logger.info(
+                    f"[REGEN-LIVE-OVERRIDE] seg {segment_index}: slot "
+                    f"backend=({backend_slot_start:.2f}, {backend_slot_end:.2f}) → "
+                    f"live=({slot_start:.2f}, {slot_end:.2f})"
+                )
+        else:
+            slot_start = backend_slot_start
+            slot_end = backend_slot_end
+        slot_dur = slot_end - slot_start
         if slot_dur > 0.2:
             trimmed_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen_notrim.mp3")
             trimmed_ok = await asyncio.to_thread(
@@ -2574,7 +2603,19 @@ class DubbingService:
                     (s for s in segments if _effective_start(s) > slot_end + 0.01),
                     None
                 )
-                next_start = _effective_start(next_seg) if next_seg else slot_end + 999.0
+                backend_next_start = _effective_start(next_seg) if next_seg else slot_end + 999.0
+
+                # Same trust rule as the slot itself: only override with the live value
+                # if it's sane and actually leaves room after this segment's live end.
+                if _is_finite_number(live_next_segment_start) and live_next_segment_start > slot_end:
+                    next_start = float(live_next_segment_start)
+                    if abs(next_start - backend_next_start) > 0.01:
+                        logger.info(
+                            f"[REGEN-LIVE-OVERRIDE] seg {segment_index}: next_start "
+                            f"backend={backend_next_start:.2f} → live={next_start:.2f}"
+                        )
+                else:
+                    next_start = backend_next_start
                 available_dur = next_start - slot_start
 
                 overlap = actual_dur - available_dur
