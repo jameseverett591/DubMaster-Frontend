@@ -555,7 +555,7 @@ export function DubVerseEditor({
   const importedSegments = useEditorStore((state) => state.importedSegments)
   const importedSegmentsJobId = useEditorStore((state) => state.importedSegmentsJobId)
   const setImportedSegmentsRaw = useEditorStore((state) => state.setImportedSegments)
-  const { hasFeature, recordingLimit } = usePlan()
+  const { hasFeature, recordingLimit, isPremium, isProfessional } = usePlan()
   // Wrap the store setter so every write to importedSegments also stamps the
   // owning jobId directly via Zustand's static setState — always available,
   // never undefined, never dependent on a store action that may be missing
@@ -3023,10 +3023,46 @@ export function DubVerseEditor({
     setIsRetranslating(true)
     try {
       const result = await apiClient.retranslateJob(jobId)
-      // Refresh segments in the editor from the response
-      const updatedSegs = result.segments as any[]
-      if (updatedSegs?.length) {
-        setImportedSegments(updatedSegs)
+      // The backend returns its own segment shape (text/start/end/speaker/
+      // segment_id) — not the editor's Segment type (target_text/start_time/
+      // end_time/speaker_id/...). Passing it straight into the store left
+      // every field the UI reads undefined except what happened to share a
+      // name, and speaker_id specifically fell back to a single default
+      // color/label for every row. Map it explicitly instead.
+      const rawSegs = result.segments as any[]
+      if (rawSegs?.length) {
+        const priorSegs = displaySegments
+        const mapped: Segment[] = rawSegs.map((raw, i) => {
+          const origIdx = Number(raw.original_segment_id ?? raw.segment_id ?? i)
+          const origSeg = Number.isFinite(origIdx) ? priorSegs[origIdx] : undefined
+          const englishText = raw.text ?? raw.translated_text ?? ''
+          return {
+            ...(origSeg ?? {} as Segment),
+            id: raw.auto_split ? `retranslate-${jobId}-${i}` : (origSeg?.id ?? `retranslate-${jobId}-${i}`),
+            index: i,
+            transcript_index: i,
+            status: 'edited',
+            start_time: raw.start ?? origSeg?.start_time ?? 0,
+            end_time: raw.end ?? origSeg?.end_time ?? 0,
+            source_text: raw.source_text || origSeg?.source_text || '',
+            target_text: englishText,
+            active_text: englishText,
+            variant_text: englishText,
+            preview_text: null,
+            isPreviewing: false,
+            isUserEdited: false,
+            committed_adapted_text: englishText,
+            // Text changed — any previously committed audio/timing no longer
+            // matches it and must be regenerated, not silently carried over.
+            committed_audio_url: undefined,
+            committed_start_time: undefined,
+            committed_end_time: undefined,
+            speaker_id: raw.speaker || origSeg?.speaker_id || 'speaker-1',
+            speaker_label: origSeg?.speaker_label,
+            qc_findings: origSeg?.qc_findings ?? [],
+          } as Segment
+        })
+        setImportedSegments(mapped)
       }
       alert(`Re-translation complete — ${result.segments_updated} segments updated. Review the script then Rebuild to generate new audio.`)
     } catch (err: any) {
@@ -3034,7 +3070,7 @@ export function DubVerseEditor({
     } finally {
       setIsRetranslating(false)
     }
-  }, [jobId, isRetranslating, setImportedSegments])
+  }, [jobId, isRetranslating, setImportedSegments, displaySegments])
 
   const handleTimelineDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -3250,7 +3286,14 @@ export function DubVerseEditor({
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
               <span className="text-white font-bold text-sm">D</span>
             </div>
-            <span className="font-bold text-lg text-white">DubMaster</span>
+            <div className="flex flex-col leading-tight">
+              <span className="font-bold text-lg text-white">DubMaster</span>
+              {(isProfessional || isPremium) && (
+                <span className="text-xs font-semibold uppercase tracking-wide text-cyan-400">
+                  {isProfessional ? 'Professional' : 'Premium'}
+                </span>
+              )}
+            </div>
           </Link>
           
           {/* Nav */}
