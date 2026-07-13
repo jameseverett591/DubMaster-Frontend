@@ -2495,20 +2495,37 @@ export function DubVerseEditor({
     handleTimelineMouseUp(e)
   }, [groupMoveOffset, groupSelectedSegments, displaySegments])
 
-  // One-level undo: snapshot of each segment's text taken before its last edit.
-  const prevTextByIndex = useRef<Record<number, string>>({})
+  // Global undo stack: each text edit pushes {index, prevText} so the top-bar
+  // undo button can step backward through all edits in reverse order.
+  const undoStack = useRef<Array<{ index: number; prevText: string }>>([])
   // Hume auto-fire guard, lifted out of FloatingEmotionChart so Clear Segment
   // and text edits can reset it (re-fire emotion analysis on next dwell).
   const emotionAutoFiredRef = useRef<Set<number>>(new Set())
 
-  const handleUndoLastEdit = useCallback((index: number) => {
-    const prev = prevTextByIndex.current[index]
-    if (prev === undefined) return
-    setPreviewText(index, prev)
-    updateSegment(index, { preview_text: prev, active_text: prev, isUserEdited: true })
-    setImportedSegments(p => p ? p.map((seg, i) => i === index ? { ...seg, preview_text: prev, active_text: prev } : seg) : p)
-    delete prevTextByIndex.current[index]
+  const _applyUndo = useCallback((index: number, prevText: string) => {
+    setPreviewText(index, prevText)
+    updateSegment(index, { preview_text: prevText, active_text: prevText, isUserEdited: true })
+    setImportedSegments(p => p ? p.map((seg, i) => i === index ? { ...seg, preview_text: prevText, active_text: prevText } : seg) : p)
   }, [setPreviewText, updateSegment])
+
+  // Global undo — pops the most recent edit off the stack (any segment).
+  const handleGlobalUndo = useCallback(() => {
+    const entry = undoStack.current.pop()
+    if (!entry) return
+    _applyUndo(entry.index, entry.prevText)
+  }, [_applyUndo])
+
+  // Per-segment undo (context menu) — splices the most recent entry for that segment.
+  const handleUndoLastEdit = useCallback((index: number) => {
+    const stackArr = undoStack.current
+    for (let i = stackArr.length - 1; i >= 0; i--) {
+      if (stackArr[i].index === index) {
+        const [entry] = stackArr.splice(i, 1)
+        _applyUndo(entry.index, entry.prevText)
+        return
+      }
+    }
+  }, [_applyUndo])
 
   const handleClearSegment = useCallback((index: number) => {
     const original = initialSegments[index]
@@ -2613,6 +2630,16 @@ export function DubVerseEditor({
           ? editingText.trim()
           : (segment.preview_text ?? segment.active_text ?? segment.target_text)
       console.log('[REGEN] calling backend', { activeIndex, finalVoiceKey, regenerateText, textOverride, preview_text: segment.preview_text, active_text: segment.active_text, editing: editingText.trim() })
+      // Live timeline boundaries, straight from the on-screen segment — segments.json
+      // on the backend can lag behind a split/resize whose commitSegmentTiming call
+      // is fire-and-forget (see the interrupt handler above). Sending these lets the
+      // fit-check use what the user is actually looking at instead of a stale copy.
+      const liveStart = segment.start_time ?? segment.committed_start_time ?? undefined
+      const liveEnd = segment.end_time ?? segment.committed_end_time ?? undefined
+      const nextSegment = displaySegments[activeIndex + 1]
+      const liveNextStart = nextSegment
+        ? (nextSegment.start_time ?? nextSegment.committed_start_time ?? undefined)
+        : undefined
       const response = await apiClient.regenerateSegment(jobId, segment.transcript_index ?? activeIndex, {
         text: regenerateText,
         speed: stagedSpeeds[activeIndex] ?? 1.0,
@@ -2625,6 +2652,9 @@ export function DubVerseEditor({
         emotionIntensity,
         nuances: stagedNuances[activeIndex] ?? segment.nuances,
         nuance_markers: segment.nuance_markers,
+        live_segment_start: liveStart,
+        live_segment_end: liveEnd,
+        live_next_segment_start: liveNextStart,
       })
       console.log('[REGEN] backend response', { path: response.segment.path, voice_id: response.segment.voice_id, status: response.status })
       if (response.segment.timing_exclusion) {
@@ -3045,9 +3075,8 @@ export function DubVerseEditor({
     if (editingSegmentIndex !== null) {
       const idx = editingSegmentIndex
       const text = editingText
-      // Snapshot pre-edit text for one-level Undo, and clear the Hume auto-fire
-      // guard so the emotion curve re-fires on next dwell after a text change.
-      prevTextByIndex.current[idx] = displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? ''
+      // Push pre-edit text onto the global undo stack before applying the change.
+      undoStack.current.push({ index: idx, prevText: displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? '' })
       emotionAutoFiredRef.current.delete(idx)
       setPreviewText(idx, text)
       setImportedSegments(prev => {
@@ -3302,8 +3331,8 @@ export function DubVerseEditor({
               <span className="text-slate-500 text-xs">min</span>
             </div>
           </div>
-          <Button variant="ghost" size="sm" className="h-8">
-            <RefreshCw className="h-4 w-4" />
+          <Button variant="ghost" size="sm" className="h-8" onClick={handleGlobalUndo} title="Undo last edit">
+            <RotateCcw className="h-4 w-4" />
           </Button>
           <Popover onOpenChange={() => setShareCopied(null)}>
             <PopoverTrigger asChild>
@@ -3395,7 +3424,7 @@ export function DubVerseEditor({
                   <button
                     type="button"
                     title="Share to Facebook"
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#1877F2]/10 hover:bg-[#1877F2]/25 text-[#1877F2] border border-[#1877F2]/20 hover:border-[#1877F2]/50 transition-colors"
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#1877F2] hover:bg-[#1565C0] text-white transition-colors"
                     onClick={() => window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}`, '_blank', 'width=600,height=400')}
                   >
                     <Facebook className="h-4 w-4" />
@@ -3405,36 +3434,46 @@ export function DubVerseEditor({
                   <button
                     type="button"
                     title="Share to X (Twitter)"
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-white border border-white/10 hover:border-white/30 transition-colors"
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-black hover:bg-neutral-800 text-white transition-colors"
                     onClick={() => window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}&text=${encodeURIComponent(`Check out my dubbed video — ${title}`)}`, '_blank', 'width=600,height=400')}
                   >
                     <Twitter className="h-4 w-4" />
                     <span className="text-[9px] font-medium">X / Twitter</span>
                   </button>
-                  {/* YouTube */}
+                  {/* YouTube — download video then open YouTube Studio */}
                   <button
                     type="button"
-                    title="Upload to YouTube"
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#FF0000]/10 hover:bg-[#FF0000]/20 text-[#FF0000] border border-[#FF0000]/20 hover:border-[#FF0000]/50 transition-colors"
-                    onClick={() => window.open('https://studio.youtube.com/channel/upload', '_blank')}
+                    title="Download for YouTube"
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#FF0000] hover:bg-[#CC0000] text-white transition-colors"
+                    onClick={() => {
+                      if (activeDubbedVideoUrl) {
+                        const a = document.createElement('a')
+                        a.href = activeDubbedVideoUrl
+                        a.download = `${title || 'dubbed_video'}.mp4`
+                        a.click()
+                      }
+                      window.open('https://studio.youtube.com/channel/upload', '_blank')
+                    }}
                   >
                     <Youtube className="h-4 w-4" />
                     <span className="text-[9px] font-medium">YouTube</span>
                   </button>
-                  {/* Instagram — copy link (no web API) */}
+                  {/* Instagram — download video (no web upload API) */}
                   <button
                     type="button"
-                    title="Copy link for Instagram"
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#E1306C]/10 hover:bg-[#E1306C]/20 text-[#E1306C] border border-[#E1306C]/20 hover:border-[#E1306C]/50 transition-colors"
+                    title="Download for Instagram"
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-gradient-to-br from-[#833AB4] via-[#E1306C] to-[#F77737] hover:opacity-90 text-white transition-opacity"
                     onClick={() => {
-                      const url = activeDubbedVideoUrl ?? (typeof window !== 'undefined' ? window.location.href : '')
-                      navigator.clipboard.writeText(url)
-                      setShareCopied('link')
-                      setTimeout(() => setShareCopied(null), 2000)
+                      if (activeDubbedVideoUrl) {
+                        const a = document.createElement('a')
+                        a.href = activeDubbedVideoUrl
+                        a.download = `${title || 'dubbed_video'}.mp4`
+                        a.click()
+                      }
                     }}
                   >
                     <Instagram className="h-4 w-4" />
-                    <span className="text-[9px] font-medium">{shareCopied === 'link' ? 'Copied!' : 'Instagram'}</span>
+                    <span className="text-[9px] font-medium">Instagram</span>
                   </button>
                 </div>
               </div>
