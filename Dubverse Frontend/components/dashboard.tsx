@@ -276,6 +276,11 @@ export function Dashboard() {
                 <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-[#A855F7] via-[#FDB022] to-[#22D3EE] bg-clip-text text-transparent drop-shadow-[0_0_30px_rgba(168,85,247,0.8)] mb-2">
                   DubMaster Studio
                 </h1>
+                {plan === 'basic' && (
+                  <span className="inline-block text-xs font-semibold uppercase tracking-wide text-[#22D3EE] border border-[#22D3EE]/40 rounded-full px-2 py-0.5 mb-2">
+                    Basic
+                  </span>
+                )}
                 <p className="text-[#94A3B8] text-base md:text-lg italic">
                   Transform Your Content. Reach The World.
                 </p>
