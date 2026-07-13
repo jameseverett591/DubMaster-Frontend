@@ -1,4 +1,4 @@
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from pydantic import BaseModel
 import fastapi
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Request, Body
@@ -2526,12 +2526,23 @@ async def clear_all_jobs(request: Request, force: bool = False):
     now = time.time()
     cutoff = now - (min_age_minutes * 60)
 
-    # Clear in-memory jobs — user-scoped only
+    # Clear in-memory jobs — user-scoped only.
+    # Jobs still in flight on RunPod GPU must be cancelled here before their local
+    # record disappears — otherwise the remote worker keeps running unaware the
+    # job was cleared, permanently occupying the account's worker slot(s) and
+    # blocking every subsequent job from ever leaving IN_QUEUE (mirrors the
+    # best-effort cancel already done in the single-job /cancel endpoint above).
+    from app.services.runpod_service import runpod_service
+    _TERMINAL_STATUSES = {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
     cleared_ids: list[str] = []
+    runpod_ids_to_cancel: list[str] = []
     if force:
         for jid, job in list(job_manager._jobs.items()):
             if job.user_id == user_id:
                 cleared_ids.append(jid)
+                runpod_id = getattr(job, "runpod_job_id", None)
+                if runpod_id and getattr(job, "status", None) not in _TERMINAL_STATUSES:
+                    runpod_ids_to_cancel.append(runpod_id)
                 job_manager._jobs.pop(jid, None)
     else:
         for jid, job in list(job_manager._jobs.items()):
@@ -2550,7 +2561,17 @@ async def clear_all_jobs(request: Request, force: bool = False):
             except Exception:
                 continue
             cleared_ids.append(jid)
+            runpod_id = getattr(job, "runpod_job_id", None)
+            if runpod_id and getattr(job, "status", None) not in _TERMINAL_STATUSES:
+                runpod_ids_to_cancel.append(runpod_id)
             job_manager._jobs.pop(jid, None)
+
+    if runpod_ids_to_cancel and runpod_service.is_available():
+        for runpod_id in runpod_ids_to_cancel:
+            try:
+                await runpod_service.cancel_job(runpod_id)
+            except Exception as exc:
+                logger.warning(f"[CLEAR-ALL] RunPod cancel failed for {runpod_id}: {exc}")
 
     # Delete from Supabase — scoped to this user (CASCADE removes segments + speakers)
     if cleared_ids:
@@ -2607,6 +2628,22 @@ async def delete_job(job_id: str, request: Request):
     job = await job_manager.get_job(job_id)
     if job and job.user_id != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
+
+    # Cancel any still-running RunPod GPU job before dropping the local record —
+    # same orphaned-worker bug clear_all_jobs had: without this, the remote worker
+    # keeps running unaware the job was deleted, permanently occupying the
+    # account's worker slot and blocking every subsequent job from leaving
+    # IN_QUEUE. See the /jobs/{job_id}/cancel endpoint above for the same pattern.
+    if job:
+        _TERMINAL_STATUSES = {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+        runpod_id = getattr(job, "runpod_job_id", None)
+        if runpod_id and getattr(job, "status", None) not in _TERMINAL_STATUSES:
+            from app.services.runpod_service import runpod_service
+            if runpod_service.is_available():
+                try:
+                    await runpod_service.cancel_job(runpod_id)
+                except Exception as exc:
+                    logger.warning(f"Job {job_id}: RunPod cancel failed for {runpod_id}: {exc}")
 
     # Delete from Supabase (CASCADE removes segments + job_speakers)
     try:
@@ -4651,31 +4688,50 @@ async def retranslate_job(job_id: str, request: Request):
 
     # 5a. Rebuild on-disk segments.json — replace split parent entries with sub-segments
     # so the editor sees one bubble per sentence without waiting for a full rebuild.
+    #
+    # Group by transcript_index rather than raw list position. Every sub-segment
+    # born from one original utterance's split carries that utterance's
+    # transcript_index (see the fan-out below), so after the FIRST retranslate
+    # ever splits an utterance, one original index occupies N consecutive list
+    # slots instead of exactly one — enumerate()-based position matching then
+    # permanently misaligns with _orig_to_new's utterance-indexed keys. A
+    # second retranslate would insert a freshly-recalculated split at the
+    # correct utterance's position while leaving the FIRST split's now-stale
+    # entries (still carrying their old start/end) orphaned elsewhere in the
+    # list — exactly the false "overlapping segments" seen in the editor,
+    # since those orphans' old timestamps collide with the new ones.
     try:
         if os.path.exists(_segments_path):
             with open(_segments_path, "r", encoding="utf-8") as sf:
                 _seg_data = _json.load(sf)
             _disk_segs = _seg_data.get("segments", [])
+            _groups: Dict[Any, list] = {}
+            for disk_seg in _disk_segs:
+                _groups.setdefault(disk_seg.get("transcript_index"), []).append(disk_seg)
+
             new_disk_segs: list = []
-            for _idx, disk_seg in enumerate(_disk_segs):
-                sub_segs = _orig_to_new.get(_idx)
+            for _ti, _group in _groups.items():
+                sub_segs = _orig_to_new.get(_ti)
                 if not sub_segs:
-                    new_disk_segs.append(disk_seg)
+                    new_disk_segs.extend(_group)
                     continue
+                base = _group[0]
                 if len(sub_segs) == 1 and not sub_segs[0].get("auto_split"):
-                    # No split — just update text in place
-                    disk_seg["text"] = sub_segs[0].get("text", disk_seg.get("text", ""))
-                    disk_seg["original_text"] = disk_seg.get("original_text") or disk_seg["text"]
-                    new_disk_segs.append(disk_seg)
+                    # No split — just update text in place, dropping any stale
+                    # siblings this group may still be carrying from a prior split.
+                    base["text"] = sub_segs[0].get("text", base.get("text", ""))
+                    base["original_text"] = base.get("original_text") or base["text"]
+                    new_disk_segs.append(base)
                 else:
-                    # Sentence was split — insert one disk entry per sub-sentence,
-                    # inheriting all audio/speaker metadata from the parent.
+                    # Sentence was split — replace the ENTIRE group (fresh split
+                    # and any stale siblings from a prior split alike) with one
+                    # disk entry per current sub-sentence.
                     for sub in sub_segs:
                         new_disk_segs.append({
-                            **disk_seg,
+                            **base,
                             "text":       sub.get("text", ""),
-                            "start":      sub.get("start", disk_seg.get("start")),
-                            "end":        sub.get("end",   disk_seg.get("end")),
+                            "start":      sub.get("start", base.get("start")),
+                            "end":        sub.get("end",   base.get("end")),
                             "auto_split": True,
                         })
             _seg_data["segments"] = new_disk_segs
