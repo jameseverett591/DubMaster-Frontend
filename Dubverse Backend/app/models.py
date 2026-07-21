@@ -185,6 +185,11 @@ class VoiceParams(BaseModel):
     speed: Optional[float] = None
     speed_ratio: Optional[float] = None
     target_duration: Optional[float] = None
+    # Signed lip-sync offset in ms from the QC lip-sync analysis (positive = audio
+    # leads video, negative = video leads audio). Resolved against the segment's
+    # own authoritative `duration` inside regenerate_segment, since the caller
+    # (frontend) has no reliable client-side duration value to compute this from.
+    sync_offset_ms: Optional[float] = None
 
 
 class RegenerateRequest(BaseModel):

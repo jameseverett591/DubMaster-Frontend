@@ -1,10 +1,18 @@
 ﻿import logging
 import asyncio
 import re
+import secrets
 from typing import List, Dict, Optional, Tuple
 import os
 
 logger = logging.getLogger(__name__)
+
+# Matches a marked reply line like "[[SEG-a3f9c2]] translated text here".
+# See _generate_line_markers / _parse_marked_reply / _validate_marked_mapping —
+# these replace the old "1. 2. 3." numbered-line scheme, whose positional zip
+# back onto segments silently desynced text/timing whenever the LLM merged two
+# adjacent lines into one answer (confirmed root cause, 2026-07-14).
+_MARKER_LINE_RE = re.compile(r"^\s*\[\[SEG-([0-9a-f]{6})\]\]\s*(.*)$")
 
 from app.config import get_settings
 from app.utils.language import normalize_language_code, LANGUAGE_NAMES
@@ -541,6 +549,49 @@ class TranslationService:
         # Last resort: free Google Translate via deep_translator (scraping)
         return await self._translate_segments_batch(segments, source_norm, target_norm)
 
+    # ── Batch-translation line markers ────────────────────────────────────────
+    # Shared by _translate_segments_claude and _translate_segments_gpt. Both send
+    # every segment in one prompt as a numbered-line list and parse the reply
+    # back — plain "1. 2. 3." numbering let the model "helpfully" merge two
+    # short adjacent lines under one number, silently desyncing every segment's
+    # text from its own timing from that point on, with no error raised. A
+    # random per-line marker can't be merged or continued, and the mapping is
+    # now validated before being trusted at all.
+
+    def _generate_line_markers(self, n: int) -> List[str]:
+        """Fresh random markers for one batch — regenerated each call (including
+        retries) so a retry can't anchor on the same failure pattern."""
+        return [secrets.token_hex(3) for _ in range(n)]
+
+    def _parse_marked_reply(self, reply: str) -> List[Tuple[str, str]]:
+        """(marker, text) pairs in reply order. Deliberately preserves duplicates
+        and doesn't dedupe — _validate_marked_mapping decides what's fatal."""
+        pairs: List[Tuple[str, str]] = []
+        for line in reply.splitlines():
+            m = _MARKER_LINE_RE.match(line)
+            if m:
+                pairs.append((m.group(1), m.group(2).strip()))
+        return pairs
+
+    def _validate_marked_mapping(
+        self, markers: List[str], pairs: List[Tuple[str, str]]
+    ) -> Optional[Dict[str, str]]:
+        """Returns marker -> text ONLY if every sent marker comes back exactly
+        once. Returns None on ANY mismatch (missing, duplicated, extra, or
+        unrecognized marker) — the caller must treat None as a hard failure,
+        not a signal to fall back to a partial/best-effort zip."""
+        if len(pairs) != len(markers):
+            return None
+        seen: Dict[str, str] = {}
+        marker_set = set(markers)
+        for mk, text in pairs:
+            if mk not in marker_set or mk in seen:
+                return None
+            seen[mk] = text
+        if set(seen.keys()) != marker_set:
+            return None
+        return seen
+
     async def _translate_segments_claude(
         self,
         segments: List[Dict],
@@ -596,10 +647,11 @@ class TranslationService:
             end = float(seg.get("end", start))
             return f"{round(max(0.3, end - start), 1)}s"
 
-        numbered_lines = "\n".join(
-            f"{i+1}. ({_slot(segments[i])}) {p}"
-            for i, p in enumerate(protected)
-        )
+        def _build_marked_lines(markers: List[str]) -> str:
+            return "\n".join(
+                f"[[SEG-{markers[i]}]] ({_slot(segments[i])}) {p}"
+                for i, p in enumerate(protected)
+            )
 
         # Literal translation system prompt — does NOT use DUBBING_SYSTEM_PROMPT because
         # that prompt instructs the model to "prefer short conversational English" and
@@ -613,9 +665,13 @@ class TranslationService:
             "  Example: '神秘' = 'secretive' — do NOT change it to 'mysterious'.\n"
             "- Do NOT paraphrase, adapt, or rewrite for 'naturalness'.\n"
             "- Do NOT add, remove, or combine any words beyond what is needed to form a grammatical sentence.\n"
-            "- Do NOT merge two numbered lines into one answer.\n"
+            "- Each input line starts with a marker like [[SEG-a3f9c2]]. Your answer for that\n"
+            "  line MUST start with the EXACT SAME marker, unchanged, followed by your translation.\n"
+            "  Answer EVERY marker exactly once, one per output line. NEVER merge two markers'\n"
+            "  content into one answer line, NEVER skip a marker, NEVER invent a marker that\n"
+            "  wasn't in the input.\n"
             "- Do NOT prefix lines with speaker names (e.g. NEVER write 'Ip Man: ...').\n"
-            "- Do NOT echo the timing value (e.g. '(1.2s)') in your answer.\n"
+            "- Do NOT echo the timing value (e.g. '(1.2s)') in your answer — but DO echo the marker.\n"
             "- XGLO###X and XFUZ###X tokens (e.g. XGLO135X, XFUZ002X) are glossary placeholders.\n"
             "  Preserve them CHARACTER-FOR-CHARACTER. Do NOT rename, reformat, or convert them.\n"
             "  WRONG: ENTITY:135  RIGHT: XGLO135X\n"
@@ -709,7 +765,7 @@ class TranslationService:
         system_prompt_parts.append("- These are SPOKEN Cantonese martial arts film dialogue lines.")
         system_prompt_parts.append("- Each line has a timing budget (Xs) — choose words that fit naturally in that time.")
         system_prompt_parts.append("- Short exclamations must stay short (1-3 syllables).")
-        system_prompt_parts.append("- NEVER combine two numbered lines into one answer.")
+        system_prompt_parts.append("- NEVER combine two [[SEG-...]] marked lines into one answer — answer each marker separately, even short ones.")
         system_prompt_parts.append("- Do NOT echo or repeat the timing value (Xs) in your answer.")
         system_prompt_parts.append("- Do NOT prefix with speaker names (e.g. NEVER 'Ip Man: ...').")
         system_prompt_parts.append("- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.")
@@ -727,15 +783,46 @@ class TranslationService:
 
         system_prompt = "\n".join(system_prompt_parts)
 
-        user_prompt = (
-            f"Translate these spoken {lang_name} dialogue lines to {target_name} word-for-word.\n\n"
-            f"Rules:\n"
-            f"- Translate LITERALLY. Do NOT substitute synonyms, paraphrase, or rewrite for 'naturalness'.\n"
-            f"- Keep the exact meaning of each word. 'Secretive' must stay 'secretive', not 'mysterious'.\n"
-            f"- Preserve every line. Do NOT drop, merge, or skip any numbered line.\n"
-            f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
-            f"{numbered_lines}"
-        )
+        def _build_user_prompt(marked_lines: str) -> str:
+            return (
+                f"Translate these spoken {lang_name} dialogue lines to {target_name} word-for-word.\n\n"
+                f"Rules:\n"
+                f"- Translate LITERALLY. Do NOT substitute synonyms, paraphrase, or rewrite for 'naturalness'.\n"
+                f"- Keep the exact meaning of each word. 'Secretive' must stay 'secretive', not 'mysterious'.\n"
+                f"- Preserve every line. Do NOT drop, merge, or skip any [[SEG-...]] marked line.\n"
+                f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
+                f"{marked_lines}"
+            )
+
+        async def _send_and_validate(markers: List[str]) -> Optional[Dict[str, str]]:
+            payload = {
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 8192,
+                "temperature": 0.3,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": _build_user_prompt(_build_marked_lines(markers))}],
+            }
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            }
+            response = await asyncio.to_thread(
+                lambda: httpx.post(
+                    "https://api.anthropic.com/v1/messages",
+                    json=payload, headers=headers, timeout=60.0,
+                )
+            )
+            if response.status_code != 200:
+                logger.warning(
+                    f"[TRANSLATE] Claude failed: {response.status_code} "
+                    f"{response.text[:200]}"
+                )
+                return None
+            data = response.json()
+            reply = data["content"][0]["text"].strip()
+            pairs = self._parse_marked_reply(reply)
+            return self._validate_marked_mapping(markers, pairs)
 
         try:
             logger.info(
@@ -743,68 +830,53 @@ class TranslationService:
                 f"{lang_name} -> {target_name} via Anthropic API"
             )
 
-            payload = {
-                "model": "claude-sonnet-4-6",
-                "max_tokens": 8192,
-                "temperature": 0.3,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": user_prompt}],
-            }
+            markers = self._generate_line_markers(len(protected))
+            marker_map = await _send_and_validate(markers)
 
-            headers = {
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            }
-
-            response = await asyncio.to_thread(
-                lambda: httpx.post(
-                    "https://api.anthropic.com/v1/messages",
-                    json=payload, headers=headers, timeout=60.0,
-                )
-            )
-
-            if response.status_code != 200:
+            if marker_map is None:
                 logger.warning(
-                    f"[TRANSLATE] Claude failed: {response.status_code} "
-                    f"{response.text[:200]}"
+                    f"[TRANSLATE-ZIP-MISMATCH] Claude's reply markers didn't validate "
+                    f"1:1 against the {len(markers)} segments sent (missing, duplicated, "
+                    f"or merged line) — rejecting this mapping rather than risk a silently "
+                    f"desynced text/timing zip. Retrying once with fresh markers."
                 )
-                return None
+                markers = self._generate_line_markers(len(protected))
+                marker_map = await _send_and_validate(markers)
 
-            data = response.json()
-            reply = data["content"][0]["text"].strip()
-
-            gpt_lines = re.findall(r"^\d+\.\s*(.+)$", reply, re.MULTILINE)
-
-            if len(gpt_lines) < len(segments):
+            if marker_map is None:
                 logger.warning(
-                    f"[TRANSLATE] Claude returned {len(gpt_lines)} lines "
-                    f"for {len(segments)} segments — padding with originals"
+                    f"[TRANSLATE-ZIP-FALLBACK] Retry also failed validation for this "
+                    f"{len(segments)}-segment batch — falling back to one Claude call "
+                    f"per segment (slower, but a single-segment batch has zero merge "
+                    f"risk by construction, so it's guaranteed aligned)."
                 )
+                result: List[Dict] = []
+                for i, seg in enumerate(segments):
+                    single = await self._translate_segments_claude(
+                        [seg], target_language, source_language, character_profiles, velma_context
+                    )
+                    if single is None:
+                        logger.error(
+                            f"[TRANSLATE-ZIP-FALLBACK] seg {i} individual Claude call "
+                            f"also failed — keeping original text untranslated"
+                        )
+                        result.append({**seg, "original_text": seg.get("text", ""), "text": seg.get("text", "")})
+                    else:
+                        result.extend(single)
+                return result
 
             result: List[Dict] = []
             changed = 0
-            retry_indices: List[int] = []
             for i, seg in enumerate(segments):
-                if i < len(gpt_lines):
-                    raw = gpt_lines[i]
-                    # Restore protected entities first, then fix hallucinations, then glossary
-                    raw = restore_entities(raw, entity_replacements_per_seg[i])
-                    raw = fix_translation_names(raw)
-                    final = self._apply_glossary_post(raw, replacements_per_seg[i])
-                    final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
-                    for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
-                    if raw.strip() != protected[i].strip():
-                        changed += 1
-                else:
-                    # Claude returned fewer lines than segments — mark for retry
-                    # rather than padding with raw CJK (which would go to TTS verbatim)
-                    raw = restore_entities(protected[i], entity_replacements_per_seg[i])
-                    raw = fix_translation_names(raw)
-                    final = self._apply_glossary_post(
-                        raw, replacements_per_seg[i]
-                    )
-                    retry_indices.append(i)
+                raw = marker_map[markers[i]]
+                # Restore protected entities first, then fix hallucinations, then glossary
+                raw = restore_entities(raw, entity_replacements_per_seg[i])
+                raw = fix_translation_names(raw)
+                final = self._apply_glossary_post(raw, replacements_per_seg[i])
+                final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
+                for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
+                if raw.strip() != protected[i].strip():
+                    changed += 1
                 result.append({
                     **seg, "original_text": seg.get("text", ""), "text": final,
                 })
@@ -812,8 +884,9 @@ class TranslationService:
             # CJK leak guard — flag any segment that still contains CJK after translation.
             # This catches cases where Claude echoed the source instead of translating it.
             _cjk_leak_re = re.compile(r'[一-鿿぀-ゟ゠-ヿ]')
+            retry_indices: List[int] = []
             for i, seg_result in enumerate(result):
-                if i not in retry_indices and _cjk_leak_re.search(seg_result.get("text", "")):
+                if _cjk_leak_re.search(seg_result.get("text", "")):
                     logger.warning(
                         f"[TRANSLATE] CJK leak in seg {i}: '{seg_result['text'][:60]}' — queuing retry"
                     )
@@ -917,10 +990,11 @@ class TranslationService:
             dur = round(max(0.3, end - start), 1)
             return f"{dur}s"
 
-        numbered_lines = "\n".join(
-            f"{i+1}. ({_slot(segments[i])}) {p}"
-            for i, p in enumerate(protected)
-        )
+        def _build_marked_lines(markers: List[str]) -> str:
+            return "\n".join(
+                f"[[SEG-{markers[i]}]] ({_slot(segments[i])}) {p}"
+                for i, p in enumerate(protected)
+            )
 
         # Build centralized system prompt from policy layer
         system_prompt_parts = [DUBBING_SYSTEM_PROMPT]
@@ -966,7 +1040,7 @@ class TranslationService:
         system_prompt_parts.append("- These are SPOKEN Cantonese martial arts film dialogue lines.")
         system_prompt_parts.append("- Each line has a timing budget (Xs) — choose words that fit naturally in that time.")
         system_prompt_parts.append("- Short exclamations must stay short (1-3 syllables).")
-        system_prompt_parts.append("- NEVER combine two numbered lines into one answer.")
+        system_prompt_parts.append("- NEVER combine two [[SEG-...]] marked lines into one answer — answer each marker separately, even short ones.")
         system_prompt_parts.append("- Do NOT echo or repeat the timing value (Xs) in your answer.")
         system_prompt_parts.append("- Do NOT prefix with speaker names (e.g. NEVER 'Ip Man: ...').")
         system_prompt_parts.append("- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.")
@@ -984,90 +1058,106 @@ class TranslationService:
 
         system_prompt = "\n".join(system_prompt_parts)
 
-        user_prompt = (
-            f"Translate these spoken {lang_name} dialogue lines to natural {target_name} for voice actors.\n\n"
-            f"Preserve meaning, emotion, and character voice. "
-            f"Use colloquial spoken English — not formal or written style.\n\n"
-            f"{numbered_lines}"
-        )
+        def _build_user_prompt(marked_lines: str) -> str:
+            return (
+                f"Translate these spoken {lang_name} dialogue lines to natural {target_name} for voice actors.\n\n"
+                f"Preserve meaning, emotion, and character voice. "
+                f"Use colloquial spoken English — not formal or written style.\n\n"
+                f"{marked_lines}"
+            )
 
-        try:
-            if use_azure:
-                api_version = "2024-06-01"
-                url = (
-                    f"{azure_endpoint}/openai/deployments/{azure_deployment}"
-                    f"/chat/completions?api-version={api_version}"
-                )
-                headers = {"api-key": azure_key, "Content-Type": "application/json"}
-            else:
-                url = "https://api.openai.com/v1/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {openai_key}",
-                    "Content-Type": "application/json",
-                }
+        if use_azure:
+            api_version = "2024-06-01"
+            url = (
+                f"{azure_endpoint}/openai/deployments/{azure_deployment}"
+                f"/chat/completions?api-version={api_version}"
+            )
+            headers = {"api-key": azure_key, "Content-Type": "application/json"}
+        else:
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {openai_key}",
+                "Content-Type": "application/json",
+            }
 
+        async def _send_and_validate(markers: List[str]) -> Optional[Dict[str, str]]:
             payload = {
                 "messages": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": _build_user_prompt(_build_marked_lines(markers))},
                 ],
                 "temperature": 0.3,
                 "max_tokens": 8192,
             }
             if use_openai:
                 payload["model"] = "gpt-4o"
-
-            logger.info(
-                f"[TRANSLATE] GPT-4 batch: {len(segments)} segments, "
-                f"{lang_name} -> {target_name} via {'Azure OpenAI' if use_azure else 'OpenAI'}"
-            )
-
             response = await asyncio.to_thread(
                 lambda: httpx.post(url, json=payload, headers=headers, timeout=60.0)
             )
-
             if response.status_code != 200:
                 logger.warning(
                     f"[TRANSLATE] GPT-4 failed: {response.status_code} "
                     f"{response.text[:200]}"
                 )
                 return None
-
             data = response.json()
             reply = data["choices"][0]["message"]["content"].strip()
+            pairs = self._parse_marked_reply(reply)
+            return self._validate_marked_mapping(markers, pairs)
 
-            # Parse numbered lines from GPT response
-            import re
-            gpt_lines = re.findall(r"^\d+\.\s*(.+)$", reply, re.MULTILINE)
+        try:
+            logger.info(
+                f"[TRANSLATE] GPT-4 batch: {len(segments)} segments, "
+                f"{lang_name} -> {target_name} via {'Azure OpenAI' if use_azure else 'OpenAI'}"
+            )
 
-            if len(gpt_lines) < len(segments):
+            markers = self._generate_line_markers(len(protected))
+            marker_map = await _send_and_validate(markers)
+
+            if marker_map is None:
                 logger.warning(
-                    f"[TRANSLATE] GPT-4 returned {len(gpt_lines)} lines "
-                    f"for {len(segments)} segments — retrying with stricter prompt"
+                    f"[TRANSLATE-ZIP-MISMATCH] GPT-4's reply markers didn't validate "
+                    f"1:1 against the {len(markers)} segments sent — rejecting this "
+                    f"mapping rather than risk a silently desynced text/timing zip. "
+                    f"Retrying once with fresh markers."
                 )
-                # If the count is badly off (>20% missing), fail and let fallback handle it
-                if len(gpt_lines) < len(segments) * 0.8:
-                    return None
+                markers = self._generate_line_markers(len(protected))
+                marker_map = await _send_and_validate(markers)
+
+            if marker_map is None:
+                logger.warning(
+                    f"[TRANSLATE-ZIP-FALLBACK] Retry also failed validation for this "
+                    f"{len(segments)}-segment batch — falling back to one GPT-4 call "
+                    f"per segment (slower, but a single-segment batch has zero merge "
+                    f"risk by construction, so it's guaranteed aligned)."
+                )
+                result: List[Dict] = []
+                for i, seg in enumerate(segments):
+                    single = await self._translate_segments_gpt(
+                        [seg], target_language, source_language, character_profiles
+                    )
+                    if single is None:
+                        logger.error(
+                            f"[TRANSLATE-ZIP-FALLBACK] seg {i} individual GPT-4 call "
+                            f"also failed — keeping original text untranslated"
+                        )
+                        result.append({**seg, "original_text": seg.get("text", ""), "text": seg.get("text", "")})
+                    else:
+                        result.extend(single)
+                return result
 
             result: List[Dict] = []
             changed = 0
             for i, seg in enumerate(segments):
-                if i < len(gpt_lines):
-                    raw = gpt_lines[i]
-                    # Restore protected entities first, then fix hallucinations, then glossary
-                    raw = restore_entities(raw, entity_replacements_per_seg[i])
-                    raw = fix_translation_names(raw)
-                    final = self._apply_glossary_post(raw, replacements_per_seg[i])
-                    final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
-                    for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
-                    if raw.strip() != protected[i].strip():
-                        changed += 1
-                else:
-                    raw = restore_entities(protected[i], entity_replacements_per_seg[i])
-                    raw = fix_translation_names(raw)
-                    final = self._apply_glossary_post(
-                        raw, replacements_per_seg[i]
-                    )
+                raw = marker_map[markers[i]]
+                # Restore protected entities first, then fix hallucinations, then glossary
+                raw = restore_entities(raw, entity_replacements_per_seg[i])
+                raw = fix_translation_names(raw)
+                final = self._apply_glossary_post(raw, replacements_per_seg[i])
+                final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
+                for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
+                if raw.strip() != protected[i].strip():
+                    changed += 1
                 result.append({
                     **seg,
                     "original_text": seg.get("text", ""),

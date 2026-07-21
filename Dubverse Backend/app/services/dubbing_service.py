@@ -1633,40 +1633,71 @@ class DubbingService:
     
     def _get_audio_duration(self, audio_path: str) -> float:
         """
-        Return duration in seconds without spawning a subprocess.
+        Return duration in seconds.
 
-        Strategy (fastest first):
-        1. WAV/FLAC/OGG/AIFF  — soundfile reads the header in pure Python (~0ms).
-        2. MP3                 — scan MPEG frame headers in pure Python (~1-5ms).
-        3. Fallback            — ffprobe subprocess (original behaviour).
+        Strategy (correct-and-fast first):
+        1. soundfile.info() — header read, no decode, no subprocess. With
+           libsndfile >= 1.1 this covers MP3 too and, crucially, reports the
+           TRUE duration of variable-bitrate MP3s.
+        2. ffprobe subprocess — correct for any format soundfile can't open.
+        3. Pure-Python CBR frame estimate — LAST RESORT ONLY, logged loudly.
+
+        History (2026-07-21): MP3 previously went straight to the pure-Python
+        frame scan (_mp3_duration_fast), which assumes CONSTANT bitrate and
+        derives duration from (file_size * 8 / first_frame_bitrate). Fish
+        Audio emits VARIABLE-bitrate MP3, so that under-reported every clip to
+        ~60% of its real length (verified: 1.411s stored vs 2.352s real). That
+        wrong duration then drove the slot-fit and the frontend auto-shrink to
+        pull each segment's slot down to ~60% of its audio, cutting off the end
+        of every segment on rebuild. Never trust a CBR estimate for VBR MP3.
         """
         try:
             ext = os.path.splitext(audio_path)[1].lower()
 
-            # --- soundfile path (lossless / uncompressed formats) ---
-            if ext in (".wav", ".flac", ".ogg", ".aiff", ".aif"):
-                import soundfile as _sf
-                info = _sf.info(audio_path)
-                return float(info.duration)
+            # --- soundfile: correct for WAV/FLAC/OGG/AIFF and (libsndfile>=1.1) MP3,
+            #     including VBR MP3. Header-only, ~0ms. ---
+            if ext in (".wav", ".flac", ".ogg", ".aiff", ".aif", ".mp3"):
+                try:
+                    import soundfile as _sf
+                    info = _sf.info(audio_path)
+                    if info.duration and info.duration > 0:
+                        return float(info.duration)
+                except Exception:
+                    # e.g. older libsndfile without MP3 support — fall through.
+                    pass
 
-            # --- pure-Python MP3 frame scan ---
+            # --- ffprobe: correct for VBR, used when soundfile can't open the file ---
+            try:
+                result = subprocess.run(
+                    [
+                        "ffprobe", "-v", "error",
+                        "-show_entries", "format=duration",
+                        "-of", "json", audio_path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    data = json.loads(result.stdout)
+                    d = float(data["format"]["duration"])
+                    if d > 0:
+                        return d
+            except Exception:
+                pass
+
+            # --- last resort: pure-Python CBR estimate. WRONG for VBR MP3 —
+            #     only reached when neither soundfile nor ffprobe is available. ---
             if ext == ".mp3":
                 dur = self._mp3_duration_fast(audio_path)
                 if dur > 0:
+                    logger.warning(
+                        f"[AUDIO-DUR] soundfile+ffprobe unavailable; falling back to "
+                        f"unreliable CBR estimate for {audio_path}: {dur:.3f}s "
+                        f"(may under-report VBR MP3)"
+                    )
                     return dur
 
-            # --- fallback: ffprobe ---
-            result = subprocess.run(
-                [
-                    "ffprobe", "-v", "error",
-                    "-show_entries", "format=duration",
-                    "-of", "json", audio_path,
-                ],
-                capture_output=True,
-                text=True,
-            )
-            data = json.loads(result.stdout)
-            return float(data["format"]["duration"])
+            return 0.0
 
         except Exception as e:
             logger.error(f"Failed to get audio duration: {e}")
@@ -2259,6 +2290,8 @@ class DubbingService:
             json.dump(payload, f, indent=2, ensure_ascii=False)
         shutil.copy2(path, snapshot_path)
         logger.info(f"[SEGMENTS] Wrote {len(audio_segments)} segments to {path}")
+        from app.services.segment_validation import validate_segments
+        validate_segments(job_id, payload["segments"])
         try:
             from app.services.supabase_client import upsert_segments
             loop = asyncio.get_running_loop()
@@ -2441,6 +2474,7 @@ class DubbingService:
         speed: Optional[float] = None,
         speed_ratio: Optional[float] = None,
         target_duration: Optional[float] = None,
+        sync_offset_ms: Optional[float] = None,
         emotion: Optional[str] = None,
         traits: Optional[List[str]] = None,
         pitch: Optional[int] = None,
@@ -2481,6 +2515,26 @@ class DubbingService:
                 td = float(target_duration)
                 if base_dur > 0 and td > 0:
                     use_speed = base_dur / td
+            except Exception:
+                pass
+
+        # Lip-sync auto-fix: caller sends a signed ms offset (positive = audio leads
+        # video, negative = video leads audio) rather than a precomputed duration,
+        # since the frontend has no reliable current-duration value to derive one
+        # from — this segment's own `duration` field here is the authoritative
+        # source. Slow down (longer duration) when audio leads, speed up when video
+        # leads. Only applies when nothing more explicit (speed/speed_ratio/
+        # target_duration) was already given.
+        if (
+            speed is None and speed_ratio is None and target_duration is None
+            and sync_offset_ms is not None and "duration" in seg
+        ):
+            try:
+                base_dur = float(seg.get("duration") or 0.0)
+                offset_s = float(sync_offset_ms) / 1000.0
+                candidate_duration = base_dur + offset_s
+                if base_dur > 0 and candidate_duration > 0:
+                    use_speed = base_dur / candidate_duration
             except Exception:
                 pass
 
@@ -2642,13 +2696,32 @@ class DubbingService:
                     )
                     if stretched and os.path.exists(stretched_path):
                         final_path = stretched_path
-                    new_end = round(slot_start + target, 3)
-                    seg["end"] = new_end
-                    seg["committed_end_time"] = new_end
-                    logger.info(
-                        f"[REGEN-TOLERANCE] seg {segment_index}: "
-                        f"overlap {overlap:.2f}s {'(forced)' if force_timing else 'within tolerance'}, speed-fit to {target:.2f}s"
-                    )
+                        new_end = round(slot_start + target, 3)
+                        seg["end"] = new_end
+                        seg["committed_end_time"] = new_end
+                        logger.info(
+                            f"[REGEN-TOLERANCE] seg {segment_index}: "
+                            f"overlap {overlap:.2f}s {'(forced)' if force_timing else 'within tolerance'}, speed-fit to {target:.2f}s"
+                        )
+                    else:
+                        # The speed-fit itself failed (ffmpeg error) — do NOT shrink the
+                        # committed window to `target` in this case. Doing so unconditionally
+                        # here used to leave the segment thinking its slot was `target`
+                        # seconds long while `final_path` was still the original, longer,
+                        # un-stretched audio — silently producing audio that overruns its own
+                        # slot with a 200 OK response and no visible error anywhere. Surface
+                        # it as a timing exclusion instead, same as the "genuinely too long"
+                        # branch below, so the user is told to intervene rather than getting
+                        # a silently mismatched result.
+                        seg["timing_exclusion"] = True
+                        seg["timing_audio_duration"] = round(actual_dur, 2)
+                        seg["timing_slot_duration"] = round(available_dur, 2)
+                        seg["timing_overlap"] = round(overlap, 2)
+                        logger.error(
+                            f"[REGEN-TOLERANCE] seg {segment_index}: speed-fit failed "
+                            f"(ffmpeg error) — surfacing as timing exclusion instead of "
+                            f"silently keeping mismatched audio/timing"
+                        )
                 else:
                     # Genuinely too long — reject with exclusion error
                     seg["timing_exclusion"] = True

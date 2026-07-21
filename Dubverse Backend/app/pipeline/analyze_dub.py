@@ -87,7 +87,7 @@ def analyze_dub(
                 original_transcript = json.load(f)
 
         # --- Run all analyses ---
-        analysis["retranscription"] = _retranscribe_dubbed_audio(dubbed_video)
+        analysis["retranscription"] = _retranscribe_dubbed_audio(dubbed_video, lang_norm)
         analysis["timing"] = _compare_timing(timing_data, original_transcript)
         analysis["silences"] = _detect_silences(dubbed_video, original_transcript)
         analysis["speed"] = _detect_speed_anomalies(timing_data)
@@ -179,8 +179,16 @@ def analyze_dub(
 # ---------------------------------------------------------------------------
 
 
-def _retranscribe_dubbed_audio(dubbed_video: Path) -> Dict[str, Any]:
-    """Re-transcribe the dubbed video with Whisper to verify actual spoken content."""
+def _retranscribe_dubbed_audio(dubbed_video: Path, target_language: str = "") -> Dict[str, Any]:
+    """Re-transcribe the dubbed video with Whisper to verify actual spoken content.
+
+    target_language is passed explicitly to Whisper rather than left to
+    auto-detect — the dub's target language is already known, and auto-detect
+    can mis-identify the language of TTS-generated speech (observed: Korean
+    detected for an English dub), producing gibberish transcription and a
+    meaningless near-zero pronunciation_clarity score that has nothing to do
+    with actual pronunciation quality.
+    """
     try:
         # Extract audio from dubbed video
         audio_path = dubbed_video.with_suffix(".wav")
@@ -213,6 +221,7 @@ def _retranscribe_dubbed_audio(dubbed_video: Path) -> Dict[str, Any]:
             audio_data,
             beam_size=5,
             condition_on_previous_text=False,
+            language=(target_language or None),
         )
         segments = [
             {
@@ -610,11 +619,33 @@ def _compute_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
         timing: 10, speed: 10, loudness: 5, silences: 10,
         emotion_variance: 15, emotion_intensity: 10,
         pronunciation_fluency: 10, pronunciation_prosody: 10,
-        translation_accuracy: 15, dialogue_coverage: 5
+        translation_accuracy: 15, dialogue_coverage: 5,
+        pronunciation_clarity: 12, lip_sync: 12, emotion_preservation: 10,
+        gemini_overall: 5
 
     When a service is unavailable, its weights redistribute to remaining metrics.
+
+    IMPORTANT: every component that should count toward the score must be added to
+    `scores` BEFORE the single weighted-average calculation below. lip_sync,
+    emotion_preservation, and gemini_overall used to be computed *after* that
+    calculation, which meant they were displayed in weights_used/component_scores
+    but silently had zero actual effect on the score — e.g. a lip_sync of 29 never
+    dragged a bad dub's grade down. Fixed 2026-07-15.
     """
     scores = {}
+
+    # Provisional retranscription-confidence weight. Confirmed 2026-07-15 against a
+    # real job that a heavy-accent dub produces a genuine low-to-high confidence trend
+    # tracking accent severity across the clip — not just short-utterance ASR noise.
+    # Revisit after observing this across a handful of real dubs with varying accent
+    # severity.
+    PRONUNCIATION_CLARITY_WEIGHT = 12
+
+    # Whisper confidence runs naturally low on brief interjections regardless of actual
+    # clarity, so short lines count at reduced weight rather than being excluded outright
+    # — a genuinely bad short line (e.g. "Hello?" at 7%) should still register as a problem.
+    SHORT_LINE_WORD_THRESHOLD = 2
+    SHORT_LINE_WEIGHT_FACTOR = 0.4
 
     # Base weights — full allocation when all services are available
     weights = {
@@ -628,6 +659,7 @@ def _compute_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
         "pronunciation_prosody": 7,
         "translation_accuracy": 10,
         "dialogue_coverage": 4,
+        "pronunciation_clarity": PRONUNCIATION_CLARITY_WEIGHT,
         "lip_sync": 12,
         "emotion_preservation": 10,
         "gemini_overall": 5,
@@ -707,28 +739,28 @@ def _compute_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
         weights["speed"] += openai_weight // 3
         weights["silences"] += openai_weight - 2 * (openai_weight // 3)
 
-    # Weighted average
-    total_weight = sum(weights.get(k, 0) for k in scores)
-    if total_weight > 0:
-        weighted_score = sum(
-            scores[k] * weights.get(k, 0) for k in scores
-        ) / total_weight
+    # --- Retranscription-based pronunciation clarity (local Whisper, always available) ---
+    retrans = analysis.get("retranscription", {})
+    retrans_segments = retrans.get("segments") or []
+    if retrans.get("status") == "ok" and retrans_segments:
+        weighted_conf_sum = 0.0
+        seg_weight_total = 0.0
+        for seg in retrans_segments:
+            conf_pct = max(0.0, min(100.0, (seg.get("confidence") or 0) * 100))
+            word_count = len((seg.get("text") or "").split())
+            seg_weight = (
+                SHORT_LINE_WEIGHT_FACTOR if word_count <= SHORT_LINE_WORD_THRESHOLD else 1.0
+            )
+            weighted_conf_sum += conf_pct * seg_weight
+            seg_weight_total += seg_weight
+        scores["pronunciation_clarity"] = weighted_conf_sum / seg_weight_total
     else:
-        weighted_score = 50
-
-    score = round(weighted_score)
-
-    # Grade
-    if score >= 90:
-        grade = "A"
-    elif score >= 80:
-        grade = "B"
-    elif score >= 70:
-        grade = "C"
-    elif score >= 60:
-        grade = "D"
-    else:
-        grade = "F"
+        # Retranscription pass didn't run/failed — redistribute weight, don't guess a score.
+        retrans_weight = weights.pop("pronunciation_clarity", 0)
+        if retrans_weight:
+            weights["timing"] += retrans_weight // 3
+            weights["speed"] += retrans_weight // 3
+            weights["silences"] += retrans_weight - 2 * (retrans_weight // 3)
 
     # --- QC Stack scores (optional) ---
     lip_sync = analysis.get("lip_sync", {})
@@ -754,21 +786,52 @@ def _compute_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
     if gemini.get("status") == "ok":
         scores["gemini_overall"] = gemini.get("overall_score", 50)
 
+    # Weighted average — computed once, after every component above (including
+    # lip_sync/emotion_preservation/gemini/pronunciation_clarity) has been added to
+    # `scores`, so every weight in weights_used actually influences the result.
+    total_weight = sum(weights.get(k, 0) for k in scores)
+    if total_weight > 0:
+        weighted_score = sum(
+            scores[k] * weights.get(k, 0) for k in scores
+        ) / total_weight
+    else:
+        weighted_score = 50
+
+    score = round(weighted_score)
+
+    # Grade
+    if score >= 90:
+        grade = "A"
+    elif score >= 80:
+        grade = "B"
+    elif score >= 70:
+        grade = "C"
+    elif score >= 60:
+        grade = "D"
+    else:
+        grade = "F"
+
     # Track which AI services contributed
     services_available = {
         "azure_speech": pronunciation.get("status") == "ok",
         "azure_openai": translation.get("status") == "ok",
         "screenapp": (analysis.get("screenapp_dubbed") or {}).get("status") == "ok",
+        "retranscription": retrans.get("status") == "ok",
         "syncnet": lip_sync.get("status") == "ok",
         "emotion2vec": emotion_pres.get("status") == "ok",
         "gemini": gemini.get("status") == "ok",
         "claude_report": (analysis.get("qc_report") or {}).get("status") == "ok",
     }
 
-    # Use Claude synthesis score as authoritative when available
+    # Use Claude's holistic synthesis score as authoritative when available — but only
+    # the genuine Claude synthesis, not the template fallback. The template only averages
+    # whichever raw sub-scores happen to be available at this point (missing timing/speed/
+    # silences, and giving lip_sync equal weight to emotion), which is cruder than the
+    # properly-weighted pipeline score above and must never override it.
     qc_report = analysis.get("qc_report") or {}
-    synthesis_score = qc_report.get("overall_score") if qc_report.get("status") == "ok" else None
-    synthesis_grade = qc_report.get("overall_grade") if qc_report.get("status") == "ok" else None
+    is_claude_synthesis = qc_report.get("status") == "ok" and qc_report.get("method") == "claude"
+    synthesis_score = qc_report.get("overall_score") if is_claude_synthesis else None
+    synthesis_grade = qc_report.get("overall_grade") if is_claude_synthesis else None
     score_source = "synthesis" if synthesis_score is not None else "pipeline"
 
     return {

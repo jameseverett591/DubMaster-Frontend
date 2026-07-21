@@ -161,6 +161,145 @@ def analyze_lip_sync(
         return {"status": "error", "reason": str(e)}
 
 
+def analyze_segment_lip_sync(
+    original_video_path: str,
+    segment_audio_path: str,
+    seg_start: float,
+    seg_end: float,
+) -> Optional[Dict[str, Any]]:
+    """
+    Verify ONE segment's lip-sync without requiring the full dub to be rebuilt.
+
+    The on-screen mouth movement doesn't change when a segment's dubbed audio
+    is regenerated — only the audio does. So instead of re-analyzing the whole
+    assembled dub video (analyze_lip_sync above, which requires dubbed_{lang}.mp4
+    to reflect every edit), this extracts the mouth-movement signal directly from
+    the ORIGINAL source video for just this segment's time window, and the audio
+    energy envelope directly from the segment's freshly-regenerated audio file,
+    then cross-correlates just those two. Same scoring math as the per-segment
+    path in analyze_lip_sync, scoped down so a single "Fix" can be confirmed
+    without a full rebuild+remux cycle.
+    """
+    if not is_enabled():
+        return None
+    if not os.path.exists(original_video_path):
+        logger.warning(f"[SYNCNET-SEGMENT] Source video not found: {original_video_path}")
+        return None
+    if not os.path.exists(segment_audio_path):
+        logger.warning(f"[SYNCNET-SEGMENT] Segment audio not found: {segment_audio_path}")
+        return None
+    if seg_end <= seg_start:
+        return {"status": "error", "reason": "invalid segment window"}
+
+    try:
+        audio_energy = _extract_audio_energy(segment_audio_path)
+        if audio_energy is None:
+            return {"status": "error", "reason": "audio extraction failed"}
+
+        mouth_movement = _extract_mouth_movement_window(original_video_path, seg_start, seg_end)
+        if mouth_movement is None:
+            return {"status": "error", "reason": "face detection unavailable or window too short"}
+
+        min_len = min(len(audio_energy), len(mouth_movement))
+        if min_len < 5:
+            return {"status": "error", "reason": "insufficient data"}
+
+        audio_energy = _normalize(audio_energy[:min_len])
+        mouth_movement = _normalize(mouth_movement[:min_len])
+
+        fps = 25
+        max_offset_frames = int(0.5 * fps)
+        corr, offset = _cross_correlate(audio_energy, mouth_movement, max_offset_frames)
+        score = max(0, min(100, int((corr + 0.2) / 0.8 * 100)))
+        offset_ms = round(offset / fps * 1000)
+
+        return {
+            "status": "ok",
+            "sync_score": score,
+            "correlation": round(corr, 3),
+            "offset_ms": offset_ms,
+            "severity": "good" if score >= 70 else "fair" if score >= 40 else "poor",
+        }
+    except Exception as e:
+        logger.error(f"[SYNCNET-SEGMENT] Analysis failed: {e}", exc_info=True)
+        return {"status": "error", "reason": str(e)}
+
+
+def _extract_mouth_movement_window(video_path: str, start_s: float, end_s: float) -> Optional[Any]:
+    """Same approach as _extract_mouth_movement, but seeks straight to [start_s, end_s]
+    instead of decoding the whole file — a single-segment check shouldn't have to walk
+    frames it doesn't need, especially since this may run once per Fix click."""
+    try:
+        import cv2
+        import numpy as np
+
+        face_cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        face_cascade = cv2.CascadeClassifier(face_cascade_path)
+        if face_cascade.empty():
+            logger.warning("[SYNCNET-SEGMENT] Face cascade not available")
+            return None
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25
+        start_frame = max(0, int(start_s * fps))
+        end_frame = int(end_s * fps)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+        sample_interval = max(1, int(fps / 25))
+        mouth_signal = []
+        prev_mouth_region = None
+        frame_idx = start_frame
+
+        while frame_idx < end_frame:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            if (frame_idx - start_frame) % sample_interval != 0:
+                frame_idx += 1
+                continue
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)
+            )
+
+            if len(faces) > 0:
+                x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+                mouth_y = y + int(h * 0.65)
+                mouth_h = int(h * 0.35)
+                mouth_region = gray[mouth_y:mouth_y + mouth_h, x:x + w]
+
+                if prev_mouth_region is not None and mouth_region.shape == prev_mouth_region.shape:
+                    diff = np.mean(np.abs(
+                        mouth_region.astype(float) - prev_mouth_region.astype(float)
+                    ))
+                    mouth_signal.append(diff)
+                else:
+                    mouth_signal.append(0.0)
+
+                prev_mouth_region = mouth_region.copy()
+            else:
+                mouth_signal.append(0.0)
+                prev_mouth_region = None
+
+            frame_idx += 1
+
+        cap.release()
+
+        if len(mouth_signal) < 5:
+            return None
+
+        return np.array(mouth_signal, dtype=np.float32)
+
+    except Exception as e:
+        logger.warning(f"[SYNCNET-SEGMENT] Mouth movement window extraction failed: {e}")
+        return None
+
+
 def _extract_audio_energy(video_path: str) -> Optional[Any]:
     """Extract per-frame audio energy from video."""
     try:

@@ -45,7 +45,16 @@ def verify_jwt(token: str) -> str:
 
 
 async def upsert_segments(job_id: str, segments: list) -> None:
-    """Upsert all segments for a job to Supabase. Never raises."""
+    """Upsert all segments for a job to Supabase. Never raises.
+
+    `sequence` stores each segment's stable `transcript_index`, not its current
+    array position. Splits can insert a segment anywhere in the array while
+    giving it a fresh, unrelated transcript_index (see sync_segments in
+    routes.py), so array position drifts from transcript_index over a job's
+    life. Every other segment lookup (regenerate_segment, reset_segment,
+    commit_segment_timing) matches by transcript_index — sequence must mean
+    the same thing, or updates silently land on the wrong Supabase row.
+    """
     try:
         if os.environ.get("PERSIST_JOBS", "1") != "1":
             return
@@ -53,7 +62,7 @@ async def upsert_segments(job_id: str, segments: list) -> None:
         for i, seg in enumerate(segments):
             rows.append({
                 "job_id": job_id,
-                "sequence": i,
+                "sequence": seg.get("transcript_index", i),
                 "speaker": seg.get("speaker", "speaker-1"),
                 "start_time": seg.get("start", 0.0),
                 "end_time": seg.get("end", 0.0),
@@ -145,9 +154,13 @@ async def sync_committed_segments_to_disk(
 
         for row in rows:
             idx = row.get("sequence")
-            if idx is None or idx >= len(segments):
+            if idx is None:
                 continue
-            seg = segments[idx]
+            # sequence == transcript_index (a stable id), not array position —
+            # match by field, not raw list index. See upsert_segments docstring.
+            seg = next((s for s in segments if s.get("transcript_index") == idx), None)
+            if seg is None:
+                continue
 
             # Audio path — convert URL to local disk path
             committed_url = row.get("committed_audio_url")

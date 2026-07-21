@@ -192,11 +192,16 @@ _GLOSSARY_YUE: Dict[str, str] = {
     "咏春叶问": "Wing Chun, Ip Man",
     "好的功夫是不分男女路友": "Good kung fu doesn't discriminate between men and women",
     "好功夫是不會分男女路友的": "Kung fu doesn't discriminate between male and female",
+    # Another Whisper mishearing of the "詠春，葉問" opening exclamation — same
+    # family as "龄春, 燕文" above, confirmed against the correct rendering.
     # 川 alone means "river" and is unsafe as a bare glossary key (would false-match
-    # inside unrelated words like 四川/Sichuan). Scoped to the full address line
-    # instead, matching this file's existing full-phrase-override convention.
-    "喂，川，你慢": "Hey, Wing Chun, wait",
-    "喂，川，你慢。": "Hey, Wing Chun, wait.",
+    # inside unrelated words like 四川/Sichuan), so this is scoped to the full line.
+    # _apply_glossary_pre strips CJK-adjacent commas from the segment text BEFORE
+    # matching (its own collapsing only handles spaces, not punctuation), so a
+    # key with commas never matches — the punctuation-free form is required.
+    "喂川你慢": "Wing Chun, Yip Man!",
+    "喂，川，你慢": "Wing Chun, Yip Man!",
+    "喂，川，你慢。": "Wing Chun, Yip Man!",
 
     # ── "I'll pay" — compensation phrases (moved from translation_service.py's
     # whole-segment-only exact-override table). These are 2+ character phrases,

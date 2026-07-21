@@ -63,7 +63,7 @@ async def _generate_with_claude(
                 "content-type": "application/json",
             },
             json={
-                "model": "claude-sonnet-4-20250514",
+                "model": "claude-sonnet-5",
                 "max_tokens": 4096,
                 "messages": [
                     {"role": "user", "content": prompt}

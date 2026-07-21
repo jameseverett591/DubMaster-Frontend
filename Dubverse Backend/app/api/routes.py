@@ -1,5 +1,5 @@
 from typing import Optional, Dict, List, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import fastapi
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Request, Body
 from fastapi.responses import JSONResponse, FileResponse, Response
@@ -15,6 +15,7 @@ import hashlib
 import traceback
 import subprocess
 import tempfile
+import time
 
 from app.models import (
     UploadResponse,
@@ -185,6 +186,26 @@ async def _rehydrate_job(job_id: str):
         job = await job_manager.get_job(job_id)
         if job and transcript.duration:
             job.video_duration = transcript.duration
+
+        # Restore voice_mapping / traits_mapping — see _persist_job_metadata_field.
+        # These used to be in-memory only and silently reverted to null on every
+        # rehydration; without restoring them here, a fresh backend process would
+        # keep forgetting the user's voice/traits assignments indefinitely.
+        if job:
+            dubbed_dir_for_meta = os.path.join(settings.DUBBED_DIR, job_id)
+            segments_meta_path = os.path.join(dubbed_dir_for_meta, "segments.json")
+            if os.path.exists(segments_meta_path):
+                try:
+                    with open(segments_meta_path, "r", encoding="utf-8") as f:
+                        meta = _json.load(f)
+                    # "in meta", not a truthy check: an explicitly-persisted {} (e.g.
+                    # Clear All Voices) must be restored as empty, not treated as absent.
+                    if "voice_mapping" in meta:
+                        job.voice_mapping = meta["voice_mapping"]
+                    if "traits_mapping" in meta:
+                        job.traits_mapping = meta["traits_mapping"]
+                except Exception as e:
+                    logger.warning(f"Job {job_id}: failed to restore voice/traits mapping: {e}")
 
         # Restore dubbed video URL if a dubbed file exists on disk
         dubbed_dir = os.path.join(settings.DUBBED_DIR, job_id)
@@ -1241,7 +1262,6 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             "Falling back to local transcription."
         )
         try:
-            from app.pipeline.extract_audio import extract_audio
             from app.pipeline.transcribe_cantonese import transcribe_cantonese
 
             prev_lang = os.environ.get("WHISPER_LANGUAGE")
@@ -1369,7 +1389,6 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         # Run local F0 pitch analysis on the uploaded video so child-voice
         # routing and gender-based voice assignment work correctly.
         try:
-            from app.pipeline.extract_audio import extract_audio
             from app.pipeline.classify_speakers import classify_speakers as _classify
 
             logger.info(f"Job {job_id}: speaker_genders empty from GPU — running local F0 classification")
@@ -1655,7 +1674,7 @@ async def process_video_pipeline(job_id: str, video_path: str):
         if is_cloud_enabled() and vocals_path:
             logger.info(f"Job {job_id}: using CLOUD GPU for Whisper transcription")
             transcribe_result = await asyncio.to_thread(
-                cloud_transcribe, vocals_path, whisper_language or "yue", job_id
+                cloud_transcribe, vocals_path, whisper_language, job_id
             )
             if transcribe_result.get("status") != "ok":
                 logger.warning(f"Job {job_id}: cloud transcription failed, falling back to local")
@@ -2679,6 +2698,29 @@ async def delete_job(job_id: str, request: Request):
     return {"message": f"Job {job_id} deleted successfully"}
 
 
+def _persist_job_metadata_field(job_id: str, field: str, value) -> None:
+    """Write a job-level metadata field into segments.json's top-level dict —
+    the one place that's genuinely durable across a backend restart. Job objects
+    like voice_mapping/traits_mapping used to be set ONLY in-memory (job.x = value)
+    with a docstring claiming to "persist" it — but nothing ever wrote it to disk,
+    so it silently reverted to null the moment the job got rehydrated (backend
+    restart, in-memory eviction, etc.). Confirmed real: a user's voice assignments
+    vanished after normal navigation away from and back into the editor, which
+    happened to coincide with a backend restart during the same session.
+    """
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        return
+    try:
+        with open(segments_path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        data[field] = value
+        with open(segments_path, "w", encoding="utf-8") as f:
+            _json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"Job {job_id}: failed to persist {field} to segments.json: {e}")
+
+
 @router.patch("/jobs/{job_id}/voice-mapping", status_code=204)
 async def update_voice_mapping(job_id: str, body: Dict[str, str] = Body(...)):
     """Persist a speaker_id → voice_key mapping for this job."""
@@ -2686,6 +2728,7 @@ async def update_voice_mapping(job_id: str, body: Dict[str, str] = Body(...)):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     job.voice_mapping = body
+    _persist_job_metadata_field(job_id, "voice_mapping", body)
     logger.info(f"[VOICE MAP] Job {job_id} voice mapping updated: {body}")
 
 
@@ -2697,6 +2740,7 @@ async def update_traits_mapping(job_id: str, body: Dict[str, List[str]] = Body(.
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     job.traits_mapping = body
+    _persist_job_metadata_field(job_id, "traits_mapping", body)
     logger.info(f"[TRAITS MAP] Job {job_id} traits mapping updated: {body}")
 
 
@@ -3980,6 +4024,52 @@ async def trigger_analysis(job_id: str, language: str, background_tasks: Backgro
     )
 
 
+@router.post("/analyze-segment/{job_id}/{segment_index}")
+async def analyze_segment(job_id: str, segment_index: int):
+    """Verify a single segment's lip-sync WITHOUT requiring a full video rebuild.
+
+    Analyze_dub's /analysis/{job_id}/{language} endpoint only ever reads
+    dubbed_{lang}.mp4 (the fully assembled video) — a per-segment Fix that
+    only writes segment_NNNN_regen.mp3 has zero effect on that file until a
+    full Rebuild (remix) happens. Re-running the whole-video analysis after a
+    single-segment fix would silently re-score stale, unchanged video content.
+    This runs the same audio/mouth-movement correlation scoped to just this
+    segment: mouth movement straight from the original source video (the
+    on-screen mouth doesn't change when only the dub audio is regenerated),
+    audio energy straight from the segment's freshly-regenerated audio file.
+    """
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+
+    video_path = data.get("video_path")
+    if not video_path:
+        raise HTTPException(status_code=404, detail="Original source video path not recorded for this job")
+
+    seg = next((s for s in data.get("segments", []) if s.get("transcript_index") == segment_index), None)
+    if seg is None:
+        raise HTTPException(status_code=404, detail=f"Segment with transcript_index={segment_index} not found")
+
+    audio_path = seg.get("path")
+    if not audio_path or not os.path.exists(audio_path):
+        raise HTTPException(status_code=404, detail="Segment audio file not found — regenerate it first")
+
+    seg_start = seg.get("committed_start_time")
+    seg_start = float(seg_start) if seg_start is not None else float(seg.get("start_time") or seg.get("start") or 0)
+    seg_end = seg.get("committed_end_time")
+    seg_end = float(seg_end) if seg_end is not None else float(seg.get("end_time") or seg.get("end") or 0)
+
+    from app.services.syncnet_service import analyze_segment_lip_sync
+    result = await asyncio.to_thread(analyze_segment_lip_sync, video_path, audio_path, seg_start, seg_end)
+    if result is None:
+        raise HTTPException(status_code=503, detail="Lip-sync analysis unavailable (OpenCV not installed) or source video missing")
+
+    return result
+
+
 @router.get("/analysis/{job_id}/{language}")
 async def get_analysis(job_id: str, language: str):
     """Get quality analysis results. 202 if running, 200 if complete, 404 if not triggered."""
@@ -4717,9 +4807,19 @@ async def retranslate_job(job_id: str, request: Request):
                     continue
                 base = _group[0]
                 if len(sub_segs) == 1 and not sub_segs[0].get("auto_split"):
-                    # No split — just update text in place, dropping any stale
-                    # siblings this group may still be carrying from a prior split.
+                    # No split — update text AND timing in place, dropping any
+                    # stale siblings this group may still be carrying from a
+                    # prior split. Timing must be refreshed too, not just text:
+                    # if an earlier retranslate/manual transcript edit shifted
+                    # where this utterance falls (e.g. splitting an earlier
+                    # segment shifted every later transcript_index by one),
+                    # the disk entry's old start/end no longer corresponds to
+                    # the utterance this text describes — only updating text
+                    # would silently re-desync text from timing again, exactly
+                    # the bug this whole rebuild exists to prevent.
                     base["text"] = sub_segs[0].get("text", base.get("text", ""))
+                    base["start"] = sub_segs[0].get("start", base.get("start"))
+                    base["end"] = sub_segs[0].get("end", base.get("end"))
                     base["original_text"] = base.get("original_text") or base["text"]
                     new_disk_segs.append(base)
                 else:
@@ -5026,15 +5126,26 @@ async def get_segments_snapshot(job_id: str):
 
 @router.patch("/segment/commit/{job_id}/{index}")
 async def commit_segment_timing(job_id: str, index: int, body: dict, request: Request):
-    """Save committed timing and audio URL for a single segment to Supabase and segments.json."""
+    """Save committed timing and audio URL for a single segment to Supabase and segments.json.
+
+    `index` is the segment's transcript_index, a stable id — NOT its current array
+    position. A split can insert a segment anywhere in the array while giving it a
+    transcript_index far outside its neighbors (see sync_segments below), so array
+    position drifts from transcript_index over a job's life. Matching by raw
+    `segs[index]` here used to silently write these fields onto whatever segment
+    happened to sit at that array slot, not the one the user actually edited.
+    """
     from app.services.supabase_client import supabase_writer
     committed_start_time = body.get("committed_start_time")
     committed_end_time = body.get("committed_end_time")
     committed_audio_url = body.get("committed_audio_url")
     committed_adapted_text = body.get("committed_adapted_text")
+    committed_voice_id = body.get("committed_voice_id")
+    committed_speed = body.get("committed_speed")
+    committed_emotion = body.get("committed_emotion")
     flag_status = body.get("flag_status")
     correction_type = body.get("correction_type")
-    # Update Supabase
+    # Update Supabase — sequence stores transcript_index (see upsert_segments docstring)
     update_data = {"sequence": index}
     if committed_start_time is not None:
         update_data["committed_start_time"] = committed_start_time
@@ -5044,6 +5155,12 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         update_data["committed_audio_url"] = committed_audio_url
     if committed_adapted_text is not None:
         update_data["committed_adapted_text"] = committed_adapted_text
+    if committed_voice_id is not None:
+        update_data["committed_voice_id"] = committed_voice_id
+    if committed_speed is not None:
+        update_data["committed_speed"] = committed_speed
+    if committed_emotion is not None:
+        update_data["committed_emotion"] = committed_emotion
     if flag_status is not None:
         update_data["flag_status"] = flag_status
     if "correction_type" in body:
@@ -5052,28 +5169,40 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         supabase_writer.table("segments").update(update_data).eq("job_id", job_id).eq("sequence", index).execute()
     except Exception as e:
         logger.warning(f"Supabase segment commit failed: {e}")
-    # Also update segments.json on disk
+    # Also update segments.json on disk — matched by transcript_index, not array position.
+    # This is the authoritative copy: regenerate_segment and reset_segment both read
+    # from disk, not Supabase, so a Supabase-only write (e.g. if a column above doesn't
+    # exist yet) must never be mistaken for a successful save.
     segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
-    if os.path.exists(segments_path):
-        with open(segments_path, "r", encoding="utf-8") as f:
-            data = _json.load(f)
-        segs = data.get("segments", [])
-        if index < len(segs):
-            if committed_start_time is not None:
-                segs[index]["committed_start_time"] = committed_start_time
-            if committed_end_time is not None:
-                segs[index]["committed_end_time"] = committed_end_time
-            if committed_audio_url is not None:
-                segs[index]["committed_audio_url"] = committed_audio_url
-            if committed_adapted_text is not None:
-                segs[index]["committed_adapted_text"] = committed_adapted_text
-            if flag_status is not None:
-                segs[index]["flag_status"] = flag_status
-            if "correction_type" in body:
-                segs[index]["correction_type"] = correction_type
-            data["segments"] = segs
-            with open(segments_path, "w", encoding="utf-8") as f:
-                _json.dump(data, f, indent=2, ensure_ascii=False)
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    segs = data.get("segments", [])
+    seg = next((s for s in segs if s.get("transcript_index") == index), None)
+    if seg is None:
+        raise HTTPException(status_code=404, detail=f"Segment {index} not found")
+    if committed_start_time is not None:
+        seg["committed_start_time"] = committed_start_time
+    if committed_end_time is not None:
+        seg["committed_end_time"] = committed_end_time
+    if committed_audio_url is not None:
+        seg["committed_audio_url"] = committed_audio_url
+    if committed_adapted_text is not None:
+        seg["committed_adapted_text"] = committed_adapted_text
+    if committed_voice_id is not None:
+        seg["committed_voice_id"] = committed_voice_id
+    if committed_speed is not None:
+        seg["committed_speed"] = committed_speed
+    if committed_emotion is not None:
+        seg["committed_emotion"] = committed_emotion
+    if flag_status is not None:
+        seg["flag_status"] = flag_status
+    if "correction_type" in body:
+        seg["correction_type"] = correction_type
+    data["segments"] = segs
+    with open(segments_path, "w", encoding="utf-8") as f:
+        _json.dump(data, f, indent=2, ensure_ascii=False)
     return {"status": "ok", "job_id": job_id, "index": index}
 
 
@@ -5104,6 +5233,23 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest):
         raise HTTPException(
             status_code=422,
             detail=f"Sync rejected: incoming {len(body.segments)} segments vs {len(existing_segs)} existing — looks like a partial array"
+        )
+
+    # Safety: reject if the incoming payload has a transcript_index appearing more
+    # than once. The merge loop below matches each incoming segment onto the
+    # existing one sharing its transcript_index and appends a fresh merged record
+    # for every incoming entry — if the same transcript_index shows up twice, this
+    # silently produces two separate output segments with the identical identity,
+    # each merged from the same stale base. That's a confirmed real corruption
+    # (duplicate transcript_index found live in production data), not a
+    # theoretical risk — reject outright rather than let it happen again.
+    incoming_tis = [s.get("transcript_index") for s in body.segments if s.get("transcript_index") is not None]
+    dup_tis = {ti for ti in incoming_tis if incoming_tis.count(ti) > 1}
+    if dup_tis:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Sync rejected: incoming payload has duplicate transcript_index value(s) {sorted(dup_tis)} — "
+                   f"each must appear at most once"
         )
 
     existing_by_ti = {s["transcript_index"]: s for s in existing_segs if "transcript_index" in s}
@@ -5149,6 +5295,9 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest):
 
     with open(segments_path, "w", encoding="utf-8") as f:
         _json.dump(data, f, indent=2, ensure_ascii=False)
+
+    from app.services.segment_validation import validate_segments
+    validate_segments(job_id, result)
 
     response_segments = []
     for seg in result:
@@ -5221,6 +5370,7 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
         speed = body.speed
         speed_ratio = None
         target_duration = None
+        sync_offset_ms = None
 
         # Resolve canonical voice key (e.g. "male-1") to Fish Audio reference_id.
         # Fall through to body.voice_key directly if unresolved — it may already
@@ -5236,6 +5386,7 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
                 speed = body.voice_params.speed
             speed_ratio = body.voice_params.speed_ratio
             target_duration = body.voice_params.target_duration
+            sync_offset_ms = body.voice_params.sync_offset_ms
 
         seg = await dubbing_service.regenerate_segment(
             job_id=job_id,
@@ -5244,6 +5395,7 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
             speed=speed,
             speed_ratio=speed_ratio,
             target_duration=target_duration,
+            sync_offset_ms=sync_offset_ms,
             emotion=body.emotion,
             traits=body.traits,
             pitch=body.pitch,
@@ -5264,20 +5416,59 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
 
 
 class AskAIRequest(BaseModel):
-    prompt: str
+    prompt: str = Field(..., max_length=2000)
     model: str = "sonnet"
-    source_text: str = ""
-    dubbed_text: str = ""
+    source_text: str = Field("", max_length=4000)
+    dubbed_text: str = Field("", max_length=4000)
     source_language: str = "zh"
     target_language: str = "en"
     speaker_label: str = ""
     speaker_gender: str = "male"
 
 
+# Simple in-memory per-user sliding-window rate limit for /ask-ai — this endpoint
+# makes a real, unmetered call to a paid external LLM API on every request, so it
+# needs a floor even without a shared cache/Redis in this deployment.
+_ASK_AI_RATE_LIMIT_MAX = 10
+_ASK_AI_RATE_LIMIT_WINDOW_SECONDS = 60
+_ask_ai_request_times: Dict[str, list] = {}
+
+def _check_ask_ai_rate_limit(user_id: str) -> None:
+    now = time.monotonic()
+    window_start = now - _ASK_AI_RATE_LIMIT_WINDOW_SECONDS
+    times = [t for t in _ask_ai_request_times.get(user_id, []) if t > window_start]
+    if len(times) >= _ASK_AI_RATE_LIMIT_MAX:
+        raise HTTPException(status_code=429, detail="Too many Ask AI requests — please wait a moment and try again")
+    times.append(now)
+    _ask_ai_request_times[user_id] = times
+
+
 @router.post("/ask-ai")
-async def ask_ai(body: AskAIRequest):
-    """Ask Claude to improve a dubbed segment based on a user prompt."""
+async def ask_ai(body: AskAIRequest, request: Request):
+    """Ask Claude to improve a dubbed segment based on a user prompt.
+
+    Premium/professional only (matches FEATURE_MATRIX.askAI in the frontend's
+    plan-features.ts) — mirrors the auth pattern used by every other endpoint
+    in this file (see /emotional-library, /ei/curves).
+    """
     import httpx, re as _re
+
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+
+    from app.services.supabase_client import supabase_writer
+    sub_result = supabase_writer.table("subscriptions") \
+        .select("plan_type") \
+        .eq("user_id", user_id) \
+        .in_("status", ["active", "trialing"]) \
+        .limit(1) \
+        .execute()
+    plan_type = sub_result.data[0]["plan_type"] if sub_result.data else None
+    if plan_type not in ("premium", "professional"):
+        raise HTTPException(status_code=403, detail="Ask AI requires a Premium or Professional plan")
+
+    _check_ask_ai_rate_limit(user_id)
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
@@ -5336,6 +5527,106 @@ Respond with JSON: {{"suggestion": "<improved dubbed text>", "explanation": "<on
         return {"status": "ok", "suggestion": text.strip(), "explanation": ""}
     except Exception as e:
         logger.error(f"[ASK-AI] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Ask AI Chat (general help — separate feature from /ask-ai above) ───────
+
+_ASK_AI_CHAT_KNOWLEDGE_PATH = os.path.join(os.path.dirname(__file__), "..", "knowledge", "dubmaster_help.md")
+try:
+    with open(_ASK_AI_CHAT_KNOWLEDGE_PATH, "r", encoding="utf-8") as _f:
+        _ASK_AI_CHAT_KNOWLEDGE = _f.read()
+except FileNotFoundError:
+    logger.warning("Ask AI Chat knowledge doc not found at %s", _ASK_AI_CHAT_KNOWLEDGE_PATH)
+    _ASK_AI_CHAT_KNOWLEDGE = ""
+
+_ASK_AI_CHAT_SYSTEM_PROMPT = (
+    "You are DubMaster's in-app help assistant. Answer only using the reference "
+    "material below — it is the ground truth for what DubMaster's features actually "
+    "do today. If a question isn't covered by it, say you're not sure rather than "
+    "guessing or inventing behavior. Keep answers short and practical. Do not discuss "
+    "topics unrelated to using DubMaster.\n\n"
+    "--- DubMaster reference material ---\n"
+    f"{_ASK_AI_CHAT_KNOWLEDGE}"
+)
+
+
+class AskAIChatMessage(BaseModel):
+    role: str
+    # Assistant replies are free-form, multi-paragraph help answers — this cap must
+    # be generous enough to hold the assistant's own prior turn when it's echoed
+    # back as history on the next request, not just a single short user message.
+    content: str = Field(..., max_length=6000)
+
+
+class AskAIChatRequest(BaseModel):
+    message: str = Field(..., max_length=1000)
+    history: List[AskAIChatMessage] = Field(default_factory=list, max_length=20)
+
+
+# Separate in-memory rate limit from /ask-ai — different feature, different usage
+# pattern (a help chat is naturally more chatty/turn-heavy than a one-shot rewrite).
+_ASK_AI_CHAT_RATE_LIMIT_MAX = 15
+_ASK_AI_CHAT_RATE_LIMIT_WINDOW_SECONDS = 60
+_ask_ai_chat_request_times: Dict[str, list] = {}
+
+def _check_ask_ai_chat_rate_limit(user_id: str) -> None:
+    now = time.monotonic()
+    window_start = now - _ASK_AI_CHAT_RATE_LIMIT_WINDOW_SECONDS
+    times = [t for t in _ask_ai_chat_request_times.get(user_id, []) if t > window_start]
+    if len(times) >= _ASK_AI_CHAT_RATE_LIMIT_MAX:
+        raise HTTPException(status_code=429, detail="Too many messages — please wait a moment and try again")
+    times.append(now)
+    _ask_ai_chat_request_times[user_id] = times
+
+
+@router.post("/ask-ai-chat")
+async def ask_ai_chat(body: AskAIChatRequest, request: Request):
+    """General "how do I use DubMaster" help chat. Separate from /ask-ai (which
+    rewrites a segment's dialogue text) — available to all plan tiers, no tier
+    check, but still requires login so this doesn't repeat the same unmetered/
+    unauthenticated exposure /ask-ai had before its fix.
+    """
+    import httpx
+
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+
+    _check_ask_ai_chat_rate_limit(user_id)
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="AI not configured")
+
+    messages = [{"role": m.role, "content": m.content} for m in body.history]
+    messages.append({"role": "user", "content": body.message})
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-sonnet-4-6",
+                    "max_tokens": 400,
+                    "system": _ASK_AI_CHAT_SYSTEM_PROMPT,
+                    "messages": messages,
+                },
+            )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail="AI request failed")
+
+        text = resp.json().get("content", [{}])[0].get("text", "")
+        return {"status": "ok", "reply": text.strip()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[ASK-AI-CHAT] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
