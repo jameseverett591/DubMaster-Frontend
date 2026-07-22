@@ -3258,7 +3258,10 @@ export function DubVerseEditor({
         </div>
       )}
       {/* Header */}
-      <header className="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-neutral-900">
+      <header className="relative flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-neutral-900">
+        <span className="absolute left-1/2 -translate-x-1/2 text-xs font-mono text-amber-400 select-all">
+          {jobId}
+        </span>
         <div className="flex items-center gap-4">
           {/* Logo */}
           <Link href="/studio" className="flex items-center gap-2">
@@ -3339,7 +3342,7 @@ export function DubVerseEditor({
           </Link>
           <h1 className="text-sm font-medium truncate max-w-[300px]">{title}</h1>
         </div>
-        
+
         <div className="flex items-center gap-3">
           {/* Points display - compact badge style */}
           <div className="flex items-center gap-2 bg-slate-800/50 rounded-md px-2.5 py-1 border border-slate-700/50">
@@ -4167,8 +4170,29 @@ export function DubVerseEditor({
                                   setInlineEmotionWriteIn(null)
                                 }
                               }}
-                              className="w-full text-[11px] px-2 py-1 rounded-md bg-slate-800 border border-slate-700 text-cyan-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500/60"
+                              className="w-full text-[11px] px-2 py-1 rounded-md bg-slate-800 border border-slate-700 text-cyan-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500/60 mb-1.5"
                             />
+                            <button
+                              type="button"
+                              disabled={isRegenerating || !(customEmotionDrafts[index] ?? '').trim()}
+                              className="w-full text-[10px] py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-medium transition-colors mb-1.5"
+                              onClick={() => {
+                                const draft = (customEmotionDrafts[index] ?? '').trim()
+                                if (!draft) return
+                                setStagedEmotions(prev => ({ ...prev, [index]: draft }))
+                                setInlineEmotionWriteIn(null)
+                                selectSegment(index)
+                                handleGenerateSpeech(index)
+                              }}
+                            >
+                              ✦ Generate Speech
+                            </button>
+                            <span
+                              className="text-[9px] text-slate-600 hover:text-slate-400 cursor-pointer block text-right"
+                              onClick={() => setInlineEmotionWriteIn(null)}
+                            >
+                              ✕ cancel
+                            </span>
                           </div>
                         )}
                         {/* Speed chip */}
