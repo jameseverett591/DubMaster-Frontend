@@ -60,8 +60,6 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
     { key: 'speed', label: 'speed' },
     { key: 'loudness', label: 'loudness' },
     { key: 'silences', label: 'silences' },
-    { key: 'emotion_variance', label: 'emotion_variance' },
-    { key: 'emotion_intensity', label: 'emotion_intensity' },
     ...(hasFeature('lipSyncScoring') ? [{ key: 'lip_sync' as const, label: 'lip_sync' }] : []),
     { key: 'emotion_preservation', label: 'emotion_preservation' },
   ]
@@ -71,7 +69,7 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
       {/* Score header */}
       <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-4">
         <div className="flex items-center justify-between mb-3">
-          <div className="text-sm font-semibold text-white">Quality Score</div>
+          <div className="text-sm font-semibold text-white">Overall Quality Score</div>
           {report.emotion_provider === 'emotion2vec' && (
             <span className="text-[10px] px-2 py-0.5 rounded-full border border-blue-500/40 text-blue-300 bg-blue-500/10">
               ⟁ emotion2vec
