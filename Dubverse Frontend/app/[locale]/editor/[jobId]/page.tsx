@@ -236,15 +236,38 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     // Captured when the effect arms; handleReanalyze sets it before bumping the nonce.
     const prevGen = reanalyzePrevGenRef.current
 
+    // Fast phase: every 5s for 5 min (60 attempts) — matches prior behavior.
+    // Slow phase: back off to every 30s instead of giving up outright — full
+    // analysis (Whisper retranscription + optional Azure/Gemini + emotion2vec)
+    // can legitimately take longer than 5 minutes, especially now that it also
+    // runs automatically pre-export. Giving up left a completed, correct
+    // result sitting on disk invisible until a manual page reload. Final
+    // outer cap (~2h5m total) is a genuine last-resort safety net, not a
+    // realistic ceiling for any real analysis.
+    const FAST_ATTEMPTS = 60
+    const FAST_INTERVAL_MS = 5000
+    const SLOW_INTERVAL_MS = 30000
+    const SLOW_ATTEMPTS = 240
+
+    function startPolling(intervalMs: number) {
+      if (pollRef.current) clearInterval(pollRef.current)
+      pollRef.current = setInterval(checkQC, intervalMs)
+    }
+
     async function checkQC() {
-      // Safety cap (~5 min at 5s) so a backend error can't poll forever.
-      if (attempts >= 60) {
+      attempts += 1
+      // Cross into the slow phase once the fast window elapses.
+      if (attempts === FAST_ATTEMPTS + 1) {
+        startPolling(SLOW_INTERVAL_MS)
+      }
+      // Final safety cap so a genuinely wedged job (bad data, backend down)
+      // can't poll forever if the tab is left open.
+      if (attempts >= FAST_ATTEMPTS + SLOW_ATTEMPTS) {
         if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
         reanalyzePendingRef.current = false
         if (!cancelled) setQcLoading(false)
         return
       }
-      attempts += 1
       try {
         const res = await fetch(`${API_BASE}/api/analysis/${jobId}/${lang}`)
         if (res.ok) {
@@ -286,7 +309,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     }
 
     checkQC()
-    pollRef.current = setInterval(checkQC, 5000)
+    startPolling(FAST_INTERVAL_MS)
 
     return () => {
       cancelled = true
