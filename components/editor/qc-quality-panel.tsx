@@ -7,7 +7,7 @@ import { usePlan } from '@/lib/use-plan'
 import { findingIsAutoFixable } from '@/lib/qc-fixes'
 
 interface QCQualityPanelProps {
-  report: QCReport
+  report: QCReport | null
   segment?: Segment | null
   onJumpToTime?: (seconds: number) => void
   onSelectFinding?: (finding: QCFinding) => void
@@ -55,6 +55,17 @@ function statusBadge(status: 'ok' | 'warn' | 'fail') {
 
 export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding, onSelectSegment, onApplyFix, selectedRetranscriptionIndex }: QCQualityPanelProps) {
   const { hasFeature } = usePlan()
+
+  if (!report) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-slate-500 text-sm p-6 gap-2">
+        <Gauge className="h-8 w-8 opacity-40" />
+        <p>Not yet analyzed.</p>
+        <p className="text-xs text-slate-600">Quality analysis runs after the dub is rebuilt.</p>
+      </div>
+    )
+  }
+
   const componentEntries: { key: keyof QCReport['components']; label: string }[] = [
     { key: 'timing', label: 'timing' },
     { key: 'speed', label: 'speed' },

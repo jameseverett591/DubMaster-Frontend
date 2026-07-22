@@ -61,7 +61,6 @@ import { useEditorStore, type SidebarTab } from '@/lib/editor-store'
 import type { Segment, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType } from '@/lib/editor-types'
 import { DEFAULT_NUANCES, NUANCE_MARKER_META } from '@/lib/editor-types'
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
-import { buildMockQCReport } from '@/lib/qc-mock-data'
 import { applyQCFix } from '@/lib/qc-fixes'
 import { VideoRecorder } from '@/components/video-recorder'
 import { QCQualityPanel } from '@/components/editor/qc-quality-panel'
@@ -606,9 +605,12 @@ export function DubVerseEditor({
   const [velmaEnrichLoading, setVelmaEnrichLoading] = useState(false)
   const [velmaEnrichResult, setVelmaEnrichResult] = useState<{ patched: number; total: number } | null>(null)
 
-  // QC report — real data from /api/analysis when available, otherwise mock
+  // QC report — real data from /api/analysis only. Never falls back to mock
+  // data: a fake score dressed up as real (with a genuine-looking grade/letter)
+  // was indistinguishable from a true low score. null means "not yet analyzed"
+  // — QCQualityPanel/SegmentQCPanel render an honest empty state for that.
   const [qcReport, setQcReport] = useState<QCReport | null>(() =>
-    qcAnalysis ? mapAnalysisToQCReport(jobId || 'demo', qcAnalysis) : buildMockQCReport(jobId || 'demo')
+    qcAnalysis ? mapAnalysisToQCReport(jobId || 'demo', qcAnalysis) : null
   )
 
   // Sync real QC analysis data when it arrives from the page-level poller
@@ -1441,35 +1443,12 @@ export function DubVerseEditor({
     prevJobIdRef.current = jobId
 
     const segmentsWithFindings = initialSegments.map((seg, idx) => {
-      // Generate mock segment-level QC data
-      const score = Math.floor(Math.random() * 40) + 60 // 60-100
-      const problems = [
-        'Spoken too fast, sounds mechanical and unnatural',
-        'Emotion doesn\'t match the source context',
-        'Timing is slightly off from lip movement',
-        'Pronunciation unclear on certain words',
-        'Delivery lacks energy and expression',
-        'Speed variation is inconsistent',
-      ]
-      const fixes = [
-        'Stretch the transcription box on the dubbed track on the timeline until the voice is more natural',
-        'Adjust emotion parameter to match source intensity',
-        'Fine-tune segment timing to align with lip-sync',
-        'Re-record with clearer pronunciation',
-        'Increase delivery intensity in the emotion controls',
-        'Smooth out speed variations using the timing correction tool',
-      ]
-      const problemIdx = Math.floor(Math.random() * problems.length)
-
       return {
         ...seg,
         id: seg.id || `segment-${idx}`,
         index: idx,
         status: seg.status || 'auto',
         qc_findings: qcFindings.filter(f => f.segment_index === idx),
-        qc_score: score,
-        qc_problem: problems[problemIdx],
-        qc_fix: fixes[problemIdx],
         emotionalCurve: seg.emotionalCurve || {
           combined: [
             { x: 0, y: 0.5 },
