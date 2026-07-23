@@ -116,7 +116,7 @@ import {
 } from '@/components/ui/context-menu'
 
 // Additional QC tab icons not in main import block
-import { LayoutList, AudioLines, Zap, GitBranch, Sliders } from 'lucide-react'
+import { LayoutList, AudioLines, Zap, GitBranch, Sliders, MessageCircle, ArrowUp } from 'lucide-react'
 import { usePlan } from '@/lib/use-plan'
 
 // QC Tab definitions - main navigation tabs + QC-specific tabs
@@ -346,6 +346,95 @@ interface DubVerseEditorProps {
   onShare?: () => void
   onGenerateSpeech?: () => void
   onTranslateAndDub?: () => void
+}
+
+type AskAiMessage = { role: 'user' | 'assistant'; content: string; displayed?: string }
+
+// Ask DubMaster AI's bot icon — outlined, brand-gradient linework. `id` must be unique per instance (SVG gradient ids can't repeat on a page).
+function AskAiBotIcon({ id, size = 20 }: { id: string; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24">
+      <defs>
+        <linearGradient id={id} x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#f59e0b" />
+          <stop offset="50%" stopColor="#10b981" />
+          <stop offset="100%" stopColor="#8b5cf6" />
+        </linearGradient>
+      </defs>
+      <rect x="5" y="7" width="14" height="11" rx="4" stroke={`url(#${id})`} strokeWidth="1.6" fill="none" />
+      <circle cx="9.3" cy="12.2" r="1.5" fill={`url(#${id})`} />
+      <circle cx="14.7" cy="12.2" r="1.5" fill={`url(#${id})`} />
+      <line x1="12" y1="3.5" x2="12" y2="7" stroke={`url(#${id})`} strokeWidth="1.4" strokeLinecap="round" />
+      <circle cx="12" cy="3" r="1" fill={`url(#${id})`} />
+    </svg>
+  )
+}
+
+// Lightweight markdown renderer for Ask DubMaster AI replies — headings, bold, lists, rules, paragraphs.
+// No react-markdown dependency: the assistant's system prompt only ever produces this subset.
+function renderMarkdownLite(text: string): ReactNode[] {
+  const renderInline = (line: string, key: number): ReactNode => {
+    const parts = line.split(/(\*\*[^*]+\*\*)/g)
+    return (
+      <span key={key}>
+        {parts.map((part, i) =>
+          part.startsWith('**') && part.endsWith('**')
+            ? <strong key={i}>{part.slice(2, -2)}</strong>
+            : part
+        )}
+      </span>
+    )
+  }
+
+  const lines = text.split('\n')
+  const nodes: ReactNode[] = []
+  let listItems: string[] | null = null
+  let listOrdered = false
+
+  const flushList = () => {
+    if (!listItems) return
+    const Tag = listOrdered ? 'ol' : 'ul'
+    nodes.push(
+      <Tag key={nodes.length} className={cn("pl-5 space-y-1", listOrdered ? "list-decimal" : "list-disc")}>
+        {listItems.map((item, i) => <li key={i}>{renderInline(item, i)}</li>)}
+      </Tag>
+    )
+    listItems = null
+  }
+
+  lines.forEach((line, idx) => {
+    const bullet = line.match(/^[-*]\s+(.*)/)
+    const numbered = line.match(/^\d+\.\s+(.*)/)
+    if (bullet) {
+      if (listItems && listOrdered) flushList()
+      listOrdered = false
+      listItems = [...(listItems ?? []), bullet[1]]
+      return
+    }
+    if (numbered) {
+      if (listItems && !listOrdered) flushList()
+      listOrdered = true
+      listItems = [...(listItems ?? []), numbered[1]]
+      return
+    }
+    flushList()
+
+    if (/^(---|\*\*\*)\s*$/.test(line)) {
+      nodes.push(<hr key={idx} className="border-white/10 my-1" />)
+    } else if (line.startsWith('### ')) {
+      nodes.push(<h4 key={idx} className="font-semibold text-sm mt-1">{renderInline(line.slice(4), idx)}</h4>)
+    } else if (line.startsWith('## ')) {
+      nodes.push(<h3 key={idx} className="font-semibold text-base mt-1">{renderInline(line.slice(3), idx)}</h3>)
+    } else if (line.startsWith('# ')) {
+      nodes.push(<h2 key={idx} className="font-bold text-lg mt-1">{renderInline(line.slice(2), idx)}</h2>)
+    } else if (line.trim() === '') {
+      nodes.push(<div key={idx} className="h-1" />)
+    } else {
+      nodes.push(<p key={idx}>{renderInline(line, idx)}</p>)
+    }
+  })
+  flushList()
+  return nodes
 }
 
 function mapAnalysisToQCReport(jobId: string, analysis: any): QCReport {
@@ -693,7 +782,7 @@ export function DubVerseEditor({
   const [emotionSource, setEmotionSource] = useState<'auto' | 'advanced'>('auto')
   const [advancedBrowserSegment, setAdvancedBrowserSegment] = useState<number | null>(null)
   const [floatingEmotionSegment, setFloatingEmotionSegment] = useState<number | null>(null)
-  const [videoSubTab, setVideoSubTab] = useState<'chord' | 'advanced' | 'characters' | null>(null)
+  const [videoSubTab, setVideoSubTab] = useState<'chord' | 'advanced' | 'characters' | 'askai' | null>(null)
 
   const [activeDubbedVideoUrl, setActiveDubbedVideoUrl] = useState(dubbedVideoUrl)
   const [isRebuilding, setIsRebuilding] = useState(false)
@@ -766,6 +855,41 @@ export function DubVerseEditor({
   const [voicePaletteOpen, setVoicePaletteOpen] = useState(false)
   const [voiceDragOverIndex, setVoiceDragOverIndex] = useState<number | null>(null)
   const [voiceAppliedFeedback, setVoiceAppliedFeedback] = useState<{ segmentIndex: number; voiceName: string } | null>(null)
+  const [askAiConversations, setAskAiConversations] = useState<{ id: string; messages: AskAiMessage[] }[]>([{ id: 'askai-1', messages: [] }])
+  const [askAiCurrentIndex, setAskAiCurrentIndex] = useState(0)
+  const [askAiConvListOpen, setAskAiConvListOpen] = useState(false)
+  const askAiChatMessages = askAiConversations[askAiCurrentIndex]?.messages ?? []
+  const setAskAiChatMessages = useCallback((updater: (prev: AskAiMessage[]) => AskAiMessage[]) => {
+    setAskAiConversations(prev => prev.map((conv, i) => i === askAiCurrentIndex ? { ...conv, messages: updater(conv.messages) } : conv))
+  }, [askAiCurrentIndex])
+  const [askAiChatInput, setAskAiChatInput] = useState('')
+  const [askAiChatLoading, setAskAiChatLoading] = useState(false)
+  const [askAiChatError, setAskAiChatError] = useState<string | null>(null)
+  const askAiChatRafRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    const lastIdx = askAiChatMessages.length - 1
+    if (lastIdx < 0) return
+    const last = askAiChatMessages[lastIdx]
+    if (last.role !== 'assistant' || last.displayed === last.content) return
+    const CHARS_PER_MS = 0.35
+    const startTime = performance.now()
+    const startLen = last.displayed?.length ?? 0
+    const tick = (now: number) => {
+      const elapsed = now - startTime
+      const targetLen = Math.min(last.content.length, startLen + Math.floor(elapsed * CHARS_PER_MS))
+      setAskAiChatMessages(prev => {
+        const next = [...prev]
+        next[lastIdx] = { ...next[lastIdx], displayed: last.content.slice(0, targetLen) }
+        return next
+      })
+      if (targetLen < last.content.length) {
+        askAiChatRafRef.current = requestAnimationFrame(tick)
+      }
+    }
+    askAiChatRafRef.current = requestAnimationFrame(tick)
+    return () => { if (askAiChatRafRef.current) cancelAnimationFrame(askAiChatRafRef.current) }
+  }, [askAiChatMessages.length, askAiCurrentIndex])
   const [pitchPopupIndex, setPitchPopupIndex] = useState<number | null>(null)
   const [pitchPopupPos, setPitchPopupPos] = useState({ x: 0, y: 0 })
   const [speedPopupIndex, setSpeedPopupIndex] = useState<number | null>(null)
@@ -2493,6 +2617,39 @@ export function DubVerseEditor({
     if (!entry) return
     _applyUndo(entry.index, entry.prevText)
   }, [_applyUndo])
+
+  const submitAskAiChat = useCallback(async () => {
+    const text = askAiChatInput.trim()
+    if (!text || askAiChatLoading) return
+    const history = askAiChatMessages.map(m => ({ role: m.role, content: m.content }))
+    setAskAiChatMessages(prev => [...prev, { role: 'user', content: text, displayed: text }])
+    setAskAiChatInput('')
+    setAskAiChatError(null)
+    setAskAiChatLoading(true)
+    try {
+      const res = await apiClient.askAIChat(jobId, text, history)
+      setAskAiChatMessages(prev => [...prev, { role: 'assistant', content: res.reply, displayed: '' }])
+    } catch (err) {
+      setAskAiChatError(err instanceof Error ? err.message : 'Ask AI is unavailable right now.')
+    } finally {
+      setAskAiChatLoading(false)
+    }
+  }, [askAiChatInput, askAiChatLoading, askAiChatMessages, jobId])
+
+  const startNewAskAiChat = useCallback(() => {
+    setAskAiConversations(prev => [...prev, { id: `askai-${Date.now()}`, messages: [] }])
+    setAskAiCurrentIndex(askAiConversations.length)
+    setAskAiChatInput('')
+    setAskAiChatError(null)
+    setAskAiConvListOpen(false)
+  }, [askAiConversations.length])
+
+  const switchAskAiConversation = useCallback((index: number) => {
+    setAskAiCurrentIndex(index)
+    setAskAiChatInput('')
+    setAskAiChatError(null)
+    setAskAiConvListOpen(false)
+  }, [])
 
   // Per-segment undo (context menu) — splices the most recent entry for that segment.
   const handleUndoLastEdit = useCallback((index: number) => {
@@ -4337,9 +4494,18 @@ export function DubVerseEditor({
           
           {/* Bottom toolbar */}
           <div className="flex items-center gap-2 px-4 py-2 border-t border-neutral-800 bg-neutral-900/70">
-            <Button variant="ghost" size="sm" className="h-8 text-xs text-slate-400" onClick={handleRevert} disabled={selectedSegmentIndex === null}>
-              <RefreshCw className="h-4 w-4 mr-1" />
-              Revert to Original
+            {/* Ask DubMaster AI — swaps the preview video for the chat panel, same slot */}
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn("h-8 text-xs", videoSubTab === 'askai' ? "text-amber-400 bg-amber-500/10" : "text-slate-400")}
+              onClick={() => {
+                setRightPanelTab('result')
+                setVideoSubTab(v => v === 'askai' ? null : 'askai')
+              }}
+            >
+              <MessageCircle className="h-4 w-4 mr-1" />
+              Ask DubMaster AI
             </Button>
             {/* Change Voice — click to reveal draggable chips, drag onto a segment */}
             <Button
@@ -4774,6 +4940,110 @@ export function DubVerseEditor({
               <div className="absolute bottom-2 right-2 flex items-center gap-1 text-xs text-slate-500">
                 <span>Video Translated by DubMaster</span>
               </div>
+            </div>
+          </div>
+
+          {/* Ask DubMaster AI tab — docked in the preview slot, replaces video (not an overlay); sibling of the Result-tab wrapper, same pattern as Chord/Advanced/Characters below */}
+          <div
+            className="flex-1 min-h-0 flex flex-col overflow-hidden"
+            style={{
+              display: videoSubTab === 'askai' && rightPanelTab === 'result' ? 'flex' : 'none',
+              background: 'linear-gradient(135deg, rgba(255,255,255,0.05), rgba(255,255,255,0) 45%), rgba(14,14,17,0.92)',
+              backdropFilter: 'blur(16px)',
+              WebkitBackdropFilter: 'blur(16px)',
+              border: '2px solid transparent',
+              borderRadius: '16px',
+              margin: '12px',
+              boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
+              animation: 'ask-ai-border-glow 6s linear infinite, ask-ai-glow-shadow 6s linear infinite',
+            }}
+          >
+            <div className="relative flex items-center justify-between px-8 py-6 border-b border-white/10 flex-shrink-0 bg-gradient-to-r from-white/[0.04] to-transparent">
+              <span className="flex items-center gap-3 text-lg font-semibold text-amber-400">
+                <span className="w-11 h-11 rounded-lg bg-[#1c1c20] border border-white/10 flex items-center justify-center shrink-0">
+                  <AskAiBotIcon id="askAiBotGradient-header" size={26} />
+                </span>
+                Ask DubMaster AI
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setAskAiConvListOpen(v => !v)}
+                  className="text-xs text-white/50 hover:text-white px-2 py-1 rounded-md hover:bg-white/5 transition-colors"
+                >
+                  {askAiConversations.length > 1 ? `Chats (${askAiConversations.length})` : 'Chats'}
+                </button>
+                <button
+                  onClick={startNewAskAiChat}
+                  className="text-xs text-emerald-400 hover:text-emerald-300 px-2 py-1 rounded-md hover:bg-white/5 transition-colors"
+                >
+                  + New Chat
+                </button>
+                <button onClick={() => setVideoSubTab(null)} className="text-white/50 hover:text-white text-sm ml-2">✕</button>
+              </div>
+
+              {askAiConvListOpen && (
+                <div className="absolute right-8 top-full mt-1 w-64 max-h-64 overflow-y-auto rounded-lg border border-white/10 bg-[#1c1c20] shadow-xl z-10">
+                  {askAiConversations.map((conv, idx) => (
+                    <button
+                      key={conv.id}
+                      onClick={() => switchAskAiConversation(idx)}
+                      className={cn(
+                        "w-full text-left px-3 py-2 text-xs truncate transition-colors",
+                        idx === askAiCurrentIndex ? "text-amber-400 bg-white/5" : "text-white/60 hover:bg-white/5 hover:text-white"
+                      )}
+                    >
+                      {conv.messages.find(m => m.role === 'user')?.content?.slice(0, 32) || `Conversation ${idx + 1}`}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto px-8 py-6 space-y-6">
+              {askAiChatMessages.length === 0 && (
+                <div className="text-sm text-white/40">Ask me anything about your dub — QC scores, Velma enrichment, exporting, timeline behavior.</div>
+              )}
+              {askAiChatMessages.map((m, i) => (
+                <div key={i} className={cn("flex items-start gap-3", m.role === 'user' ? "flex-row-reverse" : "flex-row")}>
+                  {m.role === 'assistant' ? (
+                    <span className="w-7 h-7 rounded-lg bg-[#1c1c20] border border-white/10 flex items-center justify-center shrink-0 mt-0.5">
+                      <AskAiBotIcon id={`askAiBotGradient-msg-${i}`} size={16} />
+                    </span>
+                  ) : (
+                    <span className="w-7 h-7 rounded-full bg-amber-500 flex items-center justify-center text-[10px] font-medium text-white shrink-0 mt-0.5">{userInitials}</span>
+                  )}
+                  <div className={cn("text-sm leading-relaxed space-y-1 max-w-[78%]", m.role === 'user' ? "text-white text-right" : "text-emerald-400 text-left")}>
+                    {m.role === 'assistant'
+                      ? (m.displayed === m.content ? renderMarkdownLite(m.content) : <span className="whitespace-pre-wrap">{m.displayed ?? ''}</span>)
+                      : m.content}
+                  </div>
+                </div>
+              ))}
+              {askAiChatLoading && <div className="text-sm text-white/40 pl-10">Thinking…</div>}
+              {askAiChatError && <div className="text-sm text-red-400 pl-10">{askAiChatError}</div>}
+            </div>
+            <div className="flex items-center gap-3 px-8 py-6 border-t border-white/10 flex-shrink-0 bg-gradient-to-r from-white/[0.04] to-transparent">
+              <div
+                className="flex-1 rounded-full"
+                style={{
+                  border: '1.5px solid transparent',
+                  animation: 'ask-ai-border-glow 6s linear infinite, ask-ai-glow-shadow 6s linear infinite',
+                }}
+              >
+                <input
+                  value={askAiChatInput}
+                  onChange={e => setAskAiChatInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') submitAskAiChat() }}
+                  placeholder="Ask about your dub..."
+                  className="w-full bg-white/5 text-white text-sm rounded-full px-4 py-3 outline-none placeholder:text-white/30"
+                />
+              </div>
+              <button
+                onClick={submitAskAiChat}
+                disabled={askAiChatLoading || !askAiChatInput.trim()}
+                className="w-10 h-10 rounded-full bg-amber-500 disabled:bg-white/10 flex items-center justify-center shrink-0 transition-colors"
+              >
+                <ArrowUp className="h-5 w-5 text-white" />
+              </button>
             </div>
           </div>
 
