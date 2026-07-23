@@ -36,7 +36,21 @@ def analyze_dub(
     original_video_path: str,
 ) -> Dict[str, Any]:
     """
-    Run full quality analysis on a dubbed video.
+    Run quality analysis on a dub.
+
+    Runs against the exported dubbed_{lang}.mp4 when it exists (unchanged
+    behavior). When no export exists yet, builds a lightweight internal
+    audio-only stitch of the CURRENT segment audio -- reusing the exact merge
+    step dubbing_service.remix_dub itself calls, deliberately skipping
+    remix_dub's separate video-mux step, which none of the 5 local analyses
+    below need. This is what lets the existing automatic trigger-on-editor-
+    open (page.tsx) succeed instead of permanently 404ing until Export runs.
+
+    lip_sync/emotion_preservation/pronunciation/screenapp_dubbed/gemini_review
+    all need real video frames or are otherwise video-dependent -- they report
+    "skipped" (same graceful pattern already used for a missing API key) until
+    an export exists. A proper no-export lip-sync path via
+    analyze_segment_lip_sync is a separate, following commit.
 
     Args:
         job_id: The dubbing job ID
@@ -49,6 +63,7 @@ def analyze_dub(
     dubbed_dir = Path("data/dubbed") / job_id
     lang_norm = target_language.lower().strip()
     dubbed_video = dubbed_dir / f"dubbed_{lang_norm}.mp4"
+    segments_file = dubbed_dir / "segments.json"
     timing_file = dubbed_dir / "timing_diagnostics.json"
     transcript_file = Path("data/transcripts") / f"{job_id}.json"
     output_file = dubbed_dir / f"analysis_{lang_norm}.json"
@@ -61,13 +76,46 @@ def analyze_dub(
         pass
 
     try:
-        if not dubbed_video.exists():
-            return {"status": "error", "reason": f"Dubbed video not found: {dubbed_video}"}
+        has_export = dubbed_video.exists()
+        audio_source: Optional[Path] = None
+
+        if has_export:
+            audio_source = dubbed_video
+        else:
+            # No export yet -- stitch CURRENT segment audio only. Reuses the
+            # exact function dubbing_service.remix_dub calls for its own audio
+            # step; overwritten every run (ffmpeg -y), never accumulates, and
+            # its qc_preview_ prefix keeps it unambiguous against the real
+            # export artifacts (dubbed_{lang}.mp4, dubbed_audio.wav).
+            if not segments_file.exists():
+                return {"status": "error", "reason": "No segments available yet"}
+            with open(segments_file, "r", encoding="utf-8") as f:
+                seg_data = json.load(f)
+            segs = seg_data.get("segments", [])
+            merge_segments = [
+                {"path": s["path"], "start": s["start"], "end": s["end"]}
+                for s in segs if s.get("path")
+            ]
+            if not merge_segments:
+                return {"status": "error", "reason": "No generated audio yet"}
+
+            from app.services.dubbing_service import dubbing_service
+            video_duration = seg_data.get("video_duration") or 0.0
+            if not video_duration:
+                video_duration = dubbing_service._get_video_duration(original_video_path)
+
+            stitched_audio = dubbed_dir / f"qc_preview_audio_{lang_norm}.wav"
+            ok = dubbing_service._merge_audio_segments(
+                merge_segments, str(stitched_audio), video_duration
+            )
+            if not ok:
+                return {"status": "error", "reason": "Could not build preview audio for QC"}
+            audio_source = stitched_audio
 
         analysis: Dict[str, Any] = {
             "job_id": job_id,
             "target_language": lang_norm,
-            "dubbed_video": str(dubbed_video),
+            "dubbed_video": str(dubbed_video) if has_export else None,
             # Unique per run — lets the editor tell a fresh re-analysis result
             # apart from the previous one (the GET endpoint can serve the prior
             # result while a re-run is still in flight).
@@ -86,19 +134,22 @@ def analyze_dub(
             with open(transcript_file, "r", encoding="utf-8") as f:
                 original_transcript = json.load(f)
 
-        # --- Run all analyses ---
-        analysis["retranscription"] = _retranscribe_dubbed_audio(dubbed_video, lang_norm)
+        # --- 5 local analyses -- work identically whether audio_source is the
+        # exported mp4 or the internal audio-only stitch; none read video frames. ---
+        analysis["retranscription"] = _retranscribe_dubbed_audio(audio_source, lang_norm)
         analysis["timing"] = _compare_timing(timing_data, original_transcript)
-        analysis["silences"] = _detect_silences(dubbed_video, original_transcript)
+        analysis["silences"] = _detect_silences(audio_source, original_transcript)
         analysis["speed"] = _detect_speed_anomalies(timing_data)
-        analysis["loudness"] = _analyze_loudness(dubbed_video)
+        analysis["loudness"] = _analyze_loudness(audio_source)
 
-        # ScreenApp analyses (optional — graceful skip if not configured)
+        # ScreenApp analyses (optional — graceful skip if not configured, or if
+        # no export exists yet: screenapp_dubbed needs real video frames)
         analysis["screenapp_original"] = _screenapp_analyze(
             original_video_path, "original"
         )
-        analysis["screenapp_dubbed"] = _screenapp_analyze(
-            str(dubbed_video), "dubbed"
+        analysis["screenapp_dubbed"] = (
+            _screenapp_analyze(str(dubbed_video), "dubbed") if has_export
+            else {"status": "skipped", "reason": "video not yet exported"}
         )
 
         # --- New AI-powered analyses (optional — graceful skip) ---
@@ -120,26 +171,36 @@ def analyze_dub(
             seg.get("text", "") for seg in dubbed_segments
         ).strip()
 
-        analysis["pronunciation"] = _assess_pronunciation(
-            str(dubbed_video), dubbed_text
+        analysis["pronunciation"] = (
+            _assess_pronunciation(str(dubbed_video), dubbed_text) if has_export
+            else {"status": "skipped", "reason": "video not yet exported"}
         )
         analysis["translation"] = _evaluate_translation(
             orig_segments, dubbed_segments, source_lang, lang_norm
         )
 
         # --- New QC Stack analyses ---
-        # SyncNet lip-sync scoring (local, free)
+        # SyncNet lip-sync scoring (local, free) -- no-export path is a
+        # separate, following commit. For now this keeps running against
+        # audio_source; when there's no export it hits syncnet_service's own
+        # existing audio-only fallback (no video frames -> "method":
+        # "audio-only") rather than erroring, exactly the same as if OpenCV/
+        # face-detection were unavailable today.
         analysis["lip_sync"] = _analyze_lip_sync(
-            str(dubbed_video), timing_data
+            str(audio_source), timing_data
         )
-        # emotion2vec emotion preservation (local, free)
-        analysis["emotion_preservation"] = _analyze_emotion_preservation(
-            original_video_path, str(dubbed_video), timing_data
+        # emotion2vec emotion preservation (local, free) -- needs real video
+        # frames for its dubbed-side extraction as currently implemented;
+        # skipped until export exists, same as pronunciation/screenapp above.
+        analysis["emotion_preservation"] = (
+            _analyze_emotion_preservation(original_video_path, str(dubbed_video), timing_data)
+            if has_export else {"status": "skipped", "reason": "video not yet exported"}
         )
-        # Gemini 2.5 Pro holistic review (optional, ~$0.12/video)
-        analysis["gemini_review"] = _gemini_review(
-            original_video_path, str(dubbed_video), lang_norm, source_lang,
-            timing_data
+        # Gemini 2.5 Pro holistic review (optional, ~$0.12/video) -- needs real
+        # video frames; skipped until export exists.
+        analysis["gemini_review"] = (
+            _gemini_review(original_video_path, str(dubbed_video), lang_norm, source_lang, timing_data)
+            if has_export else {"status": "skipped", "reason": "video not yet exported"}
         )
         # Claude QC report synthesis (optional)
         analysis["qc_report"] = _generate_qc_report(analysis, job_id)
