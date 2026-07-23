@@ -1054,6 +1054,23 @@ class DubVerseAPIClient {
     return response.json()
   }
 
+  async askAIChat(jobId: string, message: string, history: { role: 'user' | 'assistant'; content: string }[]): Promise<{ reply: string }> {
+    const res = await fetch(`${this.baseURL}/api/ask-ai-chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ message, history }),
+    })
+    if (!res.ok) {
+      let detail = `Ask AI request failed (${res.status})`
+      try {
+        const body = await res.json()
+        if (body?.detail) detail = body.detail
+      } catch {}
+      throw new Error(detail)
+    }
+    return res.json()
+  }
+
   async askAI(request: {
     prompt: string
     model?: 'haiku' | 'sonnet' | 'opus'
