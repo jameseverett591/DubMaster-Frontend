@@ -2919,6 +2919,23 @@ async def save_project(job_id: str, body: SaveProjectBody = SaveProjectBody()):
         pass
 
     try:
+        video_copy_path = base / "video" / Path(job.video_path).name if getattr(job, "video_path", None) else None
+        if video_copy_path and video_copy_path.exists():
+            thumb_path = base / "thumbnail.jpg"
+            cmd = [
+                "ffmpeg", "-y", "-ss", "1", "-i", str(video_copy_path),
+                "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "4",
+                str(thumb_path),
+            ]
+            result = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, timeout=15)
+            if result.returncode == 0 and thumb_path.exists() and thumb_path.stat().st_size > 0:
+                meta["thumbnail_url"] = f"/api/projects/{project_id}/thumbnail"
+            else:
+                logger.warning(f"[THUMBNAIL] generation failed for project={project_id}: {result.stderr.decode(errors='ignore')[:500]}")
+    except Exception as e:
+        logger.warning(f"[THUMBNAIL] generation failed for project={project_id}: {e}")
+
+    try:
         transcript_path = Path("data/transcripts") / f"{job_id}.json"
         if transcript_path.exists():
             _safe_copytree(transcript_path, base / "transcript.json")
@@ -3591,6 +3608,15 @@ async def download_dubbed_video(job_id: str, language: str):
         media_type="video/mp4",
         headers={"Content-Disposition": "inline"},
     )
+
+
+@router.get("/projects/{project_id}/thumbnail")
+async def serve_project_thumbnail(project_id: str):
+    """Serve a saved project's generated thumbnail image."""
+    thumb_path = _projects_base_dir() / project_id / "thumbnail.jpg"
+    if not thumb_path.exists():
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    return FileResponse(thumb_path, media_type="image/jpeg")
 
 
 @router.get("/media/{job_id}/video")

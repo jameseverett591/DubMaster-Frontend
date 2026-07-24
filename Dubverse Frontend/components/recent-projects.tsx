@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Loader2, Film } from "lucide-react"
-import { apiClient } from "@/lib/api-client"
+import { apiClient, API_BASE_URL } from "@/lib/api-client"
 import { createClient } from "@/lib/supabase/client"
 
 type Project = {
@@ -88,7 +88,7 @@ export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
             <div className="relative aspect-video bg-slate-900 flex items-center justify-center">
               {project.thumbnail_url ? (
                 <img
-                  src={project.thumbnail_url}
+                  src={project.thumbnail_url.startsWith('http') ? project.thumbnail_url : `${API_BASE_URL}${project.thumbnail_url}`}
                   alt={project.title}
                   className="h-full w-full object-cover"
                 />
