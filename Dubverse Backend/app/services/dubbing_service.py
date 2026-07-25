@@ -2658,12 +2658,17 @@ class DubbingService:
 
             actual_dur = await asyncio.to_thread(self._get_audio_duration, final_path)
             if actual_dur > slot_dur + 0.05:
-                # Check how much room exists before the next segment starts
-                next_seg = next(
-                    (s for s in segments if _effective_start(s) > slot_end + 0.01),
-                    None
+                # Room before the next segment starts. The segments array is NOT
+                # guaranteed to be in time order (splits insert out-of-order
+                # transcript_indexes), so take the temporally-NEAREST segment that
+                # starts after this one — the SMALLEST such start — not the first in
+                # array order. Otherwise the window can overrun a segment that sits
+                # later in the array but earlier in time, and the expanded audio
+                # overlaps its slot.
+                backend_next_start = min(
+                    (_effective_start(s) for s in segments if _effective_start(s) > slot_end + 0.01),
+                    default=slot_end + 999.0,
                 )
-                backend_next_start = _effective_start(next_seg) if next_seg else slot_end + 999.0
 
                 # Same trust rule as the slot itself: only override with the live value
                 # if it's sane and actually leaves room after this segment's live end.
@@ -2676,9 +2681,19 @@ class DubbingService:
                         )
                 else:
                     next_start = backend_next_start
-                available_dur = next_start - slot_start
+                available_dur = next_start - slot_start  # end-only room (keeps start fixed)
 
-                overlap = actual_dur - available_dur
+                # Also count the gap BEFORE this segment: it can move its start earlier,
+                # up to the previous segment's end, to gain room without colliding. The
+                # "full window" between neighbors is what decides whether it can fit at all.
+                prev_end = max(
+                    (_effective_end(s) for s in segments if _effective_end(s) <= slot_start + 0.01),
+                    default=0.0,
+                )
+                window_start = max(0.0, prev_end + 0.05)
+                full_room = next_start - window_start  # room growing in BOTH directions
+
+                overlap = actual_dur - full_room
                 TOLERANCE = 0.3
 
                 if actual_dur <= available_dur - 0.05:
@@ -2691,9 +2706,24 @@ class DubbingService:
                         f"extended end {slot_end:.2f}s → {new_end:.2f}s "
                         f"(next seg at {next_start:.2f}s, gap was {available_dur - slot_dur:.2f}s)"
                     )
+                elif actual_dur <= full_room - 0.05:
+                    # Doesn't fit by growing the end alone, but the gap BEFORE this segment
+                    # supplies enough total room — move the start earlier just enough to fit,
+                    # ending just before the next segment (0.05s gap). No collision either side.
+                    new_end = round(next_start - 0.05, 3)
+                    new_start = round(max(window_start, new_end - actual_dur), 3)
+                    seg["start"] = new_start
+                    seg["committed_start_time"] = new_start
+                    seg["end"] = new_end
+                    seg["committed_end_time"] = new_end
+                    logger.info(
+                        f"[REGEN-EXTEND-BIDIR] seg {segment_index}: grew into window "
+                        f"[{window_start:.2f}, {next_start:.2f}] — start {slot_start:.2f}→{new_start:.2f}, "
+                        f"end {slot_end:.2f}→{new_end:.2f}"
+                    )
                 elif overlap <= TOLERANCE or force_timing:
-                    # Marginal overrun or user-forced — speed-up to fit
-                    target = available_dur - 0.05
+                    # Marginal overrun even vs the full window, or user-forced — speed-fit into it.
+                    target = full_room - 0.05
                     stretched_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen_fit.mp3")
                     stretched = await asyncio.to_thread(
                         self._adjust_audio_duration,
@@ -2702,12 +2732,15 @@ class DubbingService:
                     )
                     if stretched and os.path.exists(stretched_path):
                         final_path = stretched_path
-                        new_end = round(slot_start + target, 3)
+                        new_end = round(next_start - 0.05, 3)
+                        new_start = round(max(window_start, new_end - target), 3)
+                        seg["start"] = new_start
+                        seg["committed_start_time"] = new_start
                         seg["end"] = new_end
                         seg["committed_end_time"] = new_end
                         logger.info(
                             f"[REGEN-TOLERANCE] seg {segment_index}: "
-                            f"overlap {overlap:.2f}s {'(forced)' if force_timing else 'within tolerance'}, speed-fit to {target:.2f}s"
+                            f"overlap {overlap:.2f}s {'(forced)' if force_timing else 'within tolerance'}, speed-fit to {target:.2f}s in full window"
                         )
                     else:
                         # The speed-fit itself failed (ffmpeg error) — do NOT shrink the
@@ -2721,7 +2754,7 @@ class DubbingService:
                         # a silently mismatched result.
                         seg["timing_exclusion"] = True
                         seg["timing_audio_duration"] = round(actual_dur, 2)
-                        seg["timing_slot_duration"] = round(available_dur, 2)
+                        seg["timing_slot_duration"] = round(full_room, 2)
                         seg["timing_overlap"] = round(overlap, 2)
                         logger.error(
                             f"[REGEN-TOLERANCE] seg {segment_index}: speed-fit failed "
@@ -2729,14 +2762,15 @@ class DubbingService:
                             f"silently keeping mismatched audio/timing"
                         )
                 else:
-                    # Genuinely too long — reject with exclusion error
+                    # Even the full window between neighbors can't hold the audio —
+                    # rewrite is genuinely the only option now.
                     seg["timing_exclusion"] = True
                     seg["timing_audio_duration"] = round(actual_dur, 2)
-                    seg["timing_slot_duration"] = round(available_dur, 2)
+                    seg["timing_slot_duration"] = round(full_room, 2)
                     seg["timing_overlap"] = round(overlap, 2)
                     logger.info(
                         f"[REGEN-EXCLUSION] seg {segment_index}: "
-                        f"{actual_dur:.2f}s exceeds {available_dur:.2f}s by {overlap:.2f}s"
+                        f"{actual_dur:.2f}s exceeds full window {full_room:.2f}s by {overlap:.2f}s"
                     )
 
         # Always measure final audio duration so the frontend can auto-shrink

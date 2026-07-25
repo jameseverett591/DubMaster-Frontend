@@ -4006,6 +4006,148 @@ async def get_voice_by_id(voice_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Custom voices — user-added Fish Audio / ElevenLabs voices, persisted to a
+# JSON file and merged into the Voice Library so they can be assigned like any
+# catalog voice. (Global list; wire to per-user storage when auth requires it.)
+# ---------------------------------------------------------------------------
+
+CUSTOM_VOICES_PATH = os.path.join("data", "custom_voices.json")
+
+
+def _load_custom_voices() -> list:
+    try:
+        with open(CUSTOM_VOICES_PATH, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _save_custom_voices(voices: list) -> None:
+    os.makedirs(os.path.dirname(CUSTOM_VOICES_PATH), exist_ok=True)
+    with open(CUSTOM_VOICES_PATH, "w", encoding="utf-8") as f:
+        _json.dump(voices, f, indent=2, ensure_ascii=False)
+
+
+class CustomVoiceRequest(BaseModel):
+    provider: str  # "fish-audio" | "elevenlabs"
+    voice_id: str
+    name: str = ""
+
+
+@router.get("/voices/custom")
+async def list_custom_voices():
+    return {"voices": _load_custom_voices()}
+
+
+@router.post("/voices/custom")
+async def add_custom_voice(body: CustomVoiceRequest):
+    provider = (body.provider or "").lower().strip()
+    voice_id = (body.voice_id or "").strip()
+    if provider not in ("fish-audio", "elevenlabs"):
+        raise HTTPException(status_code=422, detail="provider must be 'fish-audio' or 'elevenlabs'")
+    if not voice_id:
+        raise HTTPException(status_code=422, detail="voice_id is required")
+
+    # Best-effort validation + name/tag lookup. Never hard-fail on lookup — the
+    # id may be valid even if the metadata call errors; store what we can.
+    name = (body.name or "").strip()
+    tags: list = []
+    try:
+        if provider == "fish-audio" and fish_audio_tts.enabled:
+            m = await fish_audio_tts._get_client().voices.get(voice_id)
+            name = name or (getattr(m, "title", None) or "Custom Voice")
+            tags = list(getattr(m, "tags", None) or [])
+        elif provider == "elevenlabs":
+            voices = await elevenlabs_tts.get_voices()
+            match = next((v for v in voices if v.get("voice_id") == voice_id), None)
+            if match:
+                name = name or match.get("name") or "Custom Voice"
+    except Exception as e:
+        logger.warning(f"Custom voice validation failed for {provider}/{voice_id}: {e}")
+
+    entry = {
+        "voice_id": voice_id,
+        "provider": provider,
+        "name": name or "Custom Voice",
+        "tags": tags,
+        "custom": True,
+    }
+    voices = _load_custom_voices()
+    # Replace any existing entry with the same provider+id, then put newest first.
+    voices = [v for v in voices if not (v.get("voice_id") == voice_id and v.get("provider") == provider)]
+    voices.insert(0, entry)
+    _save_custom_voices(voices)
+    return entry
+
+
+@router.delete("/voices/custom/{voice_id:path}")
+async def delete_custom_voice(voice_id: str, provider: Optional[str] = None):
+    voices = _load_custom_voices()
+    before = len(voices)
+    voices = [
+        v for v in voices
+        if not (v.get("voice_id") == voice_id and (provider is None or v.get("provider") == provider))
+    ]
+    _save_custom_voices(voices)
+    return {"status": "ok", "removed": before - len(voices)}
+
+
+@router.post("/voices/clone")
+async def clone_voice(
+    file: UploadFile = File(...),
+    name: str = Form(""),
+):
+    """Clone a voice from an uploaded audio sample under DubMaster's OWN Fish Audio
+    account, then add it to the custom-voices library.
+
+    No user API keys or external accounts — the customer just uploads a short
+    clip of the voice. The cloned model lives on the account we generate with, so
+    it works everywhere immediately (assign, generate, export).
+    """
+    if not fish_audio_tts.enabled:
+        raise HTTPException(status_code=503, detail="Voice cloning is not available right now")
+
+    audio_bytes = await file.read()
+    if not audio_bytes or len(audio_bytes) < 2000:
+        raise HTTPException(
+            status_code=422,
+            detail="Please upload a clear audio sample — a few seconds of clean speech works best.",
+        )
+
+    title = (name or "").strip() or "My Voice"
+    try:
+        voice = await fish_audio_tts._get_client().voices.create(
+            title=title,
+            voices=[audio_bytes],
+            visibility="private",
+            train_mode="fast",
+        )
+    except Exception as e:
+        logger.error(f"[VOICE-CLONE] failed: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail="Voice cloning failed — try a longer, cleaner sample.")
+
+    voice_id = getattr(voice, "id", None)
+    if not voice_id:
+        raise HTTPException(status_code=502, detail="Voice cloning did not return a voice id.")
+
+    entry = {
+        "voice_id": voice_id,
+        "provider": "fish-audio",
+        "name": title,
+        "tags": list(getattr(voice, "tags", None) or []),
+        "custom": True,
+        "cloned": True,
+    }
+    voices = _load_custom_voices()
+    voices = [v for v in voices if v.get("voice_id") != voice_id]
+    voices.insert(0, entry)
+    _save_custom_voices(voices)
+    logger.info(f"[VOICE-CLONE] created '{title}' -> {voice_id}")
+    return entry
+
+
+# ---------------------------------------------------------------------------
 # Quality Analysis endpoints
 # ---------------------------------------------------------------------------
 
@@ -5510,6 +5652,87 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"status": "ok", "segment": seg}
+
+
+class ApplyVoiceRequest(BaseModel):
+    speaker_id: str
+    voice_id: str = ""
+    voice_key: str = ""
+
+
+@router.post("/segments/apply-voice/{job_id}")
+async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
+    """Set ONE voice across every segment of a speaker, server-side and atomically.
+
+    The old client-side per-segment regen loop was unreliable (skipped locked
+    segments, dropped failed calls, slow), so a speaker's segments drifted onto
+    different voices. This regenerates all of a speaker's segments here with the
+    same voice while preserving each segment's own text/emotion/speed, so a voice
+    assignment is applied consistently and persisted in one call. Locked segments
+    are skipped (reported) so the lock still wins.
+    """
+    voice_id = body.voice_id
+    if body.voice_key and not voice_id:
+        resolved = fish_audio_tts.get_voice_id(body.voice_key)
+        voice_id = resolved or body.voice_key
+    if not voice_id:
+        raise HTTPException(status_code=422, detail="voice_id or voice_key is required")
+
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    # Snapshot each target's preserved attributes up front — regenerate_segment
+    # rewrites segments.json on every call, so read what we need before looping.
+    targets = [
+        {
+            "ti": s.get("transcript_index"),
+            "locked": bool(s.get("locked")),
+            "speed": s.get("speed"),
+            "emotion": s.get("emotion"),
+            "traits": s.get("attached_traits"),
+            "nuances": s.get("nuances"),
+            "nuance_markers": s.get("nuance_markers"),
+        }
+        for s in data.get("segments", [])
+        if s.get("speaker") == body.speaker_id and s.get("transcript_index") is not None
+    ]
+
+    regenerated, skipped_locked, failed = [], [], []
+    for t in targets:
+        if t["locked"]:
+            skipped_locked.append(t["ti"])
+            continue
+        try:
+            seg = await dubbing_service.regenerate_segment(
+                job_id=job_id,
+                segment_index=t["ti"],
+                voice_id=voice_id,
+                # Preserve everything but the voice.
+                speed=t["speed"],
+                emotion=t["emotion"],
+                traits=t["traits"],
+                nuances=t["nuances"],
+                nuance_markers=t["nuance_markers"],
+            )
+            regenerated.append({
+                "transcript_index": t["ti"],
+                "voice_id": seg.get("voice_id"),
+                "path": seg.get("path"),
+                "committed_audio_url": seg.get("committed_audio_url"),
+            })
+        except Exception as e:
+            logger.warning("apply-voice: segment %s failed: %s", t["ti"], e)
+            failed.append({"transcript_index": t["ti"], "error": str(e)})
+
+    return {
+        "status": "ok",
+        "voice_id": voice_id,
+        "regenerated": regenerated,
+        "skipped_locked": skipped_locked,
+        "failed": failed,
+    }
 
 
 class AskAIRequest(BaseModel):

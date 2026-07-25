@@ -56,6 +56,7 @@ import { useRouter } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import { apiClient } from '@/lib/api-client'
 import { VoiceLibraryPanel } from '@/components/voice-library-modal'
+import { CustomVoicesModal } from '@/components/editor/custom-voices-modal'
 import { CharacterProfilePopover } from '@/components/editor/character-profile-popover'
 import { useEditorStore, type SidebarTab } from '@/lib/editor-store'
 import type { Segment, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType } from '@/lib/editor-types'
@@ -897,6 +898,9 @@ export function DubVerseEditor({
   const [groupSelectMode, setGroupSelectMode] = useState(false)
   const [groupAnchor, setGroupAnchor] = useState<number | null>(null)
   const [voicePaletteOpen, setVoicePaletteOpen] = useState(false)
+  const [customVoicesOpen, setCustomVoicesOpen] = useState(false)
+  // Bumped whenever custom voices change so the Voice Library re-fetches them.
+  const [customVoicesVersion, setCustomVoicesVersion] = useState(0)
   const [voiceDragOverIndex, setVoiceDragOverIndex] = useState<number | null>(null)
   const [voiceAppliedFeedback, setVoiceAppliedFeedback] = useState<{ segmentIndex: number; voiceName: string } | null>(null)
   const [askAiConversations, setAskAiConversations] = useState<{ id: string; messages: AskAiMessage[] }[]>([{ id: 'askai-1', messages: [] }])
@@ -3130,9 +3134,23 @@ export function DubVerseEditor({
       const audio_url = filename
         ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}`
         : segment.audio_url
-      // Keep the frontend's current timing as the source of truth.
-      // The backend response timing is unreliable for split/added segments
-      // because segments.json still holds the pre-split layout.
+      // If the backend GREW the segment into neighboring gaps to fit the audio,
+      // adopt its new committed timing so the timeline shows the bigger slot (and we
+      // don't then shrink it back). Otherwise keep the frontend's timing as the source
+      // of truth — backend timing can lag for split/added segments.
+      const bStart = response.segment.start
+      const bEnd = response.segment.end
+      const expanded = bEnd > liveEnd + 0.02 || bStart < liveStart - 0.02
+      if (expanded) {
+        updateSegment(activeIndex, { start_time: bStart, end_time: bEnd })
+        commitSegmentChanges(activeIndex, { committed_start_time: bStart, committed_end_time: bEnd })
+        apiClient.commitSegmentTiming(jobId, segment.transcript_index ?? activeIndex, {
+          committed_start_time: bStart, committed_end_time: bEnd,
+        }).catch(err => console.warn('[REGEN-EXPAND]', err))
+        setImportedSegments(prev => prev ? prev.map((seg, i) => i === activeIndex
+          ? { ...seg, start_time: bStart, end_time: bEnd, committed_start_time: bStart, committed_end_time: bEnd }
+          : seg) : prev)
+      }
       updateSegment(activeIndex, {
         audio_url,
         status: 'edited',
@@ -3140,7 +3158,7 @@ export function DubVerseEditor({
       })
       const audioDur = response.segment.audio_duration
       const slotDur = segment.end_time - segment.start_time
-      const shouldShrink = audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
+      const shouldShrink = !expanded && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
       let shrunkEnd = segment.end_time
       if (shouldShrink) {
         const buffer = getTrailingBuffer(segment.preview_text ?? segment.active_text ?? segment.target_text ?? '')
@@ -3258,20 +3276,68 @@ export function DubVerseEditor({
   const displaySegmentsRef = useRef(displaySegments)
   displaySegmentsRef.current = displaySegments
 
-  const regenAllForSpeaker = useCallback(async (speakerId: string, voiceId: string) => {
+
+  // Apply one voice to EVERY segment of a speaker via the backend bulk endpoint —
+  // reliable and atomic (no per-segment client loop that could skip/fail some and
+  // leave voices inconsistent). Updates each regenerated segment's audio in place.
+  const applyVoiceToSpeaker = useCallback(async (speakerId: string, voiceId: string) => {
     const indices = displaySegmentsRef.current
       .map((seg, i) => ({ seg, i }))
       .filter(({ seg }) => seg.speaker_id === speakerId)
       .map(({ i }) => i)
     if (indices.length === 0) return
     setSpeakerRegenQueue(new Set(indices))
-    for (const idx of indices) {
-      setSpeakerRegenQueue(prev => { const next = new Set(prev); next.delete(idx); return next })
-      selectSegment(idx)
-      await handleGenerateSpeechRef.current(idx, voiceId)
+    try {
+      const res = await apiClient.applyVoiceToSpeaker(jobId, speakerId, voiceId)
+      const byTi = new Map(res.regenerated.map(r => [r.transcript_index, r]))
+      setImportedSegments(prev => {
+        const base = prev ?? displaySegmentsRef.current
+        return base.map(seg => {
+          const r = seg.transcript_index != null ? byTi.get(seg.transcript_index) : undefined
+          if (!r) return seg
+          const filename = (r.path || '').split('/').pop()
+          const url = filename ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}` : seg.committed_audio_url
+          return { ...seg, committed_voice_id: r.voice_id, committed_audio_url: url, audio_url: url, status: 'edited' as const, rpt_dirty: false }
+        })
+      })
+      invalidateCache()
+      // Rebuild the preview audio so playback reflects the new voices. Without this
+      // the files regenerate but you keep hearing the old stitch — the "assignment
+      // does nothing" symptom (the single-segment path already re-stitches).
+      if (audioContextRef.current == null) {
+        audioContextRef.current = new AudioContext()
+      }
+      const resolveUrl = (url?: string) => {
+        if (!url || !jobId) return url
+        if (url.startsWith('http')) return url
+        const fn = url.split('/').pop()
+        return fn ? apiClient.getAudioFileUrl(jobId, fn) : url
+      }
+      const stitchSegs = displaySegmentsRef.current.map(seg => {
+        const r = seg.transcript_index != null ? byTi.get(seg.transcript_index) : undefined
+        if (r) {
+          const fn = (r.path || '').split('/').pop()
+          const url = fn ? `${apiClient.getAudioFileUrl(jobId, fn)}?ts=${Date.now()}` : resolveUrl(seg.committed_audio_url)
+          return { ...seg, audio_url: url, committed_audio_url: url }
+        }
+        return { ...seg, audio_url: resolveUrl(seg.audio_url), committed_audio_url: resolveUrl(seg.committed_audio_url) }
+      })
+      requestRPTStitch(stitchSegs, videoDuration, audioContextRef.current, () => {}, (result) => {
+        if (result) rptBufferRef.current = result.buffer
+      })
+      setPlaybackMode('preview')
+      if (res.failed.length > 0) {
+        setRegenError(`Voice applied, but ${res.failed.length} segment(s) failed — try applying again.`)
+      } else if (res.skipped_locked.length > 0) {
+        setRegenError(`Voice applied. ${res.skipped_locked.length} locked segment(s) were left unchanged — unlock them to include.`)
+      }
+    } catch (err) {
+      console.warn('[APPLY-VOICE]', err)
+      setRegenError('Failed to apply voice to speaker — please try again.')
+    } finally {
+      setSpeakerRegenQueue(new Set())
     }
-    setSpeakerRegenQueue(new Set())
-  }, [selectSegment])
+  }, [jobId, videoDuration])
 
   // Preview speech — non-destructive TTS preview using preview_text
   const handlePreviewSpeech = useCallback(async (index: number) => {
@@ -4360,7 +4426,7 @@ export function DubVerseEditor({
                           selectSegment(index)
                           setCurrentTime(displaySegments[index].start_time)
                           if (speakerId) {
-                            regenAllForSpeaker(speakerId, parsed.voice_id)
+                            applyVoiceToSpeaker(speakerId, parsed.voice_id)
                           } else {
                             handleGenerateSpeech(index, parsed.voice_id)
                           }
@@ -4875,9 +4941,9 @@ export function DubVerseEditor({
                 <span className="text-[10px] text-slate-600 ml-1">drag to segment</span>
               </div>
             )}
-            <Button variant="ghost" size="sm" className="h-8 text-xs text-slate-400">
+            <Button variant="ghost" size="sm" className="h-8 text-xs text-slate-400 hover:text-amber-300" onClick={() => setCustomVoicesOpen(true)}>
               <Sparkles className="h-4 w-4 mr-1" />
-              Pronunciation
+              Custom Voices
             </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -5442,7 +5508,11 @@ export function DubVerseEditor({
           {rightPanelTab === 'library' && (
             <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
               <VoiceLibraryPanel
+                customVoicesVersion={customVoicesVersion}
                 onVoiceAssigned={(speakerId, voiceId) => {
+                  // Clear any per-segment staged voice overrides for this speaker so
+                  // nothing shadows the assignment, then apply the voice to all of the
+                  // speaker's segments atomically on the backend.
                   setStagedVoices(prev => {
                     const next = { ...prev }
                     displaySegments.forEach((seg, i) => {
@@ -5451,7 +5521,7 @@ export function DubVerseEditor({
                     return next
                   })
                   if (voiceId) {
-                    regenAllForSpeaker(speakerId, voiceId)
+                    applyVoiceToSpeaker(speakerId, voiceId)
                   }
                 }}
               />
@@ -5945,6 +6015,12 @@ export function DubVerseEditor({
           stagedVoices={stagedVoices}
         />
       )}
+
+      <CustomVoicesModal
+        open={customVoicesOpen}
+        onOpenChange={setCustomVoicesOpen}
+        onChanged={() => setCustomVoicesVersion(v => v + 1)}
+      />
 
       {/* Ask AI — draggable floating panel */}
       {askAiOpen && (() => {

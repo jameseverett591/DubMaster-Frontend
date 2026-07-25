@@ -21,6 +21,8 @@ interface VoiceLibraryContentProps {
   /** 'grid' = responsive multi-col (modal). 'list' = single-column (narrow panel). */
   layout?: Layout
   onVoiceAssigned?: (speakerId: string, voiceId: string) => void
+  /** Bumped by the Custom Voices modal to trigger a re-fetch of the user's voices. */
+  customVoicesVersion?: number
 }
 
 /**
@@ -28,7 +30,7 @@ interface VoiceLibraryContentProps {
  * Rendered inside both <VoiceLibraryModal> (Dialog wrapper) and <VoiceLibraryPanel>
  * (right-panel-tab wrapper). All state lives here.
  */
-export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned }: VoiceLibraryContentProps) {
+export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVoicesVersion = 0 }: VoiceLibraryContentProps) {
   // Job context (browse-only when no jobId in URL)
   const params = useParams<{ jobId?: string }>()
   const routeJobId = (params as any)?.jobId as string | undefined
@@ -36,6 +38,28 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned }: VoiceL
   const jobId = routeJobId ?? storeJobId ?? undefined
   const isJobAware = !!jobId
   const { segments, speakerVoiceMap, updateSpeakerVoice, pulseSpeaker } = useEditorStore()
+
+  // User-added custom voices (Fish/ElevenLabs) — shown at the top of page 1 as
+  // Voice cards so they can be assigned like any catalog voice.
+  const [customVoices, setCustomVoices] = useState<Voice[]>([])
+  useEffect(() => {
+    let cancelled = false
+    apiClient.getCustomVoices().then(cvs => {
+      if (cancelled) return
+      setCustomVoices(cvs.map(cv => ({
+        voice_id: cv.voice_id,
+        name: cv.name,
+        category: 'custom',
+        labels: {},
+        preview_url: '',
+        description: `${cv.provider === 'fish-audio' ? 'Fish Audio' : 'ElevenLabs'} · your voice`,
+        tags: [...(cv.tags || []), cv.provider === 'fish-audio' ? 'fish' : 'elevenlabs', 'custom'],
+        task_count: 0,
+        like_count: 0,
+      })))
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [customVoicesVersion])
 
   const getSpeakerDisplayName = useCallback((speakerId: string, speakerLabel?: string) => {
     const digits = speakerId.match(/\d+/)?.[0]
@@ -506,9 +530,11 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned }: VoiceL
         </div>
       )
     }
+    // Surface the user's custom voices at the very top of page 1.
+    const pageVoices = pageNum === 1 && customVoices.length > 0 ? [...customVoices, ...voices] : voices
     return (
       <div className={`grid ${gapClass} ${gridColsClass} ${layout === 'list' ? 'h-full' : ''}`}>
-        {voices.map(renderVoiceCard)}
+        {pageVoices.map(renderVoiceCard)}
       </div>
     )
   }
@@ -829,10 +855,10 @@ export function VoiceLibraryModal({ open, onOpenChange }: VoiceLibraryModalProps
  * Right-panel tab wrapper — narrow, single-column. Used inside the editor's
  * right rail as a sibling to the Speakers tab.
  */
-export function VoiceLibraryPanel({ onVoiceAssigned }: { onVoiceAssigned?: (speakerId: string, voiceId: string) => void } = {}) {
+export function VoiceLibraryPanel({ onVoiceAssigned, customVoicesVersion }: { onVoiceAssigned?: (speakerId: string, voiceId: string) => void; customVoicesVersion?: number } = {}) {
   return (
     <div className="flex-1 min-h-0 flex flex-col p-3">
-      <VoiceLibraryContent layout="list" onVoiceAssigned={onVoiceAssigned} />
+      <VoiceLibraryContent layout="list" onVoiceAssigned={onVoiceAssigned} customVoicesVersion={customVoicesVersion} />
     </div>
   )
 }
