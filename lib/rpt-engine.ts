@@ -16,6 +16,20 @@ export interface RPTStitchResult {
   segmentCount: number
 }
 
+// ─── Effective timing ────────────────────────────────────────────────────────
+// committed_start_time/committed_end_time are the authoritative, corrected
+// position after any edit (drag, resize, lip-sync fix, etc.) — raw start_time/
+// end_time can lag behind. Every timeline read site should resolve through
+// these instead of reading the raw fields directly.
+
+export function effStart(seg: { start_time: number; committed_start_time?: number | null }): number {
+  return seg.committed_start_time ?? seg.start_time
+}
+
+export function effEnd(seg: { end_time: number; committed_end_time?: number | null }): number {
+  return seg.committed_end_time ?? seg.end_time
+}
+
 // ─── Cache ───────────────────────────────────────────────────────────────────
 
 const audioCache = new Map<string, AudioBuffer>()
@@ -88,8 +102,8 @@ export async function stitchRPT(
       const audioUrl = seg.committed_audio_url ?? seg.audio_url
       if (!audioUrl) return
 
-      const startTime = seg.start_time ?? seg.committed_start_time ?? 0
-      const endTime   = seg.end_time ?? seg.committed_end_time ?? startTime
+      const startTime = effStart(seg)
+      const endTime   = effEnd(seg)
       const startSample = Math.floor(startTime * sampleRate)
       const maxSlotSamples = Math.ceil(endTime * sampleRate) - startSample
 
