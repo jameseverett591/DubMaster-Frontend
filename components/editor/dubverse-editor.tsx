@@ -178,6 +178,9 @@ interface SegmentContextMenuProps {
   onSelect: (index: number) => void
   onRenameSpeaker: (index: number) => void
   onShowProfile: (index: number, x: number, y: number) => void
+  onGroupSelect: () => void
+  onClearGroup: () => void
+  groupSelectActive: boolean
 }
 
 function SegmentContextMenu({
@@ -203,6 +206,9 @@ function SegmentContextMenu({
   onSelect,
   onRenameSpeaker,
   onShowProfile,
+  onGroupSelect,
+  onClearGroup,
+  groupSelectActive,
 }: SegmentContextMenuProps) {
   const [showEmotions, setShowEmotions] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
@@ -239,6 +245,16 @@ function SegmentContextMenu({
           onClick={(e) => { e.stopPropagation(); onMerge(index) }}
           className="text-xs gap-2">
           🔗 Merge with Next
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={(e) => { e.stopPropagation(); onGroupSelect() }} className="text-xs gap-2">
+          ⛶ Group Selection
+        </ContextMenuItem>
+        <ContextMenuItem
+          disabled={!groupSelectActive}
+          onClick={(e) => { e.stopPropagation(); onClearGroup() }}
+          className="text-xs gap-2">
+          ✖ Clear Group
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem
@@ -873,14 +889,13 @@ export function DubVerseEditor({
   const [curveSearchQuery, setCurveSearchQuery] = useState('')
   const [draggedVoice, setDraggedVoice] = useState<string | null>(null)
   const [groupSelectedSegments, setGroupSelectedSegments] = useState<Set<number>>(new Set())
-  const [selectionDrag, setSelectionDrag] = useState<{
-    startX: number
-    startY: number
-    currentX: number
-    currentY: number
-  } | null>(null)
   const [groupMoveActive, setGroupMoveActive] = useState(false)
   const [groupMoveOffset, setGroupMoveOffset] = useState({ x: 0, y: 0 })
+  // Group-selection mode (right-click → Group Selection): while active the segment
+  // cursor changes and Ctrl+clicking a first then last segment selects that whole
+  // run to move as one. Cleared via right-click → Clear Group.
+  const [groupSelectMode, setGroupSelectMode] = useState(false)
+  const [groupAnchor, setGroupAnchor] = useState<number | null>(null)
   const [voicePaletteOpen, setVoicePaletteOpen] = useState(false)
   const [voiceDragOverIndex, setVoiceDragOverIndex] = useState<number | null>(null)
   const [voiceAppliedFeedback, setVoiceAppliedFeedback] = useState<{ segmentIndex: number; voiceName: string } | null>(null)
@@ -1550,10 +1565,11 @@ export function DubVerseEditor({
       // Escape — clear group selection and move state
       if (e.key === 'Escape') {
         setGroupSelectedSegments(new Set())
-        setSelectionDrag(null)
         setGroupMoveActive(false)
         groupMoveActiveRef.current = false
         setGroupMoveOffset({ x: 0, y: 0 })
+        setGroupSelectMode(false)
+        setGroupAnchor(null)
         return
       }
 
@@ -2564,14 +2580,53 @@ export function DubVerseEditor({
   }, [setCurrentTime, zoomLevel])
   
   // Segment click — always just select; QC is shown in the docked right panel
-  const handleSegmentClick = useCallback((index: number) => {
+  // Ctrl+click a first then last segment to select that contiguous run. First
+  // click sets the anchor; each later click sets the range end (anchor..index).
+  const handleGroupRangeClick = useCallback((index: number) => {
+    setGroupAnchor(prev => {
+      if (prev === null) {
+        setGroupSelectedSegments(new Set([index]))
+        return index
+      }
+      const lo = Math.min(prev, index)
+      const hi = Math.max(prev, index)
+      const range = new Set<number>()
+      for (let i = lo; i <= hi; i++) range.add(i)
+      setGroupSelectedSegments(range)
+      return prev
+    })
+  }, [])
+
+  const enterGroupSelectMode = useCallback(() => {
+    setGroupSelectMode(true)
+    setGroupAnchor(null)
+    setGroupSelectedSegments(new Set())
+  }, [])
+
+  const clearGroupSelection = useCallback(() => {
+    setGroupSelectMode(false)
+    setGroupAnchor(null)
+    setGroupSelectedSegments(new Set())
+    setGroupMoveActive(false)
+    groupMoveActiveRef.current = false
+    setGroupMoveOffset({ x: 0, y: 0 })
+  }, [])
+
+  const handleSegmentClick = useCallback((index: number, e?: React.MouseEvent) => {
+    // In group-selection mode a Ctrl+click builds the range instead of selecting
+    // /seeking; stopPropagation keeps the context-menu wrapper from also selecting.
+    if (groupSelectMode && e && (e.ctrlKey || e.metaKey)) {
+      e.stopPropagation()
+      handleGroupRangeClick(index)
+      return
+    }
     selectSegment(index)
     const seg = displaySegmentsRef.current[index]
     if (seg) {
       setCurrentTime(seg.start_time)
       if (videoRef.current) videoRef.current.currentTime = seg.start_time
     }
-  }, [selectSegment])
+  }, [selectSegment, groupSelectMode, handleGroupRangeClick])
   
   // Handle preview panel resize
   const handlePreviewResizeStart = useCallback((e: React.MouseEvent) => {
@@ -2764,97 +2819,15 @@ export function DubVerseEditor({
     setDraggedTranslation(null)
   }, [updateSegmentText])
 
-  const handleTimelineMouseDown = useCallback((e: React.MouseEvent) => {
-    // Only start selection with Shift key
-    if (!e.shiftKey) return
-
-    // Don't start selection if clicking on a segment block or resize handle
-    const target = e.target as HTMLElement
-    if (target.closest('[data-segment-block]') || target.closest('[data-resize-handle]')) return
-
-    e.preventDefault()
-    e.stopPropagation()
-
-    const container = e.currentTarget as HTMLElement
-    const rect = container.getBoundingClientRect()
-    const startX = e.clientX - rect.left
-    const startY = e.clientY - rect.top
-
-    setSelectionDrag({ startX, startY, currentX: startX, currentY: startY })
-  }, [])
-
   const handleTimelineMouseMove = useCallback((e: React.MouseEvent) => {
-    // Handle group movement during move phase
+    // Group movement during the drag phase — offset all selected segments live.
     if (groupMoveActiveRef.current) {
       setGroupMoveOffset({
         x: e.clientX - groupMoveStartXRef.current,
         y: 0
       })
-      return
     }
-
-    // Handle normal selection rectangle drag
-    if (!selectionDrag) return
-
-    const container = e.currentTarget as HTMLElement
-    const rect = container.getBoundingClientRect()
-    const currentX = e.clientX - rect.left
-    const currentY = e.clientY - rect.top
-
-    setSelectionDrag(prev => prev ? { ...prev, currentX, currentY } : null)
-  }, [selectionDrag])
-
-  const handleTimelineMouseUp = useCallback((e: React.MouseEvent) => {
-    if (!selectionDrag) return
-
-    // Define helpers inside callback — no closure risk, tight scope
-    const getSelectionRect = () => {
-      const x1 = Math.min(selectionDrag.startX, selectionDrag.currentX)
-      const x2 = Math.max(selectionDrag.startX, selectionDrag.currentX)
-      const y1 = Math.min(selectionDrag.startY, selectionDrag.currentY)
-      const y2 = Math.max(selectionDrag.startY, selectionDrag.currentY)
-      return { x1, x2, y1, y2, width: x2 - x1, height: y2 - y1 }
-    }
-
-    const checkSegmentIntersection = (index: number, selectionRect: ReturnType<typeof getSelectionRect>) => {
-      const block = document.querySelector(`[data-segment-block-index="${index}"]`) as HTMLElement
-      if (!block) return false
-      const rect = block.getBoundingClientRect()
-      const container = document.querySelector('[data-timeline-container]') as HTMLElement
-      if (!container) return false
-      const containerRect = container.getBoundingClientRect()
-
-      // Adjust block position relative to container
-      const blockX1 = rect.left - containerRect.left
-      const blockX2 = blockX1 + rect.width
-      const blockY1 = rect.top - containerRect.top
-      const blockY2 = blockY1 + rect.height
-
-      // Check intersection
-      return !(selectionRect.x2 < blockX1 ||
-              selectionRect.x1 > blockX2 ||
-              selectionRect.y2 < blockY1 ||
-              selectionRect.y1 > blockY2)
-    }
-
-    const selectionRect = getSelectionRect()
-    if (!selectionRect) {
-      setSelectionDrag(null)
-      return
-    }
-
-    // Find all intersecting segments
-    const selected = new Set<number>()
-    displaySegments.forEach((_, index) => {
-      if (checkSegmentIntersection(index, selectionRect)) {
-        selected.add(index)
-      }
-    })
-
-    setGroupSelectedSegments(selected)
-    setSelectionDrag(null)
-    setGroupMoveOffset({ x: 0, y: 0 })
-  }, [selectionDrag, displaySegments])
+  }, [])
 
   const handleTimelineMouseUpWrapper = useCallback((e: React.MouseEvent) => {
     // Handle group movement end
@@ -2863,19 +2836,30 @@ export function DubVerseEditor({
 
       displaySegments.forEach((segment, index) => {
         if (groupSelectedSegments.has(index)) {
-          const newStartTime = Math.max(0, segment.start_time + timeDelta)
-          const newEndTime = Math.max(0, segment.end_time + timeDelta)
+          // Base on effStart/effEnd and write the committed fields (+ persist), the
+          // same way the single-segment drag does — otherwise the group snaps back
+          // to its pre-move position because the tracks render through effStart.
+          const newStartTime = Math.max(0, effStart(segment) + timeDelta)
+          const newEndTime = Math.max(0, effEnd(segment) + timeDelta)
 
           updateSegment(index, {
             start_time: newStartTime,
             end_time: newEndTime,
           })
+          commitSegmentChanges(index, {
+            committed_start_time: newStartTime,
+            committed_end_time: newEndTime,
+          })
+          apiClient.commitSegmentTiming(jobId, segment.transcript_index ?? index, {
+            committed_start_time: newStartTime,
+            committed_end_time: newEndTime,
+          }).catch(err => console.warn('[GROUP-MOVE]', err))
 
           setImportedSegments(prev => {
             if (!prev) return prev
             return prev.map((seg, i) =>
               i === index
-                ? { ...seg, start_time: newStartTime, end_time: newEndTime }
+                ? { ...seg, start_time: newStartTime, end_time: newEndTime, committed_start_time: newStartTime, committed_end_time: newEndTime }
                 : seg
             )
           })
@@ -2884,12 +2868,8 @@ export function DubVerseEditor({
 
       setGroupMoveActive(false)
       groupMoveActiveRef.current = false
-      return
     }
-
-    // Handle normal selection freeze
-    handleTimelineMouseUp(e)
-  }, [groupMoveOffset, groupSelectedSegments, displaySegments])
+  }, [groupMoveOffset, groupSelectedSegments, displaySegments, commitSegmentChanges, jobId])
 
   // Global undo stack: each text edit pushes {index, prevText} so the top-bar
   // undo button can step backward through all edits in reverse order.
@@ -3367,8 +3347,12 @@ export function DubVerseEditor({
     const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
     try {
       await Promise.all(
-        toSave.map(seg =>
-          fetch(`${base}/api/segment/commit/${jobId}/${seg.index}`, {
+        toSave.map((seg, i) =>
+          // Address by transcript_index (the stable id the commit endpoint matches
+          // on) — seg.index is array position and drifts after splits/inserts.
+          // `locked` is written for every segment so Save is the authoritative
+          // checkpoint for lock state, not just the fire-and-forget per-lock write.
+          fetch(`${base}/api/segment/commit/${jobId}/${seg.transcript_index ?? seg.index}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -3378,6 +3362,10 @@ export function DubVerseEditor({
               committed_end_time: seg.committed_end_time,
               flag_status: seg.flag_status,
               correction_type: seg.correction_type,
+              locked: lockedSegments.has(i),
+              // Persist the display text too so a plain edit doesn't revert on
+              // reopen — the loader reads `text` back into target/active text.
+              text: seg.active_text ?? seg.target_text,
             }),
           })
         )
@@ -3390,7 +3378,7 @@ export function DubVerseEditor({
     } finally {
       setIsSaving(false)
     }
-  }, [isSaving, displaySegments, jobId, title, targetLanguage])
+  }, [isSaving, displaySegments, jobId, title, targetLanguage, lockedSegments])
 
   // Flag outcome helpers — set both flag_status and correction_type together,
   // only on segments that are currently unreviewed and have flags.
@@ -4244,6 +4232,9 @@ export function DubVerseEditor({
                     setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
                   }}
                   onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
+                  onGroupSelect={enterGroupSelectMode}
+                  onClearGroup={clearGroupSelection}
+                  groupSelectActive={groupSelectMode || groupSelectedSegments.size > 0}
                 >
                 <div
                   data-segment-row
@@ -6784,7 +6775,6 @@ export function DubVerseEditor({
               className="flex flex-col min-h-full relative"
               style={{ minWidth: timelineWidth, width: '100%' }}
               data-timeline-container
-              onMouseDown={handleTimelineMouseDown}
               onMouseMove={handleTimelineMouseMove}
               onMouseUp={handleTimelineMouseUpWrapper}
               onClick={(e) => {
@@ -6945,6 +6935,9 @@ export function DubVerseEditor({
                         setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
                       }}
                       onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
+                      onGroupSelect={enterGroupSelectMode}
+                      onClearGroup={clearGroupSelection}
+                      groupSelectActive={groupSelectMode || groupSelectedSegments.size > 0}
                     >
                     <div
                       data-segment-drop-zone
@@ -6953,7 +6946,7 @@ export function DubVerseEditor({
                         'absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded group',
                         lockedSegments.has(index) && 'ring-1 ring-green-400/60',
                         lockGlowIndices.has(index) && 'ring-2 ring-green-400 shadow-[0_0_16px_4px_rgba(74,222,128,0.95)] animate-pulse',
-                        selectedSegmentIndex === index && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
+                        selectedSegmentIndex === index && !lockGlowIndices.has(index) && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                         voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
                         isAssignmentPulse && 'ring-2 ring-amber-400/60 shadow-[0_0_6px_2px_rgba(245,158,11,0.22)] animate-pulse',
                         flashingPair === index && 'ring-1 ring-amber-400',
@@ -7205,6 +7198,9 @@ export function DubVerseEditor({
                         setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
                       }}
                       onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
+                      onGroupSelect={enterGroupSelectMode}
+                      onClearGroup={clearGroupSelection}
+                      groupSelectActive={groupSelectMode || groupSelectedSegments.size > 0}
                     >
                     <div
                       data-segment-drop-zone
@@ -7217,11 +7213,14 @@ export function DubVerseEditor({
                         groupSelectedSegments.has(index)
                           ? 'border-yellow-400/70 shadow-[0_0_12px_rgba(250,204,21,0.4)] ring-1 ring-yellow-400/50'
                           : 'border-slate-400/30',
-                        selectedSegmentIndex === index && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
+                        selectedSegmentIndex === index && !lockGlowIndices.has(index) && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                         voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
                         flashingPair === index && 'ring-1 ring-amber-400',
                         lockedPairs.has(index) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
-                        draggingSegment?.index === index && draggingSegment?.track === 'dubbed' ? 'cursor-grabbing' : 'cursor-grab'
+                        groupSelectMode && !groupSelectedSegments.has(index) && 'ring-1 ring-yellow-400/30',
+                        groupSelectMode
+                          ? '!cursor-cell'
+                          : draggingSegment?.index === index && draggingSegment?.track === 'dubbed' ? 'cursor-grabbing' : 'cursor-grab'
                       )}
                       style={{
                         left: (() => {
@@ -7241,12 +7240,16 @@ export function DubVerseEditor({
                       }}
                       data-segment-block={true}
                       data-segment-block-index={index}
-                      onClick={() => handleSegmentClick(index)}
+                      onClick={(e) => handleSegmentClick(index, e)}
                       onDrop={(e) => handleTimelineDrop(e, index)}
                       onDragOver={handleTimelineDragOver}
                       onMouseDown={(e) => {
                         const t = e.target as HTMLElement
                         if (t.closest('[data-resize-handle]')) return
+
+                        // In group-select mode a Ctrl press builds the range (see onClick) —
+                        // don't let it start a drag or group move.
+                        if (groupSelectMode && (e.ctrlKey || e.metaKey)) return
 
                         // Start group move if segment is selected and Shift is not pressed
                         if (groupSelectedSegments.has(index) && !e.shiftKey) {
@@ -7707,25 +7710,6 @@ export function DubVerseEditor({
                 <div className="absolute top-0 bottom-0 left-0 w-[1px] bg-amber-400/60 pointer-events-none" />
               </div>
 
-              {/* Selection rectangle overlay — appears during Shift+drag, disappears on mouseup */}
-              {selectionDrag && (() => {
-                const x1 = Math.min(selectionDrag.startX, selectionDrag.currentX)
-                const x2 = Math.max(selectionDrag.startX, selectionDrag.currentX)
-                const y1 = Math.min(selectionDrag.startY, selectionDrag.currentY)
-                const y2 = Math.max(selectionDrag.startY, selectionDrag.currentY)
-                return (
-                  <div
-                    className="absolute pointer-events-none bg-yellow-400/20 border border-yellow-400/50 rounded"
-                    style={{
-                      left: `${x1}px`,
-                      top: `${y1}px`,
-                      width: `${x2 - x1}px`,
-                      height: `${y2 - y1}px`,
-                      zIndex: 40,
-                    }}
-                  />
-                )
-              })()}
             </div>
           </div>
         </div>
