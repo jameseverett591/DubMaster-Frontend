@@ -267,8 +267,8 @@ function SegmentContextMenu({
           {lockedSegments.has(index) ? '🔓 Unlock' : '🔒 Lock'}
         </ContextMenuItem>
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onTogglePair(index) }} className="text-xs gap-2">
-          {lockedPairs.has(index) ? '🔗 Unpair' : '🔗 Pair with Original'}
-          <ContextMenuShortcut>U</ContextMenuShortcut>
+          {lockedPairs.has(index) ? '🔗 Unpair' : '🔗 Pair with Next'}
+          <ContextMenuShortcut>⇧P</ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onRevert(index) }} className="text-xs gap-2">
@@ -1358,6 +1358,16 @@ export function DubVerseEditor({
     return { firstIdx, lastIdx, leftT, rightT }
   })()
 
+  // Whether a segment should move with the current single-segment drag: it's the
+  // one being dragged, or it's paired with it (adjacent, and the left of the two
+  // is in lockedPairs). Used so a paired neighbor tracks live on every track.
+  const draggedIdx = draggingSegment?.index ?? null
+  const movesWithDrag = (index: number) => {
+    if (draggedIdx === null) return false
+    if (draggedIdx === index) return true
+    return Math.abs(draggedIdx - index) === 1 && lockedPairs.has(Math.min(draggedIdx, index))
+  }
+
   // Keep the store's segments array in sync with importedSegments after
   // structural edits (split, add, delete) so that commitPreview /
   // commitSegmentChanges write to the correct segment at the correct index.
@@ -1576,11 +1586,25 @@ export function DubVerseEditor({
     setRenameValue('')
   }, [displaySegments])
 
-  // Keyboard shortcuts — U: pair lock, M: QC group lock
+  // Pair a segment with the one immediately to its right so they move together on
+  // the timeline. lockedPairs stores the LEFT index of each pair. Toggles off if
+  // already paired; no-op if there is no right neighbor. (Shift+P / context menu.)
+  const togglePairWithNext = useCallback((index: number) => {
+    if (index + 1 >= displaySegmentsRef.current.length) return
+    setLockedPairs(prev => {
+      const next = new Set(prev)
+      next.has(index) ? next.delete(index) : next.add(index)
+      return next
+    })
+    setFlashingPair(index)
+    setTimeout(() => setFlashingPair(null), 300)
+  }, [])
+
+  // Keyboard shortcuts — Shift+P: pair with next, C: split
   // Placed after displaySegments and qcBoxPosition so dep array has no TDZ
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Escape — clear group selection and move state
+      // Escape — clear group selection/move state and release all pairs (unpair).
       if (e.key === 'Escape') {
         setGroupSelectedSegments(new Set())
         setGroupMoveActive(false)
@@ -1588,6 +1612,7 @@ export function DubVerseEditor({
         setGroupMoveOffset({ x: 0, y: 0 })
         setGroupSelectMode(false)
         setGroupAnchor(null)
+        setLockedPairs(new Set())
         return
       }
 
@@ -1608,24 +1633,19 @@ export function DubVerseEditor({
         return
       }
 
-      if ((e.key === 'u' || e.key === 'U') && !e.shiftKey) {
+      // Shift+P — pair the selected segment with the one immediately to its right
+      // (they then move together). Press again to unpair.
+      if (e.shiftKey && e.code === 'KeyP') {
         const target = e.target as HTMLElement
         if (
           target.tagName === 'INPUT' ||
           target.tagName === 'TEXTAREA' ||
           target.contentEditable === 'true'
         ) return
-        if (selectedSegmentIndex !== null) {
-          setLockedPairs(prev => {
-            const next = new Set(prev)
-            next.has(selectedSegmentIndex) ? next.delete(selectedSegmentIndex) : next.add(selectedSegmentIndex)
-            return next
-          })
-          setFlashingPair(selectedSegmentIndex)
-          setTimeout(() => setFlashingPair(null), 300)
-        } else if (lockedPairs.size > 0) {
-          setLockedPairs(new Set())
-        }
+        if (selectedSegmentIndex === null) return
+        togglePairWithNext(selectedSegmentIndex)
+        e.preventDefault()
+        return
       }
 
       if (e.key === 'c' || e.key === 'C') {
@@ -4230,7 +4250,7 @@ export function DubVerseEditor({
                   canMergeNext={canMergeWithNext(index)}
                   onDelete={(idx) => setPendingDelete(idx)}
                   onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(idx))}
-                  onTogglePair={(idx) => setLockedPairs(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
+                  onTogglePair={togglePairWithNext}
                   onRevert={() => handleRevert()}
                   onUndoLastEdit={handleUndoLastEdit}
                   onClearSegment={handleClearSegment}
@@ -6969,8 +6989,9 @@ export function DubVerseEditor({
                 {displaySegments.map((segment, index) => {
                   const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'original'
                   // Any drag of this segment (on any track) moves every track's block
-                  // for it, since they all share the one committed position.
-                  const isDraggingPaired = draggingSegment?.index === index
+                  // for it, since they all share the one committed position; a paired
+                  // neighbor (Shift+P) moves too.
+                  const isDraggingPaired = movesWithDrag(index)
                   const isAssignmentPulse = speakerPulseId !== null && segment.speaker_id === speakerPulseId
                   const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
                   return (
@@ -6989,7 +7010,7 @@ export function DubVerseEditor({
                       canMergeNext={canMergeWithNext(index)}
                       onDelete={(idx) => setPendingDelete(idx)}
                       onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(idx))}
-                      onTogglePair={(idx) => setLockedPairs(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
+                      onTogglePair={togglePairWithNext}
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
                       onClearSegment={handleClearSegment}
@@ -7024,7 +7045,7 @@ export function DubVerseEditor({
                         voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
                         isAssignmentPulse && 'ring-2 ring-amber-400/60 shadow-[0_0_6px_2px_rgba(245,158,11,0.22)] animate-pulse',
                         flashingPair === index && 'ring-1 ring-amber-400',
-                        lockedPairs.has(index) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
+                        (lockedPairs.has(index) || lockedPairs.has(index - 1)) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
                         isDraggingThis ? 'cursor-grabbing' : 'cursor-grab'
                       )}
                       style={{
@@ -7063,11 +7084,26 @@ export function DubVerseEditor({
                             committed_start_time: Math.max(0, originalStart + deltaTime),
                             committed_end_time: Math.max(0, originalEnd + deltaTime),
                           }).catch(err => console.warn('[COMMIT-TIMING]', err))
-                          if (lockedPairs.has(index)) {
-                            updateSegment(index, {
-                              start_time: Math.max(0, originalStart + deltaTime),
-                              end_time: Math.max(0, originalEnd + deltaTime),
-                            })
+                          // Paired neighbor (Shift+P) moves by the same amount — commit
+                          // its shifted timing too so it doesn't snap back.
+                          const partnerIdx = lockedPairs.has(index) ? index + 1 : (lockedPairs.has(index - 1) ? index - 1 : null)
+                          if (partnerIdx != null) {
+                            const p = displaySegmentsRef.current[partnerIdx]
+                            if (p) {
+                              const pStart = Math.max(0, effStart(p) + deltaTime)
+                              const pEnd = Math.max(0, effEnd(p) + deltaTime)
+                              updateSegment(partnerIdx, { start_time: pStart, end_time: pEnd })
+                              commitSegmentChanges(partnerIdx, { committed_start_time: pStart, committed_end_time: pEnd })
+                              apiClient.commitSegmentTiming(jobId, p.transcript_index ?? partnerIdx, {
+                                committed_start_time: pStart, committed_end_time: pEnd,
+                              }).catch(err => console.warn('[PAIR-MOVE]', err))
+                              setImportedSegments(prev => {
+                                const base = prev ?? displaySegments
+                                return base.map((seg, i) => i === partnerIdx
+                                  ? { ...seg, start_time: pStart, end_time: pEnd, committed_start_time: pStart, committed_end_time: pEnd }
+                                  : seg)
+                              })
+                            }
                           }
                           setImportedSegments(prev => {
                             const base = prev ?? displaySegments
@@ -7252,7 +7288,7 @@ export function DubVerseEditor({
                       canMergeNext={canMergeWithNext(index)}
                       onDelete={(idx) => setPendingDelete(idx)}
                       onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(idx))}
-                      onTogglePair={(idx) => setLockedPairs(prev => { const next = new Set(prev); next.has(idx) ? next.delete(idx) : next.add(idx); return next })}
+                      onTogglePair={togglePairWithNext}
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
                       onClearSegment={handleClearSegment}
@@ -7290,7 +7326,7 @@ export function DubVerseEditor({
                         selectedSegmentIndex === index && !lockGlowIndices.has(index) && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                         voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
                         flashingPair === index && 'ring-1 ring-amber-400',
-                        lockedPairs.has(index) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
+                        (lockedPairs.has(index) || lockedPairs.has(index - 1)) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
                         groupSelectMode && !groupSelectedSegments.has(index) && 'ring-1 ring-yellow-400/30',
                         groupSelectMode
                           ? '!cursor-cell'
@@ -7299,8 +7335,9 @@ export function DubVerseEditor({
                       style={{
                         left: (() => {
                           const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'dubbed'
-                          // Follow any drag of this segment (any track) — shared position.
-                          const isDraggingPaired = draggingSegment?.index === index
+                          // Follow any drag of this segment (any track) — shared position;
+                          // a paired neighbor (Shift+P) moves too.
+                          const isDraggingPaired = movesWithDrag(index)
                           const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
                           const groupDelta = (groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0
                           return (effStart(segment) + delta) * PIXELS_PER_SECOND + groupDelta
@@ -7376,11 +7413,26 @@ export function DubVerseEditor({
                             committed_start_time: Math.max(0, originalStart + deltaTime),
                             committed_end_time: Math.max(0, originalEnd + deltaTime),
                           }).catch(err => console.warn('[COMMIT-TIMING]', err))
-                          if (lockedPairs.has(index)) {
-                            updateSegment(index, {
-                              start_time: Math.max(0, originalStart + deltaTime),
-                              end_time: Math.max(0, originalEnd + deltaTime),
-                            })
+                          // Paired neighbor (Shift+P) moves by the same amount — commit
+                          // its shifted timing too so it doesn't snap back.
+                          const partnerIdx = lockedPairs.has(index) ? index + 1 : (lockedPairs.has(index - 1) ? index - 1 : null)
+                          if (partnerIdx != null) {
+                            const p = displaySegmentsRef.current[partnerIdx]
+                            if (p) {
+                              const pStart = Math.max(0, effStart(p) + deltaTime)
+                              const pEnd = Math.max(0, effEnd(p) + deltaTime)
+                              updateSegment(partnerIdx, { start_time: pStart, end_time: pEnd })
+                              commitSegmentChanges(partnerIdx, { committed_start_time: pStart, committed_end_time: pEnd })
+                              apiClient.commitSegmentTiming(jobId, p.transcript_index ?? partnerIdx, {
+                                committed_start_time: pStart, committed_end_time: pEnd,
+                              }).catch(err => console.warn('[PAIR-MOVE]', err))
+                              setImportedSegments(prev => {
+                                const base = prev ?? displaySegments
+                                return base.map((seg, i) => i === partnerIdx
+                                  ? { ...seg, start_time: pStart, end_time: pEnd, committed_start_time: pStart, committed_end_time: pEnd }
+                                  : seg)
+                              })
+                            }
                           }
                           setImportedSegments(prev => {
                             const base = prev ?? displaySegments
@@ -7559,7 +7611,7 @@ export function DubVerseEditor({
                   const startT = effStart(seg)
                   const endT = effEnd(seg)
                   const groupDelta = (groupMoveActive && groupSelectedSegments.has(i)) ? groupMoveOffset.x : 0
-                  const dragDelta = draggingSegment && draggingSegment.index === i ? draggingSegment.currentDelta : 0
+                  const dragDelta = movesWithDrag(i) && draggingSegment ? draggingSegment.currentDelta : 0
                   return (
                     <div
                       key={seg.id + '-rpt-audio'}
@@ -7685,7 +7737,7 @@ export function DubVerseEditor({
                         setVideoSubTab('chord')
                       }}
                       style={{
-                        left: (effStart(segment) + (draggingSegment && draggingSegment.index === index ? draggingSegment.currentDelta : 0)) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0),
+                        left: (effStart(segment) + (movesWithDrag(index) && draggingSegment ? draggingSegment.currentDelta : 0)) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0),
                         width: segWidth,
                       }}
                     >
