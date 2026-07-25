@@ -10,6 +10,10 @@ DubMaster is an AI dubbing tool: upload a video, it transcribes and diarizes spe
 translates the dialogue, and generates dubbed audio per segment using AI voices. Users
 then review and fine-tune the result in the Editor before exporting.
 
+Speakers are numbered by the order they are first heard — the first person to speak is
+speaker-1, the next new voice speaker-2, and so on. You can reassign a segment's speaker
+or rename a speaker in the editor if diarization gets one wrong.
+
 ## The Editor layout
 
 - **Left panel**: the segment/transcript list. Each row shows a speaker, the original
@@ -28,9 +32,17 @@ then review and fine-tune the result in the Editor before exporting.
 
 - **Ask AI Chat** — this feature: general help/how-to questions about DubMaster,
   available to everyone regardless of plan.
-- **Change Voice** — opens a row of voice chips; drag one onto a segment (or a whole
-  speaker) to assign that voice.
-- **Pronunciation** — adjust how a specific word/phrase is pronounced in the dub.
+- **Change Voice** — opens a row of quick voice presets (Male 1, Male 2, Female 1,
+  Child 1); drag one onto a segment to assign that voice to the segment's speaker.
+  Assigning a voice to a speaker applies it to ALL of that speaker's segments at once
+  (locked segments are left unchanged), so a character's voice stays consistent — you
+  don't assign voices one segment at a time.
+- **Custom Voices** — add your own voice. Upload a short, clean audio clip (10–30s of
+  single-speaker speech, no music/background noise) and DubMaster clones it; the cloned
+  voice then appears at the top of the Voice Library and can be assigned to any speaker
+  like any other voice. No API keys and no Fish Audio / ElevenLabs account are required —
+  the clone is created under DubMaster's own account, so it works for generation and
+  export immediately. (This replaces the old Pronunciation button.)
 - **Emotion** — set or clear an emotional tone tag for the segment's delivery.
 - **Nuances** — fine-grained delivery adjustments beyond the base emotion tag.
 - **Ask AI** (separate feature, sparkle icon) — a floating panel that rewrites the
@@ -95,14 +107,27 @@ unlocked segments stay unlocked. Closing and reopening the editor (or a hard ref
 restores the project exactly as it was left — Save does not lock anything down, it just
 preserves the current state.
 
+## Fitting text into a segment's timing
+
+When you regenerate a segment whose new dubbed audio is longer than its current slot,
+DubMaster first tries to make it fit by expanding the segment into the empty space
+around it — extending its end toward the next segment and, if needed, nudging its start
+earlier into the gap before it — as long as that doesn't collide with a neighbor. Only
+when the audio is too long for even the full free space between its neighbors does it
+show the "Rewrite Text — Timing Exclusion" dialog asking you to shorten the text. So the
+rewrite prompt means there is genuinely no room; otherwise the segment just grows to fit.
+
 ## Voice Library
 
 A panel for browsing available AI voices (search, filter by gender/tag, favorites).
 Selecting a voice shows a Preview button and an "Assign to…" control to assign it to
-a speaker. A "Clear All Voices" button removes every speaker's voice assignment for
-the whole job at once (with a confirmation dialog showing how many segments are
-affected) — this is a bulk action, separate from clearing one segment via the context
-menu.
+a speaker. Assigning a voice to a speaker applies it to ALL of that speaker's segments
+consistently (locked segments are skipped), so the whole character switches voices in
+one action. Your own **custom voices** (added via the Custom Voices button) appear at
+the top of the library and are assigned the same way. A "Clear All Voices" button
+removes every speaker's voice assignment for the whole job at once (with a confirmation
+dialog showing how many segments are affected) — this is a bulk action, separate from
+clearing one segment via the context menu.
 
 ## QC (Quality Control) panel
 
