@@ -17,9 +17,12 @@ then review and fine-tune the result in the Editor before exporting.
   left-clicking selects it.
 - **Video preview** (top right, "Video" tab): plays the video with the current dub.
   Below it is a toolbar with per-segment actions.
-- **Timeline** (bottom): shows the Original audio track and the Dubbed audio track as
-  blocks positioned by segment timing, with a shared playhead. Right-clicking a block
-  opens the same context menu as the segment list.
+- **Timeline** (bottom): shows several stacked tracks — Original, Dubbed, Preview Audio,
+  and Emotion — as blocks positioned by segment timing, with a shared playhead. Each
+  segment appears in every track at the same horizontal position. Right-clicking a block
+  opens the same context menu as the segment list. Segment blocks can be dragged to
+  reposition and their edges dragged to resize; when you move a segment, its blocks on
+  every track move together in real time, and the new position is saved.
 
 ## Segment toolbar actions
 
@@ -40,16 +43,53 @@ then review and fine-tune the result in the Editor before exporting.
 ## Right-click context menu (segment list rows and timeline blocks)
 
 - **Undo Last Edit** — reverts the most recent text edit only.
-- **Split at Playhead** / **Split at Word…** — divides a segment into two.
+- **Split at Playhead** / **Split at Word…** — divides a segment into two. Each half keeps
+  its own text, and the halves are auto-generated afterward so each gets fresh audio
+  matching its text.
 - **Add Segment After** — inserts a new empty segment.
+- **Merge with Next** — combines a segment with the following segment into one. Only
+  available when the next segment has the same speaker and neither segment is locked.
 - **Delete Segment**.
-- **Lock / Unlock** — locked segments are protected from edits/regeneration.
-- **Pair with Original** — links a segment's timing to the original track.
+- **Group Selection** / **Clear Group** — start or release a multi-segment selection to
+  move several segments as one; see "Moving and grouping segments on the timeline" below.
+- **Lock / Unlock** (keyboard: **Shift+L** to lock, **Shift+U** to unlock) — a locked
+  segment is fully frozen: it cannot be dragged, resized, text-edited, or regenerated, and
+  its voice, emotion, and speed are held exactly as they are. Locked segments show a green
+  highlight and stay locked through a page refresh or closing and reopening the editor.
+  Regeneration of a locked segment is refused even by bulk or automated actions — unlock
+  it (Shift+U) to make any change.
+- **Pair with Original** (keyboard: **U**) — links a segment to its neighbor so they move
+  together.
 - **Revert to Original** — fully resets the segment: dubbed text back to the true
   original transcription, audio recomputed from the original file, and any commit/
   lock/staged voice/emotion state cleared.
 - **Clear Segment** — resets text to the original transcription and clears emotion/
   voice overrides, with a confirm-click safety step.
+
+## Moving and grouping segments on the timeline
+
+- **Move one segment**: drag its block on the timeline. All of that segment's blocks
+  across the Original, Dubbed, Preview Audio, and Emotion tracks move together in real
+  time, and the new position is saved. Drag a block's left or right edge to resize it.
+- **Move several segments together (group move)**: right-click a segment and choose
+  **Group Selection** to enter group mode — the cursor changes. Hold **Ctrl** and click
+  the first segment, then Ctrl+click the last segment; everything from first to last is
+  selected and enclosed in a transparent amber box (only the first and last segments are
+  highlighted). Drag that box — or any selected segment — to move the whole group at once,
+  with all tracks moving in sync. To release the group, right-click the box and choose
+  **Clear Group**, or press **Escape**.
+- **Pair with Original** (shortcut **U**) links a single segment to its neighbor so the
+  two move together, which is different from a group selection.
+
+Grouping segments to move them as one **is** supported — via Group Selection above.
+
+## Saving and persistence
+
+Text edits, splits, merges, segment moves/resizes, and locks are saved. The **Save**
+button writes the current state as a snapshot, and locked segments stay locked and
+unlocked segments stay unlocked. Closing and reopening the editor (or a hard refresh)
+restores the project exactly as it was left — Save does not lock anything down, it just
+preserves the current state.
 
 ## Voice Library
 
