@@ -143,6 +143,14 @@ export interface Voice {
   visibility?: string
 }
 
+export interface CustomVoice {
+  voice_id: string
+  provider: 'fish-audio' | 'elevenlabs'
+  name: string
+  tags?: string[]
+  custom?: boolean
+}
+
 export interface DubRequest {
   job_id: string
   target_language: string
@@ -691,6 +699,53 @@ class DubVerseAPIClient {
     }
   }
 
+  // ── Custom voices (user-added Fish Audio / ElevenLabs voices) ──────────────
+  async getCustomVoices(): Promise<CustomVoice[]> {
+    const res = await fetch(`${this.baseURL}/api/voices/custom`)
+    if (!res.ok) return []
+    const data = await res.json()
+    return (data.voices || []) as CustomVoice[]
+  }
+
+  async addCustomVoice(provider: 'fish-audio' | 'elevenlabs', voiceId: string, name?: string): Promise<CustomVoice> {
+    const res = await fetch(`${this.baseURL}/api/voices/custom`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ provider, voice_id: voiceId, name: name ?? '' }),
+    })
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}))
+      throw new Error(detail?.detail || `Failed to add voice (${res.status})`)
+    }
+    return res.json()
+  }
+
+  // Clone a voice from an uploaded audio sample (no API keys — cloned under
+  // DubMaster's own account) and add it to the library.
+  async cloneVoice(file: File, name: string): Promise<CustomVoice> {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('name', name)
+    const res = await fetch(`${this.baseURL}/api/voices/clone`, {
+      method: 'POST',
+      headers: { ...this._authHeaders() },
+      body: form,
+    })
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}))
+      throw new Error(detail?.detail || `Voice cloning failed (${res.status})`)
+    }
+    return res.json()
+  }
+
+  async deleteCustomVoice(voiceId: string, provider?: string): Promise<void> {
+    const q = provider ? `?provider=${encodeURIComponent(provider)}` : ''
+    await fetch(`${this.baseURL}/api/voices/custom/${encodeURIComponent(voiceId)}${q}`, {
+      method: 'DELETE',
+      headers: { ...this._authHeaders() },
+    })
+  }
+
   /**
    * Get available dubbing engines and their status
    */
@@ -1042,6 +1097,28 @@ class DubVerseAPIClient {
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify(data),
     })
+  }
+
+  // Apply one voice across every segment of a speaker, server-side (reliable +
+  // atomic). Returns which segments were regenerated / skipped (locked) / failed.
+  async applyVoiceToSpeaker(
+    jobId: string,
+    speakerId: string,
+    voiceId: string,
+  ): Promise<{
+    status: string
+    voice_id: string
+    regenerated: Array<{ transcript_index: number; voice_id: string; path: string; committed_audio_url?: string }>
+    skipped_locked: number[]
+    failed: Array<{ transcript_index: number; error: string }>
+  }> {
+    const res = await fetch(`${this.baseURL}/api/segments/apply-voice/${jobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ speaker_id: speakerId, voice_id: voiceId }),
+    })
+    if (!res.ok) throw new Error(`apply-voice failed: ${res.status}`)
+    return res.json()
   }
 
   async syncSegments(
