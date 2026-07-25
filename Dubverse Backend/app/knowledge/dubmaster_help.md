@@ -146,7 +146,9 @@ DubMaster has three tiers: **Basic**, **Premium**, and **Professional**.
   features.
 - **Professional only**: the review queue, emotional curve editor, lip-sync scoring,
   heatmaps, character analyzer, Velma panel, character profiles, the emotional
-  intelligence library, project versioning, and performance notes.
+  intelligence library, project versioning, performance notes, and **Custom Voices**
+  (uploading/cloning your own voice — the automatic cloning of the original video's
+  speakers is separate and available to all tiers).
 
 If a user on a lower tier asks about a feature above their plan, say so plainly and
 suggest upgrading, rather than describing the feature as if they can use it.

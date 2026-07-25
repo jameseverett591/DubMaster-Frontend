@@ -4029,6 +4029,26 @@ def _save_custom_voices(voices: list) -> None:
         _json.dump(voices, f, indent=2, ensure_ascii=False)
 
 
+def _require_plan(request: Request, allowed: tuple, feature: str) -> str:
+    """Enforce plan entitlement server-side — mirrors the auth pattern in /ask-ai
+    so a gated feature can't be reached by hitting the API directly. Raises 403 if
+    the caller's active subscription plan isn't in `allowed`."""
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+    from app.services.supabase_client import supabase_writer
+    sub_result = supabase_writer.table("subscriptions") \
+        .select("plan_type") \
+        .eq("user_id", user_id) \
+        .in_("status", ["active", "trialing"]) \
+        .limit(1) \
+        .execute()
+    plan_type = sub_result.data[0]["plan_type"] if sub_result.data else None
+    if plan_type not in allowed:
+        raise HTTPException(status_code=403, detail=f"{feature} requires a Professional plan")
+    return user_id
+
+
 class CustomVoiceRequest(BaseModel):
     provider: str  # "fish-audio" | "elevenlabs"
     voice_id: str
@@ -4041,7 +4061,8 @@ async def list_custom_voices():
 
 
 @router.post("/voices/custom")
-async def add_custom_voice(body: CustomVoiceRequest):
+async def add_custom_voice(body: CustomVoiceRequest, request: Request):
+    _require_plan(request, ("professional",), "Custom Voices")
     provider = (body.provider or "").lower().strip()
     voice_id = (body.voice_id or "").strip()
     if provider not in ("fish-audio", "elevenlabs"):
@@ -4095,6 +4116,7 @@ async def delete_custom_voice(voice_id: str, provider: Optional[str] = None):
 
 @router.post("/voices/clone")
 async def clone_voice(
+    request: Request,
     file: UploadFile = File(...),
     name: str = Form(""),
 ):
@@ -4105,6 +4127,7 @@ async def clone_voice(
     clip of the voice. The cloned model lives on the account we generate with, so
     it works everywhere immediately (assign, generate, export).
     """
+    _require_plan(request, ("professional",), "Custom Voices")
     if not fish_audio_tts.enabled:
         raise HTTPException(status_code=503, detail="Voice cloning is not available right now")
 

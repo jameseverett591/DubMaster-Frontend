@@ -4941,9 +4941,16 @@ export function DubVerseEditor({
                 <span className="text-[10px] text-slate-600 ml-1">drag to segment</span>
               </div>
             )}
-            <Button variant="ghost" size="sm" className="h-8 text-xs text-slate-400 hover:text-amber-300" onClick={() => setCustomVoicesOpen(true)}>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn("h-8 text-xs", hasFeature('customVoices') ? "text-slate-400 hover:text-amber-300" : "text-slate-500 hover:text-violet-300")}
+              title={hasFeature('customVoices') ? undefined : 'Custom Voices is a Professional feature — upgrade to add your own voice'}
+              onClick={() => hasFeature('customVoices') ? setCustomVoicesOpen(true) : router.push('/subscribe')}
+            >
               <Sparkles className="h-4 w-4 mr-1" />
               Custom Voices
+              {!hasFeature('customVoices') && <Lock className="h-3 w-3 ml-1" />}
             </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
