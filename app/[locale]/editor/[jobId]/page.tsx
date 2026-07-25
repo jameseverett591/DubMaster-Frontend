@@ -135,6 +135,8 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             index: idx,
             transcript_index: seg.transcript_index ?? idx,
             status: seg.locked ? 'locked' : 'auto',
+            // Carried so the editor can restore persisted pairs on load.
+            paired_with_next: seg.paired_with_next ?? false,
             start_time: seg.committed_start_time ?? seg.start ?? 0,
             end_time: seg.committed_end_time ?? seg.end ?? 0,
             source_text: sourceByIndex.get(seg.transcript_index ?? idx) ?? '',

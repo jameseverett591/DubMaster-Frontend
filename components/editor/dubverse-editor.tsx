@@ -1591,14 +1591,19 @@ export function DubVerseEditor({
   // already paired; no-op if there is no right neighbor. (Shift+P / context menu.)
   const togglePairWithNext = useCallback((index: number) => {
     if (index + 1 >= displaySegmentsRef.current.length) return
+    const nowPaired = !lockedPairs.has(index)
     setLockedPairs(prev => {
       const next = new Set(prev)
-      next.has(index) ? next.delete(index) : next.add(index)
+      nowPaired ? next.add(index) : next.delete(index)
       return next
     })
     setFlashingPair(index)
     setTimeout(() => setFlashingPair(null), 300)
-  }, [])
+    // Persist so pairs survive refresh / crash — stored on the LEFT segment.
+    const ti = displaySegmentsRef.current[index]?.transcript_index ?? index
+    apiClient.commitSegmentTiming(jobId, ti, { paired_with_next: nowPaired })
+      .catch(err => console.warn('[PAIR] persist failed:', err))
+  }, [lockedPairs, jobId])
 
   // Keyboard shortcuts — Shift+P: pair with next, C: split
   // Placed after displaySegments and qcBoxPosition so dep array has no TDZ
@@ -1612,6 +1617,12 @@ export function DubVerseEditor({
         setGroupMoveOffset({ x: 0, y: 0 })
         setGroupSelectMode(false)
         setGroupAnchor(null)
+        // Persist the unpair so refreshing doesn't bring the pairs back.
+        lockedPairs.forEach(i => {
+          const ti = displaySegmentsRef.current[i]?.transcript_index ?? i
+          apiClient.commitSegmentTiming(jobId, ti, { paired_with_next: false })
+            .catch(err => console.warn('[PAIR] unpair persist failed:', err))
+        })
         setLockedPairs(new Set())
         return
       }
@@ -1662,7 +1673,7 @@ export function DubVerseEditor({
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [selectedSegmentIndex, lockedPairs, displaySegments, handleSplitAtPlayhead])
+  }, [selectedSegmentIndex, lockedPairs, displaySegments, handleSplitAtPlayhead, jobId])
 
   // Video thumbnails for timeline
   const [videoThumbnails, setVideoThumbnails] = useState<string[]>([])
@@ -1712,17 +1723,20 @@ export function DubVerseEditor({
   // Segments showing the transient "just locked" green glow. Added on Shift+L,
   // removed after 7s — the lock itself persists, only the glow is temporary.
   const [lockGlowIndices, setLockGlowIndices] = useState<Set<number>>(new Set())
-  // Restore persisted locks once per job load, from the backend `locked` flag
-  // (the page loader maps seg.locked → status 'locked').
+  // Restore persisted locks AND pairs once per job load, from the backend `locked`
+  // and `paired_with_next` flags (the page loader carries both onto the segment).
   const locksInitRef = useRef<string | null>(null)
   useEffect(() => {
     if (locksInitRef.current === jobId) return
     if (!displaySegments.length) return
-    const restored = new Set<number>()
+    const restoredLocks = new Set<number>()
+    const restoredPairs = new Set<number>()
     displaySegments.forEach((s, i) => {
-      if (s.status === 'locked' || (s as unknown as { locked?: boolean }).locked) restored.add(i)
+      if (s.status === 'locked' || (s as unknown as { locked?: boolean }).locked) restoredLocks.add(i)
+      if ((s as unknown as { paired_with_next?: boolean }).paired_with_next) restoredPairs.add(i)
     })
-    if (restored.size) setLockedSegments(restored)
+    if (restoredLocks.size) setLockedSegments(restoredLocks)
+    if (restoredPairs.size) setLockedPairs(restoredPairs)
     locksInitRef.current = jobId
   }, [displaySegments, jobId])
 
@@ -3401,6 +3415,7 @@ export function DubVerseEditor({
               flag_status: seg.flag_status,
               correction_type: seg.correction_type,
               locked: lockedSegments.has(i),
+              paired_with_next: lockedPairs.has(i),
               // Persist the display text too so a plain edit doesn't revert on
               // reopen — the loader reads `text` back into target/active text.
               text: seg.active_text ?? seg.target_text,
@@ -3416,7 +3431,7 @@ export function DubVerseEditor({
     } finally {
       setIsSaving(false)
     }
-  }, [isSaving, displaySegments, jobId, title, targetLanguage, lockedSegments])
+  }, [isSaving, displaySegments, jobId, title, targetLanguage, lockedSegments, lockedPairs])
 
   // Flag outcome helpers — set both flag_status and correction_type together,
   // only on segments that are currently unreviewed and have flags.

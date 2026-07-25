@@ -92,6 +92,8 @@ export interface Segment {
   qc_problem?: string
   qc_fix?: string
   rpt_dirty?: boolean
+  // Persisted pairing: true when this segment is paired with the one to its right.
+  paired_with_next?: boolean
   committed_voice_id?: string
   committed_pitch?: number
   committed_emotion?: string
