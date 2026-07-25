@@ -1340,6 +1340,24 @@ export function DubVerseEditor({
     ? importedSegments.filter(Boolean)
     : (Array.isArray(segments) ? segments : []).filter(Boolean)
 
+  // Bounds of the current group selection: the first/last selected segment (only
+  // those two get highlighted) and the left/right time span the encasing amber box
+  // covers. Null when nothing is grouped.
+  const groupBounds = (() => {
+    if (groupSelectedSegments.size === 0) return null
+    let firstIdx = Infinity, lastIdx = -Infinity, leftT = Infinity, rightT = -Infinity
+    groupSelectedSegments.forEach(i => {
+      const seg = displaySegments[i]
+      if (!seg) return
+      if (i < firstIdx) firstIdx = i
+      if (i > lastIdx) lastIdx = i
+      leftT = Math.min(leftT, effStart(seg))
+      rightT = Math.max(rightT, effEnd(seg))
+    })
+    if (!isFinite(leftT)) return null
+    return { firstIdx, lastIdx, leftT, rightT }
+  })()
+
   // Keep the store's segments array in sync with importedSegments after
   // structural edits (split, add, delete) so that commitPreview /
   // commitSegmentChanges write to the correct segment at the correct index.
@@ -6796,6 +6814,60 @@ export function DubVerseEditor({
                 selectSegment(null)
               }}
             >
+              {/* Group selection frame — a transparent amber box encasing the whole
+                  run from first to last selected segment; follows the group live
+                  during a group move (groupMoveOffset). */}
+              {groupBounds && (
+                <ContextMenu>
+                <ContextMenuTrigger asChild>
+                <div
+                  className="absolute bottom-0 cursor-move rounded-lg border-2 border-amber-400/80 bg-amber-400/10 hover:bg-amber-400/20 shadow-[0_0_16px_rgba(251,191,36,0.35)] z-30 transition-colors"
+                  style={{
+                    // Start at the top of the segment tracks: below the h-6 seek
+                    // header (24) + h-10 time ruler (40) + h-16 video row (64) = 128px.
+                    top: 128,
+                    left: groupBounds.leftT * PIXELS_PER_SECOND + (groupMoveActive ? groupMoveOffset.x : 0),
+                    width: Math.max(0, (groupBounds.rightT - groupBounds.leftT) * PIXELS_PER_SECOND),
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                  onMouseDown={(e) => {
+                    // Right-click (or any non-primary button) is for the context menu,
+                    // not a move — let the ContextMenuTrigger handle it.
+                    if (e.button !== 0) return
+                    // The box sits above the segments — a Ctrl press still adjusts the
+                    // range by hit-testing the segment beneath the cursor.
+                    if (e.ctrlKey || e.metaKey) {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      const blockEl = document
+                        .elementsFromPoint(e.clientX, e.clientY)
+                        .find(el => el.getAttribute('data-segment-block-index'))
+                      if (blockEl) {
+                        const idx = Number(blockEl.getAttribute('data-segment-block-index'))
+                        if (!Number.isNaN(idx)) handleGroupRangeClick(idx)
+                      }
+                      return
+                    }
+                    // Otherwise drag the box to move the whole group — the container's
+                    // onMouseMove/onMouseUp drive the live offset and commit.
+                    e.preventDefault()
+                    e.stopPropagation()
+                    groupMoveActiveRef.current = true
+                    groupMoveStartXRef.current = e.clientX
+                    setGroupMoveActive(true)
+                    setGroupMoveOffset({ x: 0, y: 0 })
+                  }}
+                />
+                </ContextMenuTrigger>
+                <ContextMenuContent className="bg-neutral-900 border-neutral-700 w-52">
+                  <ContextMenuItem
+                    onClick={(e) => { e.stopPropagation(); clearGroupSelection() }}
+                    className="text-xs gap-2">
+                    ✖ Clear Group
+                  </ContextMenuItem>
+                </ContextMenuContent>
+                </ContextMenu>
+              )}
               {/* Infinite repeating grid — 3 levels: 10s / 5s / 1s — always continuous */}
               <div
                 className="absolute inset-0 pointer-events-none z-20"
@@ -6896,7 +6968,9 @@ export function DubVerseEditor({
               <div className="h-14 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative" data-timeline-track>
                 {displaySegments.map((segment, index) => {
                   const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'original'
-                  const isDraggingPaired = draggingSegment?.index === index && draggingSegment?.track === 'dubbed' && lockedPairs.has(index)
+                  // Any drag of this segment (on any track) moves every track's block
+                  // for it, since they all share the one committed position.
+                  const isDraggingPaired = draggingSegment?.index === index
                   const isAssignmentPulse = speakerPulseId !== null && segment.speaker_id === speakerPulseId
                   const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
                   return (
@@ -6954,7 +7028,7 @@ export function DubVerseEditor({
                         isDraggingThis ? 'cursor-grabbing' : 'cursor-grab'
                       )}
                       style={{
-                        left: (effStart(segment) + delta) * PIXELS_PER_SECOND,
+                        left: (effStart(segment) + delta) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0),
                         width: (() => {
                           const dur = effEnd(segment) - effStart(segment)
                           const spd = dragSpeedPreview?.index === index ? dragSpeedPreview.speed : (stagedSpeeds[index] ?? 1.0)
@@ -7210,8 +7284,8 @@ export function DubVerseEditor({
                         bgColor,
                         lockedSegments.has(index) && 'ring-1 ring-green-400/60',
                         lockGlowIndices.has(index) && 'ring-2 ring-green-400 shadow-[0_0_16px_4px_rgba(74,222,128,0.95)] animate-pulse',
-                        groupSelectedSegments.has(index)
-                          ? 'border-yellow-400/70 shadow-[0_0_12px_rgba(250,204,21,0.4)] ring-1 ring-yellow-400/50'
+                        (index === groupBounds?.firstIdx || index === groupBounds?.lastIdx)
+                          ? 'border-yellow-400/90 shadow-[0_0_14px_rgba(250,204,21,0.6)] ring-2 ring-yellow-400/80'
                           : 'border-slate-400/30',
                         selectedSegmentIndex === index && !lockGlowIndices.has(index) && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                         voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
@@ -7225,7 +7299,8 @@ export function DubVerseEditor({
                       style={{
                         left: (() => {
                           const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'dubbed'
-                          const isDraggingPaired = draggingSegment?.index === index && draggingSegment?.track === 'original' && lockedPairs.has(index)
+                          // Follow any drag of this segment (any track) — shared position.
+                          const isDraggingPaired = draggingSegment?.index === index
                           const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
                           const groupDelta = (groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0
                           return (effStart(segment) + delta) * PIXELS_PER_SECOND + groupDelta
@@ -7484,13 +7559,14 @@ export function DubVerseEditor({
                   const startT = effStart(seg)
                   const endT = effEnd(seg)
                   const groupDelta = (groupMoveActive && groupSelectedSegments.has(i)) ? groupMoveOffset.x : 0
+                  const dragDelta = draggingSegment && draggingSegment.index === i ? draggingSegment.currentDelta : 0
                   return (
                     <div
                       key={seg.id + '-rpt-audio'}
                       data-segment-drop-zone
                       data-index={i}
                       className={cn(
-                        'absolute top-1 bottom-1 rounded opacity-70 transition-all group',
+                        'absolute top-1 bottom-1 rounded opacity-70 transition-colors group',
                         voiceDragOverIndex === i
                           ? 'bg-emerald-500/70 border-2 border-emerald-400 ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.7)] animate-pulse'
                           : !hasAudio
@@ -7508,7 +7584,7 @@ export function DubVerseEditor({
                           : 'bg-emerald-500/50 border border-emerald-500/70'
                       )}
                       style={{
-                        left: startT * PIXELS_PER_SECOND + groupDelta,
+                        left: (startT + dragDelta) * PIXELS_PER_SECOND + groupDelta,
                         width: Math.max(
                           (() => {
                             const dur = endT - startT
@@ -7609,7 +7685,7 @@ export function DubVerseEditor({
                         setVideoSubTab('chord')
                       }}
                       style={{
-                        left: effStart(segment) * PIXELS_PER_SECOND,
+                        left: (effStart(segment) + (draggingSegment && draggingSegment.index === index ? draggingSegment.currentDelta : 0)) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0),
                         width: segWidth,
                       }}
                     >
