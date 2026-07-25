@@ -2499,6 +2499,12 @@ class DubbingService:
         if seg is None:
             raise ValueError(f"Segment with transcript_index={segment_index} not found in job {job_id}")
 
+        # A locked segment is frozen — refuse to regenerate it here, the single
+        # choke point every regen path (HTTP endpoint, bulk/auto) flows through,
+        # so nothing but a manual unlock in the editor can overwrite it.
+        if seg.get("locked"):
+            raise PermissionError(f"Segment {segment_index} is locked — unlock it to regenerate")
+
         use_voice_id = voice_id or seg.get("voice_id", "")
         use_speed = speed if speed is not None else seg.get("speed", 1.0)
         if speed is None and speed_ratio is not None:

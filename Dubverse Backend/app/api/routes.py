@@ -5172,10 +5172,13 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     flag_status = body.get("flag_status")
     correction_type = body.get("correction_type")
     locked = body.get("locked")
+    text = body.get("text")
     # Update Supabase — sequence stores transcript_index (see upsert_segments docstring)
     update_data = {"sequence": index}
     if locked is not None:
         update_data["locked"] = locked
+    if text is not None:
+        update_data["text"] = text
     if committed_start_time is not None:
         update_data["committed_start_time"] = committed_start_time
     if committed_end_time is not None:
@@ -5231,6 +5234,8 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         seg["correction_type"] = correction_type
     if locked is not None:
         seg["locked"] = locked
+    if text is not None:
+        seg["text"] = text
     data["segments"] = segs
     with open(segments_path, "w", encoding="utf-8") as f:
         _json.dump(data, f, indent=2, ensure_ascii=False)
@@ -5491,6 +5496,10 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError as e:
+        # Locked segment — 423 Locked. The editor already blocks this client-side;
+        # this makes it authoritative for any bulk/auto/direct caller.
+        raise HTTPException(status_code=423, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except RuntimeError as e:
