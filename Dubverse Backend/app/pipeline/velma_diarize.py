@@ -214,19 +214,26 @@ def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
 
         segments = []
         full_text_parts = []
+
+        # Number speakers by the order each is first HEARD (first = speaker-1),
+        # NOT by the service's cluster id. That id has no relation to who speaks
+        # first, so mapping Speaker_2 -> speaker-2 kept landing the numbers on the
+        # wrong person. Build the map from clips sorted by start time.
+        def _raw_speaker(c):
+            return str(c.get("speaker_label") or c.get("speaker") or "Speaker_1")
+
+        appearance_map: dict = {}
+        for c in sorted(clips, key=lambda c: c.get("start_ms", 0)):
+            raw = _raw_speaker(c)
+            if raw not in appearance_map:
+                appearance_map[raw] = f"speaker-{len(appearance_map) + 1}"
+
         for clip in clips:
             text = (clip.get("text") or "").strip()
             if text:
                 full_text_parts.append(text)
 
-            speaker_label = clip.get("speaker_label") or clip.get("speaker") or "Speaker_1"
-            if isinstance(speaker_label, str) and speaker_label.startswith("Speaker_"):
-                try:
-                    speaker_label = f"speaker-{int(speaker_label.split('_')[1])}"
-                except (IndexError, ValueError):
-                    speaker_label = "speaker-1"
-            elif isinstance(speaker_label, int):
-                speaker_label = f"speaker-{speaker_label}"
+            speaker_label = appearance_map.get(_raw_speaker(clip), "speaker-1")
 
             start_ms   = clip.get("start_ms", 0)
             duration_ms = clip.get("duration_ms", 0)
@@ -252,6 +259,11 @@ def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
         topics           = triage_data.get("topics", [])
         topic_sentiments = triage_data.get("topic_sentiments", [])
         role_picks       = triage_data.get("participant_role_picks", [])
+        # Keep character/role names attached to the renumbered speakers.
+        for rp in role_picks:
+            raw = str(rp.get("speaker_label") or "")
+            if raw in appearance_map:
+                rp["speaker_label"] = appearance_map[raw]
 
         logger.info(
             f"[VELMA] Job {job_id}: {len(segments)} segments, {unique_speakers} speakers | "
