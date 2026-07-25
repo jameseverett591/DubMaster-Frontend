@@ -28,6 +28,20 @@ or rename a speaker in the editor if diarization gets one wrong.
   reposition and their edges dragged to resize; when you move a segment, its blocks on
   every track move together in real time, and the new position is saved.
 
+## Resizing the editor layout
+
+The editor panels can be resized to give more room where you need it, and your sizes
+are remembered across sessions (saved in the browser):
+
+- **Video preview size** — drag the vertical divider between the video preview and the
+  segment list left/right to make the video bigger or smaller.
+- **Timeline height** — drag the horizontal bar just above the timeline up/down to make
+  the timeline taller (more room to work with tracks) or shorter.
+- Smaller resizers also let you widen the QC monitor and the timeline's track-label
+  column.
+- **Lock Layout** (top bar) freezes all of these so you don't move a panel by accident;
+  toggle it off to resize again.
+
 ## Segment toolbar actions
 
 - **Ask AI Chat** — this feature: general help/how-to questions about DubMaster,
