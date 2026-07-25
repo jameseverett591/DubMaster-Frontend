@@ -29,6 +29,7 @@ export type FeatureKey =
   | 'versioning'
   | 'performanceNotes'
   | 'voiceCloning'
+  | 'customVoices'
 
 export const FEATURE_MATRIX: Record<FeatureKey, PlanType[]> = {
   // All plans
@@ -53,6 +54,7 @@ export const FEATURE_MATRIX: Record<FeatureKey, PlanType[]> = {
   versioning:           ['professional'],
   performanceNotes:     ['professional'],
   voiceCloning:         ['basic', 'professional'],
+  customVoices:         ['professional'],
 }
 
 export function planHasFeature(plan: PlanType | null, feature: FeatureKey): boolean {
