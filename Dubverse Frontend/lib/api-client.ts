@@ -1032,6 +1032,7 @@ class DubVerseAPIClient {
       committed_adapted_text?: string
       flag_status?: string
       correction_type?: string | null
+      locked?: boolean
     }
   ): Promise<void> {
     await fetch(`${this.baseURL}/api/segment/commit/${jobId}/${index}`, {

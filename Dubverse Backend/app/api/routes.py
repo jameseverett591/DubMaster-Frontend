@@ -5171,8 +5171,11 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     committed_emotion = body.get("committed_emotion")
     flag_status = body.get("flag_status")
     correction_type = body.get("correction_type")
+    locked = body.get("locked")
     # Update Supabase — sequence stores transcript_index (see upsert_segments docstring)
     update_data = {"sequence": index}
+    if locked is not None:
+        update_data["locked"] = locked
     if committed_start_time is not None:
         update_data["committed_start_time"] = committed_start_time
     if committed_end_time is not None:
@@ -5226,6 +5229,8 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         seg["flag_status"] = flag_status
     if "correction_type" in body:
         seg["correction_type"] = correction_type
+    if locked is not None:
+        seg["locked"] = locked
     data["segments"] = segs
     with open(segments_path, "w", encoding="utf-8") as f:
         _json.dump(data, f, indent=2, ensure_ascii=False)
@@ -5280,6 +5285,15 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest):
 
     existing_by_ti = {s["transcript_index"]: s for s in existing_segs if "transcript_index" in s}
 
+    # Voice per speaker, from the existing segments — used to give a new
+    # split/added segment the same voice as its speaker (it arrives with no
+    # voice_id, and synthesis produces no vocals without one).
+    voice_by_speaker: dict = {}
+    for s in existing_segs:
+        spk, vid = s.get("speaker"), s.get("voice_id")
+        if spk and vid and spk not in voice_by_speaker:
+            voice_by_speaker[spk] = vid
+
     max_ti = max((s.get("transcript_index", -1) for s in existing_segs), default=-1)
 
     FRONTEND_FIELDS = {
@@ -5302,6 +5316,27 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest):
                     merged[key] = incoming[key]
             merged["start"] = incoming.get("start_time", merged.get("start", 0))
             merged["end"] = incoming.get("end_time", merged.get("end", 0))
+            # A structural edit (split/merge) sets rpt_dirty when the segment's
+            # inherited audio no longer matches its new text/span. sync runs only on
+            # structural edits, so honor that flag on the changed segment:
+            #  1. Persist the new target text into both `text` (what the editor page
+            #     loader reads back) and `committed_adapted_text` (what Generate Speech
+            #     renders from — see dubbing_service `use_text = committed_adapted_text
+            #     or text`). Without this a split half reverts to the parent's text on
+            #     refresh and regenerates the parent's line.
+            #  2. Drop the stale rendered clip (path + committed_audio_url) so the
+            #     loader can't rebuild audio_url from `path`, leaving the half silent
+            #     until the next Generate Speech re-renders it.
+            # Gated on rpt_dirty so untouched segments in the same payload (a full
+            # sync sends every segment) keep their audio and any distinct adaptation.
+            if incoming.get("rpt_dirty") is True:
+                new_text = incoming.get("target_text")
+                if new_text is not None:
+                    merged["text"] = new_text
+                    merged["committed_adapted_text"] = new_text
+                merged["path"] = None
+                merged["committed_audio_url"] = None
+                merged.pop("audio_url", None)
             result.append(merged)
         else:
             max_ti += 1
@@ -5313,6 +5348,28 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest):
             new_seg.setdefault("voice_id", None)
             new_seg.setdefault("speed", 1.0)
             new_seg.setdefault("edit_history", [])
+            # New segments (split right half, Add Segment) carry their text only in
+            # target_text; mirror it into `text`/`committed_adapted_text` so it survives
+            # reload (loader reads `text`) and Generate Speech renders the right line.
+            nt = incoming.get("target_text")
+            if nt is not None:
+                new_seg.setdefault("text", nt)
+                new_seg.setdefault("committed_adapted_text", nt)
+            # The loader derives the speaker chip from the backend `speaker` field,
+            # but the frontend only carries `speaker_id`/`speaker_label`. Without this
+            # a split/added segment reloads as the default "Speaker 1" instead of
+            # inheriting its parent's speaker.
+            sp = incoming.get("speaker_id") or incoming.get("speaker_label")
+            if sp is not None:
+                new_seg.setdefault("speaker", sp)
+            # Inherit the speaker's voice so Generate Speech has something to render
+            # with. Prefer an explicit committed_voice_id from the editor, else the
+            # voice already in use by this speaker's other segments.
+            if not new_seg.get("voice_id"):
+                new_seg["voice_id"] = (
+                    incoming.get("committed_voice_id")
+                    or voice_by_speaker.get(new_seg.get("speaker"))
+                )
             result.append(new_seg)
 
     from datetime import datetime as _dt
