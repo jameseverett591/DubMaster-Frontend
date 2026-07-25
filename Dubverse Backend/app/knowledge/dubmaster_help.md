@@ -58,8 +58,11 @@ then review and fine-tune the result in the Editor before exporting.
   highlight and stay locked through a page refresh or closing and reopening the editor.
   Regeneration of a locked segment is refused even by bulk or automated actions — unlock
   it (Shift+U) to make any change.
-- **Pair with Original** (keyboard: **U**) — links a segment to its neighbor so they move
-  together.
+- **Pair with Next** (keyboard: **Shift+P**) — links the segment with the one immediately
+  to its right so the two move together on the timeline. Choose it again (it becomes
+  **Unpair**) to release one pair, or press **Escape** to release all pairs at once. (This
+  replaces the old "Pair with Original," which is obsolete now that all tracks already move
+  in sync.)
 - **Revert to Original** — fully resets the segment: dubbed text back to the true
   original transcription, audio recomputed from the original file, and any commit/
   lock/staged voice/emotion state cleared.
@@ -78,8 +81,9 @@ then review and fine-tune the result in the Editor before exporting.
   highlighted). Drag that box — or any selected segment — to move the whole group at once,
   with all tracks moving in sync. To release the group, right-click the box and choose
   **Clear Group**, or press **Escape**.
-- **Pair with Original** (shortcut **U**) links a single segment to its neighbor so the
-  two move together, which is different from a group selection.
+- **Pair with Next** (shortcut **Shift+P**) links a single segment with the one immediately
+  to its right so the two move together — a quick two-segment link, different from a group
+  selection.
 
 Grouping segments to move them as one **is** supported — via Group Selection above.
 
