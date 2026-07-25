@@ -89,7 +89,7 @@ Grouping segments to move them as one **is** supported — via Group Selection a
 
 ## Saving and persistence
 
-Text edits, splits, merges, segment moves/resizes, and locks are saved. The **Save**
+Text edits, splits, merges, segment moves/resizes, locks, and pairs are saved. The **Save**
 button writes the current state as a snapshot, and locked segments stay locked and
 unlocked segments stay unlocked. Closing and reopening the editor (or a hard refresh)
 restores the project exactly as it was left — Save does not lock anything down, it just

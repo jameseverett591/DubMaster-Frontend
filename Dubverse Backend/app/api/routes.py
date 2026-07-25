@@ -5173,12 +5173,15 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     correction_type = body.get("correction_type")
     locked = body.get("locked")
     text = body.get("text")
+    paired_with_next = body.get("paired_with_next")
     # Update Supabase — sequence stores transcript_index (see upsert_segments docstring)
     update_data = {"sequence": index}
     if locked is not None:
         update_data["locked"] = locked
     if text is not None:
         update_data["text"] = text
+    if paired_with_next is not None:
+        update_data["paired_with_next"] = paired_with_next
     if committed_start_time is not None:
         update_data["committed_start_time"] = committed_start_time
     if committed_end_time is not None:
@@ -5236,6 +5239,8 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         seg["locked"] = locked
     if text is not None:
         seg["text"] = text
+    if paired_with_next is not None:
+        seg["paired_with_next"] = paired_with_next
     data["segments"] = segs
     with open(segments_path, "w", encoding="utf-8") as f:
         _json.dump(data, f, indent=2, ensure_ascii=False)
