@@ -398,7 +398,9 @@ function AskAiBotIcon({ id, size = 20 }: { id: string; size?: number }) {
 }
 
 // Lightweight markdown renderer for Ask DubMaster AI replies — headings, bold, lists, rules, paragraphs.
-// No react-markdown dependency: the assistant's system prompt only ever produces this subset.
+// No react-markdown dependency: the assistant's system prompt only ever produces
+// this subset (bold, lists, headers, rules, paragraphs, and GFM pipe tables — the
+// last so "show me the emotion chart" renders as an actual on-screen table).
 function renderMarkdownLite(text: string): ReactNode[] {
   const renderInline = (line: string, key: number): ReactNode => {
     const parts = line.split(/(\*\*[^*]+\*\*)/g)
@@ -429,37 +431,83 @@ function renderMarkdownLite(text: string): ReactNode[] {
     listItems = null
   }
 
-  lines.forEach((line, idx) => {
+  // GFM pipe-table helpers
+  const isTableRow = (l: string) => /^\s*\|.*\|\s*$/.test(l)
+  const isTableSep = (l: string) => /-/.test(l) && /\|/.test(l) && /^[\s|:\-]+$/.test(l)
+  const splitCells = (l: string) =>
+    l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim())
+
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+
+    // Table = header row + separator row + zero-or-more body rows
+    if (isTableRow(line) && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      flushList()
+      const header = splitCells(line)
+      const rows: string[][] = []
+      let j = i + 2
+      while (j < lines.length && isTableRow(lines[j])) {
+        rows.push(splitCells(lines[j]))
+        j++
+      }
+      nodes.push(
+        <div key={nodes.length} className="my-1.5 overflow-x-auto rounded border border-white/10">
+          <table className="w-full text-xs border-collapse">
+            <thead>
+              <tr className="bg-white/5">
+                {header.map((h, hi) => (
+                  <th key={hi} className="text-left font-semibold px-2 py-1 border-b border-white/15">{renderInline(h, hi)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, ri) => (
+                <tr key={ri} className="border-b border-white/5 last:border-0">
+                  {r.map((c, ci) => (
+                    <td key={ci} className="align-top px-2 py-1">{renderInline(c, ci)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )
+      i = j
+      continue
+    }
+
     const bullet = line.match(/^[-*]\s+(.*)/)
     const numbered = line.match(/^\d+\.\s+(.*)/)
     if (bullet) {
       if (listItems && listOrdered) flushList()
       listOrdered = false
       listItems = [...(listItems ?? []), bullet[1]]
-      return
+      i++; continue
     }
     if (numbered) {
       if (listItems && !listOrdered) flushList()
       listOrdered = true
       listItems = [...(listItems ?? []), numbered[1]]
-      return
+      i++; continue
     }
     flushList()
 
     if (/^(---|\*\*\*)\s*$/.test(line)) {
-      nodes.push(<hr key={idx} className="border-white/10 my-1" />)
+      nodes.push(<hr key={nodes.length} className="border-white/10 my-1" />)
     } else if (line.startsWith('### ')) {
-      nodes.push(<h4 key={idx} className="font-semibold text-sm mt-1">{renderInline(line.slice(4), idx)}</h4>)
+      nodes.push(<h4 key={nodes.length} className="font-semibold text-sm mt-1">{renderInline(line.slice(4), i)}</h4>)
     } else if (line.startsWith('## ')) {
-      nodes.push(<h3 key={idx} className="font-semibold text-base mt-1">{renderInline(line.slice(3), idx)}</h3>)
+      nodes.push(<h3 key={nodes.length} className="font-semibold text-base mt-1">{renderInline(line.slice(3), i)}</h3>)
     } else if (line.startsWith('# ')) {
-      nodes.push(<h2 key={idx} className="font-bold text-lg mt-1">{renderInline(line.slice(2), idx)}</h2>)
+      nodes.push(<h2 key={nodes.length} className="font-bold text-lg mt-1">{renderInline(line.slice(2), i)}</h2>)
     } else if (line.trim() === '') {
-      nodes.push(<div key={idx} className="h-1" />)
+      nodes.push(<div key={nodes.length} className="h-1" />)
     } else {
-      nodes.push(<p key={idx}>{renderInline(line, idx)}</p>)
+      nodes.push(<p key={nodes.length}>{renderInline(line, i)}</p>)
     }
-  })
+    i++
+  }
   flushList()
   return nodes
 }
@@ -2271,8 +2319,26 @@ export function DubVerseEditor({
     reader.readAsText(file)
   }, [])
   
-  // Get the actual video URL to use (imported or original)
-  const activeVideoUrl = importedVideoUrl || ((playbackMode === 'dubbed' || playbackMode === 'preview') && activeDubbedVideoUrl ? activeDubbedVideoUrl : videoUrl)
+  // Get the actual video URL to use (imported or original).
+  // PREVIEW mode plays the ORIGINAL footage (real lip movement) with the live stitched
+  // audio + live captions layered on top, so every edit shows instantly with NO rebuild.
+  // Only DUBBED mode shows the last rendered dubbed video (with its baked-in audio/subtitles);
+  // that render is an export artifact and is intentionally not used for live editing.
+  const activeVideoUrl = importedVideoUrl || (playbackMode === 'dubbed' && activeDubbedVideoUrl ? activeDubbedVideoUrl : videoUrl)
+
+  // The caption to show over the video. In preview mode it follows the playhead (the segment
+  // being spoken right now), so subtitles are live and disappear during gaps — no stale baked
+  // pixels. In other modes it shows the selected segment for context.
+  const captionSegment = useMemo(() => {
+    if (playbackMode === 'preview') {
+      const t = currentTime
+      const live = displaySegments.find(s => t >= effStart(s) && t < effEnd(s))
+      if (live) return live
+      // paused between segments: keep the selected one visible for context; hide while playing
+      return isPlaying ? null : (selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null)
+    }
+    return selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null
+  }, [playbackMode, currentTime, isPlaying, displaySegments, selectedSegmentIndex])
   
   // Track which URL we've already extracted thumbnails for
   const lastExtractedUrlRef = useRef<string | null>(null)
@@ -3116,6 +3182,7 @@ export function DubVerseEditor({
         emotionIntensity,
         nuances: stagedNuances[activeIndex] ?? segment.nuances,
         nuance_markers: segment.nuance_markers,
+        custom_nuance: segment.custom_nuance,
         live_segment_start: liveStart,
         live_segment_end: liveEnd,
         live_next_segment_start: liveNextStart,
@@ -3801,6 +3868,30 @@ export function DubVerseEditor({
   }
   
   const EMOTIONS = ['Neutral', 'Happy', 'Excited', 'Calm', 'Sad', 'Angry', 'Fearful', 'Surprised', 'Disgusted', 'Professional', 'Casual', 'Formal', 'Intimate', 'Defiant', 'Confused', 'Whisper', 'Shout', 'Sarcastic', 'Hopeful', 'Melancholic']
+  // What each pill actually asks the voice to do — shown to the user so they can
+  // choose informed. Mirrors _S2_EMOTION_STYLE in the backend (dubbing_service.py).
+  const EMOTION_DESCRIPTIONS: Record<string, string> = {
+    Neutral: 'No steering — plain, natural read',
+    Happy: 'Warm and bright, lightly smiling tone',
+    Excited: 'Breathless and eager, rising pitch with building anticipation',
+    Calm: 'Slow and steady, soft soothing tone',
+    Sad: 'Heavy and subdued, downward trailing endings',
+    Angry: 'Tense and forceful, clipped hard delivery',
+    Fearful: 'Shaky and hushed, quick uneven breaths',
+    Surprised: 'Sudden sharp rise in pitch, wide-eyed disbelief',
+    Disgusted: 'Recoiling, curled sneering tone',
+    Professional: 'Clear, measured and confident broadcast tone',
+    Casual: 'Relaxed and easygoing, conversational',
+    Formal: 'Poised and precise, controlled cadence',
+    Intimate: 'Soft and close, gentle breathy warmth',
+    Defiant: 'Firm and unyielding, chin-up challenging tone',
+    Confused: 'Hesitant and searching, inquisitive rising ending',
+    Whisper: 'Hushed whisper in a small voice',
+    Shout: 'Loud and projected, urgent force',
+    Sarcastic: 'Dry and mocking, exaggerated flat delivery',
+    Hopeful: 'Gentle rising pitch, warm anticipation',
+    Melancholic: 'Wistful and slow, trailing pensive endings',
+  }
   const VOICE_OPTIONS = [
     { key: 'male-1',   label: 'Male 1'   },
     { key: 'male-2',   label: 'Male 2'   },
@@ -4719,6 +4810,7 @@ export function DubVerseEditor({
                               {EMOTIONS.map((emotion) => (
                                 <span
                                   key={emotion}
+                                  title={EMOTION_DESCRIPTIONS[emotion]}
                                   className={cn(
                                     'text-[9px] px-1.5 py-0.5 rounded-full cursor-pointer border transition-colors select-none font-mono',
                                     stagedEmotions[index] === emotion
@@ -5023,6 +5115,7 @@ export function DubVerseEditor({
                 {EMOTIONS.map((emotion) => (
                   <DropdownMenuItem
                     key={emotion}
+                    title={EMOTION_DESCRIPTIONS[emotion]}
                     className={cn(
                       "text-xs cursor-pointer",
                       selectedSegmentIndex !== null && stagedEmotions[selectedSegmentIndex] === emotion
@@ -5035,10 +5128,17 @@ export function DubVerseEditor({
                       }
                     }}
                   >
-                    <span className="font-mono text-[10px] text-slate-500 mr-2 w-20 shrink-0">
-                      ({emotion.toLowerCase()})
-                    </span>
-                    {emotion}
+                    <div className="flex flex-col gap-0.5 py-0.5">
+                      <div className="flex items-center">
+                        <span className="font-mono text-[10px] text-slate-500 mr-2 w-16 shrink-0">
+                          ({emotion.toLowerCase()})
+                        </span>
+                        <span className="font-medium">{emotion}</span>
+                      </div>
+                      <span className="text-[10px] text-slate-500 leading-snug">
+                        {EMOTION_DESCRIPTIONS[emotion]}
+                      </span>
+                    </div>
                   </DropdownMenuItem>
                 ))}
                 <DropdownMenuSeparator className="bg-slate-700" />
@@ -5383,10 +5483,10 @@ export function DubVerseEditor({
                 onTimeUpdate={handleVideoTimeUpdate}
                 controls={false}
               />
-              {selectedSegmentIndex !== null && displaySegments[selectedSegmentIndex] && (
-                <div className="absolute bottom-8 left-0 right-0 text-center">
+              {captionSegment && (
+                <div className="absolute bottom-8 left-0 right-0 text-center px-4">
                   <span className="bg-black/75 px-4 py-2 rounded text-white text-sm">
-                    {displaySegments[selectedSegmentIndex].preview_text ?? displaySegments[selectedSegmentIndex].active_text ?? displaySegments[selectedSegmentIndex].target_text}
+                    {captionSegment.preview_text ?? captionSegment.active_text ?? captionSegment.target_text}
                   </span>
                 </div>
               )}
@@ -5762,6 +5862,21 @@ export function DubVerseEditor({
                     ))}
                   </div>
                 )}
+
+                {/* Free-text write-in — folds into this segment's composed S2 nuance directive */}
+                <div className="space-y-1 pt-1">
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">Write-in</div>
+                  <input
+                    type="text"
+                    value={seg?.custom_nuance ?? ''}
+                    onChange={(e) => setImportedSegments(prev => prev
+                      ? prev.map((s, i) => i === nIdx ? { ...s, custom_nuance: e.target.value } : s)
+                      : prev)}
+                    placeholder="e.g. lingers on the last word, slight tremble"
+                    className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 placeholder:text-slate-600 focus:border-violet-500/60 focus:outline-none"
+                  />
+                  <div className="text-[9px] text-slate-600">Free-text delivery note, added to this segment's nuance directive on regenerate.</div>
+                </div>
 
                 <div className="pt-3">
                   <Button
