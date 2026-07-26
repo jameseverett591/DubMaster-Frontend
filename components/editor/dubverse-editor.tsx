@@ -173,6 +173,8 @@ interface SegmentContextMenuProps {
   onTogglePair: (index: number) => void
   onRevert: (index: number) => void
   onUndoLastEdit: (index: number) => void
+  onCopyText: (index: number) => void
+  onPasteText: (index: number) => void
   onClearSegment: (index: number) => void
   onSetEmotion: (index: number, emotion: string) => void
   onClearEmotion: (index: number) => void
@@ -201,6 +203,8 @@ function SegmentContextMenu({
   onTogglePair,
   onRevert,
   onUndoLastEdit,
+  onCopyText,
+  onPasteText,
   onClearSegment,
   onSetEmotion,
   onClearEmotion,
@@ -229,6 +233,13 @@ function SegmentContextMenu({
       <ContextMenuContent className={cn("bg-neutral-900 border-neutral-700", showEmotions ? "w-72" : "w-52")}>
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onUndoLastEdit(index) }} className="text-xs gap-2">
           ↶ Undo Last Edit
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={(e) => { e.stopPropagation(); onCopyText(index) }} className="text-xs gap-2">
+          📋 Copy Text
+        </ContextMenuItem>
+        <ContextMenuItem onClick={(e) => { e.stopPropagation(); onPasteText(index) }} className="text-xs gap-2">
+          📥 Paste Text
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onSplit(index) }} className="text-xs gap-2">
@@ -3793,6 +3804,49 @@ export function DubVerseEditor({
     setEditingText('')
   }, [])
 
+  // Right-click → Copy Text: put the segment's current dubbed text on the clipboard.
+  const handleCopyText = useCallback((index: number) => {
+    const seg = displaySegmentsRef.current[index]
+    const text = seg?.preview_text ?? seg?.active_text ?? seg?.target_text ?? ''
+    if (!navigator.clipboard) { console.warn('[COPY] clipboard API unavailable'); return }
+    navigator.clipboard.writeText(text).catch(err => console.warn('[COPY] failed:', err))
+  }, [])
+
+  // Right-click → Paste Text: replace the segment's dubbed text with the clipboard
+  // contents, applied exactly like an inline text edit (preview_text + persisted
+  // committed_adapted_text, undo entry, and a debounced auto-regen in Preview mode).
+  const handlePasteText = useCallback(async (index: number) => {
+    if (!navigator.clipboard) { console.warn('[PASTE] clipboard API unavailable'); return }
+    let text: string
+    try {
+      text = await navigator.clipboard.readText()
+    } catch (err) {
+      console.warn('[PASTE] clipboard read failed (permission?):', err)
+      return
+    }
+    if (text == null) return
+    const segs = displaySegmentsRef.current
+    undoStack.current.push({ index, prevText: segs[index]?.preview_text ?? segs[index]?.active_text ?? segs[index]?.target_text ?? '' })
+    emotionAutoFiredRef.current.delete(index)
+    setPreviewText(index, text)
+    setImportedSegments(prev => {
+      const base = prev ?? displaySegmentsRef.current
+      return base.map((seg, i) => i === index ? { ...seg, preview_text: text } : seg)
+    })
+    applyFlagOutcome(index, 'text')
+    const ti = segs[index]?.transcript_index ?? index
+    apiClient.commitSegmentTiming(jobId, ti, { committed_adapted_text: text }).catch(err =>
+      console.warn('[PASTE] failed to persist text:', err)
+    )
+    if (playbackMode === 'preview') {
+      if (autoRegenTimerRef.current) clearTimeout(autoRegenTimerRef.current)
+      autoRegenTimerRef.current = setTimeout(() => {
+        handleGenerateSpeechRef.current(index, undefined, text)
+        autoRegenTimerRef.current = null
+      }, 2000)
+    }
+  }, [setPreviewText, jobId, playbackMode])
+
   // Drag-to-reorder refs to avoid stale closures in mousemove
   const dragReorderRef = useRef<{ fromIndex: number; toIndex: number | null; isDragging: boolean } | null>(null)
 
@@ -4467,6 +4521,8 @@ export function DubVerseEditor({
                   onTogglePair={togglePairWithNext}
                   onRevert={() => handleRevert()}
                   onUndoLastEdit={handleUndoLastEdit}
+                  onCopyText={handleCopyText}
+                  onPasteText={handlePasteText}
                   onClearSegment={handleClearSegment}
                   onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
                   onClearEmotion={(idx) => {
@@ -4756,10 +4812,15 @@ export function DubVerseEditor({
                       <>
                         <div className="flex items-center gap-1.5 flex-wrap">
                         {/* Emotion tag chip — shows the exact tag that will be sent to TTS */}
-                        {stagedEmotions[index] ? (
+                        {stagedEmotions[index] ? (() => {
+                          // Compact a long custom emotion to a one-word pill; full text on hover.
+                          const full = stagedEmotions[index].toLowerCase()
+                          const firstWord = full.split(/[\s,]+/).filter(Boolean)[0] ?? full
+                          const label = full.length > firstWord.length ? `${firstWord}…` : full
+                          return (
                           <span
-                            className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-300 border border-violet-500/30 font-mono cursor-pointer hover:bg-red-500/20 hover:text-red-300 hover:border-red-500/30 transition-colors group"
-                            title="Click to remove emotion"
+                            className="inline-flex items-center gap-1 max-w-[9rem] text-[10px] px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-300 border border-violet-500/30 font-mono cursor-pointer hover:bg-red-500/20 hover:text-red-300 hover:border-red-500/30 transition-colors group"
+                            title={`(${full}) — click to remove`}
                             onClick={(e) => {
                               e.stopPropagation()
                               setStagedEmotions(prev => ({ ...prev, [index]: '' }))
@@ -4770,10 +4831,11 @@ export function DubVerseEditor({
                               })
                             }}
                           >
-                            ({stagedEmotions[index].toLowerCase()})
+                            ({label})
                             <X className="h-2.5 w-2.5 opacity-0 group-hover:opacity-100 transition-opacity" />
                           </span>
-                        ) : (
+                          )
+                        })() : (
                           <span
                             className="inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full text-slate-600 border border-slate-800 hover:text-violet-400 hover:border-violet-500/30 transition-colors cursor-pointer select-none"
                             title="Set emotion for this segment"
@@ -4847,6 +4909,9 @@ export function DubVerseEditor({
                           <div
                             className="w-full mt-1 p-2 rounded-xl border border-cyan-500/40 bg-[#0d1525] shadow-lg shadow-cyan-900/30"
                             onClick={(e) => e.stopPropagation()}
+                            // Let the browser's native right-click menu (with Paste) work inside
+                            // this field instead of the segment's custom context menu.
+                            onContextMenu={(e) => e.stopPropagation()}
                           >
                             <input
                               type="text"
@@ -5099,7 +5164,12 @@ export function DubVerseEditor({
                   )}
                 >
                   {selectedSegmentIndex !== null && stagedEmotions[selectedSegmentIndex]
-                    ? <><span className="font-mono text-[10px]">({stagedEmotions[selectedSegmentIndex].toLowerCase()})</span></>
+                    ? (() => {
+                        const full = stagedEmotions[selectedSegmentIndex].toLowerCase()
+                        const firstWord = full.split(/[\s,]+/).filter(Boolean)[0] ?? full
+                        const label = full.length > firstWord.length ? `${firstWord}…` : full
+                        return <span className="font-mono text-[10px] max-w-[8rem] truncate" title={`(${full})`}>({label})</span>
+                      })()
                     : 'Emotion'}
                   {Object.keys(stagedEmotions).length > 0 && (
                     <span className="ml-0.5 text-[9px] bg-violet-500/30 text-violet-300 rounded-full px-1">
@@ -5869,9 +5939,16 @@ export function DubVerseEditor({
                   <input
                     type="text"
                     value={seg?.custom_nuance ?? ''}
-                    onChange={(e) => setImportedSegments(prev => prev
-                      ? prev.map((s, i) => i === nIdx ? { ...s, custom_nuance: e.target.value } : s)
-                      : prev)}
+                    onChange={(e) => {
+                      const val = e.target.value
+                      // Seed from displaySegments when importedSegments is still null/empty
+                      // (fresh session with no structural edit yet) — otherwise the update
+                      // would be a no-op and the field would appear un-typeable.
+                      setImportedSegments(prev => {
+                        const base = (prev && prev.length) ? prev : displaySegments
+                        return base.map((s, i) => i === nIdx ? { ...s, custom_nuance: val } : s)
+                      })
+                    }}
                     placeholder="e.g. lingers on the last word, slight tremble"
                     className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 placeholder:text-slate-600 focus:border-violet-500/60 focus:outline-none"
                   />
@@ -7268,6 +7345,8 @@ export function DubVerseEditor({
                       onTogglePair={togglePairWithNext}
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
+                      onCopyText={handleCopyText}
+                      onPasteText={handlePasteText}
                       onClearSegment={handleClearSegment}
                       onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
                       onClearEmotion={(idx) => {
@@ -7546,6 +7625,8 @@ export function DubVerseEditor({
                       onTogglePair={togglePairWithNext}
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
+                      onCopyText={handleCopyText}
+                      onPasteText={handlePasteText}
                       onClearSegment={handleClearSegment}
                       onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
                       onClearEmotion={(idx) => {
