@@ -116,6 +116,7 @@ export interface Segment {
   nuances?: Partial<SegmentNuances>
   nuance_markers?: NuanceMarker[]
   custom_nuance?: string   // free-text write-in directive from the Nuances panel
+  tts_text?: string        // Delivery Script: verbatim line + inline [tags] sent to TTS
   flags?: Array<{ code: string; score: number | null; threshold: number; reason?: string | null }>
   flag_status?: 'unreviewed' | 'reviewed_no_change' | 'reviewed_corrected'
   correction_type?: 'timing' | 'text' | 'voice' | 'emotion' | null

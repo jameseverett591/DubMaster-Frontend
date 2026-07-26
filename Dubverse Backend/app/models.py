@@ -204,6 +204,10 @@ class RegenerateRequest(BaseModel):
     nuances: Optional[Dict] = None
     nuance_markers: Optional[List[Dict]] = None
     custom_nuance: Optional[str] = None   # free-text write-in from the Nuances panel
+    # Delivery Script: the user-authored line + inline [tags] to synthesize VERBATIM.
+    # When set, this is exactly what Fish speaks (tags parse, not spoken); the segment's
+    # display text / subtitle / timing keep using the clean `text` instead.
+    tts_text: Optional[str] = None
     # Live timeline boundaries from the frontend at the moment of regen — see
     # dubbing_service.regenerate_segment for why these can beat segments.json.
     live_segment_start: Optional[float] = None

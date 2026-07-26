@@ -5661,6 +5661,7 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
             nuances=body.nuances,
             nuance_markers=body.nuance_markers,
             custom_nuance=body.custom_nuance,
+            tts_text=body.tts_text,
             live_segment_start=body.live_segment_start,
             live_segment_end=body.live_segment_end,
             live_next_segment_start=body.live_next_segment_start,

@@ -2650,6 +2650,7 @@ class DubbingService:
         nuances: Optional[Dict] = None,
         nuance_markers: Optional[List[Dict]] = None,
         custom_nuance: Optional[str] = None,
+        tts_text: Optional[str] = None,
         live_segment_start: Optional[float] = None,
         live_segment_end: Optional[float] = None,
         live_next_segment_start: Optional[float] = None,
@@ -2730,28 +2731,37 @@ class DubbingService:
 
         # Nuance sliders → delivery directives + speed modifier + pause/marker text edits.
         nuance_directives: List[str] = []
-        tts_text = use_text
+        tts_text_processed = use_text
         if nuances:
             translated = self._nuance_translator.translate_for_fish_audio(nuances)
             nuance_directives = translated["directives"]
             use_speed = max(0.5, min(2.0, use_speed * translated["speed_modifier"]))
             pause_level = nuances.get("pauses", 50)
             if pause_level != 50:
-                tts_text = self._nuance_translator.preprocess_text_pauses(
-                    tts_text, pause_level, engine="fish_audio"
+                tts_text_processed = self._nuance_translator.preprocess_text_pauses(
+                    tts_text_processed, pause_level, engine="fish_audio"
                 )
         if nuance_markers:
-            tts_text = self._nuance_translator.apply_markers_to_text(
-                tts_text, nuance_markers, engine="fish_audio"
+            tts_text_processed = self._nuance_translator.apply_markers_to_text(
+                tts_text_processed, nuance_markers, engine="fish_audio"
             )
-        # One composed S2 directive: traits + emotion + nuance delivery/cadence
-        # clauses + the free-text write-in from the Nuances panel (last).
-        directive = compose_fish_directive(
-            emotion=emotion, traits=traits,
-            nuance_directives=nuance_directives, extra=custom_nuance,
-        )
+        # Delivery Script override: the user authored the exact line + inline [tags]
+        # to synthesize. Send it VERBATIM (tags parse, not spoken) and skip the
+        # composed directive so we don't double-tag. The clean display text
+        # (use_text) still drives seg["text"] / subtitle / timing below.
+        if tts_text and tts_text.strip():
+            fish_text = tts_text
+            directive = ""
+        else:
+            fish_text = tts_text_processed
+            # One composed S2 directive: traits + emotion + nuance delivery/cadence
+            # clauses + the free-text write-in from the Nuances panel (last).
+            directive = compose_fish_directive(
+                emotion=emotion, traits=traits,
+                nuance_directives=nuance_directives, extra=custom_nuance,
+            )
         result = await fish_audio_tts.text_to_speech(
-            text=tts_text,
+            text=fish_text,
             voice_id=use_voice_id,
             output_path=audio_path,
             speed=use_speed,
@@ -2974,6 +2984,12 @@ class DubbingService:
             seg.pop("custom_nuance", None)
         elif custom_nuance:
             seg["custom_nuance"] = custom_nuance
+        # Delivery Script (verbatim line + tags): same contract. Kept separate from
+        # seg["text"] so the display/subtitle stays the clean line.
+        if tts_text == "":
+            seg.pop("tts_text", None)
+        elif tts_text:
+            seg["tts_text"] = tts_text
         if speed_ratio is not None:
             seg["speed_ratio"] = speed_ratio
         if target_duration is not None:
