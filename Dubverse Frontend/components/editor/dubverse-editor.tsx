@@ -3276,6 +3276,48 @@ export function DubVerseEditor({
   const displaySegmentsRef = useRef(displaySegments)
   displaySegmentsRef.current = displaySegments
 
+  // Manual "make room" for a segment whose audio won't fit even after the automatic
+  // expand-into-gaps. Grows this segment's slot and RIPPLES every later segment right
+  // by the same amount (so nothing collides), then regenerates it into the bigger slot.
+  // multiplier ×1 = just fit the audio; ×2/×3 = progressively more trailing room.
+  const expandTimingSlot = useCallback((multiplier: number) => {
+    const ex = timingExclusion
+    if (!ex) return
+    const idx = ex.segmentIndex
+    const segs = displaySegmentsRef.current
+    const seg = segs[idx]
+    if (!seg) return
+    const start = effStart(seg)
+    const newSlot = Math.max(ex.slotDuration * multiplier, ex.audioDuration + 0.2)
+    const newEnd = start + newSlot
+    const nextStart = start + ex.slotDuration           // the neighbor boundary that was constraining
+    const delta = Math.max(0, (newEnd + 0.05) - nextStart) // how far to push later segments
+    const updated = segs.map((s, i) => {
+      if (i === idx) {
+        return { ...s, end_time: newEnd, committed_end_time: newEnd, status: 'edited' as const, rpt_dirty: true }
+      }
+      if (delta > 0 && effStart(s) >= nextStart - 0.01) {
+        return {
+          ...s,
+          start_time: effStart(s) + delta,
+          end_time: effEnd(s) + delta,
+          committed_start_time: effStart(s) + delta,
+          committed_end_time: effEnd(s) + delta,
+        }
+      }
+      return s
+    })
+    setImportedSegments(updated)
+    setTimingExclusion(null)
+    // Persist the whole rippled layout, then regenerate this segment into the new
+    // (now large enough) slot so it fits with no speed-up and no truncation.
+    setTimeout(async () => {
+      await syncSegmentsToBackend(displaySegmentsRef.current)
+      await new Promise(r => setTimeout(r, 0))
+      handleGenerateSpeechRef.current(idx, undefined, undefined)
+    }, 0)
+  }, [timingExclusion, syncSegmentsToBackend])
+
 
   // Apply one voice to EVERY segment of a speaker via the backend bulk endpoint —
   // reliable and atomic (no per-segment client loop that could skip/fail some and
@@ -7976,14 +8018,28 @@ export function DubVerseEditor({
               Your text exceeds this by <span className="text-red-400 font-mono font-bold">{timingExclusion.overlap.toFixed(1)}s</span>.
             </p>
             <p className="text-sm text-neutral-400 mb-6">
-              Please rewrite your text so that it fits into its given time slot.
+              Rewrite it shorter, or give the segment more room — that pushes the later
+              segments over to make space, then refits the audio at a natural pace.
             </p>
+            <div className="flex items-center gap-2 mb-4">
+              <span className="text-xs text-neutral-500 shrink-0">Make room:</span>
+              {[1, 2, 3].map(m => (
+                <button
+                  key={m}
+                  className="flex-1 px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium transition-colors"
+                  onClick={() => expandTimingSlot(m)}
+                  title={m === 1 ? 'Expand just enough to fit the audio' : `${m}× the current space`}
+                >
+                  Expand ×{m}
+                </button>
+              ))}
+            </div>
             <div className="flex justify-end">
               <button
-                className="px-4 py-2 rounded bg-amber-500 hover:bg-amber-600 text-black text-sm font-medium transition-colors"
+                className="px-4 py-2 rounded bg-neutral-700 hover:bg-neutral-600 text-white text-sm font-medium transition-colors"
                 onClick={() => setTimingExclusion(null)}
               >
-                OK
+                Cancel
               </button>
             </div>
           </div>
