@@ -146,9 +146,36 @@ the last word", "rising, inquisitive on 'me'"). It's appended to the segment's
 delivery instruction on regenerate. A few decisive settings land better than
 maxing everything at once.
 
+## Delivery Script — inline tags placed exactly where you want them
+
+For fine, positional control you can write the line together with inline delivery
+tags in **square brackets**, placed at the exact point where the shift should
+happen. The voice engine reads the tags as performance direction and does **not**
+speak them:
+
+    There are many masters, [reassuring] anyone of them should be fine.
+    She set the folder down. [long pause] Then she looked up.
+
+You author this in the segment's **write-in box** (the "+ write-in" chip), so the
+brackets never clutter the on-screen line or subtitle:
+
+1. Open the write-in box, then **double-click inside it** to load the segment's
+   current line.
+2. Type your `[tags]` inline where you want the delivery to change.
+3. Press **Generate Speech** (or Ctrl+Enter).
+
+The write-in text is what the voice speaks; the segment's normal text bubble,
+subtitle, and timeline keep the clean line (no brackets, no timing change). Tags
+are free-form natural language — describe the delivery in your own words
+(`[whispering]`, `[warm and reassuring]`, `[quiet, trailing off]`), you're not
+limited to a fixed list. This applies only when you generate from the write-in;
+a normal regenerate goes back to the plain line plus any emotion/nuance settings.
+
 ## Right-click context menu (segment list rows and timeline blocks)
 
 - **Undo Last Edit** — reverts the most recent text edit only.
+- **Copy Text** / **Paste Text** — copy the segment's dubbed text to the clipboard, or
+  replace it with the clipboard contents (applied like a normal edit).
 - **Split at Playhead** / **Split at Word…** — divides a segment into two. Each half keeps
   its own text, and the halves are auto-generated afterward so each gets fresh audio
   matching its text.
