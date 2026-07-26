@@ -165,6 +165,10 @@ class DubbingService:
     _MIN_SLOT_SECONDS = 0.3
     # Characters-per-second for CJK (each char ≈ one syllable at normal pace).
     _CJK_CHARS_PER_SECOND = 4.0
+    # Max speed-up when FITTING audio into its slot. Higher than the natural-
+    # translation cap (MAX_SPEED_RATIO ~1.15) and matches the editor regen path, so
+    # a long line fits by speeding up rather than being hard-trimmed (truncated).
+    _FIT_MAX_SPEED = float(os.getenv("DUBMASTER_FIT_MAX_SPEED", "1.5"))
 
     # Patterns that identify non-dialogue hallucination segments that must be
     # dropped before translation and TTS.
@@ -809,6 +813,25 @@ class DubbingService:
                 if _adapted is not None:
                     _variant_type = (adaptation_selections or {}).get(seg_id, "performable")
                     text = _adapted.get_variant(_variant_type).text or segment.get("text", "")
+                    # Anti-truncation (step 1 — shorten): when the user hasn't explicitly
+                    # picked a variant and the default would overrun the on-screen slot,
+                    # prefer the shorter sync_fit wording instead of hard-trimming audio
+                    # later. natural_duration() matches the fit path's timing model.
+                    if seg_id not in (adaptation_selections or {}):
+                        _start = float(segment.get("start", 0) or 0)
+                        _next = transcript[i + 1].get("start") if i + 1 < len(transcript) else None
+                        _slot = (float(_next) - _start) if _next is not None else (float(segment.get("end", 0) or 0) - _start)
+                        if _slot > 0 and text and natural_duration(text) > _slot + 0.1:
+                            try:
+                                _sync = (_adapted.get_variant("sync_fit").text or "").strip()
+                            except Exception:
+                                _sync = ""
+                            if _sync and natural_duration(_sync) < natural_duration(text):
+                                logger.info(
+                                    f"[ADAPT-FIT] seg {i}: '{_variant_type}' ~{natural_duration(text):.1f}s "
+                                    f"overruns {_slot:.1f}s slot — using sync_fit ~{natural_duration(_sync):.1f}s"
+                                )
+                                text = _sync
                 else:
                     text = segment.get("text", "")
                 speaker = segment.get("speaker", "speaker-1")
@@ -1171,16 +1194,19 @@ class DubbingService:
                 _speed_applied = 1.0
                 if actual_duration > target_duration + _atempo_tolerance and target_duration > 0.2:
                     _speed_applied = actual_duration / target_duration
-                    if _speed_applied > MAX_SPEED_RATIO:
+                    # Anti-truncation (step 2 — speed): fit by speeding up to the FIT
+                    # cap (higher than the natural-translation cap) so we keep all the
+                    # words. Only if even this can't fit does the hard-trim below fire.
+                    if _speed_applied > self._FIT_MAX_SPEED:
                         logger.warning(
                             f"[FIT] seg={i} needs {_speed_applied:.2f}x speedup "
-                            f"(exceeds MAX_SPEED_RATIO={MAX_SPEED_RATIO}) — "
-                            f"capping at {MAX_SPEED_RATIO}x; slot may hard-trim remainder"
+                            f"(exceeds fit cap {self._FIT_MAX_SPEED}) — "
+                            f"capping at {self._FIT_MAX_SPEED}x; slot may hard-trim remainder"
                         )
                     adjusted = await asyncio.to_thread(
                         self._adjust_audio_duration,
                         final_path, adjusted_audio_path, target_duration,
-                        min_speed=MIN_SPEED_RATIO, max_speed=MAX_SPEED_RATIO,
+                        min_speed=MIN_SPEED_RATIO, max_speed=self._FIT_MAX_SPEED,
                     )
                     if adjusted and os.path.exists(adjusted_audio_path):
                         final_path = adjusted_audio_path
