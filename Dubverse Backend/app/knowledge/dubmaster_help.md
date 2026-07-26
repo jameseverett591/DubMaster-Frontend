@@ -57,14 +57,94 @@ are remembered across sessions (saved in the browser):
   like any other voice. No API keys and no Fish Audio / ElevenLabs account are required —
   the clone is created under DubMaster's own account, so it works for generation and
   export immediately. (This replaces the old Pronunciation button.)
-- **Emotion** — set or clear an emotional tone tag for the segment's delivery.
-- **Nuances** — fine-grained delivery adjustments beyond the base emotion tag.
+- **Emotion** — set or clear the segment's emotional delivery from a pill list
+  (see "How emotions reach the voice" below). Applies on the next regeneration.
+- **Nuances** — a panel of fine delivery controls (pace, breath, tail, pitch,
+  etc.) plus a free-text write-in (see "Nuances — fine delivery control" below).
 - **Ask AI** (separate feature, sparkle icon) — a floating panel that rewrites the
   *currently selected segment's* dubbed text based on a free-text request or a quick
   preset ("Make this sound more natural," "Shorten to fit lip-sync," etc.). It only
   sees that one segment's source/dubbed text and language pair — it cannot see or
   change voice, emotion, QC scores, or other segments. Requires a Premium or
   Professional plan.
+
+## How emotions reach the voice (emotion pills)
+
+DubMaster's voice engine (Fish Audio S2) takes performance direction as
+free-form natural-language descriptions. When you set an emotion pill on a
+segment, DubMaster does NOT send the bare word — it automatically expands it
+into a rich delivery description the voice engine acts on. You never type tags
+yourself; setting a pill changes delivery on the segment's next (re)generation.
+
+The 20 pills map as follows — **pill → what the voice engine actually receives**:
+
+| Pill | Delivery direction sent to the voice |
+|---|---|
+| Neutral | *(nothing — no steering)* |
+| Happy | warm and bright, lightly smiling tone |
+| Excited | breathless and eager, rising pitch with building anticipation |
+| Calm | slow and steady, soft soothing tone |
+| Sad | heavy and subdued, downward trailing endings |
+| Angry | tense and forceful, clipped hard delivery |
+| Fearful | shaky and hushed, quick uneven breaths |
+| Surprised | sudden sharp rise in pitch, wide-eyed disbelief |
+| Disgusted | recoiling, curled sneering tone |
+| Professional | clear, measured and confident broadcast tone |
+| Casual | relaxed and easygoing, conversational |
+| Formal | poised and precise, controlled cadence |
+| Intimate | soft and close, gentle breathy warmth |
+| Defiant | firm and unyielding, chin-up challenging tone |
+| Confused | hesitant and searching, inquisitive rising ending |
+| Whisper | hushed whisper in a small voice |
+| Shout | loud and projected, urgent force |
+| Sarcastic | dry and mocking, exaggerated flat delivery |
+| Hopeful | gentle rising pitch, warm anticipation |
+| Melancholic | wistful and slow, trailing pensive endings |
+
+Typing your own custom emotion word passes through as-is. **Questions:** a line
+that is a question but has no question mark tends to fall flat at the end — add
+a "?" to the segment text and regenerate to get the rising, questioning
+delivery. Emotion is one of several cues; the voice-clone identity still carries
+most of the character, so pills nuance the read rather than override the voice.
+
+## Nuances — fine delivery control
+
+The Nuances tab gives per-segment control beyond the emotion pill. Every control
+here folds into the SAME single delivery instruction sent to the voice, applied
+when you press "Regenerate with Nuances". The **center/neutral position of any
+control is the intentional "no change" baseline** — move a control off center
+for it to take effect.
+
+Basic buttons (three positions; the middle is neutral, **both ends now act**):
+
+| Button | Low end | High end |
+|---|---|---|
+| Pace | quick, rushed *(also speeds up)* | slow, deliberate *(also slows down)* |
+| Weight | light, airy | heavy, weighted |
+| Breath | tight, controlled | breathy, intimate |
+| Delivery | intimate, close and soft | projected, energized |
+| Tail | clipped, clean stop | soft trailing fade |
+
+Advanced sliders (0–100; act in **both** directions once moved off center):
+
+| Slider | Toward minimum | Toward maximum |
+|---|---|---|
+| Prosody | flat, level | expressive, wide pitch |
+| Pitch Contour | flat contour | melodic, sing-song |
+| Volume Dynamics | compressed, even | dynamic swells |
+| Tempo Pacing | slower | faster |
+| Breath Sounds | minimal breaths | audible breaths |
+| Voice Quality | smooth, clean | textured, gravelly |
+| Micro Intonation | flat, robotic | natural, human |
+| Pauses | fewer pauses | more/longer pauses *(edits the spoken text)* |
+
+**Inline markers** (Rise, Drop, Stress, Whisper, Pause, Breathy): select part of
+the text, then click a marker to apply that effect to just those words.
+
+**Write-in:** a free-text box to add any extra delivery note (e.g. "lingers on
+the last word", "rising, inquisitive on 'me'"). It's appended to the segment's
+delivery instruction on regenerate. A few decisive settings land better than
+maxing everything at once.
 
 ## Right-click context menu (segment list rows and timeline blocks)
 

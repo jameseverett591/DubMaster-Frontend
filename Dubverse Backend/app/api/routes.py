@@ -5660,6 +5660,7 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
             force_timing=body.force_timing,
             nuances=body.nuances,
             nuance_markers=body.nuance_markers,
+            custom_nuance=body.custom_nuance,
             live_segment_start=body.live_segment_start,
             live_segment_end=body.live_segment_end,
             live_next_segment_start=body.live_next_segment_start,
@@ -5827,7 +5828,30 @@ async def ask_ai(body: AskAIRequest, request: Request):
     system_prompt = (
         "You are an expert dubbing editor and dialogue writer. "
         "Your job is to improve dubbed dialogue so it sounds natural, "
-        "matches the character's emotion, fits lip-sync timing, and reads well when spoken aloud. "
+        "matches the character's emotion, fits lip-sync timing, and reads well when spoken aloud.\n\n"
+        "IMPORTANT: performance direction (emotion + delivery) is applied SEPARATELY by the "
+        "editor through emotion pills and Nuance controls — do NOT embed bracket tags, stage "
+        "directions, or emotion words like [excited] in your suggestion. Return only clean "
+        "spoken dialogue. If a delivery change would help, name the relevant pill or nuance in "
+        "the explanation instead. If the line is a question, make sure it ends with '?' so it "
+        "rises naturally.\n\n"
+        "Reference — the editor's controls that shape delivery (you do not write these, they are "
+        "set by the user; use them to inform your wording and explanation):\n"
+        "Emotion pills (pill -> delivery the voice receives): Neutral (none); Happy (warm, bright, "
+        "smiling); Excited (breathless, eager, rising pitch); Calm (slow, steady, soothing); Sad "
+        "(heavy, subdued, downward trailing); Angry (tense, forceful, clipped); Fearful (shaky, "
+        "hushed, uneven breaths); Surprised (sharp pitch rise, disbelief); Disgusted (recoiling, "
+        "sneering); Professional (clear, measured, confident); Casual (relaxed, conversational); "
+        "Formal (poised, precise); Intimate (soft, close, breathy warmth); Defiant (firm, "
+        "unyielding, challenging); Confused (hesitant, inquisitive rising ending); Whisper (hushed "
+        "small voice); Shout (loud, projected, urgent); Sarcastic (dry, mocking, flat); Hopeful "
+        "(gentle rising pitch, warm anticipation); Melancholic (wistful, slow, trailing).\n"
+        "Nuance controls (each acts at both ends; center = neutral): Pace (rushed<->deliberate), "
+        "Weight (light<->heavy), Breath (tight<->breathy), Delivery (intimate<->projected), Tail "
+        "(clipped<->trailing), Prosody (flat<->expressive), Pitch Contour (flat<->melodic), Volume "
+        "Dynamics (compressed<->dynamic), Tempo (slower<->faster), Breath Sounds (minimal<->"
+        "audible), Voice Quality (smooth<->gravelly), Micro Intonation (robotic<->human), Pauses "
+        "(fewer<->more), plus inline Rise/Drop/Stress/Whisper/Pause/Breathy word markers.\n\n"
         "Always respond with valid JSON only — no markdown, no extra text."
     )
 
@@ -5889,6 +5913,12 @@ _ASK_AI_CHAT_SYSTEM_PROMPT = (
     "do today. If a question isn't covered by it, say you're not sure rather than "
     "guessing or inventing behavior. Keep answers short and practical. Do not discuss "
     "topics unrelated to using DubMaster.\n\n"
+    "When the user asks to see the full range/list/chart/graph of emotions (or the "
+    "nuance controls), reproduce the relevant table from the reference material IN "
+    "FULL as a GitHub-flavored Markdown table (pipe `|` syntax with a `---` separator "
+    "row). The chat renders Markdown tables on screen, so present the actual table "
+    "rather than describing it or trimming rows — this is the one case where a long "
+    "answer is expected. You may add a one-line intro above it.\n\n"
     "--- DubMaster reference material ---\n"
     f"{_ASK_AI_CHAT_KNOWLEDGE}"
 )

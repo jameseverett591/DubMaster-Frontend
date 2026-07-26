@@ -37,6 +37,101 @@ _VOICES_BY_GENDER: Dict[str, List[str]] = {
     "child":  ["child-1",  "child-2",  "child-3"],
 }
 
+# ---------------------------------------------------------------------------
+# Fish Audio S2 emotion styling
+# ---------------------------------------------------------------------------
+# Fish S2 (model="s2-pro") steers delivery from FREE-FORM natural-language tags
+# in SQUARE BRACKETS placed before the line, e.g. "[whisper in small voice]"
+# (per fish.audio's S2 announcement). The editor's emotion pills are single
+# words; a bare "[excited]" is the weakest possible instruction. We expand each
+# pill into a short descriptive directive — pitch movement, pacing, and how the
+# line's endings rise or trail — so S2 has something concrete to perform.
+# Keys are lowercased pill labels. "neutral" maps to no tag (no steering);
+# unknown/custom write-ins fall through as the bare word.
+_S2_EMOTION_STYLE: Dict[str, str] = {
+    "happy":        "happy, warm and bright, lightly smiling tone",
+    "excited":      "excited, breathless and eager, rising pitch with building anticipation",
+    "calm":         "calm, slow and steady, soft soothing tone",
+    "sad":          "sad, heavy and subdued, downward trailing endings",
+    "angry":        "angry, tense and forceful, clipped hard delivery",
+    "fearful":      "fearful, shaky and hushed, quick uneven breaths",
+    "surprised":    "surprised, sudden sharp rise in pitch, wide-eyed disbelief",
+    "disgusted":    "disgusted, recoiling, curled sneering tone",
+    "professional": "professional broadcast tone, clear measured and confident",
+    "casual":       "casual, relaxed and easygoing, conversational",
+    "formal":       "formal, poised and precise, controlled cadence",
+    "intimate":     "intimate, soft and close, gentle breathy warmth",
+    "defiant":      "defiant, firm and unyielding, chin-up challenging tone",
+    "confused":     "confused, hesitant and searching, inquisitive rising ending",
+    "whisper":      "whisper in a small voice, hushed and airy",
+    "shout":        "shouting, loud and projected, urgent force",
+    "sarcastic":    "sarcastic, dry and mocking, exaggerated flat delivery",
+    "hopeful":      "hopeful, gentle rising pitch, warm anticipation",
+    "melancholic":  "melancholic, wistful and slow, trailing pensive endings",
+    "neutral":      "",
+}
+
+
+def _emotion_desc(emotion: Optional[str]) -> str:
+    """Return the bare S2 description for an emotion pill (no brackets).
+
+    "" for empty/neutral; the rich phrase for known pills; the bare lowercased
+    word for unknown/custom write-ins so nothing is silently dropped.
+    """
+    if not emotion:
+        return ""
+    key = emotion.strip().lower()
+    return _S2_EMOTION_STYLE.get(key, key)
+
+
+def fish_emotion_tag(emotion: Optional[str]) -> str:
+    """Map a single emotion pill to a Fish S2 bracket directive ("" if none)."""
+    desc = _emotion_desc(emotion)
+    return f"[{desc}]" if desc else ""
+
+
+def compose_fish_directive(
+    emotion: Optional[str] = None,
+    traits: Optional[List[str]] = None,
+    nuance_directives: Optional[List[str]] = None,
+    extra: Optional[str] = None,
+) -> str:
+    """Fold character traits + emotion + nuance directives + a free-text write-in
+    into ONE Fish S2 natural-language bracket instruction.
+
+    e.g. "[gruff, hopeful with gentle rising pitch and warm anticipation,
+    breathy intimate onset, soft trailing tail, lingers on the last word]".
+
+    A single coherent [ ] instruction outperforms several separate bracket tags
+    stacked at the front of the line (per fish.audio's S2 guidance). Order:
+    character traits (colour the whole read), then the line emotion, then the
+    delivery/breath/cadence nuances, then the user's write-in directive last.
+    ``extra`` is free text typed in the editor's Nuances panel — its own square
+    brackets are stripped so it becomes a clause inside the one directive rather
+    than a nested tag. Duplicates are dropped; returns "" when nothing to steer.
+    """
+    clauses: List[str] = []
+    seen: set = set()
+
+    def _add(text: Optional[str]) -> None:
+        if not text:
+            return
+        t = text.strip()
+        key = t.lower()
+        if t and key not in seen:
+            seen.add(key)
+            clauses.append(t)
+
+    for tr in (traits or []):
+        _add(tr)  # per-speaker character words, passed through as written
+    _add(_emotion_desc(emotion))
+    for d in (nuance_directives or []):
+        _add(d)  # already full phrases from translate_for_fish_audio
+    if extra:
+        _add(extra.replace("[", "").replace("]", ""))  # write-in, brackets stripped
+
+    return "[" + ", ".join(clauses) + "]" if clauses else ""
+
 # Provisional velma_low_confidence threshold. Revisit after 2-3 real review
 # sessions using flag_status/correction_type outcome data.
 CONFIDENCE_FLAG_THRESHOLD = 0.65
@@ -950,12 +1045,13 @@ class DubbingService:
 
                 if provider_name == "fish-audio" and tts_kwargs is not None:
                     seg_emotion = segment.get("emotion")
-                    tts_kwargs["emotion_tags"] = f"[{seg_emotion.lower()}]" if seg_emotion else ""
-                    # Character traits — per-speaker, injected before emotion in the wire format.
+                    # Character traits (per-speaker) + emotion (per-line) fold into ONE
+                    # composed S2 directive rather than separate stacked brackets.
                     speaker_traits = (traits_mapping or {}).get(speaker) or []
-                    tts_kwargs["traits_tag"] = " ".join(
-                        f"[{t.lower()}]" for t in speaker_traits
-                    ) if speaker_traits else ""
+                    tts_kwargs["emotion_tags"] = compose_fish_directive(
+                        emotion=seg_emotion, traits=speaker_traits
+                    )
+                    tts_kwargs["traits_tag"] = ""  # folded into the composed directive above
                     # Pass inline voice references if extracted from source audio.
                     _refs = speaker_voice_refs.get(speaker)
                     if _refs:
@@ -2332,63 +2428,107 @@ class DubbingService:
         """
 
         def translate_for_fish_audio(self, nuances: dict) -> dict:
+            """Translate every Nuances control into rich Fish S2 directives.
+
+            Design goal: EVERY knob affects the segment. The 3-position Basic
+            buttons fire on both ends (the middle position is the intentional
+            neutral baseline). The 0-100 Advanced sliders fire in both
+            directions once moved off a small ±5 dead-band around centre (50),
+            each end emitting its own natural-language clause. ``pauses`` is the
+            one exception — it edits the text via preprocess_text_pauses rather
+            than adding a directive. Directives are already full phrases, so they
+            drop straight into the composed [ ] instruction.
+            """
             directives: List[str] = []
             speed_modifier = 1.0
 
+            def _num(key: str, default: float = 50) -> float:
+                try:
+                    return float(nuances.get(key, default))
+                except (TypeError, ValueError):
+                    return default
+
+            LO, HI = 45.0, 55.0  # ±5 dead-band around centre; move past it to act
+
+            # --- Basic 3-position buttons (0 = low end, 1 = neutral, 2 = high end) ---
             pace = nuances.get("pace", 1)
             if pace == 0:
                 speed_modifier *= 1.2
+                directives.append("quick, rushed pace")
             elif pace == 2:
                 speed_modifier *= 0.85
+                directives.append("slow, deliberate pacing")
 
             weight = nuances.get("weight", 1)
-            if weight == 2:
-                directives.append("heavy")
+            if weight == 0:
+                directives.append("light, airy delivery")
+            elif weight == 2:
+                directives.append("heavy, weighted delivery")
 
             breath = nuances.get("breath", 1)
-            if breath == 2:
-                directives.append("breathy")
+            if breath == 0:
+                directives.append("tight, controlled breathing")
+            elif breath == 2:
+                directives.append("breathy intimate onset")
 
             delivery = nuances.get("delivery", 1)
             if delivery == 0:
-                directives.append("whispered")
+                directives.append("intimate, close and soft")
             elif delivery == 2:
-                directives.append("projected")
+                directives.append("projected and forward, energized timbre")
 
             tail = nuances.get("tail", 1)
             if tail == 0:
-                directives.append("clipped")
+                directives.append("clipped, abrupt clean stop with no tail")
             elif tail == 2:
-                directives.append("trailing")
+                directives.append("soft trailing tail that fades")
 
-            prosody = nuances.get("prosody", 50)
-            if prosody > 75:
-                directives.append("expressive")
+            # --- Advanced sliders (0-100; act below LO or above HI) ---
+            prosody = _num("prosody")
+            if prosody < LO:
+                directives.append("flat, level intonation")
+            elif prosody > HI:
+                directives.append("expressive, wide pitch movement")
 
-            pitch_contour = nuances.get("pitchContour", 50)
-            if pitch_contour > 75:
-                directives.append("melodic")
+            pitch_contour = _num("pitchContour")
+            if pitch_contour < LO:
+                directives.append("flat pitch contour")
+            elif pitch_contour > HI:
+                directives.append("melodic, sing-song intonation")
 
-            volume_dynamics = nuances.get("volumeDynamics", 50)
-            if volume_dynamics > 75:
-                directives.append("dynamic")
+            volume_dynamics = _num("volumeDynamics")
+            if volume_dynamics < LO:
+                directives.append("compressed, even volume")
+            elif volume_dynamics > HI:
+                directives.append("dynamic volume swells")
 
-            tempo_pacing = nuances.get("tempoPacing", 50)
-            if tempo_pacing > 70:
-                speed_modifier *= 1.1
-            elif tempo_pacing < 30:
+            tempo_pacing = _num("tempoPacing")
+            if tempo_pacing < LO:
                 speed_modifier *= 0.9
+                directives.append("slower, unhurried tempo")
+            elif tempo_pacing > HI:
+                speed_modifier *= 1.1
+                directives.append("faster, driving tempo")
 
-            # pauses handled by preprocess_text_pauses, not bracket tags
+            breath_sounds = _num("breathSounds")
+            if breath_sounds < LO:
+                directives.append("minimal breath sounds")
+            elif breath_sounds > HI:
+                directives.append("audible breaths between phrases")
 
-            voice_quality = nuances.get("voiceQuality", 50)
-            if voice_quality > 75:
-                directives.append("gravelly")
+            voice_quality = _num("voiceQuality")
+            if voice_quality < LO:
+                directives.append("smooth, clean tone")
+            elif voice_quality > HI:
+                directives.append("textured, gravelly tone")
 
-            micro = nuances.get("microIntonation", 50)
-            if micro > 75:
-                directives.append("natural")
+            micro = _num("microIntonation")
+            if micro < LO:
+                directives.append("flat, robotic delivery")
+            elif micro > HI:
+                directives.append("natural human micro-inflections")
 
+            # pauses handled by preprocess_text_pauses (edits text), not a directive
             return {
                 "directives": directives,
                 "speed_modifier": round(speed_modifier, 3),
@@ -2507,6 +2647,7 @@ class DubbingService:
         force_timing: Optional[bool] = None,
         nuances: Optional[Dict] = None,
         nuance_markers: Optional[List[Dict]] = None,
+        custom_nuance: Optional[str] = None,
         live_segment_start: Optional[float] = None,
         live_segment_end: Optional[float] = None,
         live_next_segment_start: Optional[float] = None,
@@ -2585,16 +2726,12 @@ class DubbingService:
         # regen for this segment. edit_history preserves the change record.
         audio_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen.mp3")
 
-        emotion_tag = f"[{emotion.lower()}]" if emotion else ""
-        # Multiple traits → multiple bracket pairs. Fish normalizes commas to this anyway.
-        traits_tag = " ".join(f"[{t.lower()}]" for t in traits) if traits else ""
-        # Nuance directives — translated to Fish Audio bracket tags + speed modifier
-        nuance_tag = ""
+        # Nuance sliders → delivery directives + speed modifier + pause/marker text edits.
+        nuance_directives: List[str] = []
         tts_text = use_text
         if nuances:
             translated = self._nuance_translator.translate_for_fish_audio(nuances)
-            if translated["directives"]:
-                nuance_tag = " ".join(f"[{d}]" for d in translated["directives"])
+            nuance_directives = translated["directives"]
             use_speed = max(0.5, min(2.0, use_speed * translated["speed_modifier"]))
             pause_level = nuances.get("pauses", 50)
             if pause_level != 50:
@@ -2605,13 +2742,19 @@ class DubbingService:
             tts_text = self._nuance_translator.apply_markers_to_text(
                 tts_text, nuance_markers, engine="fish_audio"
             )
+        # One composed S2 directive: traits + emotion + nuance delivery/cadence
+        # clauses + the free-text write-in from the Nuances panel (last).
+        directive = compose_fish_directive(
+            emotion=emotion, traits=traits,
+            nuance_directives=nuance_directives, extra=custom_nuance,
+        )
         result = await fish_audio_tts.text_to_speech(
             text=tts_text,
             voice_id=use_voice_id,
             output_path=audio_path,
             speed=use_speed,
-            emotion_tags=emotion_tag,
-            traits_tag=f"{traits_tag} {nuance_tag}".strip() if nuance_tag else traits_tag,
+            emotion_tags=directive,
+            traits_tag="",  # folded into the composed directive above
             pitch=pitch,
         )
         if not result:
@@ -2824,6 +2967,11 @@ class DubbingService:
             seg.pop("attached_traits", None)
         elif traits:
             seg["attached_traits"] = [t.lower() for t in traits]
+        # Free-text nuance write-in: "" = explicit clear; None = no change; non-empty = set
+        if custom_nuance == "":
+            seg.pop("custom_nuance", None)
+        elif custom_nuance:
+            seg["custom_nuance"] = custom_nuance
         if speed_ratio is not None:
             seg["speed_ratio"] = speed_ratio
         if target_duration is not None:
