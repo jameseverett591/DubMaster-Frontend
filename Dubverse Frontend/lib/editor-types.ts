@@ -115,6 +115,7 @@ export interface Segment {
   was_truncated?: boolean
   nuances?: Partial<SegmentNuances>
   nuance_markers?: NuanceMarker[]
+  custom_nuance?: string   // free-text write-in directive from the Nuances panel
   flags?: Array<{ code: string; score: number | null; threshold: number; reason?: string | null }>
   flag_status?: 'unreviewed' | 'reviewed_no_change' | 'reviewed_corrected'
   correction_type?: 'timing' | 'text' | 'voice' | 'emotion' | null
