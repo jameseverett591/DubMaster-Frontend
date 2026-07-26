@@ -3638,6 +3638,17 @@ async def serve_job_video(job_id: str):
     return FileResponse(job.video_path, media_type=media_types.get(ext, "video/mp4"))
 
 
+# Segment audio is REGENERATED in place (same filename overwritten), so it must
+# never be cached by the browser — a cached copy is exactly the "stale playback
+# from disk" that overrides a fresh regen. no-store forces the current bytes every
+# time (files are tiny, so the re-fetch cost is negligible).
+_NO_STORE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
 @router.get("/media/{job_id}/audio/{filename}")
 async def serve_job_audio(job_id: str, filename: str):
     """Serve a dubbed audio file so Sync.Labs can fetch it by URL."""
@@ -3648,7 +3659,8 @@ async def serve_job_audio(job_id: str, filename: str):
         raise HTTPException(status_code=404, detail="Audio file not found")
     ext = Path(filename).suffix.lower()
     media_types = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4"}
-    return FileResponse(audio_path, media_type=media_types.get(ext, "audio/mpeg"))
+    return FileResponse(audio_path, media_type=media_types.get(ext, "audio/mpeg"),
+        headers=_NO_STORE_HEADERS)
 
 
 @router.get("/media/{job_id}/separated/{audio_type}")
@@ -3676,7 +3688,8 @@ async def serve_job_audio_legacy(job_id: str, filename: str):
         raise HTTPException(status_code=404, detail="Audio file not found")
     ext = Path(filename).suffix.lower()
     media_types = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4"}
-    return FileResponse(audio_path, media_type=media_types.get(ext, "audio/mpeg"))
+    return FileResponse(audio_path, media_type=media_types.get(ext, "audio/mpeg"),
+        headers=_NO_STORE_HEADERS)
 
 
 @router.get("/dubbing-engines")
