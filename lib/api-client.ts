@@ -189,6 +189,7 @@ export interface RegenerateSegmentRequest {
   nuances?: Record<string, number>
   nuance_markers?: Array<{ id: string; startChar: number; endChar: number; type: string; intensity: number }>
   custom_nuance?: string
+  tts_text?: string
   // Live timeline boundaries at the moment of regen — segments.json can go stale
   // after a split/resize whose commitSegmentTiming call hasn't landed yet (it's
   // fire-and-forget). Backend validates these before trusting them.

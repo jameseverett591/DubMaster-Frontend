@@ -1348,7 +1348,7 @@ export function DubVerseEditor({
   // Tracks where playback started so Stop returns to that position (not 0)
   const lastStartPosRef = useRef(0)
   // Pending regen while one is in flight (depth 1, last-write-wins).
-  const regenQueueRef = useRef<{ segIdx?: number; voiceOverride?: string; textOverride?: string } | null>(null)
+  const regenQueueRef = useRef<{ segIdx?: number; voiceOverride?: string; textOverride?: string; ttsTextOverride?: string } | null>(null)
   const autoRegenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingAutoRegenRef = useRef<number | null>(null)
   const [editingText, setEditingText] = useState('')
@@ -3122,13 +3122,13 @@ export function DubVerseEditor({
   }, [initialSegments, jobId, updateSegment, editingSegmentIndex])
 
   // Handle Generate Speech - calls backend TTS regeneration for the selected segment
-  const handleGenerateSpeech = useCallback(async (segIdx?: number, voiceOverride?: string, textOverride?: string): Promise<boolean> => {
+  const handleGenerateSpeech = useCallback(async (segIdx?: number, voiceOverride?: string, textOverride?: string, ttsTextOverride?: string): Promise<boolean> => {
     const activeIndex = segIdx ?? selectedSegmentIndex
     console.log('[REGEN] called', { segIdx, voiceOverride, textOverride, activeIndex, isRegenerating, selectedSegmentIndex })
     if (activeIndex === null) { console.warn('[REGEN] aborted — activeIndex null'); return false }
     if (isRegeneratingRef.current) {
       // Queue instead of dropping (depth 1, last-write-wins); drained in finally.
-      regenQueueRef.current = { segIdx, voiceOverride, textOverride }
+      regenQueueRef.current = { segIdx, voiceOverride, textOverride, ttsTextOverride }
       setQueuedSegmentIndex(activeIndex)
       console.warn('[REGEN] queued — regen already in flight', { segIdx, voiceOverride })
       return false
@@ -3194,6 +3194,10 @@ export function DubVerseEditor({
         nuances: stagedNuances[activeIndex] ?? segment.nuances,
         nuance_markers: segment.nuance_markers,
         custom_nuance: segment.custom_nuance,
+        // Delivery Script: verbatim line + tags, applied only when generated from the
+        // write-in (explicit override). A normal regen sends nothing → clean/pill mode,
+        // so there's no sticky-forever state to get trapped in.
+        tts_text: ttsTextOverride,
         live_segment_start: liveStart,
         live_segment_end: liveEnd,
         live_next_segment_start: liveNextStart,
@@ -3343,7 +3347,7 @@ export function DubVerseEditor({
         regenQueueRef.current = null
         setQueuedSegmentIndex(null)
         setTimeout(() => {
-          handleGenerateSpeechRef.current(queued.segIdx, queued.voiceOverride, queued.textOverride)
+          handleGenerateSpeechRef.current(queued.segIdx, queued.voiceOverride, queued.textOverride, queued.ttsTextOverride)
         }, 0)
       }
     }
@@ -4905,7 +4909,29 @@ export function DubVerseEditor({
                             </span>
                           </div>
                         )}
-                        {inlineEmotionWriteIn === index && (
+                        {inlineEmotionWriteIn === index && (() => {
+                          // Two modes off ONE box:
+                          //  - Delivery Script: draft contains the line (loaded via double-click) →
+                          //    send VERBATIM to Fish (inline [tags] parse, not spoken); display stays clean.
+                          //  - Short emotion: a bare descriptor with no line → prepend as emotion (old behavior).
+                          const cleanLine = (segment.preview_text ?? segment.active_text ?? segment.target_text ?? '').replace(/\s+/g, ' ').trim()
+                          const submit = () => {
+                            const draft = (customEmotionDrafts[index] ?? '').trim()
+                            if (!draft) return
+                            const stripped = draft.replace(/\[[^\]]*\]/g, '').replace(/\s+/g, ' ').trim().toLowerCase()
+                            const key = cleanLine.toLowerCase().slice(0, Math.min(cleanLine.length, 10))
+                            const isScript = key.length > 0 && stripped.includes(key)
+                            setInlineEmotionWriteIn(null)
+                            selectSegment(index)
+                            if (isScript) {
+                              setImportedSegments(prev => prev ? prev.map((s, i) => i === index ? { ...s, tts_text: draft } : s) : prev)
+                              handleGenerateSpeech(index, undefined, undefined, draft)
+                            } else {
+                              setStagedEmotions(prev => ({ ...prev, [index]: draft }))
+                              handleGenerateSpeech(index)
+                            }
+                          }
+                          return (
                           <div
                             className="w-full mt-1 p-2 rounded-xl border border-cyan-500/40 bg-[#0d1525] shadow-lg shadow-cyan-900/30"
                             onClick={(e) => e.stopPropagation()}
@@ -4913,37 +4939,32 @@ export function DubVerseEditor({
                             // this field instead of the segment's custom context menu.
                             onContextMenu={(e) => e.stopPropagation()}
                           >
-                            <input
-                              type="text"
+                            <textarea
                               autoFocus
-                              placeholder="Type a custom emotion (e.g. bitterly resigned)…"
+                              rows={2}
+                              placeholder="Double-click here to load the line, then add [tags] — or type a short emotion…"
                               value={customEmotionDrafts[index] ?? ''}
                               onChange={(e) => setCustomEmotionDrafts(prev => ({ ...prev, [index]: e.target.value }))}
                               onClick={(e) => e.stopPropagation()}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                  const draft = (customEmotionDrafts[index] ?? '').trim()
-                                  if (draft) {
-                                    setStagedEmotions(prev => ({ ...prev, [index]: draft }))
-                                    selectSegment(index)
-                                  }
-                                  setInlineEmotionWriteIn(null)
+                              onDoubleClick={(e) => {
+                                // Double-click the empty field to drop the segment's line in
+                                // (so you can add [tags]). If there's already text, let the
+                                // browser's double-click word-select behave normally.
+                                if (!(customEmotionDrafts[index] ?? '').trim()) {
+                                  e.preventDefault()
+                                  setCustomEmotionDrafts(prev => ({ ...prev, [index]: (segment.preview_text ?? segment.active_text ?? segment.target_text ?? '') }))
                                 }
                               }}
-                              className="w-full text-[11px] px-2 py-1 rounded-md bg-slate-800 border border-slate-700 text-cyan-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500/60 mb-1.5"
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit() }
+                              }}
+                              className="w-full text-[11px] px-2 py-1 rounded-md bg-slate-800 border border-slate-700 text-cyan-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500/60 mb-1.5 resize-y leading-snug"
                             />
                             <button
                               type="button"
                               disabled={isRegenerating || !(customEmotionDrafts[index] ?? '').trim()}
                               className="w-full text-[10px] py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-medium transition-colors mb-1.5"
-                              onClick={() => {
-                                const draft = (customEmotionDrafts[index] ?? '').trim()
-                                if (!draft) return
-                                setStagedEmotions(prev => ({ ...prev, [index]: draft }))
-                                setInlineEmotionWriteIn(null)
-                                selectSegment(index)
-                                handleGenerateSpeech(index)
-                              }}
+                              onClick={submit}
                             >
                               ✦ Generate Speech
                             </button>
@@ -4954,7 +4975,8 @@ export function DubVerseEditor({
                               ✕ cancel
                             </span>
                           </div>
-                        )}
+                          )
+                        })()}
                         {/* Speed chip */}
                         <span
                           className={cn(
@@ -5020,7 +5042,18 @@ export function DubVerseEditor({
                                   ? 'border-orange-400 bg-orange-500/10 shadow-[0_0_8px_rgba(251,146,60,0.3)]'
                                   : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
                             )}
-                            onDoubleClick={() => !lockedSegments.has(index) && !segment.isPreviewing && startEditing(index)}
+                            onDoubleClick={() => {
+                              if (lockedSegments.has(index) || segment.isPreviewing) return
+                              // When the write-in box is open, double-clicking the line drops it
+                              // into that field (Delivery Script) so you can add [tags]. Otherwise
+                              // double-click edits the line inline as before.
+                              if (inlineEmotionWriteIn === index) {
+                                const line = (segment.preview_text ?? segment.active_text ?? segment.target_text ?? '')
+                                setCustomEmotionDrafts(prev => ({ ...prev, [index]: line }))
+                              } else {
+                                startEditing(index)
+                              }
+                            }}
                           >
                             {lockedSegments.has(index) && <Lock className="h-3 w-3 shrink-0" />}
                             {(segment.preview_text ?? segment.active_text ?? segment.target_text)
