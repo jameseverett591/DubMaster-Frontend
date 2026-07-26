@@ -19,9 +19,19 @@ import os
 import logging
 import importlib.util
 import random
+import base64
+import httpx
 from typing import Optional, Dict, List
 
 from app.config import get_settings
+
+# Fish's REST endpoint. We POST here directly (JSON + `model` header) instead of
+# using the SDK's tts.convert, because only this path triggers S2's inline
+# [bracket] tag parsing — the SDK's msgpack request silently ignores the tags
+# (verified: two different tags produced byte-identical audio via the SDK, but
+# distinct audio via this endpoint). See _convert_via_http.
+_FISH_TTS_URL = "https://api.fish.audio/v1/tts"
+_FISH_MODEL = os.getenv("FISH_AUDIO_MODEL", "s2-pro")
 
 logger = logging.getLogger(__name__)
 
@@ -260,8 +270,55 @@ class FishAudioTTS:
 
     # ----- TTS ------------------------------------------------------------ #
 
+    async def _convert_via_http(self, tts_kwargs: Dict) -> bytes:
+        """POST to Fish's /v1/tts REST endpoint with the `model` HEADER.
+
+        This is the ONLY request shape that triggers S2's inline [bracket] tag
+        parsing — the fish-audio-sdk's msgpack request ignores the tags. Mirrors
+        the Playground's cURL: JSON body + `model: s2-pro` header. Handles both
+        voice modes: a pre-uploaded ``reference_id`` and inline ``references``
+        (zero-shot cloning), the latter base64-encoded for JSON transport.
+        """
+        cfg = tts_kwargs.get("config")
+        body: Dict = {
+            "text": tts_kwargs["text"],
+            "format": tts_kwargs.get("format", "mp3"),
+            "mp3_bitrate": getattr(cfg, "mp3_bitrate", 128),
+            "normalize": getattr(cfg, "normalize", True),
+        }
+        speed = tts_kwargs.get("speed")
+        if speed and float(speed) != 1.0:
+            body["prosody"] = {"speed": float(speed)}
+
+        refs = tts_kwargs.get("references")
+        if refs:
+            body["references"] = [
+                {
+                    "audio": base64.b64encode(
+                        r.audio if hasattr(r, "audio") else r["audio"]
+                    ).decode("ascii"),
+                    "text": r.text if hasattr(r, "text") else r["text"],
+                }
+                for r in refs
+            ]
+        elif tts_kwargs.get("reference_id"):
+            body["reference_id"] = tts_kwargs["reference_id"]
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "model": tts_kwargs.get("model") or _FISH_MODEL,
+        }
+        async with httpx.AsyncClient(timeout=90) as client:
+            resp = await client.post(_FISH_TTS_URL, headers=headers, json=body)
+        if resp.status_code == 429:
+            raise RuntimeError("HTTP 429: Too Many Requests")
+        if resp.status_code != 200:
+            raise RuntimeError(f"Fish TTS HTTP {resp.status_code}: {resp.text[:200]}")
+        return resp.content
+
     async def _convert_with_backoff(self, tts_kwargs: Dict) -> bytes:
-        """Call Fish Audio's tts.convert with concurrency cap and 429 backoff.
+        """Synthesize via /v1/tts with concurrency cap and 429 backoff.
 
         Concurrency is bounded by FISH_AUDIO_MAX_CONCURRENT so we never burst
         past the tier's rate limit. On 429 we sleep with exponential backoff
@@ -271,15 +328,23 @@ class FishAudioTTS:
 
         Returns the audio bytes on success.
         """
-        client = self._get_client()
         sem = _get_fish_semaphore()
         last_exc: Optional[BaseException] = None
+
+        # Route by voice mode:
+        #  - reference_id (editor regen, custom/library voices) -> JSON /v1/tts so
+        #    S2's inline [bracket] emotion tags actually parse.
+        #  - inline references (pipeline zero-shot cloning) -> SDK msgpack, the only
+        #    shape Fish accepts binary reference audio in (JSON rejects base64 refs
+        #    with HTTP 400). These requests don't carry editor emotion tags anyway.
+        use_http = not tts_kwargs.get("references")
 
         for attempt in range(_FISH_429_MAX_RETRIES + 1):
             async with sem:
                 try:
-                    audio = await client.tts.convert(**tts_kwargs)
-                    # SDK may return bytes directly or an async iterator.
+                    if use_http:
+                        return await self._convert_via_http(tts_kwargs)
+                    audio = await self._get_client().tts.convert(**tts_kwargs)
                     if isinstance(audio, (bytes, bytearray)):
                         return bytes(audio)
                     buf = bytearray()

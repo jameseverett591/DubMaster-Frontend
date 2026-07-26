@@ -80,7 +80,9 @@ def _emotion_desc(emotion: Optional[str]) -> str:
     """
     if not emotion:
         return ""
-    key = emotion.strip().lower()
+    # Strip any brackets the user typed in the custom write-in so we never nest
+    # them (compose wraps the whole directive in one [ ]); then look up presets.
+    key = emotion.strip().lower().replace("[", "").replace("]", "").strip()
     return _S2_EMOTION_STYLE.get(key, key)
 
 
