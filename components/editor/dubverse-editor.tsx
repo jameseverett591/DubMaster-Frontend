@@ -1015,7 +1015,6 @@ export function DubVerseEditor({
   const [showReviewQueue, setShowReviewQueue] = useState(false)
   const [contextSegmentIndex, setContextSegmentIndex] = useState<number | null>(null)
   const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
-  const [isSegmentPreviewing, setIsSegmentPreviewing] = useState(false)
   const [waveformReady, setWaveformReady] = useState(false)
   // Briefly surface an "Updated <time>" note under the Re-analyze button after a
   // successful re-analyze, then fade it out.
@@ -1025,7 +1024,6 @@ export function DubVerseEditor({
     toIndex: number | null
     isDragging: boolean
   } | null>(null)
-  const segmentAudioRef = useRef<HTMLAudioElement | null>(null)
 
   // Mirror of the live block-drag state so the mount-once safety net below can
   // read the current delta at interrupt time without re-subscribing on every move.
@@ -1037,13 +1035,6 @@ export function DubVerseEditor({
   const dragMoveListenerRef = useRef<((ev: MouseEvent) => void) | null>(null)
   const dragUpListenerRef = useRef<((ev: MouseEvent) => void) | null>(null)
 
-  useEffect(() => {
-    if (segmentAudioRef.current) {
-      segmentAudioRef.current.pause()
-      segmentAudioRef.current = null
-    }
-    setIsSegmentPreviewing(false)
-  }, [selectedSegmentIndex])
 
   useEffect(() => {
     if (splitWordMode !== null || selectedSegmentIndex !== null) setInlineEmotionPicker(null)
@@ -1757,8 +1748,36 @@ export function DubVerseEditor({
   const audioContextRef = useRef<AudioContext | null>(null)
   const rptBufferRef = useRef<AudioBuffer | null>(null)
   const rptSourceRef = useRef<AudioBufferSourceNode | null>(null)
+  // ALL live stitch source nodes, not just the latest — so a hard stop can kill
+  // every one (orphans can accumulate when isPlaying rapidly toggles, e.g. when the
+  // video fails to play and effect 2458's catch flips isPlaying).
+  const rptSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set())
   const rptGainRef = useRef<GainNode | null>(null)
   const rptCancelRef = useRef<boolean>(false)
+
+  // Authoritative "silence everything now" — stops every registered stitch source,
+  // syncs the refs so nothing reschedules. Callers handle the video element.
+  const stopAllRptAudio = useCallback(() => {
+    isPlayingRef.current = false
+    rptCancelRef.current = true
+    rptSourcesRef.current.forEach(src => {
+      try { src.onended = null } catch {}
+      try { src.stop() } catch {}
+      try { src.disconnect() } catch {}
+    })
+    rptSourcesRef.current.clear()
+    rptSourceRef.current = null
+  }, [])
+
+  // Register a freshly-scheduled source so stopAllRptAudio can reach it.
+  const registerRptSource = useCallback((src: AudioBufferSourceNode) => {
+    rptSourcesRef.current.add(src)
+    src.onended = () => {
+      rptSourcesRef.current.delete(src)
+      if (rptSourceRef.current === src) rptSourceRef.current = null
+    }
+    rptSourceRef.current = src
+  }, [])
   const [isMutedRPT, setIsMutedRPT] = useState(false)
   const [rptVolume, setRptVolume] = useState(80)
   const [rptPlaybackRate, setRptPlaybackRate] = useState(1.0)
@@ -2372,7 +2391,10 @@ export function DubVerseEditor({
     // Create a temporary video element for extraction
     const tempVideo = document.createElement('video')
     tempVideo.crossOrigin = 'anonymous'
-    tempVideo.src = videoSrc
+    // Distinct URL for the crossorigin thumbnail request so it gets its own cache
+    // entry — otherwise it reuses the main player's cached no-cors response (which
+    // lacks Access-Control-Allow-Origin) and fails CORS in a retry loop.
+    tempVideo.src = videoSrc + (videoSrc.includes('?') ? '&' : '?') + 'thumb=1'
     tempVideo.muted = true
     tempVideo.preload = 'metadata'
     
@@ -2490,10 +2512,7 @@ export function DubVerseEditor({
       'isMutedRPT:', isMutedRPT)
     if (playbackMode !== 'preview') {
       // Stop RPT audio when leaving preview mode
-      if (rptSourceRef.current) {
-        try { rptSourceRef.current.stop() } catch {}
-        rptSourceRef.current = null
-      }
+      stopAllRptAudio()
       return
     }
 
@@ -2537,23 +2556,22 @@ export function DubVerseEditor({
       rptCancelRef.current = false
       const doSchedule = () => {
         if (rptCancelRef.current) return
-        if (rptSourceRef.current) {
-          try { rptSourceRef.current.stop() } catch {}
-          rptSourceRef.current = null
-        }
+        // Kill any existing sources first so we never layer stitch playback.
+        rptSourcesRef.current.forEach(s => { try { s.onended = null } catch {} try { s.stop() } catch {} try { s.disconnect() } catch {} })
+        rptSourcesRef.current.clear()
+        rptSourceRef.current = null
         if (!rptGainRef.current) {
           rptGainRef.current = ctx.createGain()
           rptGainRef.current.connect(ctx.destination)
         }
         rptGainRef.current!.gain.value = isMutedRPT ? 0 : rptVolume / 100
-        rptSourceRef.current = scheduleRPTPlayback(
+        registerRptSource(scheduleRPTPlayback(
           rptBufferRef.current!,
           video?.currentTime ?? 0,
           ctx,
           rptGainRef.current!,
           rptPlaybackRate
-        )
-        rptSourceRef.current.onended = () => { rptSourceRef.current = null }
+        ))
       }
       if (ctx.state === 'suspended') {
         ctx.resume().then(doSchedule)
@@ -2561,11 +2579,7 @@ export function DubVerseEditor({
         doSchedule()
       }
     } else {
-      rptCancelRef.current = true
-      if (rptSourceRef.current) {
-        try { rptSourceRef.current.stop() } catch {}
-        rptSourceRef.current = null
-      }
+      stopAllRptAudio()
     }
   }, [isPlaying, playbackMode, isMutedRPT, rptVolume, rptPlaybackRate])
 
@@ -2624,11 +2638,10 @@ export function DubVerseEditor({
       if (playbackMode !== 'preview') return
       if (!rptBufferRef.current || !audioContextRef.current) return
 
-      // Stop current RPT source
-      if (rptSourceRef.current) {
-        try { rptSourceRef.current.stop() } catch {}
-        rptSourceRef.current = null
-      }
+      // Stop ALL current RPT sources (not just the latest) before re-seeking.
+      rptSourcesRef.current.forEach(s => { try { s.onended = null } catch {} try { s.stop() } catch {} try { s.disconnect() } catch {} })
+      rptSourcesRef.current.clear()
+      rptSourceRef.current = null
 
       // Only restart if video is playing (read ref to avoid stale closure)
       if (!isPlayingRef.current) return
@@ -2640,14 +2653,13 @@ export function DubVerseEditor({
         rptGainRef.current.connect(ctx.destination)
       }
       rptGainRef.current.gain.value = isMutedRPT ? 0 : rptVolume / 100
-      rptSourceRef.current = scheduleRPTPlayback(
+      registerRptSource(scheduleRPTPlayback(
         rptBufferRef.current,
         video.currentTime,
         ctx,
         rptGainRef.current,
         rptPlaybackRate
-      )
-      rptSourceRef.current.onended = () => { rptSourceRef.current = null }
+      ))
     }
 
     video.addEventListener('seeked', handleSeeked)
@@ -2667,10 +2679,9 @@ export function DubVerseEditor({
   // Cleanup RPT audio resources on unmount
   useEffect(() => {
     return () => {
-      if (rptSourceRef.current) {
-        try { rptSourceRef.current.stop() } catch {}
-        rptSourceRef.current = null
-      }
+      rptSourcesRef.current.forEach(s => { try { s.stop() } catch {} })
+      rptSourcesRef.current.clear()
+      rptSourceRef.current = null
       if (audioContextRef.current) {
         audioContextRef.current.close().catch(() => {})
         audioContextRef.current = null
@@ -3466,79 +3477,6 @@ export function DubVerseEditor({
       setSpeakerRegenQueue(new Set())
     }
   }, [jobId, videoDuration])
-
-  // Preview speech — non-destructive TTS preview using preview_text
-  const handlePreviewSpeech = useCallback(async (index: number) => {
-    if (isRegenerating) return
-    const segment = displaySegments[index]
-    if (!segment) return
-
-    const text = segment.preview_text?.trim() || segment.active_text?.trim() || segment.target_text?.trim() || ''
-    if (!text) {
-      console.warn('No text available for TTS preview')
-      return
-    }
-
-    setRegenError(null)
-
-    // If segment already has generated audio and no new preview text
-    // pending, play existing audio directly without a backend call
-    if (segment.status === 'edited' && segment.audio_url && !segment.preview_text) {
-      const absUrl = segment.audio_url.startsWith('http')
-        ? segment.audio_url
-        : apiClient.getAudioFileUrl(jobId, segment.audio_url.split('/').pop() ?? '')
-      if (segmentAudioRef.current) {
-        segmentAudioRef.current.pause()
-        segmentAudioRef.current = null
-      }
-      const audio = new Audio(absUrl)
-      audio.playbackRate = stagedSpeeds[index] ?? 1.0
-      audio.volume = isMutedDubbed ? 0 : Math.max(0, Math.min(1, (masterVolume / 100) * (dubbedTextVolume / 100)))
-      audio.onended = () => { setIsSegmentPreviewing(false); segmentAudioRef.current = null }
-      segmentAudioRef.current = audio
-      setIsSegmentPreviewing(true)
-      audio.play()
-      return
-    }
-
-    setIsRegenerating(true)
-    try {
-      const response = await apiClient.regenerateSegment(jobId, segment.transcript_index ?? index, {
-        text,
-        speed: stagedSpeeds[index] ?? 1.0,
-        emotion: stagedEmotions[index],
-        traits: segment.attached_traits ?? undefined,
-        voice_key: stagedVoices[index] ?? speakerVoiceMap[segment.speaker_id],
-        pitch: stagedPitches[index] ?? speakerPitchMap[segment.speaker_id] ?? 0,
-      })
-      const filename = response.segment.path.split('/').pop() ?? ''
-      const absUrl = filename
-        ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}`
-        : segment.audio_url
-      if (!absUrl) return
-
-      if (segmentAudioRef.current) {
-        segmentAudioRef.current.pause()
-        segmentAudioRef.current = null
-      }
-
-      const audio = new Audio(absUrl)
-      audio.playbackRate = stagedSpeeds[index] ?? 1.0
-      audio.volume = isMutedDubbed ? 0 : Math.max(0, Math.min(1, (masterVolume / 100) * (dubbedTextVolume / 100)))
-      audio.onended = () => {
-        setIsSegmentPreviewing(false)
-        segmentAudioRef.current = null
-      }
-      segmentAudioRef.current = audio
-      setIsSegmentPreviewing(true)
-      audio.play()
-    } catch (err: any) {
-      console.error('[Preview Speech] Failed:', err.message)
-      setRegenError('Preview generation failed — please try again')
-    } finally {
-      setIsRegenerating(false)
-    }
-  }, [displaySegments, jobId, stagedSpeeds, stagedEmotions, stagedVoices, stagedPitches, speakerVoiceMap, speakerPitchMap, isMutedDubbed, masterVolume, dubbedTextVolume, isRegenerating])
 
   useEffect(() => {
     if (pendingAutoRegenRef.current === null) return
@@ -4811,9 +4749,6 @@ export function DubVerseEditor({
                           setEditingSegmentIndex(null)
                         }}>
                           <RefreshCw className="h-4 w-4" />
-                        </Button>
-                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => handlePreviewSpeech(index)}>
-                          <Play className="h-4 w-4" />
                         </Button>
                       </div>
                     ) : (
@@ -6782,11 +6717,7 @@ export function DubVerseEditor({
                   if (isPlaying) {
                     // Pause: stop the stitch source directly + sync the ref so the
                     // seek/effect races can't leave audio running under a paused video.
-                    isPlayingRef.current = false
-                    rptCancelRef.current = true
-                    if (rptSourceRef.current) { try { rptSourceRef.current.stop() } catch {} rptSourceRef.current = null }
-                    if (segmentAudioRef.current) { try { segmentAudioRef.current.pause() } catch {} segmentAudioRef.current = null }
-                    setIsSegmentPreviewing(false)
+                    stopAllRptAudio()
                     videoRef.current.pause()
                   } else {
                     lastStartPosRef.current = currentTime  // save start pos for Stop
@@ -6832,11 +6763,7 @@ export function DubVerseEditor({
             >
               {isPlaying
                 ? <Pause className={playbackMode === 'preview' ? 'h-4 w-4 text-amber-400' : 'h-4 w-4'} />
-                : isSegmentPreviewing
-                  ? <Pause className="h-4 w-4 text-amber-400" />
-                  : selectedSegmentIndex !== null
-                    ? <PlayCircle className="h-4 w-4 text-amber-400" />
-                    : <Play className={playbackMode === 'preview' ? 'h-4 w-4 text-amber-400' : 'h-4 w-4'} />
+                : <Play className={playbackMode === 'preview' ? 'h-4 w-4 text-amber-400' : 'h-4 w-4'} />
               }
             </Button>
             <Button
@@ -6849,11 +6776,7 @@ export function DubVerseEditor({
                 // moving currentTime. Otherwise the video's 'seeked' handler (which
                 // reads isPlayingRef, still true until the next render) restarts the
                 // stitch — the "press Stop, it keeps playing" bug.
-                isPlayingRef.current = false
-                rptCancelRef.current = true
-                if (rptSourceRef.current) { try { rptSourceRef.current.stop() } catch {} rptSourceRef.current = null }
-                if (segmentAudioRef.current) { try { segmentAudioRef.current.pause() } catch {} segmentAudioRef.current = null }
-                setIsSegmentPreviewing(false)
+                stopAllRptAudio()
                 setIsPlaying(false)
                 if (videoRef.current) {
                   videoRef.current.pause()
