@@ -3635,7 +3635,11 @@ async def serve_job_video(job_id: str):
         ".mkv": "video/x-matroska",
         ".webm": "video/webm",
     }
-    return FileResponse(job.video_path, media_type=media_types.get(ext, "video/mp4"))
+    # Vary: Origin so the browser cache keys this by origin — the crossorigin
+    # thumbnail request and the no-cors player request never share (and poison)
+    # a cache entry, which otherwise makes the thumbnail fetch fail CORS.
+    return FileResponse(job.video_path, media_type=media_types.get(ext, "video/mp4"),
+        headers={"Vary": "Origin"})
 
 
 # Segment audio is REGENERATED in place (same filename overwritten), so it must
