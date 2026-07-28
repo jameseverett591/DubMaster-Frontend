@@ -6780,9 +6780,17 @@ export function DubVerseEditor({
                 // so Chrome's autoplay policy isn't violated for audio
                 if (videoRef.current) {
                   if (isPlaying) {
+                    // Pause: stop the stitch source directly + sync the ref so the
+                    // seek/effect races can't leave audio running under a paused video.
+                    isPlayingRef.current = false
+                    rptCancelRef.current = true
+                    if (rptSourceRef.current) { try { rptSourceRef.current.stop() } catch {} rptSourceRef.current = null }
+                    if (segmentAudioRef.current) { try { segmentAudioRef.current.pause() } catch {} segmentAudioRef.current = null }
+                    setIsSegmentPreviewing(false)
                     videoRef.current.pause()
                   } else {
                     lastStartPosRef.current = currentTime  // save start pos for Stop
+                    rptCancelRef.current = false           // allow the stitch to (re)schedule
                     videoRef.current.play().catch(() => {})
                   }
                 }
@@ -6837,11 +6845,20 @@ export function DubVerseEditor({
               className="h-8 w-8 p-0"
               onClick={() => {
                 const returnTo = lastStartPosRef.current
+                // Kill EVERY audio source and sync isPlayingRef SYNCHRONOUSLY before
+                // moving currentTime. Otherwise the video's 'seeked' handler (which
+                // reads isPlayingRef, still true until the next render) restarts the
+                // stitch — the "press Stop, it keeps playing" bug.
+                isPlayingRef.current = false
+                rptCancelRef.current = true
+                if (rptSourceRef.current) { try { rptSourceRef.current.stop() } catch {} rptSourceRef.current = null }
+                if (segmentAudioRef.current) { try { segmentAudioRef.current.pause() } catch {} segmentAudioRef.current = null }
+                setIsSegmentPreviewing(false)
+                setIsPlaying(false)
                 if (videoRef.current) {
                   videoRef.current.pause()
                   videoRef.current.currentTime = returnTo
                 }
-                setIsPlaying(false)
                 setCurrentTime(returnTo)
               }}
             >
