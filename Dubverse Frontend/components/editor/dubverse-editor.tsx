@@ -57,6 +57,7 @@ import { cn } from '@/lib/utils'
 import { apiClient } from '@/lib/api-client'
 import { VoiceLibraryPanel } from '@/components/voice-library-modal'
 import { CustomVoicesModal } from '@/components/editor/custom-voices-modal'
+import { EmotionLibraryPopup } from '@/components/editor/emotion-library-popup'
 import { CharacterProfilePopover } from '@/components/editor/character-profile-popover'
 import { useEditorStore, type SidebarTab } from '@/lib/editor-store'
 import type { Segment, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType } from '@/lib/editor-types'
@@ -1006,6 +1007,9 @@ export function DubVerseEditor({
   const [inlineEmotionPicker, setInlineEmotionPicker] = useState<number | null>(null)
   const [inlineEmotionWriteIn, setInlineEmotionWriteIn] = useState<number | null>(null)
   const [customEmotionDrafts, setCustomEmotionDrafts] = useState<Record<number, string>>({})
+  // Emotion Library popup: which segment it targets + whether picking stages the
+  // emotion pill ('stage') or inserts a [tag] into the write-in draft ('insert').
+  const [emotionLibraryTarget, setEmotionLibraryTarget] = useState<{ index: number; mode: 'stage' | 'insert' } | null>(null)
   const [userInitials, setUserInitials] = useState("JA")
   const [showRevertAllConfirm, setShowRevertAllConfirm] = useState(false)
   const [showReviewQueue, setShowReviewQueue] = useState(false)
@@ -4888,6 +4892,14 @@ export function DubVerseEditor({
                                   {emotion.toLowerCase()}
                                 </span>
                               ))}
+                              {/* Open the full Emotion Library (~194 states) */}
+                              <span
+                                title="Open the Emotion Library — 194 delivery states"
+                                className="text-[9px] px-1.5 py-0.5 rounded-full cursor-pointer border border-violet-400/50 bg-violet-500/15 text-violet-200 hover:bg-violet-500/30 hover:text-white transition-colors select-none font-mono"
+                                onClick={() => setEmotionLibraryTarget({ index, mode: 'stage' })}
+                              >
+                                ＋ more
+                              </span>
                             </div>
                             <button
                               type="button"
@@ -4939,6 +4951,13 @@ export function DubVerseEditor({
                             // this field instead of the segment's custom context menu.
                             onContextMenu={(e) => e.stopPropagation()}
                           >
+                            <span
+                              title="Emotion Library — insert a delivery [tag] into the script"
+                              className="inline-block text-[9px] px-1.5 py-0.5 mb-1.5 rounded-full cursor-pointer border border-cyan-400/50 bg-cyan-500/15 text-cyan-200 hover:bg-cyan-500/30 hover:text-white transition-colors select-none font-mono"
+                              onClick={() => setEmotionLibraryTarget({ index, mode: 'insert' })}
+                            >
+                              ＋ Emotion Library
+                            </span>
                             <textarea
                               autoFocus
                               rows={2}
@@ -6294,6 +6313,26 @@ export function DubVerseEditor({
         open={customVoicesOpen}
         onOpenChange={setCustomVoicesOpen}
         onChanged={() => setCustomVoicesVersion(v => v + 1)}
+      />
+
+      <EmotionLibraryPopup
+        open={emotionLibraryTarget !== null}
+        onClose={() => setEmotionLibraryTarget(null)}
+        onSelect={(value) => {
+          const t = emotionLibraryTarget
+          if (!t) return
+          if (t.mode === 'stage') {
+            // Stage as the segment's emotion (pill) — you then Generate.
+            setStagedEmotions(prev => ({ ...prev, [t.index]: value }))
+            selectSegment(t.index)
+          } else {
+            // Insert a [tag] into the write-in / Delivery Script draft.
+            setCustomEmotionDrafts(prev => {
+              const cur = (prev[t.index] ?? '').trim()
+              return { ...prev, [t.index]: (cur ? cur + ' ' : '') + `[${value}]` }
+            })
+          }
+        }}
       />
 
       {/* Ask AI — draggable floating panel */}
