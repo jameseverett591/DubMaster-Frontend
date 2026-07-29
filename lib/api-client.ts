@@ -1165,7 +1165,7 @@ class DubVerseAPIClient {
   }): Promise<{ status: string; suggestion: string; explanation: string }> {
     const response = await fetch(`${this.baseURL}/api/ask-ai`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify(request),
     })
     if (!response.ok) {
