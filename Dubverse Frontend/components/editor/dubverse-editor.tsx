@@ -3133,8 +3133,14 @@ export function DubVerseEditor({
     setStagedPitches(prev => { const n = { ...prev }; delete n[index]; return n })
     setLockedSegments(prev => { const next = new Set(prev); next.delete(index); return next })
     setDroppedTranslations(prev => prev.filter(t => t.segmentIndex !== index))
-    apiClient.resetSegment(jobId, index).catch(err => console.warn('[CLEAR]', err))
-  }, [initialSegments, jobId, updateSegment, editingSegmentIndex])
+    // reset_segment (routes.py) matches on transcript_index, NOT array position.
+    // The two diverge permanently after any split (a split's right half gets a
+    // fresh, unrelated transcript_index), so sending the raw index would clear a
+    // DIFFERENT segment — or 404 into the swallowed .catch below and look like
+    // it worked. Same pattern already used by the regenerate/commit call sites.
+    apiClient.resetSegment(jobId, displaySegments[index]?.transcript_index ?? index)
+      .catch(err => console.warn('[CLEAR]', err))
+  }, [initialSegments, jobId, updateSegment, editingSegmentIndex, displaySegments])
 
   // Handle Generate Speech - calls backend TTS regeneration for the selected segment
   const handleGenerateSpeech = useCallback(async (segIdx?: number, voiceOverride?: string, textOverride?: string, ttsTextOverride?: string): Promise<boolean> => {
