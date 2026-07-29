@@ -5,6 +5,38 @@ import type { AdaptedSegment, VariantType } from './adaptation-types'
 
 export type { SidebarTab }
 
+// Mirrors a per-index patch into `importedSegments` so an edit written through a
+// store action also lands on the copy that actually renders and persists
+// (dubverse-editor's `displaySegments` prefers `importedSegments` whenever it is
+// set, and `syncSegmentsToBackend` writes that copy to disk).
+//
+// Additive by design: no call site changes. Takes a patch FUNCTION rather than a
+// fixed object so each array derives conditional fields (e.g. `status`) from its
+// OWN segment, preserving existing per-array semantics exactly.
+//
+// Guards:
+//  - `importedSegments` not yet seeded (null) -> no-op. Never creates the array;
+//    when it is null, `displaySegments` already falls back to `segments`.
+//  - length mismatch (mid split/merge, where the two arrays legitimately differ)
+//    -> skip and warn. Index-based patching across differently-shaped arrays
+//    would silently hit the WRONG segment, which is worse than not mirroring.
+function mirrorIntoImported(
+  imported: Segment[] | null,
+  segments: Segment[],
+  index: number,
+  patchFor: (seg: Segment) => Partial<Segment>,
+): Segment[] | null {
+  if (!imported) return imported
+  if (imported.length !== segments.length) {
+    console.warn(
+      `[editor-store] segment mirror skipped at index ${index}: ` +
+      `importedSegments(${imported.length}) != segments(${segments.length})`
+    )
+    return imported
+  }
+  return imported.map((seg, i) => (i === index ? { ...seg, ...patchFor(seg) } : seg))
+}
+
 interface EditorState {
   // Job data
   jobId: string | null
@@ -309,11 +341,18 @@ export const useEditorStore = create<EditorState>(
   setQCFilterType: (type) => set({ qcFilterType: type }),
   
   // Segment actions
-  updateSegment: (index, updates) => set((state) => ({
-    segments: state.segments.map((seg, i) => 
-      i === index ? { ...seg, ...updates, status: seg.status === 'locked' ? 'locked' : 'edited' } : seg
-    )
-  })),
+  updateSegment: (index, updates) => set((state) => {
+    const patchFor = (seg: Segment): Partial<Segment> => ({
+      ...updates,
+      status: seg.status === 'locked' ? 'locked' : 'edited',
+    })
+    return {
+      segments: state.segments.map((seg, i) =>
+        i === index ? { ...seg, ...patchFor(seg) } : seg
+      ),
+      importedSegments: mirrorIntoImported(state.importedSegments, state.segments, index, patchFor),
+    }
+  }),
 
   updateSegmentSpeaker: (index, speakerId, speakerLabel) => set((state) => ({
     segments: state.segments.map((seg, i) =>
@@ -340,11 +379,21 @@ export const useEditorStore = create<EditorState>(
     )
   })),
   
-  updateSegmentText: (index, text) => set((state) => ({
-    segments: state.segments.map((seg, i) => 
-      i === index ? { ...seg, target_text: text, active_text: text, variant_text: text, isUserEdited: true, status: seg.status === 'locked' ? 'locked' : 'edited' } : seg
-    )
-  })),
+  updateSegmentText: (index, text) => set((state) => {
+    const patchFor = (seg: Segment): Partial<Segment> => ({
+      target_text: text,
+      active_text: text,
+      variant_text: text,
+      isUserEdited: true,
+      status: seg.status === 'locked' ? 'locked' : 'edited',
+    })
+    return {
+      segments: state.segments.map((seg, i) =>
+        i === index ? { ...seg, ...patchFor(seg) } : seg
+      ),
+      importedSegments: mirrorIntoImported(state.importedSegments, state.segments, index, patchFor),
+    }
+  }),
   
   updateSegmentTiming: (index, startTime, endTime) => set((state) => ({
     segments: state.segments.map((seg, i) => 
