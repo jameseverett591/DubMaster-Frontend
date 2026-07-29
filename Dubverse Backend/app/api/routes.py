@@ -5700,6 +5700,10 @@ class ApplyVoiceRequest(BaseModel):
     speaker_id: str
     voice_id: str = ""
     voice_key: str = ""
+    # Optional overrides. Omitted -> per-segment values are preserved as before,
+    # so existing 3-field callers are unchanged.
+    traits: Optional[List[str]] = None
+    pitch: Optional[int] = None
 
 
 @router.post("/segments/apply-voice/{job_id}")
@@ -5754,7 +5758,9 @@ async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
                 # Preserve everything but the voice.
                 speed=t["speed"],
                 emotion=t["emotion"],
-                traits=t["traits"],
+                # Caller-supplied traits win; [] deliberately clears them.
+                traits=body.traits if body.traits is not None else t["traits"],
+                pitch=body.pitch,
                 nuances=t["nuances"],
                 nuance_markers=t["nuance_markers"],
             )
