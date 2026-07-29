@@ -143,7 +143,11 @@ export function SpeakerVoicePanel() {
       const { seg, idx } = targets[i]
       const text = seg.committed_adapted_text ?? seg.active_text ?? seg.target_text
       try {
-        const response = await apiClient.regenerateSegment(jobId, idx, {
+        // regenerate_segment (dubbing_service) matches on transcript_index, NOT
+        // array position — the two diverge after any split, so passing the raw
+        // array index regenerates a DIFFERENT segment. Matches the pattern the
+        // editor's own regen call sites already use.
+        const response = await apiClient.regenerateSegment(jobId, seg.transcript_index ?? idx, {
           text,
           speed: seg.committed_speed ?? 1.0,
           emotion: seg.committed_emotion ?? undefined,
