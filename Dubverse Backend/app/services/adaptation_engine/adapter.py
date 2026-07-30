@@ -1,9 +1,10 @@
-import asyncio
 import json
 import logging
 import os
 import re
 from typing import Dict, List, Optional, Tuple
+
+import httpx
 
 from .prompts import SYSTEM_PROMPT, build_batch_adapt_prompt
 from .types import VARIANT_ORDER, AdaptationVariant, AdaptedSegment
@@ -86,33 +87,71 @@ async def adapt_batch(
         return _fallback_variants(segments)
 
 
+# Models from Opus 4.7 / Sonnet 5 onward reject `temperature` and `top_p`
+# outright (HTTP 400) — sampling parameters were removed on those models.
+_NO_SAMPLING_PARAMS = (
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "claude-mythos-5",
+)
+
+
 async def _call_llm(user_prompt: str) -> Optional[str]:
-    """Call Claude via Anthropic API with the adaptation prompt.
-    Uses temperature=0.3 and top_p=0.7 for all variants (Claude does not support
-    per-message temperature, so we use the performable default here)."""
+    """Call Claude via the Anthropic Messages API with the adaptation prompt.
+
+    Posts to /v1/messages directly, matching every other Anthropic call in this
+    codebase (qc_report_service, translation_service, routes, dubbing_service).
+    This previously used the `anthropic` SDK, which is not in requirements.txt
+    and was not installed — so every adaptation call raised ModuleNotFoundError
+    and silently fell back to synthetic variants.
+
+    Sends `temperature` only. The previous code sent temperature AND top_p
+    together, which the API rejects: verified against claude-haiku-4-5 —
+    "`temperature` and `top_p` cannot both be specified for this model."
+    Either alone returns 200. On models that removed sampling parameters
+    entirely (see _NO_SAMPLING_PARAMS) neither is sent.
+    """
     api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
         return None
 
     model = os.getenv("ADAPTATION_MODEL", "claude-haiku-4-5-20251001")
 
+    body: Dict = {
+        "model": model,
+        "max_tokens": 6000,
+        "system": SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": user_prompt}],
+    }
+    if not model.startswith(_NO_SAMPLING_PARAMS):
+        body["temperature"] = 0.3
+
     try:
-        import anthropic
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=body,
+            )
 
-        client = anthropic.Anthropic(api_key=api_key)
+        if response.status_code != 200:
+            logger.error(
+                f"[ADAPTATION] Anthropic API HTTP {response.status_code}: "
+                f"{response.text[:300]}"
+            )
+            return None
 
-        # Use the centralized system prompt from policy.py
-        response = await asyncio.to_thread(
-            client.messages.create,
-            model=model,
-            max_tokens=6000,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}],
-            temperature=0.3,
-            top_p=0.7,
+        blocks = response.json().get("content") or []
+        content = next(
+            (b.get("text") for b in blocks if b.get("type") == "text"), None
         )
-
-        content = response.content[0].text if response.content else None
         if not content:
             return None
 
