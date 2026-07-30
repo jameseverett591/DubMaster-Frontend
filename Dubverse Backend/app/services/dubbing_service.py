@@ -2767,12 +2767,30 @@ class DubbingService:
             speed=use_speed,
             emotion_tags=directive,
             traits_tag="",  # folded into the composed directive above
-            pitch=pitch,
         )
         if not result:
             raise RuntimeError(f"TTS failed for segment {segment_index} in job {job_id}")
 
         final_path = result["path"]
+
+        # Pitch is a post-process, not a Fish parameter: /v1/tts exposes prosody
+        # {speed, volume, normalize_loudness} and no pitch field. The editor's pitch
+        # slider reached text_to_speech() and was silently dropped there, so the
+        # control did nothing whenever Fish was the provider. This mirrors what the
+        # main pipeline already does (~line 1078). Runs BEFORE the fit/trim pass
+        # below so the fit measures the audio we actually ship.
+        if pitch:
+            pitched_path = os.path.join(
+                output_dir, f"segment_{segment_index:04d}_pitched.mp3"
+            )
+            ok = await asyncio.to_thread(
+                self._apply_pitch_shift, final_path, pitched_path, float(pitch)
+            )
+            if ok and os.path.exists(pitched_path):
+                final_path = pitched_path
+                logger.info(
+                    f"[PITCH] seg {segment_index}: shifted {pitch:+.0f} semitones"
+                )
 
         # Clear any stale exclusion from a previous attempt
         seg.pop("timing_exclusion", None)

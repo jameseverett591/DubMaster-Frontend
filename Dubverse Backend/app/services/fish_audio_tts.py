@@ -384,9 +384,8 @@ class FishAudioTTS:
         traits_tag: str = "",
         speaker_references: Optional[List[Dict]] = None,
         speed: float = 1.0,
-        pitch: Optional[int] = None,
-        temperature: float = 0.7,
-        top_p: float = 0.7,
+        temperature: float = _FISH_TEMPERATURE,
+        top_p: float = _FISH_TOP_P,
         language: str = "en",
         # Accept ElevenLabs params for interface compat (unused)
         model_id: str = "",
