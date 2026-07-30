@@ -54,7 +54,7 @@ class PipelineTracker:
             "stages": {
                 s["id"]: {
                     **s,
-                    "status": "pending",
+                    "status": "pending",       # pending | active | completed | failed | skipped
                     "started_at": None,
                     "completed_at": None,
                     "duration_ms": None,
