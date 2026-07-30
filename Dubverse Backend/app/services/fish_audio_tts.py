@@ -1,11 +1,13 @@
 """
-Fish Audio S1 TTS service.
+Fish Audio S2.1 TTS service.
 
 Drop-in alternative to ElevenLabs TTS for the Dubverse dubbing pipeline.
 Uses the Fish Audio async Python SDK for voice-cloned, emotion-tagged speech.
 
-Emotion control is handled via inline text tags (e.g. ``(angry)``, ``(calm)``)
-prepended to the text before synthesis.
+Emotion control is handled via one composed inline directive in square
+brackets (e.g. ``[gruff, hopeful, soft trailing tail]``) prepended to the text
+before synthesis — see ``compose_fish_directive`` in dubbing_service. The
+``(parens)`` form is S1 legacy syntax and does nothing on S2.x.
 
 Voice identity can come from:
 1. **Inline references** — raw audio bytes + transcript extracted from the
@@ -31,7 +33,32 @@ from app.config import get_settings
 # (verified: two different tags produced byte-identical audio via the SDK, but
 # distinct audio via this endpoint). See _convert_via_http.
 _FISH_TTS_URL = "https://api.fish.audio/v1/tts"
-_FISH_MODEL = os.getenv("FISH_AUDIO_MODEL", "s2-pro")
+# s2.1-pro is the only model that measurably acts on the composed [bracket]
+# directive. Measured 2026-07-29 over 2 models x 4 directives x 2 reps against a
+# real voice: a "[whispering, barely audible, hushed]" directive dropped mean
+# volume ~3-9 dB below an undirected read on s2.1-pro in 4/4 reps, and 0/4 on
+# s2-pro (indistinguishable from neutral, with or without loudness
+# normalization). Emotion pills were effectively inert before this.
+_FISH_MODEL = os.getenv("FISH_AUDIO_MODEL", "s2.1-pro")
+# The SDK's tts.convert types `model` as Literal['speech-1.5','speech-1.6','s1',
+# 's2-pro'] — it cannot express s2.1-pro. The msgpack path it serves drops the
+# inline directive anyway (see below), so it stays on s2-pro rather than passing
+# a value the SDK would reject.
+_FISH_SDK_MODEL = "s2-pro"
+
+# Fish's own documented defaults. `temperature` is described upstream as
+# "controls expressiveness" and `top_p` as nucleus-sampling diversity; both
+# default to 0.7. Defaulted here rather than at the call sites so every caller
+# inherits one value, and overridable by env for probing.
+#
+# The previous 0.25/0.55 was a leftover from a measurement probe (chosen to
+# suppress run-to-run variance so a directive's effect could be measured), not a
+# tuned value. A/B on s2.1-pro showed no intensity difference between the two
+# settings — both sat inside the 3.3 dB within-condition spread. Note the
+# trade-off: 0.7 restores ~1.5-2 dB of run-to-run variance, so future A/B probes
+# should pin these via env rather than assume the default is quiet.
+_FISH_TEMPERATURE = float(os.getenv("FISH_AUDIO_TEMPERATURE", "0.7"))
+_FISH_TOP_P = float(os.getenv("FISH_AUDIO_TOP_P", "0.7"))
 
 logger = logging.getLogger(__name__)
 
@@ -286,9 +313,26 @@ class FishAudioTTS:
             "mp3_bitrate": getattr(cfg, "mp3_bitrate", 128),
             "normalize": getattr(cfg, "normalize", True),
         }
+        # Expressiveness knobs. Previously accepted by text_to_speech but never
+        # sent, so both sat at Fish's 0.7 default. Run-to-run variance at 0.7 is
+        # ~1.5-2 dB — the same magnitude as a weak directive's effect — so a
+        # caller that wants a directive to read clearly needs to lower these.
+        for _k in ("temperature", "top_p"):
+            _v = getattr(cfg, _k, None)
+            if _v is not None:
+                body[_k] = _v
+        # Fish defaults prosody.normalize_loudness to true. We had never sent the
+        # field at all, so every request was loudness-normalised by omission rather
+        # than by intent. Send it explicitly.
+        # NOTE: this is a CORRECTNESS fix, not an intensity fix. A/B on s2.1-pro
+        # (4 conditions x 3 reps, ~2.9s clips, one voice) showed NO measurable
+        # effect: the normalize_loudness=false delta was ~0.3 dB LUFS, well inside
+        # the 3.3 dB within-condition spread. Do not expect an audible change.
+        prosody: Dict = {"normalize_loudness": False}
         speed = tts_kwargs.get("speed")
         if speed and float(speed) != 1.0:
-            body["prosody"] = {"speed": float(speed)}
+            prosody["speed"] = float(speed)
+        body["prosody"] = prosody
 
         refs = tts_kwargs.get("references")
         if refs:
@@ -407,7 +451,9 @@ class FishAudioTTS:
         output_path : str
             Where to write the audio file.
         emotion_tags : str
-            Fish Audio inline tags, e.g. ``"(angry)(shouting)"``.
+            One composed Fish S2 bracket directive, e.g.
+            ``"[angry, clipped and hard-edged]"``. Only reaches the model on the
+            ``reference_id`` path; the inline-references path drops it.
         speaker_references : list of dict, optional
             Inline voice cloning references.  Each dict has keys
             ``"audio"`` (bytes) and ``"text"`` (str transcript of that audio).
@@ -434,19 +480,25 @@ class FishAudioTTS:
         logger.info(
             f"[FISH-TTS] mode={'inline-clone' if use_inline else 'reference-id'}, "
             f"voice={voice_id if not use_inline else f'{len(speaker_references)} refs'}, "
-            f"traits={traits_tag!r}, emotion={emotion_tags!r}, text={tagged_text[:60]!r}..."
+            f"traits={traits_tag!r}, emotion={emotion_tags!r}, "
+            f"temp={temperature} top_p={top_p}, text={tagged_text[:60]!r}..."
         )
 
         try:
             from fishaudio import ReferenceAudio, TTSConfig
 
-            tts_config = TTSConfig(normalize=True, mp3_bitrate=128)
+            tts_config = TTSConfig(
+                normalize=True,
+                mp3_bitrate=128,
+                temperature=temperature,
+                top_p=top_p,
+            )
             tts_kwargs = dict(
                 text=tagged_text,
                 speed=speed,
                 format="mp3",
                 config=tts_config,
-                model="s2-pro",
+                model=_FISH_SDK_MODEL if use_inline else _FISH_MODEL,
             )
 
             if use_inline:
@@ -480,12 +532,19 @@ class FishAudioTTS:
         # to Edge TTS which produces a completely different voice mid-job.
         if use_inline:
             try:
+                # Dropping the inline refs moves this to the JSON/HTTP path, so
+                # it takes the directive-aware model.
                 retry_kwargs = dict(
                     text=tagged_text,
                     speed=speed,
                     format="mp3",
-                    config=TTSConfig(normalize=True, mp3_bitrate=128),
-                    model="s2-pro",
+                    config=TTSConfig(
+                        normalize=True,
+                        mp3_bitrate=128,
+                        temperature=temperature,
+                        top_p=top_p,
+                    ),
+                    model=_FISH_MODEL,
                 )
                 if voice_id:
                     retry_kwargs["reference_id"] = voice_id
