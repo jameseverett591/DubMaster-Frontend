@@ -409,6 +409,60 @@ class DubbingService:
                 ordered.append(speaker)
         return ordered
 
+    @staticmethod
+    def _speaker_index(speaker_id: str) -> Optional[int]:
+        """Numeric index from a speaker label, or None if it isn't of that shape."""
+        try:
+            if speaker_id.startswith("speaker-"):
+                return max(0, int(speaker_id.split("-")[1]) - 1)
+            if speaker_id.startswith("speaker_"):
+                return max(0, int(speaker_id.split("_")[1]))
+            if speaker_id.startswith("SPEAKER_"):
+                return max(0, int(speaker_id.split("_")[1]))
+        except Exception:
+            return None
+        return None
+
+    @classmethod
+    def _explicit_voice_for_speaker(
+        cls, speaker: str, voice_mapping: Optional[Dict[str, str]]
+    ) -> Optional[str]:
+        """The voice EXPLICITLY assigned to this speaker, or None.
+
+        Single source of truth for "did the user actually pick a voice for this
+        speaker." Used by _build_speaker_voice_map's Pass 1 AND by the dub loop's
+        Path A / Path B decision — deliberately one function, because a second copy
+        of this key-matching would be free to drift, and the two callers disagreeing
+        would silently change which speakers get zero-shot cloned.
+
+        Deliberately does NOT consider the gender-pool fallbacks (Passes 2 and 3):
+        those fill in EVERY remaining speaker, so treating them as "assigned" would
+        disable zero-shot cloning across the board.
+
+        Note: a whitespace-only value counts as assigned. That mirrors the original
+        truthiness check exactly; tightening it would change which speakers get
+        cloned, so it's left alone here as a separate decision.
+        """
+        if not voice_mapping:
+            return None
+        if voice_mapping.get(speaker):
+            return voice_mapping[speaker]
+        idx = cls._speaker_index(speaker)
+        if idx is None:
+            return None
+        # "voice-N" is what the frontend currently sends; the others are legacy or
+        # alternate label formats that have all shown up in real payloads.
+        for key in (
+            f"speaker-{idx + 1}",
+            f"voice-{idx + 1}",
+            f"speaker_{idx}",
+            f"SPEAKER_{idx:02d}",
+            f"SPEAKER_{idx}",
+        ):
+            if voice_mapping.get(key):
+                return voice_mapping[key]
+        return None
+
     def _build_speaker_voice_map(
         self,
         transcript: List[Dict],
@@ -416,18 +470,6 @@ class DubbingService:
         speaker_genders: Optional[Dict[str, str]] = None,
     ) -> Dict[str, str]:
         unique_speakers = self._stable_unique_speakers(transcript)
-
-        def _speaker_index(speaker_id: str) -> Optional[int]:
-            try:
-                if speaker_id.startswith("speaker-"):
-                    return max(0, int(speaker_id.split("-")[1]) - 1)
-                if speaker_id.startswith("speaker_"):
-                    return max(0, int(speaker_id.split("_")[1]))
-                if speaker_id.startswith("SPEAKER_"):
-                    return max(0, int(speaker_id.split("_")[1]))
-            except Exception:
-                return None
-            return None
 
         # ------------------------------------------------------------------ #
         # Pass 1: match by explicit key from the frontend voice_mapping.      #
@@ -437,30 +479,10 @@ class DubbingService:
         speaker_to_voice: Dict[str, str] = {}
         if voice_mapping:
             for speaker in unique_speakers:
-                # Direct key hit
-                if speaker in voice_mapping and voice_mapping[speaker]:
-                    speaker_to_voice[speaker] = voice_mapping[speaker]
-                    continue
-
-                # Index-based fallback: try all common key formats including
-                # "voice-N" which is what the frontend currently sends.
-                idx = _speaker_index(speaker)
-                if idx is not None:
-                    candidate_keys = [
-                        f"speaker-{idx + 1}",
-                        f"voice-{idx + 1}",       # frontend sends "voice-1", "voice-2", …
-                        f"speaker_{idx}",
-                        f"SPEAKER_{idx:02d}",
-                        f"SPEAKER_{idx}",
-                    ]
-                    for key in candidate_keys:
-                        if key in voice_mapping and voice_mapping[key]:
-                            speaker_to_voice[speaker] = voice_mapping[key]
-                            logger.info(
-                                f"[VOICE MAP] {speaker} matched via key '{key}' "
-                                f"-> {voice_mapping[key]}"
-                            )
-                            break
+                explicit = self._explicit_voice_for_speaker(speaker, voice_mapping)
+                if explicit:
+                    speaker_to_voice[speaker] = explicit
+                    logger.info(f"[VOICE MAP] {speaker} explicitly assigned -> {explicit}")
 
         # ------------------------------------------------------------------ #
         # Pass 2: gender-based auto-assignment for speakers still unmatched.  #
