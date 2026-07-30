@@ -1076,10 +1076,37 @@ class DubbingService:
                         emotion=seg_emotion, traits=speaker_traits
                     )
                     tts_kwargs["traits_tag"] = ""  # folded into the composed directive above
-                    # Pass inline voice references if extracted from source audio.
+                    # Voice identity, in priority order:
+                    #   1. EXPLICIT user/library assignment -> reference_id -> JSON
+                    #      /v1/tts -> s2.1-pro, composed directive PARSES. Costs no
+                    #      Fish voice slot: the model already lives on Fish's side.
+                    #   2. Zero-shot clone of the source actor -> SDK msgpack ->
+                    #      s2-pro, directive inert. Preserves the ORIGINAL actor's
+                    #      timbre, so it stays the default when nothing is assigned.
+                    #
+                    # Previously the explicit assignment was resolved into
+                    # tts_kwargs["voice_id"] and then unconditionally overridden by
+                    # the zero-shot refs, so picking a voice before the first dub
+                    # silently did nothing until you regenerated in the editor.
+                    #
+                    # Must test against raw voice_mapping, NOT speaker_to_voice: the
+                    # latter is gender-pool-filled for every speaker (Passes 2/3), so
+                    # it reports "assigned" for everyone and would kill cloning.
+                    _explicit = self._explicit_voice_for_speaker(speaker, voice_mapping)
                     _refs = speaker_voice_refs.get(speaker)
-                    if _refs:
+                    if _explicit:
+                        # voice_id was already resolved from this same assignment at
+                        # the top of the loop and is in tts_kwargs; just don't let the
+                        # inline refs override it.
+                        logger.info(
+                            f"[VOICE-PATH] {speaker}: assigned {_explicit!r} "
+                            f"(Path A / s2.1-pro, directives live, no voice slot used)"
+                        )
+                    elif _refs:
                         tts_kwargs["speaker_references"] = _refs
+                        logger.info(
+                            f"[VOICE-PATH] {speaker}: zero-shot clone (Path B / s2-pro)"
+                        )
 
                     logger.info(
                         f"[FISH-TTS] seg {i} speaker={speaker} gender={speaker_gender} "
