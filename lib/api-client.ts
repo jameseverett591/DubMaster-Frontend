@@ -900,6 +900,10 @@ class DubVerseAPIClient {
     curve: number[]
     markers: Array<{ emotion: string; intensity: number; color: string; xFrac: number }>
     top_emotions: Array<[string, number]>
+    // How the curve was produced: real frame-level analysis, a curve synthesized
+    // from Velma's per-utterance labels, or the hardcoded Excitement default when
+    // there was nothing to analyse at all.
+    analysis_method?: 'emotion2vec-sliding-window' | 'velma-labels' | 'no-data-fallback' | string
   }> {
     const response = await fetch(`${this.baseURL}/api/emotion/analyze-segment/${jobId}`, {
       method: 'POST',
@@ -1092,6 +1096,7 @@ class DubVerseAPIClient {
       locked?: boolean
       paired_with_next?: boolean
       text?: string
+      text_locked?: boolean
     }
   ): Promise<void> {
     await fetch(`${this.baseURL}/api/segment/commit/${jobId}/${index}`, {
