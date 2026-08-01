@@ -3187,12 +3187,15 @@ export function DubVerseEditor({
       const emotionIntensity = sampleEmotionalCurve(activeIndex, 0.5)
       const finalVoiceKey = voiceOverride ?? stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id]
       // Priority: explicit textOverride (passed by saveEditing — immune to stale
-      // closures) > live editingText for the selected segment > stored preview/active text.
+      // closures) > live editingText for the selected segment > committed adapted text
+      // > stored preview/active text.
       const regenerateText = (textOverride && textOverride.trim())
         ? textOverride.trim()
         : (activeIndex === selectedSegmentIndex && editingText.trim())
           ? editingText.trim()
-          : (segment.preview_text ?? segment.active_text ?? segment.target_text)
+          : segment.committed_adapted_text
+            ? segment.committed_adapted_text
+            : (segment.preview_text ?? segment.active_text ?? segment.target_text)
       console.log('[REGEN] calling backend', { activeIndex, finalVoiceKey, regenerateText, textOverride, preview_text: segment.preview_text, active_text: segment.active_text, editing: editingText.trim() })
       // Live timeline boundaries, straight from the on-screen segment — segments.json
       // on the backend can lag behind a split/resize whose commitSegmentTiming call
@@ -3202,7 +3205,7 @@ export function DubVerseEditor({
       const liveEnd = effEnd(segment)
       const nextSegment = displaySegments[activeIndex + 1]
       const liveNextStart = nextSegment ? effStart(nextSegment) : undefined
-      const response = await apiClient.regenerateSegment(jobId, segment.transcript_index ?? activeIndex, {
+      const regenPayload = {
         text: regenerateText,
         speed: stagedSpeeds[activeIndex] ?? 1.0,
         // '' = explicit clear (backend pops seg["emotion"]); undefined = unset → use committed
@@ -3222,7 +3225,9 @@ export function DubVerseEditor({
         live_segment_start: liveStart,
         live_segment_end: liveEnd,
         live_next_segment_start: liveNextStart,
-      })
+      }
+      console.log('[REGEN] payload', { activeIndex, regenPayload })
+      const response = await apiClient.regenerateSegment(jobId, segment.transcript_index ?? activeIndex, regenPayload)
       console.log('[REGEN] backend response', { path: response.segment.path, voice_id: response.segment.voice_id, status: response.status })
       if (response.segment.timing_exclusion) {
         setTimingExclusion({
@@ -3643,6 +3648,12 @@ export function DubVerseEditor({
           const origIdx = Number(raw.original_segment_id ?? raw.segment_id ?? i)
           const origSeg = Number.isFinite(origIdx) ? priorSegs[origIdx] : undefined
           const englishText = raw.text ?? raw.translated_text ?? ''
+          // A locked segment keeps its committed line, its rendered audio, and its
+          // timing — retranslation has nothing to say about any of them.
+          const locked = origSeg?.text_locked === true
+          const keep = locked
+            ? (origSeg?.committed_adapted_text ?? origSeg?.target_text ?? englishText)
+            : englishText
           return {
             ...(origSeg ?? {} as Segment),
             id: raw.auto_split ? `retranslate-${jobId}-${i}` : (origSeg?.id ?? `retranslate-${jobId}-${i}`),
@@ -3652,18 +3663,20 @@ export function DubVerseEditor({
             start_time: raw.start ?? origSeg?.start_time ?? 0,
             end_time: raw.end ?? origSeg?.end_time ?? 0,
             source_text: raw.source_text || origSeg?.source_text || '',
-            target_text: englishText,
-            active_text: englishText,
-            variant_text: englishText,
+            target_text: keep,
+            active_text: keep,
+            variant_text: keep,
             preview_text: null,
             isPreviewing: false,
-            isUserEdited: false,
-            committed_adapted_text: englishText,
+            isUserEdited: locked,
+            committed_adapted_text: locked ? keep : englishText,
+            text_locked: locked,
             // Text changed — any previously committed audio/timing no longer
             // matches it and must be regenerated, not silently carried over.
-            committed_audio_url: undefined,
-            committed_start_time: undefined,
-            committed_end_time: undefined,
+            // A locked segment's text did NOT change, so its clip is still valid.
+            committed_audio_url: locked ? origSeg?.committed_audio_url : undefined,
+            committed_start_time: locked ? origSeg?.committed_start_time : undefined,
+            committed_end_time:   locked ? origSeg?.committed_end_time   : undefined,
             speaker_id: raw.speaker || origSeg?.speaker_id || 'speaker-1',
             speaker_label: origSeg?.speaker_label,
             qc_findings: origSeg?.qc_findings ?? [],
@@ -3725,7 +3738,9 @@ export function DubVerseEditor({
       setImportedSegments(prev => {
         const base = prev ?? displaySegments
         return base.map((seg, i) =>
-          i === idx ? { ...seg, preview_text: text } : seg
+          i === idx
+            ? { ...seg, preview_text: text, committed_adapted_text: text, text_locked: true }
+            : seg
         )
       })
       // Clear editing state so regenerate uses preview_text, not editingText
@@ -3733,7 +3748,7 @@ export function DubVerseEditor({
       setEditingSegmentIndex(null)
       // Persist edited text to disk so regenerate_segment reads it from committed_adapted_text
       applyFlagOutcome(idx, 'text')
-      apiClient.commitSegmentTiming(jobId, displaySegments[idx]?.transcript_index ?? idx, { committed_adapted_text: text }).catch(err =>
+      apiClient.commitSegmentTiming(jobId, displaySegments[idx]?.transcript_index ?? idx, { committed_adapted_text: text, text_locked: true }).catch(err =>
         console.warn('[saveEditing] failed to persist text to disk:', err)
       )
       // Auto-regen in Preview mode — 2 second debounce.
@@ -3783,11 +3798,13 @@ export function DubVerseEditor({
     setPreviewText(index, text)
     setImportedSegments(prev => {
       const base = prev ?? displaySegmentsRef.current
-      return base.map((seg, i) => i === index ? { ...seg, preview_text: text } : seg)
+      return base.map((seg, i) => i === index
+        ? { ...seg, preview_text: text, committed_adapted_text: text, text_locked: true }
+        : seg)
     })
     applyFlagOutcome(index, 'text')
     const ti = segs[index]?.transcript_index ?? index
-    apiClient.commitSegmentTiming(jobId, ti, { committed_adapted_text: text }).catch(err =>
+    apiClient.commitSegmentTiming(jobId, ti, { committed_adapted_text: text, text_locked: true }).catch(err =>
       console.warn('[PASTE] failed to persist text:', err)
     )
     if (playbackMode === 'preview') {
@@ -5044,9 +5061,23 @@ export function DubVerseEditor({
                           onClick={(e) => {
                             e.stopPropagation()
                             commitPreview(index)
-                            commitSegmentChanges(index, {
+                            // Use the bound store action if available, otherwise fall back
+                            // to the live store getter to avoid HMR/stale-binding runtime
+                            // errors where the destructured binding can be undefined.
+                            const _commit = (typeof commitSegmentChanges === 'function')
+                              ? commitSegmentChanges
+                              : useEditorStore.getState().commitSegmentChanges
+                            _commit(index, {
                               committed_adapted_text: displaySegments[index]?.preview_text ?? undefined,
-                            })
+                            });
+                            // Persist the committed adapted text to the backend so the
+                            // user's correction survives refreshes, hard reloads, and shutdowns.
+                            (function persistCommittedText(idx) {
+                              const ti = displaySegments[idx]?.transcript_index ?? idx
+                              const text = displaySegments[idx]?.preview_text ?? undefined
+                              apiClient.commitSegmentTiming(jobId, ti, { committed_adapted_text: text, text_locked: true })
+                                .catch(err => console.warn('[COMMIT] persist failed', err))
+                            })(index)
                             setImportedSegments(prev => {
                               const base = prev ?? displaySegments
                               return base.map((seg, i) =>
@@ -5056,6 +5087,11 @@ export function DubVerseEditor({
                                       active_text: seg.preview_text ?? seg.active_text ?? seg.target_text,
                                       target_text: seg.preview_text ?? seg.target_text,
                                       variant_text: seg.preview_text ?? seg.variant_text ?? seg.target_text,
+                                      // commitSegmentChanges writes these into the store's
+                                      // `segments` array, which is not mirrored here — set them
+                                      // on importedSegments too or displaySegments never sees them.
+                                      committed_adapted_text: seg.preview_text ?? seg.committed_adapted_text,
+                                      text_locked: true,
                                       isUserEdited: true,
                                       preview_text: null,
                                       isPreviewing: false,

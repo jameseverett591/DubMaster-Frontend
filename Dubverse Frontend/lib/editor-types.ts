@@ -102,6 +102,10 @@ export interface Segment {
   committed_start_time?: number
   committed_end_time?: number
   committed_adapted_text?: string
+  // True only when a human committed a text correction. Never written by any
+  // pipeline path, so it — unlike committed_adapted_text, which Generate Speech
+  // and initRPTFromSegments both populate — is evidence of authorship.
+  text_locked?: boolean
   committed_at?: string
   emotionalCurve?: EmotionalCurve
   attached_traits?: string[] | null

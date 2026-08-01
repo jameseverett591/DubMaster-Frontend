@@ -4756,10 +4756,16 @@ async def emotion_analyze_segment(job_id: str, body: SegmentAnalyzeRequest):
                 overlap = min(seg.end, body.end_time) - max(seg.start, body.start_time)
                 chord_votes[chord_emotion] = chord_votes.get(chord_emotion, 0.0) + overlap
 
+    # Track provenance: a curve synthesized from real Velma labels is a weak but
+    # genuine signal; the Excitement default below is not a reading of anything.
+    # Both used to return status "ok" with no way for the caller to tell them
+    # apart, so fabricated emotion reached the voice looking like analysis.
+    analysis_method = "velma-labels"
     if not chord_votes:
         # No Velma emotion data — fall back to Excitement as neutral starting point
         logger.warning(f"[VELMA-CHORD] No velma_emotion found for {job_id} [{body.start_time}-{body.end_time}], using Excitement fallback")
         chord_votes = {"Excitement": 1.0}
+        analysis_method = "no-data-fallback"
 
     # Normalise votes to scores
     total = sum(chord_votes.values()) or 1.0
@@ -4810,7 +4816,9 @@ async def emotion_analyze_segment(job_id: str, body: SegmentAnalyzeRequest):
         "curve": [round(v, 4) for v in curve],
         "markers": markers,
         "top_emotions": sorted(chord_scores.items(), key=lambda x: x[1], reverse=True)[:8],
-        "analysis_method": "velma",
+        # Was hardcoded "velma", which credited Velma even when the Excitement
+        # default fired and nothing had been analysed at all.
+        "analysis_method": analysis_method,
     }
 
 
@@ -4984,6 +4992,28 @@ async def retranslate_job(job_id: str, request: Request):
     for _i, _seg in enumerate(translated):
         _seg["segment_id"] = str(_i)
 
+    # Locked corrections keyed by ORIGINAL transcript_index, read before 5a runs.
+    # 5b keys its rows by the post-split sequential segment_id assigned just
+    # above, which diverges from transcript_index the moment one utterance
+    # splits — so 5b cannot find a correction by its own row index without this.
+    _locked_by_ti: Dict[Any, str] = {}
+    try:
+        if os.path.exists(_segments_path):
+            with open(_segments_path, "r", encoding="utf-8") as _cf:
+                for _s in _json.load(_cf).get("segments", []):
+                    if _s.get("text_locked") and _s.get("committed_adapted_text"):
+                        _locked_by_ti[_s.get("transcript_index")] = _s["committed_adapted_text"]
+    except Exception as _exc:
+        logger.warning(f"[RETRANSLATE] Could not read locked text: {_exc}")
+
+    _new_id_to_orig: Dict[int, Any] = {}
+    for _oti, _subs in _orig_to_new.items():
+        for _s in _subs:
+            try:
+                _new_id_to_orig[int(_s["segment_id"])] = _oti
+            except (ValueError, KeyError, TypeError):
+                pass
+
     # 5a. Rebuild on-disk segments.json — replace split parent entries with sub-segments
     # so the editor sees one bubble per sentence without waiting for a full rebuild.
     #
@@ -5011,6 +5041,15 @@ async def retranslate_job(job_id: str, request: Request):
             for _ti, _group in _groups.items():
                 sub_segs = _orig_to_new.get(_ti)
                 if not sub_segs:
+                    new_disk_segs.extend(_group)
+                    continue
+                # A committed human correction outranks retranslation. Skip the
+                # whole group rather than refreshing text or timing piecemeal:
+                # re-splitting a hand-written line along the AI's new sentence
+                # boundaries is incoherent, and freezing text while refreshing
+                # timing would re-open the text/timing desync this rebuild exists
+                # to prevent. Frozen together, the pair stays self-consistent.
+                if any(s.get("text_locked") for s in _group):
                     new_disk_segs.extend(_group)
                     continue
                 base = _group[0]
@@ -5058,13 +5097,17 @@ async def retranslate_job(job_id: str, request: Request):
                 continue
             new_text = seg.get("text") or ""
             src_text = seg.get("source_text") or seg.get("original_text") or ""
+            _locked = _locked_by_ti.get(_new_id_to_orig.get(idx))
             rows.append({
                 "job_id": job_id,
                 "sequence": idx,
                 "source_text": src_text,
                 "translated_text": new_text,
                 "adapted_text": new_text,
-                "committed_adapted_text": new_text,
+                # Never clobber a locked correction: sync_committed_segments_to_disk
+                # would faithfully restore the AI line onto disk on the next remix,
+                # turning the committed-wins path into the delivery mechanism.
+                "committed_adapted_text": _locked or new_text,
                 "start_time": seg.get("start", 0.0),
                 "end_time": seg.get("end", 0.0),
                 "speaker": seg.get("speaker", "speaker-1"),
@@ -5355,6 +5398,7 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     correction_type = body.get("correction_type")
     locked = body.get("locked")
     text = body.get("text")
+    text_locked = body.get("text_locked")
     paired_with_next = body.get("paired_with_next")
     # Update Supabase — sequence stores transcript_index (see upsert_segments docstring)
     update_data = {"sequence": index}
@@ -5362,6 +5406,8 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         update_data["locked"] = locked
     if text is not None:
         update_data["text"] = text
+    if text_locked is not None:
+        update_data["text_locked"] = text_locked
     if paired_with_next is not None:
         update_data["paired_with_next"] = paired_with_next
     if committed_start_time is not None:
@@ -5421,6 +5467,8 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         seg["locked"] = locked
     if text is not None:
         seg["text"] = text
+    if text_locked is not None:
+        seg["text_locked"] = text_locked
     if paired_with_next is not None:
         seg["paired_with_next"] = paired_with_next
     data["segments"] = segs

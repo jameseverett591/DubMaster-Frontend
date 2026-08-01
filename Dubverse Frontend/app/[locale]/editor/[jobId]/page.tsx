@@ -150,6 +150,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             audio_url: seg.path ? `${seg.path}?ts=${cacheBustTs}` : undefined,
             committed_audio_url: seg.committed_audio_url ? `${seg.committed_audio_url}?ts=${cacheBustTs}` : undefined,
             committed_adapted_text: seg.committed_adapted_text ?? undefined,
+            text_locked: seg.text_locked ?? false,
             committed_start_time: seg.committed_start_time ?? undefined,
             committed_end_time: seg.committed_end_time ?? undefined,
             committed_emotion: seg.emotion ?? undefined,
