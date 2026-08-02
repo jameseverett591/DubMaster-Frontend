@@ -4899,7 +4899,7 @@ export function DubVerseEditor({
                             <button
                               type="button"
                               disabled={isRegenerating}
-                              className="w-full text-[10px] py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-medium transition-colors mb-1.5"
+                              className="w-full text-[10px] py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:bg-slate-600 disabled:hover:bg-slate-600 disabled:text-slate-400 disabled:cursor-not-allowed disabled:opacity-50 text-white font-medium transition-colors mb-1.5"
                               onClick={() => {
                                 setInlineEmotionPicker(null)
                                 selectSegment(index)
@@ -4997,7 +4997,7 @@ export function DubVerseEditor({
                             <button
                               type="button"
                               disabled={isRegenerating || !(customEmotionDrafts[index] ?? '').trim() || !!writeInError}
-                              className="w-full text-[10px] py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-medium transition-colors mb-1.5"
+                              className="w-full text-[10px] py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:bg-slate-600 disabled:hover:bg-slate-600 disabled:text-slate-400 disabled:cursor-not-allowed disabled:opacity-50 text-white font-medium transition-colors mb-1.5"
                               onClick={submit}
                             >
                               ✦ Generate Speech
