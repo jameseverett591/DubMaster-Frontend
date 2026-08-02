@@ -1413,6 +1413,10 @@ class DubbingService:
                             "threshold": MEANING_DIVERGENCE_THRESHOLD,
                         })
 
+                # Same gain floor as the editor's regenerate path, so a fresh dub
+                # and a regenerated segment are levelled identically.
+                await asyncio.to_thread(self._ensure_min_loudness, final_path)
+
                 audio_segments.append({
                     "transcript_index": i,
                     "text": text,
@@ -1804,6 +1808,86 @@ class DubbingService:
             logger.error(f"Failed to get video duration: {e}")
             return 0.0
     
+    def _ensure_min_loudness(self, audio_path: str) -> bool:
+        """Raise a too-quiet segment to a usable floor. BOOST ONLY — never cuts.
+
+        Fish sometimes renders a line far below its neighbours: measured on a
+        real job, "Master please dont be angry" came back at -31.24 LUFS with a
+        true peak of -14.98 dBTP, sitting 16.5 dB under the loudest line in the
+        same scene. That is not a quiet performance — 15 dB of headroom is
+        simply unused, and the line is inaudible under the music. Delivery tags
+        do not fix it: asking for [raised voice] produced a QUIETER take.
+
+        So level it deterministically instead of negotiating with the model.
+        A segment already at or above the floor is left completely untouched,
+        which keeps a shout louder than a whisper — this levels the broken-quiet
+        outliers, it does not compress the performance.
+
+        The boost is additionally capped so true peak never exceeds TP_CEILING,
+        so a quiet-but-peaky clip cannot be driven into clipping.
+
+        Returns True if gain was applied, False if untouched or on any failure
+        (failure is non-fatal — the original file is left exactly as it was).
+        """
+        floor = float(os.getenv("DUBBING_SEGMENT_FLOOR_LUFS", "-20"))
+        tp_ceiling = float(os.getenv("DUBBING_SEGMENT_TP_CEILING", "-1.5"))
+        try:
+            probe = subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-nostats", "-i", audio_path,
+                    "-af", "loudnorm=print_format=json", "-f", "null", "-",
+                ],
+                capture_output=True, text=True,
+            )
+            blob = re.search(r'\{[^{}]*"input_i"[^{}]*\}', probe.stderr, re.S)
+            if not blob:
+                return False
+            m = json.loads(blob.group(0))
+            cur_i = float(m["input_i"])
+            cur_tp = float(m["input_tp"])
+        except Exception as exc:
+            logger.warning(f"[GAIN] measure failed for {os.path.basename(audio_path)}: {exc}")
+            return False
+
+        # -inf / nan on a silent or unmeasurable clip — nothing to raise.
+        if not math.isfinite(cur_i) or not math.isfinite(cur_tp):
+            return False
+        if cur_i >= floor:
+            return False
+
+        gain_db = min(floor - cur_i, tp_ceiling - cur_tp)
+        if gain_db <= 0.1:  # nothing meaningful left after the peak cap
+            return False
+
+        tmp = audio_path + ".gain.mp3"
+        try:
+            res = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-nostats", "-i", audio_path,
+                    "-filter:a", f"volume={gain_db:.2f}dB",
+                    "-c:a", "libmp3lame", "-b:a", "192k", tmp,
+                ],
+                capture_output=True, text=True,
+            )
+            if res.returncode != 0 or not os.path.exists(tmp):
+                logger.warning(f"[GAIN] apply failed: {res.stderr[:200]}")
+                return False
+            shutil.move(tmp, audio_path)
+            logger.info(
+                f"[GAIN] {os.path.basename(audio_path)}: {cur_i:.2f} LUFS "
+                f"(TP {cur_tp:.2f}) +{gain_db:.2f} dB -> ~{cur_i + gain_db:.2f} LUFS"
+            )
+            return True
+        except Exception as exc:
+            logger.warning(f"[GAIN] apply error: {exc}")
+            return False
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
     def _get_audio_duration(self, audio_path: str) -> float:
         """
         Return duration in seconds.
@@ -3020,6 +3104,11 @@ class DubbingService:
                         f"[REGEN-EXCLUSION] seg {segment_index}: "
                         f"{actual_dur:.2f}s exceeds full window {full_room:.2f}s by {overlap:.2f}s"
                     )
+
+        # Raise the clip if Fish rendered it far below its neighbours. Boost only,
+        # peak-capped — see _ensure_min_loudness. Runs before the duration measure
+        # because gain re-encodes the file.
+        await asyncio.to_thread(self._ensure_min_loudness, final_path)
 
         # Always measure final audio duration so the frontend can auto-shrink
         # slots that are longer than the actual speech.
