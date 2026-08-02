@@ -61,7 +61,7 @@ import { EmotionLibraryPopup } from '@/components/editor/emotion-library-popup'
 import { CharacterProfilePopover } from '@/components/editor/character-profile-popover'
 import { useEditorStore, type SidebarTab } from '@/lib/editor-store'
 import type { Segment, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType } from '@/lib/editor-types'
-import { DEFAULT_NUANCES, NUANCE_MARKER_META, newSegmentId } from '@/lib/editor-types'
+import { DEFAULT_NUANCES, NUANCE_MARKER_META, newSegmentId, getSegmentKey } from '@/lib/editor-types'
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
 import { applyQCFix } from '@/lib/qc-fixes'
 import { VideoRecorder } from '@/components/video-recorder'
@@ -160,9 +160,12 @@ function inferEmotion(text: string): string {
 interface SegmentContextMenuProps {
   index: number
   children: ReactNode
-  lockedSegments: Set<number>
-  lockedPairs: Set<number>
-  stagedEmotions: Record<number, string>
+  // Identity of the segment this menu is for. `index` is still the row position
+  // (used for the on* callbacks); this is what the transient collections key on.
+  segmentKey: string
+  lockedSegments: Set<string>
+  lockedPairs: Set<string>
+  stagedEmotions: Record<string, string>
   emotions: string[]
   onSplit: (index: number) => void
   onSplitAtWord: (index: number) => void
@@ -190,6 +193,7 @@ interface SegmentContextMenuProps {
 function SegmentContextMenu({
   index,
   children,
+  segmentKey,
   lockedSegments,
   lockedPairs,
   stagedEmotions,
@@ -277,10 +281,10 @@ function SegmentContextMenu({
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onToggleLock(index) }} className="text-xs gap-2">
-          {lockedSegments.has(index) ? '🔓 Unlock' : '🔒 Lock'}
+          {lockedSegments.has(segmentKey) ? '🔓 Unlock' : '🔒 Lock'}
         </ContextMenuItem>
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onTogglePair(index) }} className="text-xs gap-2">
-          {lockedPairs.has(index) ? '🔗 Unpair' : '🔗 Pair with Next'}
+          {lockedPairs.has(segmentKey) ? '🔗 Unpair' : '🔗 Pair with Next'}
           <ContextMenuShortcut>⇧P</ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuSeparator />
@@ -338,11 +342,11 @@ function SegmentContextMenu({
                   onClick={(e) => { e.stopPropagation(); onSetEmotion(index, emotion) }}
                   className={cn(
                     "text-left text-xs rounded px-2 py-1.5 cursor-pointer transition-colors select-none",
-                    stagedEmotions[index] === emotion
+                    stagedEmotions[segmentKey] === emotion
                       ? "bg-amber-500/20 text-amber-400 font-medium"
                       : "text-slate-300 hover:bg-slate-700 hover:text-white"
                   )}>
-                  {stagedEmotions[index] === emotion && '✓ '}{emotion}
+                  {stagedEmotions[segmentKey] === emotion && '✓ '}{emotion}
                 </div>
               ))}
             </div>
@@ -651,22 +655,6 @@ function computeHeatmap(segment: import('@/lib/editor-types').Segment): number[]
 
 // When a segment is inserted at array position `at` (split right half, Add
 // Segment), every per-segment override keyed by index >= `at` must shift up by
-// one so it stays attached to the same segment. Merge already reindexes on
-// removal; these are the insertion counterparts.
-function shiftIndexMapUp<T>(map: Record<number, T>, at: number): Record<number, T> {
-  const next: Record<number, T> = {}
-  for (const [k, v] of Object.entries(map)) {
-    const n = Number(k)
-    next[n >= at ? n + 1 : n] = v
-  }
-  return next
-}
-function shiftIndexSetUp(set: Set<number>, at: number): Set<number> {
-  const next = new Set<number>()
-  set.forEach(n => next.add(n >= at ? n + 1 : n))
-  return next
-}
-
 /** Validate a write-in draft. Returns an error message, or null when it's safe
  *  to send. Shared by the live onChange check and submit()'s final guard so the
  *  two can never disagree. Empty is not an error — just nothing to do yet. */
@@ -937,7 +925,7 @@ export function DubVerseEditor({
     originalEnd: number
     currentDelta: number
   } | null>(null)
-  const [lockedPairs, setLockedPairs] = useState<Set<number>>(new Set())
+  const [lockedPairs, setLockedPairs] = useState<Set<string>>(new Set())
   const [flashingPair, setFlashingPair] = useState<number | null>(null)
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
@@ -960,13 +948,13 @@ export function DubVerseEditor({
   const [askAiLoading, setAskAiLoading] = useState(false)
   const [askAiResult, setAskAiResult] = useState<{ suggestion: string; explanation: string } | null>(null)
   const [askAiPos, setAskAiPos] = useState({ x: 0, y: 0 })
-  const [stagedSpeeds, setStagedSpeeds] = useState<Record<number, number>>({})
-  const [stagedEmotions, setStagedEmotions] = useState<Record<number, string>>({})
-  const [stagedVoices, setStagedVoices] = useState<Record<number, string>>({})
+  const [stagedSpeeds, setStagedSpeeds] = useState<Record<string, number>>({})
+  const [stagedEmotions, setStagedEmotions] = useState<Record<string, string>>({})
+  const [stagedVoices, setStagedVoices] = useState<Record<string, string>>({})
   const [renamingSpeakerId, setRenamingSpeakerId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
-  const [stagedPitches, setStagedPitches] = useState<Record<number, number>>({})
-  const [stagedNuances, setStagedNuances] = useState<Record<number, Partial<SegmentNuances>>>({})
+  const [stagedPitches, setStagedPitches] = useState<Record<string, number>>({})
+  const [stagedNuances, setStagedNuances] = useState<Record<string, Partial<SegmentNuances>>>({})
   const [nuancesAdvanced, setNuancesAdvanced] = useState(false)
   const [savedCurves, setSavedCurves] = useState<Array<{
     id: string; name: string; description?: string; tags?: string[]
@@ -1434,6 +1422,26 @@ export function DubVerseEditor({
     ? importedSegments.filter(Boolean)
     : (Array.isArray(segments) ? segments : []).filter(Boolean)
 
+  /**
+   * Resolve a row position to the stable key of whatever segment is sitting
+   * there RIGHT NOW. Every transient collection (staged voices/emotions/speeds/
+   * pitches/nuances, locks, pairs, glow) is keyed by segment identity, never by
+   * position — so a delete or insert can no longer slide someone else's staged
+   * settings onto a segment.
+   *
+   * Resolving position -> identity at the moment of use is correct: when the
+   * user clicks row 4 they mean the segment currently in row 4. What was wrong
+   * before was STORING that position and reading it back later, after the array
+   * had moved underneath it.
+   *
+   * Returns '' for an out-of-range index, which no collection will ever match.
+   */
+  const keyAt = useCallback((i: number | null | undefined): string => {
+    if (i == null) return ''
+    const s = displaySegments[i]
+    return s ? getSegmentKey(s) : ''
+  }, [displaySegments])
+
   // Bounds of the current group selection: the first/last selected segment (only
   // those two get highlighted) and the left/right time span the encasing amber box
   // covers. Null when nothing is grouped.
@@ -1459,7 +1467,7 @@ export function DubVerseEditor({
   const movesWithDrag = (index: number) => {
     if (draggedIdx === null) return false
     if (draggedIdx === index) return true
-    return Math.abs(draggedIdx - index) === 1 && lockedPairs.has(Math.min(draggedIdx, index))
+    return Math.abs(draggedIdx - index) === 1 && lockedPairs.has(keyAt(Math.min(draggedIdx, index)))
   }
 
   // Keep the store's segments array in sync with importedSegments after
@@ -1520,15 +1528,6 @@ export function DubVerseEditor({
       result.splice(index, 1, leftSegment, rightSegment)
       return result
     })
-    // Inserting the right half at index+1 shifts everything after it up by one —
-    // reindex per-segment overrides (incl. locks) so they stay on the right segment.
-    setStagedVoices(m => shiftIndexMapUp(m, index + 1))
-    setStagedEmotions(m => shiftIndexMapUp(m, index + 1))
-    setStagedSpeeds(m => shiftIndexMapUp(m, index + 1))
-    setStagedNuances(m => shiftIndexMapUp(m, index + 1))
-    setStagedPitches(m => shiftIndexMapUp(m, index + 1))
-    setLockedSegments(s => shiftIndexSetUp(s, index + 1))
-    setLockedPairs(s => shiftIndexSetUp(s, index + 1))
     // Persist the layout, then auto-generate each half that has text (playhead split
     // leaves the right half empty — skip it). Generation must wait for the sync: the
     // right half's real transcript_index comes back in the response, and the extra
@@ -1570,15 +1569,6 @@ export function DubVerseEditor({
       result.splice(index, 1, leftSegment, rightSegment)
       return result
     })
-    // Inserting the right half at index+1 shifts everything after it up by one —
-    // reindex per-segment overrides (incl. locks) so they stay on the right segment.
-    setStagedVoices(m => shiftIndexMapUp(m, index + 1))
-    setStagedEmotions(m => shiftIndexMapUp(m, index + 1))
-    setStagedSpeeds(m => shiftIndexMapUp(m, index + 1))
-    setStagedNuances(m => shiftIndexMapUp(m, index + 1))
-    setStagedPitches(m => shiftIndexMapUp(m, index + 1))
-    setLockedSegments(s => shiftIndexSetUp(s, index + 1))
-    setLockedPairs(s => shiftIndexSetUp(s, index + 1))
     setSplitWordMode(null)
     // Persist the layout, then auto-generate both halves (both carry text on a word
     // split). Wait for the sync + a macrotask so the right half's synced
@@ -1651,13 +1641,6 @@ export function DubVerseEditor({
     })
     // New segment inserted at index+1 — shift per-segment overrides up so they
     // stay attached to the correct segment.
-    setStagedVoices(m => shiftIndexMapUp(m, index + 1))
-    setStagedEmotions(m => shiftIndexMapUp(m, index + 1))
-    setStagedSpeeds(m => shiftIndexMapUp(m, index + 1))
-    setStagedNuances(m => shiftIndexMapUp(m, index + 1))
-    setStagedPitches(m => shiftIndexMapUp(m, index + 1))
-    setLockedSegments(s => shiftIndexSetUp(s, index + 1))
-    setLockedPairs(s => shiftIndexSetUp(s, index + 1))
     setTimeout(() => syncSegmentsToBackend(displaySegmentsRef.current), 0)
     selectSegment(index + 1)
     const expectedLen = displaySegments.length + 1
@@ -1685,10 +1668,10 @@ export function DubVerseEditor({
   // already paired; no-op if there is no right neighbor. (Shift+P / context menu.)
   const togglePairWithNext = useCallback((index: number) => {
     if (index + 1 >= displaySegmentsRef.current.length) return
-    const nowPaired = !lockedPairs.has(index)
+    const nowPaired = !lockedPairs.has(keyAt(index))
     setLockedPairs(prev => {
       const next = new Set(prev)
-      nowPaired ? next.add(index) : next.delete(index)
+      nowPaired ? next.add(keyAt(index)) : next.delete(keyAt(index))
       return next
     })
     setFlashingPair(index)
@@ -1697,7 +1680,7 @@ export function DubVerseEditor({
     const ti = displaySegmentsRef.current[index]?.transcript_index ?? index
     apiClient.commitSegmentTiming(jobId, ti, { paired_with_next: nowPaired })
       .catch(err => console.warn('[PAIR] persist failed:', err))
-  }, [lockedPairs, jobId])
+  }, [lockedPairs, jobId, keyAt])
 
   // Keyboard shortcuts — Shift+P: pair with next, C: split
   // Placed after displaySegments and qcBoxPosition so dep array has no TDZ
@@ -1841,21 +1824,22 @@ export function DubVerseEditor({
   const [droppedTranslations, setDroppedTranslations] = useState<{ segmentIndex: number; text: string; startTime: number; endTime: number }[]>([])
   
   // Locked segments (after Generate Speech)
-  const [lockedSegments, setLockedSegments] = useState<Set<number>>(new Set())
+  const [lockedSegments, setLockedSegments] = useState<Set<string>>(new Set())
   // Segments showing the transient "just locked" green glow. Added on Shift+L,
   // removed after 7s — the lock itself persists, only the glow is temporary.
-  const [lockGlowIndices, setLockGlowIndices] = useState<Set<number>>(new Set())
+  const [lockGlowIndices, setLockGlowIndices] = useState<Set<string>>(new Set())
   // Restore persisted locks AND pairs once per job load, from the backend `locked`
   // and `paired_with_next` flags (the page loader carries both onto the segment).
   const locksInitRef = useRef<string | null>(null)
   useEffect(() => {
     if (locksInitRef.current === jobId) return
     if (!displaySegments.length) return
-    const restoredLocks = new Set<number>()
-    const restoredPairs = new Set<number>()
-    displaySegments.forEach((s, i) => {
-      if (s.status === 'locked' || (s as unknown as { locked?: boolean }).locked) restoredLocks.add(i)
-      if ((s as unknown as { paired_with_next?: boolean }).paired_with_next) restoredPairs.add(i)
+    const restoredLocks = new Set<string>()
+    const restoredPairs = new Set<string>()
+    displaySegments.forEach((s) => {
+      const k = getSegmentKey(s)
+      if (s.status === 'locked' || (s as unknown as { locked?: boolean }).locked) restoredLocks.add(k)
+      if ((s as unknown as { paired_with_next?: boolean }).paired_with_next) restoredPairs.add(k)
     })
     if (restoredLocks.size) setLockedSegments(restoredLocks)
     if (restoredPairs.size) setLockedPairs(restoredPairs)
@@ -1865,48 +1849,53 @@ export function DubVerseEditor({
   // Lock / unlock a segment: update local state, flash the 7s glow (lock only),
   // and persist the flag so it survives a hard refresh.
   const setSegmentLocked = useCallback((index: number, lock: boolean) => {
+    // Resolve the clicked row to a segment identity once. The 7s glow timer
+    // below fires long after the array may have changed, so it must close over
+    // the key rather than the position.
+    const key = keyAt(index)
+    if (!key) return
     setLockedSegments(prev => {
       const next = new Set(prev)
-      if (lock) next.add(index)
-      else next.delete(index)
+      if (lock) next.add(key)
+      else next.delete(key)
       return next
     })
     if (lock) {
-      setLockGlowIndices(prev => new Set(prev).add(index))
+      setLockGlowIndices(prev => new Set(prev).add(key))
       setTimeout(() => setLockGlowIndices(prev => {
         const next = new Set(prev)
-        next.delete(index)
+        next.delete(key)
         return next
       }), 7000)
     } else {
       setLockGlowIndices(prev => {
         const next = new Set(prev)
-        next.delete(index)
+        next.delete(key)
         return next
       })
     }
     const ti = displaySegmentsRef.current[index]?.transcript_index ?? index
     apiClient.commitSegmentTiming(jobId, ti, { locked: lock })
       .catch(err => console.warn('[LOCK] persist failed:', err))
-  }, [jobId])
+  }, [jobId, keyAt])
 
   const canMergeWithNext = useCallback((index: number): boolean => {
     const first = displaySegments[index]
     const second = displaySegments[index + 1]
     if (!first || !second) return false
     if (first.speaker_id !== second.speaker_id) return false
-    if (lockedSegments.has(index) || lockedSegments.has(index + 1)) return false
-    if (lockedPairs.has(index) || lockedPairs.has(index + 1)) return false
+    if (lockedSegments.has(keyAt(index)) || lockedSegments.has(keyAt(index + 1))) return false
+    if (lockedPairs.has(keyAt(index)) || lockedPairs.has(keyAt(index + 1))) return false
     return true
-  }, [displaySegments, lockedSegments, lockedPairs])
+  }, [displaySegments, lockedSegments, lockedPairs, keyAt])
 
   const handleMergeWithNext = useCallback((index: number) => {
     const first = displaySegments[index]
     const second = displaySegments[index + 1]
     if (!first || !second) return
     if (first.speaker_id !== second.speaker_id) return
-    if (lockedSegments.has(index) || lockedSegments.has(index + 1)) return
-    if (lockedPairs.has(index) || lockedPairs.has(index + 1)) return
+    if (lockedSegments.has(keyAt(index)) || lockedSegments.has(keyAt(index + 1))) return
+    if (lockedPairs.has(keyAt(index)) || lockedPairs.has(keyAt(index + 1))) return
 
     const joinText = (a: string | null | undefined, b: string | null | undefined) => {
       const at = (a ?? '').trim()
@@ -1988,41 +1977,15 @@ export function DubVerseEditor({
       // same-speaker guard above makes this a safe default.
     }
 
-    const removedIndex = index + 1
-    const reindex = <T,>(map: Record<number, T>): Record<number, T> => {
-      const next: Record<number, T> = {}
-      for (const [kStr, v] of Object.entries(map)) {
-        const k = Number(kStr)
-        if (k === removedIndex) continue
-        next[k > removedIndex ? k - 1 : k] = v
-      }
-      return next
-    }
-    const reindexSet = (set: Set<number>): Set<number> => {
-      const next = new Set<number>()
-      set.forEach(k => {
-        if (k === removedIndex) return
-        next.add(k > removedIndex ? k - 1 : k)
-      })
-      return next
-    }
-
     setImportedSegments(prev => {
       const base = prev ?? displaySegments
       const result = [...base]
       result.splice(index, 2, mergedSegment)
       return result
     })
-    setStagedVoices(reindex)
-    setStagedEmotions(reindex)
-    setStagedSpeeds(reindex)
-    setStagedNuances(reindex)
-    setStagedPitches(reindex)
-    setLockedSegments(reindexSet)
-    setLockedPairs(reindexSet)
     selectSegment(index)
     setTimeout(() => syncSegmentsToBackend(displaySegmentsRef.current), 0)
-  }, [displaySegments, lockedSegments, lockedPairs, selectSegment, syncSegmentsToBackend])
+  }, [displaySegments, lockedSegments, lockedPairs, selectSegment, syncSegmentsToBackend, keyAt])
 
   const [groupedSegments, setGroupedSegments] = useState<Set<number>>(new Set())
   
@@ -3170,7 +3133,7 @@ export function DubVerseEditor({
     setStagedSpeeds(prev => { const n = { ...prev }; delete n[index]; return n })
     setStagedVoices(prev => { const n = { ...prev }; delete n[index]; return n })
     setStagedPitches(prev => { const n = { ...prev }; delete n[index]; return n })
-    setLockedSegments(prev => { const next = new Set(prev); next.delete(index); return next })
+    setLockedSegments(prev => { const next = new Set(prev); next.delete(keyAt(index)); return next })
     setDroppedTranslations(prev => prev.filter(t => t.segmentIndex !== index))
     // reset_segment (routes.py) matches on transcript_index, NOT array position.
     // The two diverge permanently after any split (a split's right half gets a
@@ -3179,7 +3142,7 @@ export function DubVerseEditor({
     // it worked. Same pattern already used by the regenerate/commit call sites.
     apiClient.resetSegment(jobId, displaySegments[index]?.transcript_index ?? index)
       .catch(err => console.warn('[CLEAR]', err))
-  }, [initialSegments, jobId, updateSegment, editingSegmentIndex, displaySegments])
+  }, [initialSegments, jobId, updateSegment, editingSegmentIndex, displaySegments, keyAt])
 
   // Handle Generate Speech - calls backend TTS regeneration for the selected segment
   const handleGenerateSpeech = useCallback(async (segIdx?: number, voiceOverride?: string, textOverride?: string, ttsTextOverride?: string): Promise<boolean> => {
@@ -3212,7 +3175,7 @@ export function DubVerseEditor({
     // voice / emotion / speed: those are staged and only applied on regenerate, so
     // blocking here keeps a locked segment's audio and attachments exactly as-is.
     // Unlock (Shift+U) to change it.
-    if (lockedSegments.has(activeIndex)) {
+    if (lockedSegments.has(keyAt(activeIndex))) {
       console.warn('[REGEN] blocked — segment is locked', activeIndex)
       return false
     }
@@ -3565,13 +3528,13 @@ export function DubVerseEditor({
     })
     setLockedSegments(prev => {
       const next = new Set(prev)
-      next.delete(selectedSegmentIndex)
+      next.delete(keyAt(selectedSegmentIndex))
       return next
     })
     setDroppedTranslations(prev => prev.filter(t => t.segmentIndex !== selectedSegmentIndex))
     setStagedSpeeds(prev => { const next = { ...prev }; delete next[selectedSegmentIndex]; return next })
     setStagedEmotions(prev => { const next = { ...prev }; delete next[selectedSegmentIndex]; return next })
-  }, [selectedSegmentIndex, initialSegments, jobId, updateSegment, setImportedSegments])
+  }, [selectedSegmentIndex, initialSegments, jobId, updateSegment, setImportedSegments, keyAt])
 
   const handleSave = useCallback(async () => {
     if (isSaving) return
@@ -3596,8 +3559,8 @@ export function DubVerseEditor({
               committed_end_time: seg.committed_end_time,
               flag_status: seg.flag_status,
               correction_type: seg.correction_type,
-              locked: lockedSegments.has(i),
-              paired_with_next: lockedPairs.has(i),
+              locked: lockedSegments.has(keyAt(i)),
+              paired_with_next: lockedPairs.has(keyAt(i)),
               // Persist the display text too so a plain edit doesn't revert on
               // reopen — the loader reads `text` back into target/active text.
               text: seg.active_text ?? seg.target_text,
@@ -3613,7 +3576,7 @@ export function DubVerseEditor({
     } finally {
       setIsSaving(false)
     }
-  }, [isSaving, displaySegments, jobId, title, targetLanguage, lockedSegments, lockedPairs])
+  }, [isSaving, displaySegments, jobId, title, targetLanguage, lockedSegments, lockedPairs, keyAt])
 
   // Flag outcome helpers — set both flag_status and correction_type together,
   // only on segments that are currently unreviewed and have flags.
@@ -4514,6 +4477,7 @@ export function DubVerseEditor({
                 <SegmentContextMenu
                   key={segment.id}
                   index={index}
+                  segmentKey={getSegmentKey(segment)}
                   lockedSegments={lockedSegments}
                   lockedPairs={lockedPairs}
                   stagedEmotions={stagedEmotions}
@@ -4525,7 +4489,7 @@ export function DubVerseEditor({
                   onMerge={handleMergeWithNext}
                   canMergeNext={canMergeWithNext(index)}
                   onDelete={(idx) => setPendingDelete(idx)}
-                  onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(idx))}
+                  onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
                   onTogglePair={togglePairWithNext}
                   onRevert={() => handleRevert()}
                   onUndoLastEdit={handleUndoLastEdit}
@@ -5085,14 +5049,14 @@ export function DubVerseEditor({
                           <div
                             className={cn(
                               'text-sm cursor-pointer select-none inline-flex items-center gap-1 px-3 py-1 rounded-full border-2 text-white',
-                              lockedSegments.has(index)
+                              lockedSegments.has(keyAt(index))
                                 ? 'border-emerald-400 bg-emerald-500/20 shadow-[0_0_10px_rgba(34,197,94,0.4)]'
                                 : segment.isPreviewing
                                   ? 'border-orange-400 bg-orange-500/10 shadow-[0_0_8px_rgba(251,146,60,0.3)]'
                                   : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
                             )}
                             onDoubleClick={() => {
-                              if (lockedSegments.has(index) || segment.isPreviewing) return
+                              if (lockedSegments.has(keyAt(index)) || segment.isPreviewing) return
                               // When the write-in box is open, double-clicking the line drops it
                               // into that field (Delivery Script) so you can add [tags]. Otherwise
                               // double-click edits the line inline as before.
@@ -5104,7 +5068,7 @@ export function DubVerseEditor({
                               }
                             }}
                           >
-                            {lockedSegments.has(index) && <Lock className="h-3 w-3 shrink-0" />}
+                            {lockedSegments.has(keyAt(index)) && <Lock className="h-3 w-3 shrink-0" />}
                             {(segment.preview_text ?? segment.active_text ?? segment.target_text)
                               || <span className="text-slate-500 italic">Enter text…</span>}
                           </div>
@@ -5392,7 +5356,7 @@ export function DubVerseEditor({
                 size="sm"
                 className={cn(
                   "h-8 text-xs",
-                  selectedSegmentIndex !== null && lockedSegments.has(selectedSegmentIndex)
+                  selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex))
                     ? "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30"
                     : "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
                 )}
@@ -5404,7 +5368,7 @@ export function DubVerseEditor({
                     <RefreshCw className="h-4 w-4 mr-1 animate-spin" />
                     Generating...
                   </>
-                ) : selectedSegmentIndex !== null && lockedSegments.has(selectedSegmentIndex) ? (
+                ) : selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex)) ? (
                   <>
                     <Lock className="h-4 w-4 mr-1" />
                     Locked
@@ -5467,7 +5431,7 @@ export function DubVerseEditor({
                   setTimeout(() => syncSegmentsToBackend(displaySegmentsRef.current), 0)
                   setLockedSegments(prev => {
                     const next = new Set(prev)
-                    next.delete(idx)
+                    next.delete(keyAt(idx))
                     return next
                   })
                   setStagedSpeeds(prev => { const n = { ...prev }; delete n[idx]; return n })
@@ -7456,6 +7420,7 @@ export function DubVerseEditor({
                     <SegmentContextMenu
                       key={`orig-${segment.id}`}
                       index={index}
+                      segmentKey={getSegmentKey(segment)}
                       lockedSegments={lockedSegments}
                       lockedPairs={lockedPairs}
                       stagedEmotions={stagedEmotions}
@@ -7467,7 +7432,7 @@ export function DubVerseEditor({
                       onMerge={handleMergeWithNext}
                       canMergeNext={canMergeWithNext(index)}
                       onDelete={(idx) => setPendingDelete(idx)}
-                      onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(idx))}
+                      onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
                       onTogglePair={togglePairWithNext}
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
@@ -7499,13 +7464,13 @@ export function DubVerseEditor({
                       data-index={index}
                       className={cn(
                         'absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded group',
-                        lockedSegments.has(index) && 'ring-1 ring-green-400/60',
-                        lockGlowIndices.has(index) && 'ring-2 ring-green-400 shadow-[0_0_16px_4px_rgba(74,222,128,0.95)] animate-pulse',
-                        selectedSegmentIndex === index && !lockGlowIndices.has(index) && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
+                        lockedSegments.has(keyAt(index)) && 'ring-1 ring-green-400/60',
+                        lockGlowIndices.has(keyAt(index)) && 'ring-2 ring-green-400 shadow-[0_0_16px_4px_rgba(74,222,128,0.95)] animate-pulse',
+                        selectedSegmentIndex === index && !lockGlowIndices.has(keyAt(index)) && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                         voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
                         isAssignmentPulse && 'ring-2 ring-amber-400/60 shadow-[0_0_6px_2px_rgba(245,158,11,0.22)] animate-pulse',
                         flashingPair === index && 'ring-1 ring-amber-400',
-                        (lockedPairs.has(index) || lockedPairs.has(index - 1)) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
+                        (lockedPairs.has(keyAt(index)) || lockedPairs.has(keyAt(index - 1))) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
                         isDraggingThis ? 'cursor-grabbing' : 'cursor-grab'
                       )}
                       style={{
@@ -7524,7 +7489,7 @@ export function DubVerseEditor({
                         const startX = e.clientX
                         const originalStart = effStart(segment)
                         const originalEnd = effEnd(segment)
-                        if (lockedSegments.has(index)) return // locked — position frozen
+                        if (lockedSegments.has(keyAt(index))) return // locked — position frozen
                         setDraggingSegment({ index, track: 'original', startX, originalStart, originalEnd, currentDelta: 0 })
                         const onMouseMove = (ev: MouseEvent) => {
                           const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
@@ -7546,7 +7511,7 @@ export function DubVerseEditor({
                           }).catch(err => console.warn('[COMMIT-TIMING]', err))
                           // Paired neighbor (Shift+P) moves by the same amount — commit
                           // its shifted timing too so it doesn't snap back.
-                          const partnerIdx = lockedPairs.has(index) ? index + 1 : (lockedPairs.has(index - 1) ? index - 1 : null)
+                          const partnerIdx = lockedPairs.has(keyAt(index)) ? index + 1 : (lockedPairs.has(keyAt(index - 1)) ? index - 1 : null)
                           if (partnerIdx != null) {
                             const p = displaySegmentsRef.current[partnerIdx]
                             if (p) {
@@ -7594,7 +7559,7 @@ export function DubVerseEditor({
                       {/* Left handle — drag to move start_time */}
                       <div
                         data-resize-handle={true}
-                        className={cn("absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-l", lockedSegments.has(index) && 'pointer-events-none')}
+                        className={cn("absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-l", lockedSegments.has(keyAt(index)) && 'pointer-events-none')}
                         onMouseDown={(e) => {
                           e.preventDefault()
                           e.stopPropagation()
@@ -7631,7 +7596,7 @@ export function DubVerseEditor({
                         <GripHorizontal className="h-3 w-3 rotate-90" />
                       </div>
 
-                      {lockedPairs.has(index) && (
+                      {lockedPairs.has(keyAt(index)) && (
                         <Link2 className="absolute top-0.5 right-0.5 h-2.5 w-2.5 text-amber-400 opacity-80" />
                       )}
                       <div className="px-2 truncate text-[10px] h-full flex items-center text-blue-200/80">
@@ -7641,7 +7606,7 @@ export function DubVerseEditor({
                       {/* Right handle — drag to move end_time */}
                       <div
                         data-resize-handle={true}
-                        className={cn("absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-r", lockedSegments.has(index) && 'pointer-events-none')}
+                        className={cn("absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-r", lockedSegments.has(keyAt(index)) && 'pointer-events-none')}
                         onMouseDown={(e) => {
                           e.preventDefault()
                           e.stopPropagation()
@@ -7736,6 +7701,7 @@ export function DubVerseEditor({
                     <SegmentContextMenu
                       key={`dub-${segment.id}`}
                       index={index}
+                      segmentKey={getSegmentKey(segment)}
                       lockedSegments={lockedSegments}
                       lockedPairs={lockedPairs}
                       stagedEmotions={stagedEmotions}
@@ -7747,7 +7713,7 @@ export function DubVerseEditor({
                       onMerge={handleMergeWithNext}
                       canMergeNext={canMergeWithNext(index)}
                       onDelete={(idx) => setPendingDelete(idx)}
-                      onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(idx))}
+                      onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
                       onTogglePair={togglePairWithNext}
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
@@ -7780,15 +7746,15 @@ export function DubVerseEditor({
                       className={cn(
                         'absolute top-1 bottom-1 rounded group border transition-colors',
                         bgColor,
-                        lockedSegments.has(index) && 'ring-1 ring-green-400/60',
-                        lockGlowIndices.has(index) && 'ring-2 ring-green-400 shadow-[0_0_16px_4px_rgba(74,222,128,0.95)] animate-pulse',
+                        lockedSegments.has(keyAt(index)) && 'ring-1 ring-green-400/60',
+                        lockGlowIndices.has(keyAt(index)) && 'ring-2 ring-green-400 shadow-[0_0_16px_4px_rgba(74,222,128,0.95)] animate-pulse',
                         (index === groupBounds?.firstIdx || index === groupBounds?.lastIdx)
                           ? 'border-yellow-400/90 shadow-[0_0_14px_rgba(250,204,21,0.6)] ring-2 ring-yellow-400/80'
                           : 'border-slate-400/30',
-                        selectedSegmentIndex === index && !lockGlowIndices.has(index) && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
+                        selectedSegmentIndex === index && !lockGlowIndices.has(keyAt(index)) && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                         voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
                         flashingPair === index && 'ring-1 ring-amber-400',
-                        (lockedPairs.has(index) || lockedPairs.has(index - 1)) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
+                        (lockedPairs.has(keyAt(index)) || lockedPairs.has(keyAt(index - 1))) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
                         groupSelectMode && !groupSelectedSegments.has(index) && 'ring-1 ring-yellow-400/30',
                         groupSelectMode
                           ? '!cursor-cell'
@@ -7841,7 +7807,7 @@ export function DubVerseEditor({
                         let startX = e.clientX
                         const originalStart = effStart(segment)
                         const originalEnd = effEnd(segment)
-                        if (lockedSegments.has(index)) return // locked — position frozen
+                        if (lockedSegments.has(keyAt(index))) return // locked — position frozen
                         setDraggingSegment({ index, track: 'dubbed', startX, originalStart, originalEnd, currentDelta: 0 })
                         const onMouseMove = (ev: MouseEvent) => {
                           const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
@@ -7877,7 +7843,7 @@ export function DubVerseEditor({
                           }).catch(err => console.warn('[COMMIT-TIMING]', err))
                           // Paired neighbor (Shift+P) moves by the same amount — commit
                           // its shifted timing too so it doesn't snap back.
-                          const partnerIdx = lockedPairs.has(index) ? index + 1 : (lockedPairs.has(index - 1) ? index - 1 : null)
+                          const partnerIdx = lockedPairs.has(keyAt(index)) ? index + 1 : (lockedPairs.has(keyAt(index - 1)) ? index - 1 : null)
                           if (partnerIdx != null) {
                             const p = displaySegmentsRef.current[partnerIdx]
                             if (p) {
@@ -7950,7 +7916,7 @@ export function DubVerseEditor({
                       {/* Left timing handle (green) */}
                       <div
                         data-resize-handle={true}
-                        className={cn("absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-green-500/40 hover:bg-green-500/70 rounded-l transition-colors", lockedSegments.has(index) && 'pointer-events-none')}
+                        className={cn("absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-green-500/40 hover:bg-green-500/70 rounded-l transition-colors", lockedSegments.has(keyAt(index)) && 'pointer-events-none')}
                         onMouseDown={(e) => {
                           e.preventDefault()
                           e.stopPropagation()
@@ -7988,7 +7954,7 @@ export function DubVerseEditor({
                       </div>
 
                       {/* Lock icon when paired */}
-                      {lockedPairs.has(index) && (
+                      {lockedPairs.has(keyAt(index)) && (
                         <Link2 className="absolute top-0.5 right-0.5 h-2.5 w-2.5 text-amber-400 opacity-80" />
                       )}
 
@@ -8023,7 +7989,7 @@ export function DubVerseEditor({
                       {/* Right timing handle (green) */}
                       <div
                         data-resize-handle={true}
-                        className={cn("absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-green-500/40 hover:bg-green-500/70 rounded-r transition-colors", lockedSegments.has(index) && 'pointer-events-none')}
+                        className={cn("absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-green-500/40 hover:bg-green-500/70 rounded-r transition-colors", lockedSegments.has(keyAt(index)) && 'pointer-events-none')}
                         onMouseDown={(e) => {
                           e.preventDefault()
                           e.stopPropagation()
