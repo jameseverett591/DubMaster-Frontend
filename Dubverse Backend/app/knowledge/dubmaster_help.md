@@ -213,6 +213,93 @@ one tool or the other — not both.
 This applies only when you generate from the write-in; a normal regenerate goes
 back to the plain line plus any emotion/nuance settings.
 
+## Writing effective delivery — craft notes
+
+The sections above describe what the controls *do*. This one is about what
+actually produces a good read. Findings marked **measured** come from real runs
+with figures; the rest are documented behaviour or reported experience.
+
+### Punctuation is the strongest lever you have
+
+Commas are not decoration — they are **phrase boundaries**, and phrasing is
+where prosody lives. Without them the engine sees one prosodic unit and gives
+it one flat contour across the whole line, with nowhere to place emphasis.
+
+**Measured**, same segment, same voice, same tags, only punctuation changed:
+
+    Master please dont be angry!     -> 1.73 s   flat, run together, no colour
+    Master, please, dont be angry!   -> 3.42 s   each phrase shaped separately
+
+**98% longer, and the only difference was two commas.** The commas gave the
+engine three units to shape instead of one: "please," could actually plead
+because it became a standalone phrase with room to breathe, and "dont be
+angry!" landed with urgency because it was a separate unit ending on "!".
+
+- **Question marks**: a question written without a "?" tends to fall flat at the
+  end. Adding one produces the rising, questioning delivery.
+- **Exclamation points**: end a phrase with attack and urgency.
+- **Commas**: create the phrase boundaries that make emphasis possible. If a
+  line sounds flat and rushed, punctuation is the first thing to try — before
+  reaching for more tags.
+
+### Punctuate the spoken line, not the subtitle
+
+The text bubble, subtitle, and timeline all show the segment's `text`. Only the
+Delivery Script reaches the voice. So punctuate purely for performance without
+it ever appearing on screen:
+
+    subtitle:  Master, please don't be angry
+    spoken:    [pleading] Master, please, don't be angry!
+
+Em-dashes, ellipses, an extra comma inserted to force a breath — all of it
+shapes the read and none of it reaches the viewer. This is the main reason to
+author in the write-in rather than editing the line itself.
+
+### Conflicting tags don't average — one wins
+
+Stacking tags that pull in opposite directions does not split the difference;
+the stronger instruction takes over.
+
+**Measured:** `[pleading] [raised voice] Master, please don't be angry!`
+rendered at **-31.24 LUFS** — quieter than the take it replaced. "Pleading" is
+inherently a small, soft delivery and it beat the level instruction outright.
+On the same job, `[shout] Master Yip [intense] I've been wronged!` rendered at
+**-14.16 LUFS**, the loudest line in the scene.
+
+Keep the tags on one segment semantically consistent.
+
+### Never use tags to chase volume
+
+If a line is too quiet that is a level problem, and tags are the wrong tool —
+asking for `[raised voice]` on a quiet take produced a *quieter* result.
+
+Segment level is handled for you: a rendered segment measuring below the floor
+(-20 LUFS) is raised automatically, boost-only and peak-safe, while anything
+already at or above the floor is left untouched. A shout stays louder than a
+whisper; a broken-quiet take gets rescued.
+
+Write tags for **character only** — how the line is performed, not how loud it
+is. That keeps each tag doing one job.
+
+### Placement scopes the tag
+
+A tag at the **start of a sentence** steers the whole sentence; a tag **mid-line**
+steers the words that follow it. These are different instructions:
+
+    [whispering] She left without saying goodbye.
+    She left without saying goodbye, [whispering] again.
+
+Fish Audio recommends **no more than three** combined emotion clauses per
+sentence. Past that, direction gets muddy rather than stronger.
+
+### Brackets must be square, and balanced
+
+`[like this]` — never `{like this}` or a mismatched `[like this}`. Anything the
+engine cannot parse as a tag is spoken aloud. **Measured:** a malformed
+`[Defiant}` produced 6.37 seconds of audio for a three-word line, with the
+direction read out as dialogue. The write-in box blocks Generate Speech until
+the brackets are balanced.
+
 ## Right-click context menu (segment list rows and timeline blocks)
 
 - **Undo Last Edit** — reverts the most recent text edit only.
