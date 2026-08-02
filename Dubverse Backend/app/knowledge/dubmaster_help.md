@@ -107,6 +107,11 @@ a "?" to the segment text and regenerate to get the rising, questioning
 delivery. Emotion is one of several cues; the voice-clone identity still carries
 most of the character, so pills nuance the read rather than override the voice.
 
+**A pill and a Delivery Script are mutually exclusive.** If the segment has a
+Delivery Script in its `+ write-in` box, the pill is ignored for that generation —
+put the emotion in the script's tags instead (`[defiant] ...`). The pill still
+shows in the UI, but it is not sent. See "Delivery Script" below.
+
 ## Nuances — fine delivery control
 
 The Nuances tab gives per-segment control beyond the emotion pill. Every control
@@ -114,6 +119,11 @@ here folds into the SAME single delivery instruction sent to the voice, applied
 when you press "Regenerate with Nuances". The **center/neutral position of any
 control is the intentional "no change" baseline** — move a control off center
 for it to take effect.
+
+**Nuances do not apply when the segment has a Delivery Script.** If the `+ write-in`
+box holds a Delivery Script, that text is sent to the voice verbatim and every
+control on this panel is discarded except **Tempo Pacing**, which still affects
+speed. Use one tool or the other, not both.
 
 Basic buttons (three positions; the middle is neutral, **both ends now act**):
 
@@ -141,10 +151,12 @@ Advanced sliders (0–100; act in **both** directions once moved off center):
 **Inline markers** (Rise, Drop, Stress, Whisper, Pause, Breathy): select part of
 the text, then click a marker to apply that effect to just those words.
 
-**Write-in:** a free-text box to add any extra delivery note (e.g. "lingers on
-the last word", "rising, inquisitive on 'me'"). It's appended to the segment's
-delivery instruction on regenerate. A few decisive settings land better than
-maxing everything at once.
+**Nuances write-in:** the free-text box at the bottom of *this panel* — not the
+same thing as the segment's `+ write-in` chip. Add any extra delivery note here
+(e.g. "lingers on the last word", "rising, inquisitive on 'me'") and it's appended
+to the segment's delivery instruction on regenerate. A few decisive settings land
+better than maxing everything at once. Like the rest of this panel, it is discarded
+if the segment has a Delivery Script.
 
 ## Delivery Script — inline tags placed exactly where you want them
 
@@ -155,21 +167,51 @@ speak them:
 
     There are many masters, [reassuring] anyone of them should be fine.
     She set the folder down. [long pause] Then she looked up.
+    [defiant] [shouting] What! Go On!!
 
 You author this in the segment's **write-in box** (the "+ write-in" chip), so the
 brackets never clutter the on-screen line or subtitle:
 
 1. Open the write-in box, then **double-click inside it** to load the segment's
    current line.
-2. Type your `[tags]` inline where you want the delivery to change.
+2. Type your `[tags]` inline where you want the delivery to change. You can also
+   rewrite the words themselves — punctuation, emphasis, whole phrasings — the
+   spoken line does not have to match the text bubble.
 3. Press **Generate Speech** (or Ctrl+Enter).
 
 The write-in text is what the voice speaks; the segment's normal text bubble,
-subtitle, and timeline keep the clean line (no brackets, no timing change). Tags
-are free-form natural language — describe the delivery in your own words
-(`[whispering]`, `[warm and reassuring]`, `[quiet, trailing off]`), you're not
-limited to a fixed list. This applies only when you generate from the write-in;
-a normal regenerate goes back to the plain line plus any emotion/nuance settings.
+subtitle, and timeline keep the clean line (no brackets, no timing change).
+
+**How the box decides what you meant.** The write-in box does two jobs, and it
+tells them apart by the *shape* of what you typed:
+
+- `[tags]` **and** words outside them → a **Delivery Script**. The whole thing is
+  sent to the voice verbatim; the tags steer, the words are spoken.
+- No tags, or nothing but tags → a **short emotion**, staged as an emotion pill.
+
+So `[defiant] What! Go On!!` is a script, while `defiant` or `[defiant]` on its
+own is a pill.
+
+**Brackets must be square.** `[like this]`, never `{like this}` or a mismatched
+`[like this}`. The voice engine speaks anything it can't parse as a tag, so a
+curly brace turns your direction into dialogue. The box checks this as you type
+and blocks Generate Speech until the brackets are balanced.
+
+**Tags are free-form** natural language — describe the delivery in your own words
+(`[whispering]`, `[warm and reassuring]`, `[quiet, trailing off]`); you're not
+limited to a fixed list. You can stack more than one, and a tag at the start of a
+sentence steers the whole sentence while a tag mid-line steers the words right
+after it. Fish Audio recommends **no more than three** combined emotion clauses
+per sentence — past that, direction gets muddy rather than stronger.
+
+**A Delivery Script overrides everything else on the segment.** While one is
+present, the emotion pill, the speaker's character traits, every Nuances control
+except Tempo Pacing, the inline word markers, and the Nuances write-in are all
+discarded. The script's tags have to carry the entire performance direction. Use
+one tool or the other — not both.
+
+This applies only when you generate from the write-in; a normal regenerate goes
+back to the plain line plus any emotion/nuance settings.
 
 ## Right-click context menu (segment list rows and timeline blocks)
 
