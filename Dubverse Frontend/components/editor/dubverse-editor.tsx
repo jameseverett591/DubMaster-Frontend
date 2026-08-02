@@ -667,6 +667,39 @@ function shiftIndexSetUp(set: Set<number>, at: number): Set<number> {
   return next
 }
 
+/** Validate a write-in draft. Returns an error message, or null when it's safe
+ *  to send. Shared by the live onChange check and submit()'s final guard so the
+ *  two can never disagree. Empty is not an error — just nothing to do yet. */
+function validateWriteIn(draft: string): string | null {
+  const d = draft.trim()
+  if (!d) return null
+  const opens  = (d.match(/\[/g) ?? []).length
+  const closes = (d.match(/\]/g) ?? []).length
+  // "[Defiant}" makes the tag-stripping regex run on to the NEXT square ],
+  // swallowing the line text with it — and Fish voices whatever it can't parse.
+  if (/[{}]/.test(d)) return 'Use [square] brackets — { } will be spoken aloud.'
+  if (opens !== closes) {
+    return opens > closes
+      ? 'Unclosed [ — every tag needs a matching ].'
+      : 'Stray ] — check your tags.'
+  }
+  const outside  = d.replace(/\[[^\]]*\]/g, '').replace(/\s+/g, ' ').trim()
+  const isScript = opens > 0 && outside.length > 0
+  if (!isScript && outside.split(/\s+/).filter(Boolean).length > 12) {
+    return 'That looks like a line, not an emotion — put delivery notes in [brackets].'
+  }
+  return null
+}
+
+/** True when the draft is a Delivery Script (tags AND prose outside them)
+ *  rather than a bare emotion descriptor. Assumes validateWriteIn() passed. */
+function isDeliveryScript(draft: string): boolean {
+  const d = draft.trim()
+  const opens = (d.match(/\[/g) ?? []).length
+  const outside = d.replace(/\[[^\]]*\]/g, '').replace(/\s+/g, ' ').trim()
+  return opens > 0 && outside.length > 0
+}
+
 export function DubVerseEditor({
   jobId,
   title,
@@ -1007,6 +1040,9 @@ export function DubVerseEditor({
   const [inlineEmotionPicker, setInlineEmotionPicker] = useState<number | null>(null)
   const [inlineEmotionWriteIn, setInlineEmotionWriteIn] = useState<number | null>(null)
   const [customEmotionDrafts, setCustomEmotionDrafts] = useState<Record<number, string>>({})
+  // Live validation message for the open write-in box; null = valid. Only one
+  // write-in is open at a time (inlineEmotionWriteIn), so a single slot is enough.
+  const [writeInError, setWriteInError] = useState<string | null>(null)
   // Emotion Library popup: which segment it targets + whether picking stages the
   // emotion pill ('stage') or inserts a [tag] into the write-in draft ('insert').
   const [emotionLibraryTarget, setEmotionLibraryTarget] = useState<{ index: number; mode: 'stage' | 'insert' } | null>(null)
@@ -4824,6 +4860,7 @@ export function DubVerseEditor({
                             selectSegment(null)
                             setSplitWordMode(null)
                             setInlineEmotionPicker(null)
+                            setWriteInError(null)
                             setInlineEmotionWriteIn(prev => prev === index ? null : index)
                           }}
                         >
@@ -4880,17 +4917,28 @@ export function DubVerseEditor({
                           </div>
                         )}
                         {inlineEmotionWriteIn === index && (() => {
-                          // Two modes off ONE box:
-                          //  - Delivery Script: draft contains the line (loaded via double-click) →
-                          //    send VERBATIM to Fish (inline [tags] parse, not spoken); display stays clean.
-                          //  - Short emotion: a bare descriptor with no line → prepend as emotion (old behavior).
-                          const cleanLine = (segment.preview_text ?? segment.active_text ?? segment.target_text ?? '').replace(/\s+/g, ' ').trim()
+                          // Two modes off ONE box, decided by the SHAPE of the draft rather
+                          // than by string overlap with the line:
+                          //  - Delivery Script: has [tags] AND prose outside them → send
+                          //    VERBATIM to Fish (tags parse, not spoken); display stays clean.
+                          //  - Short emotion: no tags, or tags only → stage as an emotion pill.
+                          //
+                          // The old test required the draft to contain the line's first 10
+                          // characters verbatim, so it broke the moment you rewrote the line
+                          // ("What!" -> "What?!") — which is the entire point of a Delivery
+                          // Script. On a misdetect the whole sentence was staged as the
+                          // emotion, composed into one giant [ ] directive, and voiced by
+                          // Fish: 6.4s of audio for a three-word line.
                           const submit = () => {
                             const draft = (customEmotionDrafts[index] ?? '').trim()
                             if (!draft) return
-                            const stripped = draft.replace(/\[[^\]]*\]/g, '').replace(/\s+/g, ' ').trim().toLowerCase()
-                            const key = cleanLine.toLowerCase().slice(0, Math.min(cleanLine.length, 10))
-                            const isScript = key.length > 0 && stripped.includes(key)
+                            // Final safety net. The button is disabled while writeInError is
+                            // set, but Ctrl+Enter and any future caller must not be able to
+                            // bypass validation.
+                            const err = validateWriteIn(draft)
+                            if (err) { setWriteInError(err); return }
+                            const isScript = isDeliveryScript(draft)
+                            setWriteInError(null)
                             setInlineEmotionWriteIn(null)
                             selectSegment(index)
                             if (isScript) {
@@ -4919,9 +4967,13 @@ export function DubVerseEditor({
                             <textarea
                               autoFocus
                               rows={2}
-                              placeholder="Double-click here to load the line, then add [tags] — or type a short emotion…"
+                              placeholder="Double-click to load the line, then add [tags] anywhere — or type a short emotion…"
                               value={customEmotionDrafts[index] ?? ''}
-                              onChange={(e) => setCustomEmotionDrafts(prev => ({ ...prev, [index]: e.target.value }))}
+                              onChange={(e) => {
+                                const v = e.target.value
+                                setCustomEmotionDrafts(prev => ({ ...prev, [index]: v }))
+                                setWriteInError(validateWriteIn(v))
+                              }}
                               onClick={(e) => e.stopPropagation()}
                               onDoubleClick={(e) => {
                                 // Double-click the empty field to drop the segment's line in
@@ -4929,7 +4981,9 @@ export function DubVerseEditor({
                                 // browser's double-click word-select behave normally.
                                 if (!(customEmotionDrafts[index] ?? '').trim()) {
                                   e.preventDefault()
-                                  setCustomEmotionDrafts(prev => ({ ...prev, [index]: (segment.preview_text ?? segment.active_text ?? segment.target_text ?? '') }))
+                                  const line = segment.preview_text ?? segment.active_text ?? segment.target_text ?? ''
+                                  setCustomEmotionDrafts(prev => ({ ...prev, [index]: line }))
+                                  setWriteInError(validateWriteIn(line))
                                 }
                               }}
                               onKeyDown={(e) => {
@@ -4937,9 +4991,12 @@ export function DubVerseEditor({
                               }}
                               className="w-full text-[11px] px-2 py-1 rounded-md bg-slate-800 border border-slate-700 text-cyan-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500/60 mb-1.5 resize-y leading-snug"
                             />
+                            {writeInError && (
+                              <p className="text-[9px] text-red-400 mb-1.5 leading-snug">{writeInError}</p>
+                            )}
                             <button
                               type="button"
-                              disabled={isRegenerating || !(customEmotionDrafts[index] ?? '').trim()}
+                              disabled={isRegenerating || !(customEmotionDrafts[index] ?? '').trim() || !!writeInError}
                               className="w-full text-[10px] py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-medium transition-colors mb-1.5"
                               onClick={submit}
                             >
