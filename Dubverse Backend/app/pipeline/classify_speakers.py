@@ -6,11 +6,16 @@ speaker as male, female, or child based on their vocal REGISTER FLOOR — a low
 percentile of their voiced pitch, not the median. See the calibration note
 below for why the median fails on shouted/angry content.
 
-Register-floor boundaries (Hz), measured at the 25th percentile over 50
-speakers across 14 real jobs:
-  Male speech:   ~93-150 Hz
-  Female speech: ~170-180 Hz
-  Child speech:  ~250+ Hz
+Classification runs at the 5th percentile (F0_REGISTER_PERCENTILE) of the
+RMS-gated voiced distribution, with cutoffs F0_FEMALE_HZ=155 and
+F0_CHILD_HZ=240. Measured at that percentile:
+  Male speech:   ~118-126 Hz
+  Female speech: ~166 Hz
+  Child speech:  ~256+ Hz
+
+For reference, an earlier survey at the 25th percentile over 50 speakers across
+14 real jobs gave ~93-150 Hz male, ~170-180 Hz female, ~250+ Hz child. Those
+are on the p25 scale and do NOT apply to the p5 cutoffs above.
 """
 
 import logging
@@ -52,10 +57,10 @@ logger = logging.getLogger(__name__)
 # separated. Revisit F0_FEMALE_HZ if a genuine female is classified male.
 #
 # NOTE: these use NEW env names on purpose. The previous knobs
-# (F0_FEMALE_THRESHOLD=185 / F0_CHILD_THRESHOLD=220) are calibrated for the
-# old median scale and are still present in .env — reusing those names would
-# silently apply median-scale numbers to percentile-scale values. The old
-# names are now ignored; remove them from .env when convenient.
+# (F0_FEMALE_THRESHOLD=185 / F0_CHILD_THRESHOLD=220) were calibrated for the
+# old median scale — reusing those names would silently apply median-scale
+# numbers to percentile-scale values. They have been removed from .env; do not
+# reintroduce them.
 F0_REGISTER_PERCENTILE = float(os.getenv("F0_REGISTER_PERCENTILE", "5"))
 F0_FEMALE_HZ = float(os.getenv("F0_FEMALE_HZ", "155"))
 F0_CHILD_HZ  = float(os.getenv("F0_CHILD_HZ",  "240"))
