@@ -4856,8 +4856,20 @@ export function DubVerseEditor({
                         )}
                         {/* Write-in chip — always visible; opens free-form custom emotion input */}
                         <span
-                          className="inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full text-slate-600 border border-slate-800 hover:text-cyan-400 hover:border-cyan-500/30 transition-colors cursor-pointer select-none"
-                          title="Write a custom emotion descriptor"
+                          className={
+                            "inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full transition-colors cursor-pointer select-none " +
+                            (segment.tts_text?.trim()
+                              // Active Delivery Script: stay lit so it's obvious at a
+                              // glance which segments are driven by a script — and that
+                              // their emotion pill and Nuances are inert.
+                              ? "text-cyan-300 border border-cyan-500/60 bg-cyan-500/10 hover:bg-cyan-500/20"
+                              : "text-slate-600 border border-slate-800 hover:text-cyan-400 hover:border-cyan-500/30")
+                          }
+                          title={
+                            segment.tts_text?.trim()
+                              ? `Delivery Script active: ${segment.tts_text.trim().slice(0, 80)}`
+                              : "Write a custom emotion descriptor"
+                          }
                           onClick={(e) => {
                             e.stopPropagation()
                             selectSegment(null)
