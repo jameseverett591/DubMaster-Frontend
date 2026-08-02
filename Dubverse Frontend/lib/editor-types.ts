@@ -264,3 +264,32 @@ export function parseTime(timeStr: string): number {
   const [mins, secs] = minSec.split(':').map(Number)
   return mins * 60 + secs + (parseInt(ms) || 0) / 10
 }
+
+/**
+ * A segment's permanent identity. Assigned once at creation, persisted through
+ * sync, and never derived from array position.
+ *
+ * The loader used to rebuild ids as `segment-${idx}`, which meant a segment's
+ * identity silently changed whenever anything above it was deleted — and
+ * because segment.id is also the React key, every row below a deletion
+ * remounted. transcript_index remains the BACKEND identity, used only at API
+ * boundaries; this is the client-side one.
+ */
+export function newSegmentId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  // crypto.randomUUID needs a secure context; fall back for anything else.
+  return `seg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+/**
+ * The key for every piece of per-segment transient state (staged voices,
+ * emotions, speeds, pitches, nuances, locks, pairs, lock glow).
+ *
+ * Always go through this rather than reading `.id` directly — if identity ever
+ * changes again, this is the only place that needs to know.
+ */
+export function getSegmentKey(segment: Pick<Segment, 'id'>): string {
+  return segment.id
+}

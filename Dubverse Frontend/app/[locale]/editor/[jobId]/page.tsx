@@ -5,6 +5,7 @@ import { DubVerseEditor } from '@/components/editor/dubverse-editor'
 import { LoadingSpinner } from '@/components/loading-spinner'
 import { ErrorBoundary } from '@/components/error-boundary'
 import type { Segment, QCFinding } from '@/lib/editor-types'
+import { newSegmentId } from '@/lib/editor-types'
 
 import { apiClient } from '@/lib/api-client'
 import { createClient } from '@/lib/supabase/client'
@@ -131,7 +132,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
           const speakerId = `speaker-${String(seg.speaker ?? '').replace(/\D/g, '') || '1'}`
           const gender = speakerGenders[speakerId] as 'male' | 'female' | 'child' | undefined
           return {
-            id: `segment-${idx}`,
+            // Keep the persisted id — the backend round-trips it (sync response)
+            // and sync correlates on it. Rebuilding it from idx meant identity
+            // changed on every delete, which also churned the React key.
+            id: seg.id ?? newSegmentId(),
             index: idx,
             transcript_index: seg.transcript_index ?? idx,
             status: seg.locked ? 'locked' : 'auto',
@@ -182,7 +186,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         const snapshotFetch = snapshotRes.status === 'fulfilled' ? snapshotRes.value : null
         const snapshotData = snapshotFetch?.ok ? await safeJson(snapshotFetch) : null
         const mappedSnapshotSegments: Segment[] = (snapshotData?.segments ?? []).map((seg: any, idx: number) => ({
-          id: `snapshot-${idx}`,
+          id: seg.id ?? newSegmentId(),
           index: idx,
           status: 'auto' as const,
           start_time: seg.start ?? 0,
