@@ -2,6 +2,7 @@
 
 import React, { useState, useCallback, useRef, useEffect } from 'react'
 import type { Segment } from '@/lib/editor-types'
+import { chordEmotionValue } from '@/lib/emotion-catalog'
 
 const SVG_W = 560
 const SVG_H = 280
@@ -289,6 +290,7 @@ interface FloatingEmotionChartProps {
     curve: number[]
     markers: Array<{ emotion: string; intensity: number; color: string; xFrac: number }>
     primary_emotion: string
+    analysis_method?: string
   }>
 }
 
@@ -357,6 +359,9 @@ export function FloatingEmotionChart({
   }, [])
 
   const [emotionLoading, setEmotionLoading] = useState(false)
+  // Provenance of the curve on screen, so a fabricated result can't pass for a
+  // measured one. Null until an analysis has actually run this session.
+  const [analysisMethod, setAnalysisMethod] = useState<string | null>(null)
   const [markers, setMarkers] = useState<Marker[]>([])
   const [autoMarkers, setAutoMarkers] = useState<AutoMarker[]>([])
   const [hud, setHud] = useState<HudState | null>(null)
@@ -512,9 +517,44 @@ export function FloatingEmotionChart({
     })
   }, [getCurveCoords, curveState.length])
 
+  // Read the curve as one staged emotion: the tallest point decides how hard
+  // it's played, the marker nearest that peak decides which emotion it is.
+  // Shared by the Apply button and the drag-release commit below.
+  const commitCurveEmotion = useCallback(() => {
+    if (curveState.length === 0) return
+    let peakIdx = 0
+    for (let i = 1; i < curveState.length; i++) {
+      if (curveState[i] > curveState[peakIdx]) peakIdx = i
+    }
+    const peakFrac = curveState.length > 1 ? peakIdx / (curveState.length - 1) : 0.5
+    const peakIntensity = curveState[peakIdx]
+
+    // Nearest marker to the peak names the emotion; manual markers and the
+    // auto/Hume ones are equally valid sources.
+    const candidates = [...markers, ...autoMarkers]
+    if (candidates.length === 0) return
+    const nearest = candidates.reduce((best, m) => {
+      const mFrac = trackDuration > 0 ? m.t / trackDuration : 0.5
+      const bFrac = trackDuration > 0 ? best.t / trackDuration : 0.5
+      return Math.abs(mFrac - peakFrac) < Math.abs(bFrac - peakFrac) ? m : best
+    })
+
+    onCommitEmotion(
+      segmentIndex,
+      chordEmotionValue(nearest.chord.emotion, peakIntensity),
+      peakIntensity,
+    )
+  }, [curveState, markers, autoMarkers, trackDuration, segmentIndex, onCommitEmotion])
+
+  // Reshaping the curve is an emotion edit, not just a drawing. Before this,
+  // dragging updated the curve and nothing else, so the pill kept showing
+  // whatever the last chord CLICK staged and the audio never moved. Committed
+  // on mouse-up rather than per-move so one drag = one staged emotion.
   const handleSvgMouseUp = useCallback(() => {
+    const wasDrag = didDragRef.current
     isDraggingRef.current = false
-  }, [])
+    if (wasDrag) commitCurveEmotion()
+  }, [commitCurveEmotion])
 
   const handleSvgMouseMove = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
     setHud(getSvgHud(e))
@@ -582,7 +622,13 @@ export function FloatingEmotionChart({
       onUpdateProgression?.(segmentIndex, newMarkers.map(m => ({ emotion: m.chord.emotion, intensity: m.intensity, color: m.color })))
       setPendingChord({ chordIndex: newMarkers[0].chordIndex, chord: startChord, intensity: newMarkers[0].intensity, t: newMarkers[0].t })
       setChordName('')
-      onCommitEmotion(segmentIndex, startChord.emotion, newMarkers[0].intensity)
+      // Emit the library form ("raging, explosive force…") rather than the bare
+      // chord noun, so Fish gets a real S2 directive. Curve height picks the tier.
+      onCommitEmotion(
+        segmentIndex,
+        chordEmotionValue(startChord.emotion, newMarkers[0].intensity),
+        newMarkers[0].intensity,
+      )
     }, 220)
   }, [getSvgHud, segmentIndex, onCommitEmotion, trackDuration])
 
@@ -598,9 +644,14 @@ export function FloatingEmotionChart({
     setEmotionLoading(true)
     try {
       const result = await onAnalyzeEmotion()
+      setAnalysisMethod(result.analysis_method ?? null)
       const newMarkers: AutoMarker[] = result.markers.map(m => ({
         chordIndex: Math.round(m.xFrac * NUM_CHORDS),
-        chord: CHORDS.find(c => c.emotion === m.emotion) ?? CHORDS[0],
+        // The backend maps Velma labels to chords the 50-slot axis doesn't carry
+        // (Pleading, Desperation, Longing, Yearning). Falling back to CHORDS[0]
+        // silently relabelled those as ANGER — displayed wrong and, worse, sent
+        // wrong on Apply. Keep the real emotion instead.
+        chord: CHORDS.find(c => c.emotion === m.emotion) ?? { trait: '—', state: m.emotion, emotion: m.emotion },
         intensity: m.intensity,
         t: m.xFrac * trackDuration,
         svgX: m.xFrac * SVG_W,
@@ -611,7 +662,8 @@ export function FloatingEmotionChart({
       setMarkers([])
       onUpdateCurve(segmentIndex, result.curve)
       onUpdateProgression?.(segmentIndex, result.markers.map(m => ({ emotion: m.emotion, intensity: m.intensity, color: m.color })))
-      onCommitEmotion(segmentIndex, result.primary_emotion, newMarkers[0]?.intensity ?? 0.5)
+      const humeIntensity = newMarkers[0]?.intensity ?? 0.5
+      onCommitEmotion(segmentIndex, chordEmotionValue(result.primary_emotion, humeIntensity), humeIntensity)
     } catch (err) {
       console.error('[Hume]', err)
     } finally {
@@ -687,6 +739,24 @@ export function FloatingEmotionChart({
             </>
           )}
         </div>
+        {/* Provenance badge — a curve invented from the Excitement default must
+            not look like a measurement of the performance. */}
+        {analysisMethod === 'no-data-fallback' && (
+          <span
+            className="ml-2 shrink-0 px-2 py-0.5 rounded text-[9px] font-semibold"
+            style={{
+              color: '#fbbf24',
+              background: 'rgba(251,191,36,0.12)',
+              border: '1px solid rgba(251,191,36,0.35)',
+            }}
+            title="No emotion data for this segment — this curve is a default placeholder, not an analysis of the performance."
+          >
+            ⚠ No data — placeholder
+          </span>
+        )}
+        {/* Right-hand controls, kept as one group so Analyze and Apply stay
+            adjacent regardless of how wide the chord labels run. */}
+        <div className="flex items-center gap-2 ml-auto shrink-0">
         <button
           type="button"
           className="text-slate-500 hover:text-slate-200 text-sm leading-none px-1.5 shrink-0 transition-colors"
@@ -705,7 +775,7 @@ export function FloatingEmotionChart({
           <button
             type="button"
             disabled={emotionLoading}
-            className="shrink-0 ml-2 px-2 py-0.5 rounded text-[8px] font-bold tracking-wide transition-all"
+            className="shrink-0 px-2 py-0.5 rounded text-[8px] font-bold tracking-wide transition-all"
             style={{
               color: emotionLoading ? 'rgba(167,139,250,0.5)' : '#a78bfa',
               background: emotionLoading ? 'rgba(167,139,250,0.06)' : 'rgba(167,139,250,0.12)',
@@ -718,12 +788,31 @@ export function FloatingEmotionChart({
             {emotionLoading ? '⏳ Analysing…' : '🎙 Analyze Emotion'}
           </button>
         )}
+        {/* Apply — stage the curve's emotion onto the segment pill explicitly,
+            without waiting for a drag release. */}
         <button
           type="button"
-          className="text-slate-600 hover:text-slate-300 text-sm leading-none px-1 ml-2 shrink-0 transition-colors"
+          className="shrink-0 my-1.5 h-[25px] inline-flex items-center px-4 rounded-lg text-[12px] font-semibold text-white leading-none transition-all duration-150 hover:brightness-110 active:brightness-95 active:translate-y-px focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60"
+          style={{
+            background: 'linear-gradient(180deg, #22c55e 0%, #16a34a 100%)',
+            border: '1px solid rgba(255,255,255,0.14)',
+            boxShadow: '0 1px 2px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.18)',
+            letterSpacing: '0.01em',
+            cursor: 'pointer',
+          }}
+          title="Apply this curve's emotion to the segment"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={commitCurveEmotion}
+        >
+          Apply
+        </button>
+        <button
+          type="button"
+          className="text-slate-600 hover:text-slate-300 text-sm leading-none px-1 shrink-0 transition-colors"
           onMouseDown={(e) => e.stopPropagation()}
           onClick={onClose}
         >×</button>
+        </div>
       </div>
 
       {/* SVG chart */}

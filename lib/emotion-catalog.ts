@@ -270,3 +270,107 @@ export function libraryEmotionValue(e: CatalogEmotion): string {
 }
 
 export const EMOTION_LIBRARY_COUNT = EMOTION_LIBRARY.reduce((n, c) => n + c.emotions.length, 0)
+
+// ---------------------------------------------------------------------------
+// Chord chart -> library bridge
+// ---------------------------------------------------------------------------
+// The emotional curve chart speaks in psychological NOUNS ("Anger", "Grief")
+// while every other emotion surface — the base pills and this library — speaks
+// in delivery ADJECTIVES with an S2 description attached. Nothing in the two
+// vocabularies overlaps, so a chord committed straight from the chart reached
+// Fish as a bare "[anger]" instead of a real directive.
+//
+// Each chord emotion maps to three library states along the curve's own height:
+// the curve stops being decoration and starts choosing HOW hard the emotion is
+// played. Anger at 0.2 is Irritated; at 0.9 it's Raging.
+export interface ChordTier {
+  low: string
+  mid: string
+  high: string
+}
+
+export const CHORD_EMOTION_TIERS: Record<string, ChordTier> = {
+  Acceptance:    { low: 'Muted',        mid: 'Receptive',     high: 'Affirming' },
+  Anger:         { low: 'Irritated',    mid: 'Hostile',       high: 'Raging' },
+  Anticipation:  { low: 'Wondering',    mid: 'Motivated',     high: 'Enthusiastic' },
+  Anxiety:       { low: 'Uneasy',       mid: 'Anxious',       high: 'Alarmed' },
+  Apprehension:  { low: 'Wary',         mid: 'Apprehensive',  high: 'Paranoid' },
+  Awe:           { low: 'Wondering',    mid: 'Inspired',      high: 'Radiant' },
+  Boredom:       { low: 'Muted',        mid: 'Dreary',        high: 'Languid' },
+  Compassion:    { low: 'Kind',         mid: 'Sympathetic',   high: 'Nurturing' },
+  Confidence:    { low: 'Reserved',     mid: 'Commanding',    high: 'Dominant' },
+  Confusion:     { low: 'Uncertain',    mid: 'Distracted',    high: 'Torn' },
+  Contempt:      { low: 'Dismissive',   mid: 'Contemptuous',  high: 'Scornful' },
+  Contentment:   { low: 'Content',      mid: 'Pleased',       high: 'Blissful' },
+  Courage:       { low: 'Deliberate',   mid: 'Driven',        high: 'Heroic' },
+  Curiosity:     { low: 'Observant',    mid: 'Curious',       high: 'Inquisitive' },
+  Delight:       { low: 'Amused',       mid: 'Delighted',     high: 'Tickled' },
+  Despair:       { low: 'Bleak',        mid: 'Hopeless',      high: 'Desolate' },
+  Determination: { low: 'Deliberate',   mid: 'Driven',        high: 'Forceful' },
+  Disgust:       { low: 'Cold',         mid: 'Harsh',         high: 'Severe' },
+  Empathy:       { low: 'Receptive',    mid: 'Empathetic',    high: 'Tender' },
+  Envy:          { low: 'Guarded',      mid: 'Resentful',     high: 'Bitter' },
+  Euphoria:      { low: 'Buoyant',      mid: 'Blissful',      high: 'Wild' },
+  Excitement:    { low: 'Buoyant',      mid: 'Energetic',     high: 'Hyperactive' },
+  Fear:          { low: 'Timid',        mid: 'Nervous',       high: 'Trembling' },
+  Frustration:   { low: 'Impatient',    mid: 'Frustrated',    high: 'Agitated' },
+  Gratitude:     { low: 'Affirming',    mid: 'Grateful',      high: 'Uplifted' },
+  Grief:         { low: 'Somber',       mid: 'Mournful',      high: 'Anguished' },
+  Guilt:         { low: 'Reluctant',    mid: 'Confessional',  high: 'Tormented' },
+  Hope:          { low: 'Hope-tinged',  mid: 'Hope-filled',   high: 'Inspired' },
+  Humility:      { low: 'Reserved',     mid: 'Respectful',    high: 'Courteous' },
+  Indifference:  { low: 'Muted',        mid: 'Cold',          high: 'Dismissive' },
+  Irritation:    { low: 'Annoyed',      mid: 'Irritated',     high: 'Impatient' },
+  Jealousy:      { low: 'Reserved',     mid: 'Wary',          high: 'Accusatory' },
+  Joy:           { low: 'Cheerful',     mid: 'Joyful',        high: 'Radiant' },
+  Loneliness:    { low: 'Distant',      mid: 'Forlorn',       high: 'Empty' },
+  Love:          { low: 'Affectionate', mid: 'Tender',        high: 'Impassioned' },
+  Melancholy:    { low: 'Pensive',      mid: 'Somber',        high: 'Sorrowful' },
+  Nostalgia:     { low: 'Musing',       mid: 'Bittersweet',   high: 'Haunted' },
+  Pride:         { low: 'Affirming',    mid: 'Triumphant',    high: 'Boisterous' },
+  Regret:        { low: 'Reluctant',    mid: 'Reflective',    high: 'Wounded' },
+  Relief:        { low: 'Sighing',      mid: 'Soothing',      high: 'Uplifted' },
+  Resentment:    { low: 'Cold',         mid: 'Resentful',     high: 'Bitter' },
+  Sadness:       { low: 'Subdued',      mid: 'Sorrowful',     high: 'Crushed' },
+  Serenity:      { low: 'Soothing',     mid: 'Meditative',    high: 'Weightless' },
+  Shame:         { low: 'Timid',        mid: 'Masked',        high: 'Whimpered' },
+  Surprise:      { low: 'Observant',    mid: 'Startled',      high: 'Alarmed' },
+  Tenderness:    { low: 'Softspoken',   mid: 'Tender',        high: 'Caring' },
+  Trust:         { low: 'Receptive',    mid: 'Reassuring',    high: 'Supportive' },
+  Vulnerability: { low: 'Hesitant',     mid: 'Confessional',  high: 'Unsettled' },
+  Wonder:        { low: 'Observant',    mid: 'Wondering',     high: 'Ethereal' },
+  Zeal:          { low: 'Motivated',    mid: 'Zealous',       high: 'Explosive' },
+
+  // Backend-only chords. `_VELMA_TO_CHORD` maps Velma labels onto these four,
+  // but they are NOT in the chart's 50-slot CHORDS axis (which is full — adding
+  // to it would re-space the whole chart). Without these entries they resolved
+  // to bare "[pleading]" and rendered as Anger via the CHORDS[0] fallback.
+  Pleading:      { low: 'Coaxing',      mid: 'Fretful',       high: 'Anguished' },
+  Desperation:   { low: 'Fretful',      mid: 'Anguished',     high: 'Tormented' },
+  Longing:       { low: 'Dreamy',       mid: 'Bittersweet',   high: 'Forlorn' },
+  Yearning:      { low: 'Dreamy',       mid: 'Hope-tinged',   high: 'Impassioned' },
+}
+
+// Flat name -> CatalogEmotion index, so a tier name resolves to its description.
+const EMOTION_BY_NAME: Record<string, CatalogEmotion> = {}
+for (const cat of EMOTION_LIBRARY) {
+  for (const e of cat.emotions) EMOTION_BY_NAME[e.name.toLowerCase()] = e
+}
+
+export function catalogEmotionByName(name: string): CatalogEmotion | undefined {
+  return EMOTION_BY_NAME[name.trim().toLowerCase()]
+}
+
+/** Resolve a chord emotion + curve height (0-1) to a Fish-ready "name, description".
+ *
+ * Falls back to the bare lowercased chord word for anything unmapped, which is
+ * exactly what the chart sent before — so an unknown chord is never worse off.
+ */
+export function chordEmotionValue(emotion: string, intensity: number): string {
+  const tier = CHORD_EMOTION_TIERS[emotion]
+  if (!tier) return emotion.toLowerCase()
+  const i = Number.isFinite(intensity) ? Math.max(0, Math.min(1, intensity)) : 0.5
+  const name = i < 0.34 ? tier.low : i < 0.67 ? tier.mid : tier.high
+  const found = catalogEmotionByName(name)
+  return found ? libraryEmotionValue(found) : name.toLowerCase()
+}
