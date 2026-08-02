@@ -61,7 +61,7 @@ import { EmotionLibraryPopup } from '@/components/editor/emotion-library-popup'
 import { CharacterProfilePopover } from '@/components/editor/character-profile-popover'
 import { useEditorStore, type SidebarTab } from '@/lib/editor-store'
 import type { Segment, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType } from '@/lib/editor-types'
-import { DEFAULT_NUANCES, NUANCE_MARKER_META } from '@/lib/editor-types'
+import { DEFAULT_NUANCES, NUANCE_MARKER_META, newSegmentId } from '@/lib/editor-types'
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
 import { applyQCFix } from '@/lib/qc-fixes'
 import { VideoRecorder } from '@/components/video-recorder'
@@ -1513,7 +1513,7 @@ export function DubVerseEditor({
     }
     const leftText = segment.target_text
     const leftSegment = { ...segment, end_time: currentTime, ...audioCleared }
-    const rightSegment = { ...segment, id: `split-${Date.now()}`, transcript_index: undefined, start_time: currentTime, target_text: '', source_text: '', active_text: '', preview_text: null, ...audioCleared }
+    const rightSegment = { ...segment, id: newSegmentId(), transcript_index: undefined, start_time: currentTime, target_text: '', source_text: '', active_text: '', preview_text: null, ...audioCleared }
     setImportedSegments(prev => {
       const base = prev ?? displaySegments
       const result = [...base]
@@ -1563,7 +1563,7 @@ export function DubVerseEditor({
       rpt_dirty: true,
     }
     const leftSegment = { ...segment, end_time: splitTime, target_text: leftText, active_text: leftText, preview_text: null, ...audioCleared }
-    const rightSegment = { ...segment, id: `split-${Date.now()}`, transcript_index: undefined, start_time: splitTime, end_time: segment.end_time, target_text: rightText, active_text: rightText, preview_text: null, ...audioCleared }
+    const rightSegment = { ...segment, id: newSegmentId(), transcript_index: undefined, start_time: splitTime, end_time: segment.end_time, target_text: rightText, active_text: rightText, preview_text: null, ...audioCleared }
     setImportedSegments(prev => {
       const base = prev ?? displaySegments
       const result = [...base]
@@ -1617,7 +1617,7 @@ export function DubVerseEditor({
       }
       const duration = actualDuration
       const newSegment = {
-        id: `new-${Date.now()}`,
+        id: newSegmentId(),
         index: index + 1,
         transcript_index: undefined,
         status: 'auto' as const,
@@ -1932,7 +1932,10 @@ export function DubVerseEditor({
 
     const mergedSegment: typeof first = {
       ...first,
-      id: `merge-${Date.now()}`,
+      // No new id: the merged segment keeps `first`'s identity via the spread
+      // above, matching the transcript_index it already inherits. A fresh id
+      // would leave frontend and backend disagreeing about which segment this
+      // is — and would remount the row for no reason.
       // transcript_index kept from `first` via the spread above. `second`'s
       // transcript_index is retired simply by omitting it from the array —
       // sync_segments matches/updates by transcript_index and only acts on
@@ -2052,7 +2055,7 @@ export function DubVerseEditor({
     const segmentsWithFindings = initialSegments.map((seg, idx) => {
       return {
         ...seg,
-        id: seg.id || `segment-${idx}`,
+        id: seg.id || newSegmentId(),
         index: idx,
         status: seg.status || 'auto',
         qc_findings: qcFindings.filter(f => f.segment_index === idx),
@@ -3692,7 +3695,7 @@ export function DubVerseEditor({
             : englishText
           return {
             ...(origSeg ?? {} as Segment),
-            id: raw.auto_split ? `retranslate-${jobId}-${i}` : (origSeg?.id ?? `retranslate-${jobId}-${i}`),
+            id: raw.auto_split ? newSegmentId() : (origSeg?.id ?? newSegmentId()),
             index: i,
             transcript_index: i,
             status: 'edited',
@@ -4669,10 +4672,10 @@ export function DubVerseEditor({
                       <span>{voiceAppliedFeedback.voiceName}</span>
                     </div>
                   )}
-                  {segment.id?.startsWith('new-') && !segment.committed_audio_url && (
+                  {segment.transcript_index == null && !segment.committed_audio_url && (
                     <div className="pointer-events-none absolute left-0 top-0 bottom-0 w-1 rounded-l bg-emerald-500" />
                   )}
-                  {segment.id?.startsWith('new-') && !segment.committed_audio_url && (
+                  {segment.transcript_index == null && !segment.committed_audio_url && (
                     <span className="absolute top-1 left-3 text-[9px] font-bold uppercase tracking-widest text-emerald-400 bg-emerald-500/15 border border-emerald-500/40 px-1.5 py-0.5 rounded pointer-events-none">
                       NEW
                     </span>
