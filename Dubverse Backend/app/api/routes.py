@@ -5698,9 +5698,15 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
         # Resolve canonical voice key (e.g. "male-1") to Fish Audio reference_id.
         # Fall through to body.voice_key directly if unresolved — it may already
         # be a Fish Audio UUID dragged from the Voice Library.
+        # Respeecher voice ids are plain slugs from its own catalogue ("neal",
+        # "marta"), so they must NOT pass through Fish's key map — that would
+        # rewrite a valid Respeecher id into an unrelated Fish reference_id.
         if body.voice_key and not voice_id:
-            resolved = fish_audio_tts.get_voice_id(body.voice_key)
-            voice_id = resolved or body.voice_key
+            if (body.engine or "").lower() == "respeecher":
+                voice_id = body.voice_key
+            else:
+                resolved = fish_audio_tts.get_voice_id(body.voice_key)
+                voice_id = resolved or body.voice_key
 
         if getattr(body, "voice_params", None):
             if body.voice_params.voice_id is not None:
@@ -5727,6 +5733,7 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
             nuance_markers=body.nuance_markers,
             custom_nuance=body.custom_nuance,
             tts_text=body.tts_text,
+            engine=body.engine,
             live_segment_start=body.live_segment_start,
             live_segment_end=body.live_segment_end,
             live_next_segment_start=body.live_next_segment_start,

@@ -195,6 +195,10 @@ class VoiceParams(BaseModel):
 class RegenerateRequest(BaseModel):
     voice_id: Optional[str] = None
     voice_key: Optional[str] = None   # canonical key e.g. "male-1", "female-1" — resolved to voice_id by backend
+    # Which engine synthesises this segment: "fish-audio" (default) or "respeecher".
+    # None keeps the segment's stored engine, then falls back to Fish — so existing
+    # clients that never send this field are completely unaffected.
+    engine: Optional[str] = None
     speed: Optional[float] = None
     pitch: Optional[int] = None       # semitones: -12 to +12
     emotion: Optional[str] = None
@@ -204,9 +208,10 @@ class RegenerateRequest(BaseModel):
     nuances: Optional[Dict] = None
     nuance_markers: Optional[List[Dict]] = None
     custom_nuance: Optional[str] = None   # free-text write-in from the Nuances panel
-    # Delivery Script: the user-authored line + inline [tags] to synthesize VERBATIM.
-    # When set, this is exactly what Fish speaks (tags parse, not spoken); the segment's
-    # display text / subtitle / timing keep using the clean `text` instead.
+    # Verbatim text override — exactly what the engine speaks, bypassing the composed
+    # directive. Engine-agnostic: the write-in now targets Respeecher, which has no
+    # directive language and reads punctuation/structure as authored. The segment's
+    # display text / subtitle / timing keep using the clean `text`.
     tts_text: Optional[str] = None
     # Live timeline boundaries from the frontend at the moment of regen — see
     # dubbing_service.regenerate_segment for why these can beat segments.json.

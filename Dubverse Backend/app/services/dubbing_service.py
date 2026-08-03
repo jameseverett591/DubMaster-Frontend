@@ -14,6 +14,7 @@ import httpx
 
 from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
+from app.services.respeecher_service import respeecher_tts
 from app.services.translation_service import (
     translation_service,
     natural_duration,
@@ -1994,6 +1995,28 @@ class DubbingService:
         return False
 
     @staticmethod
+    async def _apply_atempo(input_path: str, output_path: str, speed: float) -> bool:
+        """Change playback rate without altering pitch.
+
+        ffmpeg's atempo accepts 0.5-2.0 per instance; callers clamp use_speed to
+        exactly that range (see regenerate_segment), so one stage suffices.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-hide_banner", "-nostats", "-loglevel", "error",
+                "-i", input_path, "-filter:a", f"atempo={speed:.4f}", "-vn", output_path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logger.warning(f"atempo failed: {stderr.decode('utf-8', 'replace')[-200:]}")
+                return False
+            return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+        except Exception as e:
+            logger.warning(f"atempo error: {e}")
+            return False
+
+    @staticmethod
     def _mp3_duration_fast(path: str) -> float:
         """
         Estimate MP3 duration by reading the first valid MPEG frame header and
@@ -2784,6 +2807,7 @@ class DubbingService:
         nuance_markers: Optional[List[Dict]] = None,
         custom_nuance: Optional[str] = None,
         tts_text: Optional[str] = None,
+        engine: Optional[str] = None,
         live_segment_start: Optional[float] = None,
         live_segment_end: Optional[float] = None,
         live_next_segment_start: Optional[float] = None,
@@ -2878,33 +2902,103 @@ class DubbingService:
             tts_text_processed = self._nuance_translator.apply_markers_to_text(
                 tts_text_processed, nuance_markers, engine="fish_audio"
             )
-        # Delivery Script override: the user authored the exact line + inline [tags]
-        # to synthesize. Send it VERBATIM (tags parse, not spoken) and skip the
-        # composed directive so we don't double-tag. The clean display text
-        # (use_text) still drives seg["text"] / subtitle / timing below.
+        # Verbatim override: the user authored the exact line to synthesise, so the
+        # composed directive is skipped. Engine-agnostic — Fish parses [tags] in it,
+        # Respeecher reads the punctuation and structure as written.
         if tts_text and tts_text.strip():
-            fish_text = tts_text
+            speak_text = tts_text
             directive = ""
         else:
-            fish_text = tts_text_processed
+            speak_text = tts_text_processed
             # One composed S2 directive: traits + emotion + nuance delivery/cadence
             # clauses + the free-text write-in from the Nuances panel (last).
             directive = compose_fish_directive(
                 emotion=emotion, traits=traits,
                 nuance_directives=nuance_directives, extra=custom_nuance,
             )
-        result = await fish_audio_tts.text_to_speech(
-            text=fish_text,
-            voice_id=use_voice_id,
-            output_path=audio_path,
-            speed=use_speed,
-            emotion_tags=directive,
-            traits_tag="",  # folded into the composed directive above
+
+        # ---- Engine selection ------------------------------------------------
+        # Precedence: explicit request > segment's stored engine > Fish.
+        # Deliberately NOT keyed off TTS_PROVIDER: regen has always used Fish
+        # regardless of that setting, and settings.TTS_PROVIDER still defaults to
+        # "elevenlabs", so reading it here would silently reroute every regen.
+        use_engine = (engine or seg.get("engine") or "fish-audio").lower()
+        # Respeecher's catalogue is adult-only — a child speaker always gets Fish.
+        # speaker_gender is stamped onto the in-memory transcript during translation
+        # but never reaches segments.json, so it is absent on every existing job and
+        # cannot be the only signal. The durable one is the voice itself: a segment
+        # rendered with a configured child voice is a child.
+        # Only keys actually present in the voice map count — get_voice_id() falls
+        # back to the FIRST configured voice for an unset key, so "child-2"/"child-3"
+        # resolve to male-1 and would misroute every male-1 segment to Fish.
+        _child_keys = set(_VOICES_BY_GENDER.get("child", []))
+        _child_voice_ids = {
+            _vid for _key, _vid in getattr(fish_audio_tts, "_voice_map", {}).items()
+            if _key in _child_keys and _vid
+        }
+        # Read the signal off the SEGMENT as previously rendered, or its speaker's
+        # mapping — never off the voice being requested now. Switching a segment to
+        # Respeecher supplies a Respeecher voice ("neal"), which would erase the very
+        # signal this guard depends on and let a child line through.
+        _seg_voice = seg.get("voice_id") or ""
+        _mapped_voice = (data.get("voice_mapping") or {}).get(seg.get("speaker") or "", "")
+        _is_child = (
+            seg.get("speaker_gender") == "child"
+            or _seg_voice in _child_voice_ids
+            or _mapped_voice in _child_voice_ids
+            or _mapped_voice in _child_keys
         )
+        if use_engine == "respeecher" and _is_child:
+            logger.info(f"[ENGINE] seg {segment_index}: child voice -> forcing fish-audio")
+            use_engine = "fish-audio"
+        if use_engine == "respeecher" and not respeecher_tts.enabled:
+            logger.warning("[ENGINE] Respeecher unavailable (no API key) -> fish-audio")
+            use_engine = "fish-audio"
+
+        respeecher_meta: Optional[Dict] = None
+        if use_engine == "respeecher":
+            # The write-in still composes Fish [tags] until the retarget lands.
+            # Respeecher has no directive language and would SPEAK them, so strip
+            # them here. Once the write-in retargets there is nothing to strip.
+            resp_text = re.sub(r"\[[^\]]*\]", " ", speak_text)
+            resp_text = re.sub(r"\s+", " ", resp_text).strip() or speak_text
+            # Respeecher exposes no directive, speed or pitch parameters. Its only
+            # lever on duration is which take we keep, so hand it the slot and let
+            # it choose; staged speed is applied separately below.
+            _cs, _ce = seg.get("committed_start_time"), seg.get("committed_end_time")
+            _start = float(_cs) if _cs is not None else float(seg.get("start", 0))
+            _end   = float(_ce) if _ce is not None else float(seg.get("end", 0))
+            _slot  = (_end - _start) if _end > _start else None
+            result = await respeecher_tts.text_to_speech(
+                text=resp_text,
+                voice_id=use_voice_id,
+                output_path=audio_path,
+                target_duration=target_duration or _slot,
+            )
+            respeecher_meta = result
+        else:
+            result = await fish_audio_tts.text_to_speech(
+                text=speak_text,
+                voice_id=use_voice_id,
+                output_path=audio_path,
+                speed=use_speed,
+                emotion_tags=directive,
+                traits_tag="",  # folded into the composed directive above
+            )
         if not result:
-            raise RuntimeError(f"TTS failed for segment {segment_index} in job {job_id}")
+            raise RuntimeError(
+                f"TTS failed for segment {segment_index} in job {job_id} (engine={use_engine})"
+            )
 
         final_path = result["path"]
+
+        # Fish consumes use_speed natively; Respeecher has no speed parameter, so
+        # apply it here or the speed chip would silently do nothing on that engine.
+        if use_engine == "respeecher" and use_speed and abs(use_speed - 1.0) > 0.01:
+            sped_path = os.path.join(output_dir, f"segment_{segment_index:04d}_speed.mp3")
+            if await self._apply_atempo(final_path, sped_path, use_speed):
+                final_path = sped_path
+                logger.info(f"[SPEED] seg {segment_index}: atempo {use_speed:.2f}x (respeecher)")
 
         # Pitch is a post-process, not a Fish parameter: /v1/tts exposes prosody
         # {speed, volume, normalize_loudness} and no pitch field. The editor's pitch
@@ -3140,12 +3234,24 @@ class DubbingService:
             seg.pop("custom_nuance", None)
         elif custom_nuance:
             seg["custom_nuance"] = custom_nuance
-        # Delivery Script (verbatim line + tags): same contract. Kept separate from
-        # seg["text"] so the display/subtitle stays the clean line.
+        # Verbatim text override: same contract. Kept separate from seg["text"] so
+        # the display/subtitle stays the clean line.
         if tts_text == "":
             seg.pop("tts_text", None)
         elif tts_text:
             seg["tts_text"] = tts_text
+        # Engine actually used (post child/availability fallback), so the editor can
+        # show it and the next regen defaults to the same one without the client
+        # re-sending it. Take metadata drives the panel's audition list.
+        seg["engine"] = use_engine
+        if respeecher_meta:
+            seg["respeecher_takes"] = respeecher_meta.get("takes", [])
+            seg["respeecher_fits"] = respeecher_meta.get("fits", True)
+            seg["respeecher_duration"] = respeecher_meta.get("duration")
+        else:
+            seg.pop("respeecher_takes", None)
+            seg.pop("respeecher_fits", None)
+            seg.pop("respeecher_duration", None)
         if speed_ratio is not None:
             seg["speed_ratio"] = speed_ratio
         if target_duration is not None:

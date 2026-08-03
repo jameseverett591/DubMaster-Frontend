@@ -174,6 +174,9 @@ class RespeecherTTS:
             can audition them.  The duration spread is wide enough that the
             alternates are genuinely different reads, not near-duplicates.
 
+        ``takes`` is the complete ordered list, best fit first — ``takes[0]`` is
+        always the chosen take and equals ``path``.
+
         Returns ``{"path", "engine", "duration", "takes", "fits"}`` on success,
         or None on total failure.  ``fits`` is False when even the best take
         overruns ``target_duration`` by more than time-stretch can absorb
@@ -206,7 +209,10 @@ class RespeecherTTS:
         if not await self._to_mp3(best_wav, output_path):
             return None
 
-        take_paths: List[str] = []
+        # takes[0] is always the chosen take (== output_path), then the alternates
+        # in fit order. A complete ordered list means the panel can render an
+        # audition strip without an extra "selected" index to keep in sync.
+        take_paths: List[str] = [output_path]
         if keep_takes and len(candidates) > 1:
             stem, ext = os.path.splitext(output_path)
             for i, (wav, _dur) in enumerate(candidates[1:], start=2):
