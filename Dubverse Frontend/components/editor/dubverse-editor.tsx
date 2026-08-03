@@ -773,12 +773,18 @@ export function DubVerseEditor({
   // Wrap the store setter so every write to importedSegments also stamps the
   // owning jobId directly via Zustand's static setState — always available,
   // never undefined, never dependent on a store action that may be missing
-  // in a stale HMR session. Rehydration from localStorage does NOT go through
-  // this setter, so a persisted (segments, jobId) pair is restored intact.
+  // in a stale HMR session. Only a NON-NULL array claims ownership: clearing to
+  // null must not stamp this job, or an emptied store gets relabelled as ours.
+  // importedSegments is not persisted (see partialize in editor-store) — a reload
+  // restores the stamp alone, never a (segments, jobId) pair.
   const setImportedSegments = useCallback(
     (segments: Segment[] | null | ((prev: Segment[] | null) => Segment[] | null)) => {
       setImportedSegmentsRaw(segments)
-      useEditorStore.setState({ importedSegmentsJobId: jobId })
+      // Read back the committed value rather than re-invoking the updater, so a
+      // non-pure updater can't run its side effect twice.
+      if (useEditorStore.getState().importedSegments !== null) {
+        useEditorStore.setState({ importedSegmentsJobId: jobId })
+      }
     },
     [setImportedSegmentsRaw, jobId],
   )
@@ -1202,13 +1208,14 @@ export function DubVerseEditor({
           console.log('[VOICE-DROP] parsed payload (native)', parsed)
           if (parsed.voice_id) {
             const speakerId = displaySegmentsRef.current[hit.index]?.speaker_id
-            setStagedVoices(prev => ({ ...prev, [hit.index]: parsed.voice_id }))
+            const dropKey = displaySegmentsRef.current[hit.index]?.id ?? ''
+            setStagedVoices(prev => ({ ...prev, [dropKey]: parsed.voice_id }))
             if (speakerId) {
               setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: parsed.voice_id }))
               setStagedVoices(prev => {
                 const next = { ...prev }
                 displaySegmentsRef.current.forEach((seg, i) => {
-                  if (seg.speaker_id === speakerId && i !== hit.index) delete next[i]
+                  if (seg.speaker_id === speakerId && i !== hit.index) delete next[getSegmentKey(seg)]
                 })
                 return next
               })
@@ -2010,8 +2017,18 @@ export function DubVerseEditor({
 
     // Clear persisted importedSegments when a new job is loaded so stale
     // edits from a previous job don't bleed into this one.
-    if (prevId !== null && prevId !== jobId) {
-      setImportedSegments(null)
+    // Fires on mount as well as on an in-place switch. The editor unmounts while
+    // the next job loads, so prevId is null when it remounts and a prevId-based
+    // check never ran — meanwhile the module-level store still held the previous
+    // job's array, which the next writer then re-stamped as this job's. Ask the
+    // STORE who owns the segments, not this component's ref.
+    if (prevId !== jobId) {
+      const ownerJobId = useEditorStore.getState().importedSegmentsJobId
+      if (ownerJobId !== null && ownerJobId !== jobId) {
+        // Raw setter: the wrapper would re-stamp jobId, which is the whole bug.
+        setImportedSegmentsRaw(null)
+        useEditorStore.setState({ importedSegmentsJobId: null })
+      }
     }
     prevJobIdRef.current = jobId
 
@@ -2064,9 +2081,9 @@ export function DubVerseEditor({
     })
 
     // Restore staged emotions from committed_emotion saved in segments.json
-    const restoredEmotions: Record<number, string> = {}
-    segmentsWithFindings.forEach((seg, i) => {
-      if (seg.committed_emotion) restoredEmotions[i] = seg.committed_emotion
+    const restoredEmotions: Record<string, string> = {}
+    segmentsWithFindings.forEach((seg) => {
+      if (seg.committed_emotion) restoredEmotions[getSegmentKey(seg)] = seg.committed_emotion
     })
     if (Object.keys(restoredEmotions).length > 0) {
       setStagedEmotions(prev => ({ ...restoredEmotions, ...prev }))
@@ -3116,8 +3133,8 @@ export function DubVerseEditor({
       velma_progression: undefined,
     }
     // Voice → default, character profile + emotion staging + auto-fire guard cleared.
-    setStagedVoices(prev => { const next = { ...prev }; delete next[index]; return next })
-    setStagedEmotions(prev => { const next = { ...prev }; delete next[index]; return next })
+    setStagedVoices(prev => { const next = { ...prev }; delete next[keyAt(index)]; return next })
+    setStagedEmotions(prev => { const next = { ...prev }; delete next[keyAt(index)]; return next })
     emotionAutoFiredRef.current.delete(index)
     updateSegment(index, clearedFields)
     setImportedSegments(prev => {
@@ -3129,10 +3146,10 @@ export function DubVerseEditor({
       setEditingSegmentIndex(null)
     }
     setCustomEmotionDrafts(prev => { const n = { ...prev }; delete n[index]; return n })
-    setStagedEmotions(prev => { const n = { ...prev }; delete n[index]; return n })
-    setStagedSpeeds(prev => { const n = { ...prev }; delete n[index]; return n })
-    setStagedVoices(prev => { const n = { ...prev }; delete n[index]; return n })
-    setStagedPitches(prev => { const n = { ...prev }; delete n[index]; return n })
+    setStagedEmotions(prev => { const n = { ...prev }; delete n[keyAt(index)]; return n })
+    setStagedSpeeds(prev => { const n = { ...prev }; delete n[keyAt(index)]; return n })
+    setStagedVoices(prev => { const n = { ...prev }; delete n[keyAt(index)]; return n })
+    setStagedPitches(prev => { const n = { ...prev }; delete n[keyAt(index)]; return n })
     setLockedSegments(prev => { const next = new Set(prev); next.delete(keyAt(index)); return next })
     setDroppedTranslations(prev => prev.filter(t => t.segmentIndex !== index))
     // reset_segment (routes.py) matches on transcript_index, NOT array position.
@@ -3187,7 +3204,7 @@ export function DubVerseEditor({
     setRegeneratingSegmentIndex(activeIndex)
     try {
       const emotionIntensity = sampleEmotionalCurve(activeIndex, 0.5)
-      const finalVoiceKey = voiceOverride ?? stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id]
+      const finalVoiceKey = voiceOverride ?? stagedVoices[keyAt(activeIndex)] ?? speakerVoiceMap[segment.speaker_id]
       // Priority: explicit textOverride (passed by saveEditing — immune to stale
       // closures) > live editingText for the selected segment > committed adapted text
       // > stored preview/active text.
@@ -3209,15 +3226,15 @@ export function DubVerseEditor({
       const liveNextStart = nextSegment ? effStart(nextSegment) : undefined
       const regenPayload = {
         text: regenerateText,
-        speed: stagedSpeeds[activeIndex] ?? 1.0,
+        speed: stagedSpeeds[keyAt(activeIndex)] ?? 1.0,
         // '' = explicit clear (backend pops seg["emotion"]); undefined = unset → use committed
-        emotion: stagedEmotions[activeIndex] ?? segment.committed_emotion,
+        emotion: stagedEmotions[keyAt(activeIndex)] ?? segment.committed_emotion,
         // attached_traits = frozen on first keystroke. undefined = no change; [] = clear; non-empty = set
         traits: segment.attached_traits ?? undefined,
-        voice_key: voiceOverride ?? stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id],
-        pitch: stagedPitches[activeIndex] ?? speakerPitchMap[segment.speaker_id] ?? 0,
+        voice_key: voiceOverride ?? stagedVoices[keyAt(activeIndex)] ?? speakerVoiceMap[segment.speaker_id],
+        pitch: stagedPitches[keyAt(activeIndex)] ?? speakerPitchMap[segment.speaker_id] ?? 0,
         emotionIntensity,
-        nuances: stagedNuances[activeIndex] ?? segment.nuances,
+        nuances: stagedNuances[keyAt(activeIndex)] ?? segment.nuances,
         nuance_markers: segment.nuance_markers,
         custom_nuance: segment.custom_nuance,
         // Delivery Script: verbatim line + tags, applied only when generated from the
@@ -3294,7 +3311,7 @@ export function DubVerseEditor({
               committed_audio_url: audio_url,
               status: 'edited' as const,
               was_truncated: false,
-              committed_emotion: stagedEmotions[activeIndex] ?? seg.committed_emotion,
+              committed_emotion: stagedEmotions[keyAt(activeIndex)] ?? seg.committed_emotion,
               ...(shouldShrink ? { end_time: shrunkEnd } : {}),
             }
           : seg)
@@ -3302,9 +3319,9 @@ export function DubVerseEditor({
       setPlaybackMode('preview')
       commitSegmentChanges(activeIndex, {
         committed_audio_url: audio_url,
-        committed_voice_id: response.segment.voice_id ?? voiceOverride ?? stagedVoices[activeIndex] ?? speakerVoiceMap[segment.speaker_id],
-        committed_speed: stagedSpeeds[activeIndex] ?? 1.0,
-        committed_emotion: stagedEmotions[activeIndex],
+        committed_voice_id: response.segment.voice_id ?? voiceOverride ?? stagedVoices[keyAt(activeIndex)] ?? speakerVoiceMap[segment.speaker_id],
+        committed_speed: stagedSpeeds[keyAt(activeIndex)] ?? 1.0,
+        committed_emotion: stagedEmotions[keyAt(activeIndex)],
       })
       applyFlagOutcome(activeIndex, 'voice')
       requestRPTStitch(
@@ -3379,7 +3396,7 @@ export function DubVerseEditor({
         }, 0)
       }
     }
-  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds, lockedSegments, selectSegment, setImportedSegments, setPlaybackMode, editingText])
+  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds, lockedSegments, selectSegment, setImportedSegments, setPlaybackMode, editingText, keyAt])
 
   const handleGenerateSpeechRef = useRef(handleGenerateSpeech)
   handleGenerateSpeechRef.current = handleGenerateSpeech
@@ -3532,8 +3549,8 @@ export function DubVerseEditor({
       return next
     })
     setDroppedTranslations(prev => prev.filter(t => t.segmentIndex !== selectedSegmentIndex))
-    setStagedSpeeds(prev => { const next = { ...prev }; delete next[selectedSegmentIndex]; return next })
-    setStagedEmotions(prev => { const next = { ...prev }; delete next[selectedSegmentIndex]; return next })
+    setStagedSpeeds(prev => { const next = { ...prev }; delete next[keyAt(selectedSegmentIndex)]; return next })
+    setStagedEmotions(prev => { const next = { ...prev }; delete next[keyAt(selectedSegmentIndex)]; return next })
   }, [selectedSegmentIndex, initialSegments, jobId, updateSegment, setImportedSegments, keyAt])
 
   const handleSave = useCallback(async () => {
@@ -4496,9 +4513,9 @@ export function DubVerseEditor({
                   onCopyText={handleCopyText}
                   onPasteText={handlePasteText}
                   onClearSegment={handleClearSegment}
-                  onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
+                  onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [keyAt(idx)]: emotion }))}
                   onClearEmotion={(idx) => {
-                    setStagedEmotions(prev => ({ ...prev, [idx]: '' }))
+                    setStagedEmotions(prev => ({ ...prev, [keyAt(idx)]: '' }))
                     updateSegment(idx, { committed_emotion: null })
                     setImportedSegments(prev => {
                       if (!prev) return prev
@@ -4573,13 +4590,13 @@ export function DubVerseEditor({
                         console.log('[VOICE-DROP] parsed payload', parsed)
                         if (parsed.voice_id) {
                           const speakerId = displaySegments[index]?.speaker_id
-                          setStagedVoices(prev => ({ ...prev, [index]: parsed.voice_id }))
+                          setStagedVoices(prev => ({ ...prev, [keyAt(index)]: parsed.voice_id }))
                           if (speakerId) {
                             setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: parsed.voice_id }))
                             setStagedVoices(prev => {
                               const next = { ...prev }
                               displaySegments.forEach((seg, i) => {
-                                if (seg.speaker_id === speakerId && i !== index) delete next[i]
+                                if (seg.speaker_id === speakerId && i !== index) delete next[getSegmentKey(seg)]
                               })
                               return next
                             })
@@ -4603,13 +4620,13 @@ export function DubVerseEditor({
                     const vk = draggedVoice ?? e.dataTransfer.getData('voice_key') ?? fallbackVoiceId
                     if (!vk) return
                     const speakerId = displaySegments[index]?.speaker_id
-                    setStagedVoices(prev => ({ ...prev, [index]: vk }))
+                    setStagedVoices(prev => ({ ...prev, [keyAt(index)]: vk }))
                     if (speakerId) {
                       setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: vk }))
                       setStagedVoices(prev => {
                         const next = { ...prev }
                         displaySegments.forEach((seg, i) => {
-                          if (seg.speaker_id === speakerId && i !== index) delete next[i]
+                          if (seg.speaker_id === speakerId && i !== index) delete next[getSegmentKey(seg)]
                         })
                         return next
                       })
@@ -4781,9 +4798,9 @@ export function DubVerseEditor({
                       <>
                         <div className="flex items-center gap-1.5 flex-wrap">
                         {/* Emotion tag chip — shows the exact tag that will be sent to TTS */}
-                        {stagedEmotions[index] ? (() => {
+                        {stagedEmotions[keyAt(index)] ? (() => {
                           // Compact a long custom emotion to a one-word pill; full text on hover.
-                          const full = stagedEmotions[index].toLowerCase()
+                          const full = stagedEmotions[keyAt(index)].toLowerCase()
                           const firstWord = full.split(/[\s,]+/).filter(Boolean)[0] ?? full
                           const label = full.length > firstWord.length ? `${firstWord}…` : full
                           return (
@@ -4792,7 +4809,7 @@ export function DubVerseEditor({
                             title={`(${full}) — click to remove`}
                             onClick={(e) => {
                               e.stopPropagation()
-                              setStagedEmotions(prev => ({ ...prev, [index]: '' }))
+                              setStagedEmotions(prev => ({ ...prev, [keyAt(index)]: '' }))
                               updateSegment(index, { committed_emotion: null })
                               setImportedSegments(prev => {
                                 if (!prev) return prev
@@ -4857,11 +4874,11 @@ export function DubVerseEditor({
                                   title={EMOTION_DESCRIPTIONS[emotion]}
                                   className={cn(
                                     'text-[9px] px-1.5 py-0.5 rounded-full cursor-pointer border transition-colors select-none font-mono',
-                                    stagedEmotions[index] === emotion
+                                    stagedEmotions[keyAt(index)] === emotion
                                       ? 'bg-violet-500/30 text-violet-200 border-violet-400'
                                       : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-violet-500/20 hover:text-violet-300 hover:border-violet-500/40'
                                   )}
-                                  onClick={() => setStagedEmotions(prev => ({ ...prev, [index]: emotion }))}
+                                  onClick={() => setStagedEmotions(prev => ({ ...prev, [keyAt(index)]: emotion }))}
                                 >
                                   {emotion.toLowerCase()}
                                 </span>
@@ -4924,7 +4941,7 @@ export function DubVerseEditor({
                               setImportedSegments(prev => prev ? prev.map((s, i) => i === index ? { ...s, tts_text: draft } : s) : prev)
                               handleGenerateSpeech(index, undefined, undefined, draft)
                             } else {
-                              setStagedEmotions(prev => ({ ...prev, [index]: draft }))
+                              setStagedEmotions(prev => ({ ...prev, [keyAt(index)]: draft }))
                               handleGenerateSpeech(index)
                             }
                           }
@@ -4994,7 +5011,7 @@ export function DubVerseEditor({
                         <span
                           className={cn(
                             'inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full border transition-colors cursor-pointer select-none font-mono',
-                            stagedSpeeds[index] !== undefined && stagedSpeeds[index] !== 1.0
+                            stagedSpeeds[keyAt(index)] !== undefined && stagedSpeeds[keyAt(index)] !== 1.0
                               ? 'bg-orange-500/20 text-orange-300 border-orange-500/40 hover:bg-red-500/20 hover:text-red-300'
                               : 'text-slate-600 border-slate-800 hover:text-orange-400 hover:border-orange-500/30'
                           )}
@@ -5009,8 +5026,8 @@ export function DubVerseEditor({
                             setSpeedPopupIndex(prev => prev === index ? null : index)
                           }}
                         >
-                          {stagedSpeeds[index] !== undefined && stagedSpeeds[index] !== 1.0
-                            ? `${stagedSpeeds[index].toFixed(2)}×`
+                          {stagedSpeeds[keyAt(index)] !== undefined && stagedSpeeds[keyAt(index)] !== 1.0
+                            ? `${stagedSpeeds[keyAt(index)].toFixed(2)}×`
                             : <><Gauge className="h-2 w-2" />speed</>
                           }
                         </span>
@@ -5131,7 +5148,7 @@ export function DubVerseEditor({
                                       isUserEdited: true,
                                       preview_text: null,
                                       isPreviewing: false,
-                                      committed_emotion: stagedEmotions[index] ?? seg.committed_emotion,
+                                      committed_emotion: stagedEmotions[keyAt(index)] ?? seg.committed_emotion,
                                     }
                                   : seg
                               )
@@ -5223,14 +5240,14 @@ export function DubVerseEditor({
                   size="sm"
                   className={cn(
                     "h-8 text-xs gap-1",
-                    selectedSegmentIndex !== null && stagedEmotions[selectedSegmentIndex]
+                    selectedSegmentIndex !== null && stagedEmotions[keyAt(selectedSegmentIndex)]
                       ? "text-violet-400 bg-violet-500/10"
                       : "text-slate-400"
                   )}
                 >
-                  {selectedSegmentIndex !== null && stagedEmotions[selectedSegmentIndex]
+                  {selectedSegmentIndex !== null && stagedEmotions[keyAt(selectedSegmentIndex)]
                     ? (() => {
-                        const full = stagedEmotions[selectedSegmentIndex].toLowerCase()
+                        const full = stagedEmotions[keyAt(selectedSegmentIndex)].toLowerCase()
                         const firstWord = full.split(/[\s,]+/).filter(Boolean)[0] ?? full
                         const label = full.length > firstWord.length ? `${firstWord}…` : full
                         return <span className="font-mono text-[10px] max-w-[8rem] truncate" title={`(${full})`}>({label})</span>
@@ -5253,13 +5270,13 @@ export function DubVerseEditor({
                     title={EMOTION_DESCRIPTIONS[emotion]}
                     className={cn(
                       "text-xs cursor-pointer",
-                      selectedSegmentIndex !== null && stagedEmotions[selectedSegmentIndex] === emotion
+                      selectedSegmentIndex !== null && stagedEmotions[keyAt(selectedSegmentIndex)] === emotion
                         ? "text-violet-300 bg-violet-500/20"
                         : "text-slate-300 hover:text-white hover:bg-slate-700"
                     )}
                     onClick={() => {
                       if (selectedSegmentIndex !== null) {
-                        setStagedEmotions(prev => ({ ...prev, [selectedSegmentIndex]: emotion }))
+                        setStagedEmotions(prev => ({ ...prev, [keyAt(selectedSegmentIndex)]: emotion }))
                       }
                     }}
                   >
@@ -5280,7 +5297,7 @@ export function DubVerseEditor({
                 {/* Batch apply to same speaker */}
                 {selectedSegmentIndex !== null && (() => {
                   const speaker = displaySegments[selectedSegmentIndex]?.speaker_id
-                  const emotion = stagedEmotions[selectedSegmentIndex]
+                  const emotion = stagedEmotions[keyAt(selectedSegmentIndex)]
                   if (!emotion || !speaker) return null
                   const sameSpkIndices = displaySegments
                     .map((s, i) => s.speaker_id === speaker ? i : -1)
@@ -5291,7 +5308,7 @@ export function DubVerseEditor({
                       onClick={() => {
                         setStagedEmotions(prev => {
                           const next = { ...prev }
-                          sameSpkIndices.forEach(i => { next[i] = emotion })
+                          sameSpkIndices.forEach(i => { next[keyAt(i)] = emotion })
                           return next
                         })
                       }}
@@ -5304,7 +5321,7 @@ export function DubVerseEditor({
                   className="text-slate-500 hover:text-slate-300 hover:bg-slate-700 cursor-pointer text-xs"
                   onClick={() => {
                     if (selectedSegmentIndex !== null) {
-                      setStagedEmotions(prev => ({ ...prev, [selectedSegmentIndex]: '' }))
+                      setStagedEmotions(prev => ({ ...prev, [keyAt(selectedSegmentIndex)]: '' }))
                       updateSegment(selectedSegmentIndex, { committed_emotion: null })
                       setImportedSegments(prev => {
                         if (!prev) return prev
@@ -5434,10 +5451,10 @@ export function DubVerseEditor({
                     next.delete(keyAt(idx))
                     return next
                   })
-                  setStagedSpeeds(prev => { const n = { ...prev }; delete n[idx]; return n })
-                  setStagedEmotions(prev => { const n = { ...prev }; delete n[idx]; return n })
-                  setStagedVoices(prev => { const n = { ...prev }; delete n[idx]; return n })
-                  setStagedPitches(prev => { const n = { ...prev }; delete n[idx]; return n })
+                  setStagedSpeeds(prev => { const n = { ...prev }; delete n[keyAt(idx)]; return n })
+                  setStagedEmotions(prev => { const n = { ...prev }; delete n[keyAt(idx)]; return n })
+                  setStagedVoices(prev => { const n = { ...prev }; delete n[keyAt(idx)]; return n })
+                  setStagedPitches(prev => { const n = { ...prev }; delete n[keyAt(idx)]; return n })
                   selectSegment(null)
                   setPendingDelete(null)
                 }}>
@@ -5799,8 +5816,8 @@ export function DubVerseEditor({
                   // speaker's segments atomically on the backend.
                   setStagedVoices(prev => {
                     const next = { ...prev }
-                    displaySegments.forEach((seg, i) => {
-                      if (seg.speaker_id === speakerId) delete next[i]
+                    displaySegments.forEach((seg) => {
+                      if (seg.speaker_id === speakerId) delete next[getSegmentKey(seg)]
                     })
                     return next
                   })
@@ -5815,9 +5832,9 @@ export function DubVerseEditor({
           {rightPanelTab === 'nuances' && (() => {
             const nIdx = selectedSegmentIndex ?? 0
             const seg = displaySegments[nIdx]
-            const cur = { ...DEFAULT_NUANCES, ...seg?.nuances, ...stagedNuances[nIdx] }
+            const cur = { ...DEFAULT_NUANCES, ...seg?.nuances, ...stagedNuances[keyAt(nIdx)] }
             const setN = (key: keyof SegmentNuances, val: number) =>
-              setStagedNuances(prev => ({ ...prev, [nIdx]: { ...prev[nIdx], [key]: val } }))
+              setStagedNuances(prev => ({ ...prev, [keyAt(nIdx)]: { ...prev[keyAt(nIdx)], [key]: val } }))
             const tier1: Array<{ key: keyof SegmentNuances; labels: string[] }> = [
               { key: 'pace', labels: ['Rushed', 'Measured', 'Deliberate'] },
               { key: 'weight', labels: ['Light', 'Normal', 'Heavy'] },
@@ -6076,7 +6093,7 @@ export function DubVerseEditor({
                 onClose={() => { setFloatingEmotionSegment(null); setSelectedReferenceIndex(null); setVideoSubTab(null) }}
                 onCommitEmotion={(idx, emotion) => {
                   if (refSeg) return // reference segments don't update the job
-                  setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))
+                  setStagedEmotions(prev => ({ ...prev, [keyAt(idx)]: emotion }))
                   updateSegment(idx, { committed_emotion: emotion })
                   applyFlagOutcome(idx, 'emotion')
                 }}
@@ -6309,6 +6326,7 @@ export function DubVerseEditor({
       {characterProfileOpen && displaySegments[characterProfileOpen.segmentIndex] && (
         <CharacterProfilePopover
           segmentIndex={characterProfileOpen.segmentIndex}
+          segmentKey={keyAt(characterProfileOpen.segmentIndex)}
           x={characterProfileOpen.x}
           y={characterProfileOpen.y}
           onClose={() => setCharacterProfileOpen(null)}
@@ -6336,7 +6354,7 @@ export function DubVerseEditor({
           if (!t) return
           if (t.mode === 'stage') {
             // Stage as the segment's emotion (pill) — you then Generate.
-            setStagedEmotions(prev => ({ ...prev, [t.index]: value }))
+            setStagedEmotions(prev => ({ ...prev, [keyAt(t.index)]: value }))
             selectSegment(t.index)
           } else {
             // Insert a [tag] into the write-in / Delivery Script draft.
@@ -6540,9 +6558,9 @@ export function DubVerseEditor({
               <span className="text-sm font-semibold text-cyan-400 flex items-center gap-2">
                 <Music2 className="h-4 w-4" />
                 Pitch — Segment {pitchPopupIndex + 1}
-                {stagedVoices[pitchPopupIndex] && (
+                {stagedVoices[keyAt(pitchPopupIndex)] && (
                   <span className="text-[10px] font-normal text-slate-400">
-                    ({VOICE_OPTIONS.find(v => v.key === stagedVoices[pitchPopupIndex])?.label})
+                    ({VOICE_OPTIONS.find(v => v.key === stagedVoices[keyAt(pitchPopupIndex)])?.label})
                   </span>
                 )}
               </span>
@@ -6557,26 +6575,26 @@ export function DubVerseEditor({
                 type="button"
                 className="h-9 w-9 rounded-full bg-slate-700 hover:bg-slate-600 text-white text-lg font-bold flex items-center justify-center transition-colors"
                 onClick={() => setPitchPopupIndex(idx => {
-                  if (idx !== null) setStagedPitches(prev => ({ ...prev, [idx]: Math.max(-6, (prev[idx] ?? 0) - 1) }))
+                  if (idx !== null) setStagedPitches(prev => ({ ...prev, [keyAt(idx)]: Math.max(-6, (prev[keyAt(idx)] ?? 0) - 1) }))
                   return idx
                 })}
               >−</button>
               <span
                 className={cn(
                   "text-4xl font-mono w-28 text-center cursor-pointer select-none transition-colors",
-                  (stagedPitches[pitchPopupIndex] ?? 0) !== 0 ? "text-cyan-400" : "text-white"
+                  (stagedPitches[keyAt(pitchPopupIndex)] ?? 0) !== 0 ? "text-cyan-400" : "text-white"
                 )}
                 title="Click to reset"
-                onClick={() => setStagedPitches(prev => { const n = { ...prev }; delete n[pitchPopupIndex!]; return n })}
+                onClick={() => setStagedPitches(prev => { const n = { ...prev }; delete n[keyAt(pitchPopupIndex)]; return n })}
               >
-                {(stagedPitches[pitchPopupIndex] ?? 0) > 0 ? '+' : ''}{stagedPitches[pitchPopupIndex] ?? 0}
+                {(stagedPitches[keyAt(pitchPopupIndex)] ?? 0) > 0 ? '+' : ''}{stagedPitches[keyAt(pitchPopupIndex)] ?? 0}
                 <span className="text-lg ml-1 text-slate-400">st</span>
               </span>
               <button
                 type="button"
                 className="h-9 w-9 rounded-full bg-slate-700 hover:bg-slate-600 text-white text-lg font-bold flex items-center justify-center transition-colors"
                 onClick={() => setPitchPopupIndex(idx => {
-                  if (idx !== null) setStagedPitches(prev => ({ ...prev, [idx]: Math.min(6, (prev[idx] ?? 0) + 1) }))
+                  if (idx !== null) setStagedPitches(prev => ({ ...prev, [keyAt(idx)]: Math.min(6, (prev[keyAt(idx)] ?? 0) + 1) }))
                   return idx
                 })}
               >+</button>
@@ -6584,8 +6602,8 @@ export function DubVerseEditor({
 
             {/* Slider */}
             <Slider
-              value={[stagedPitches[pitchPopupIndex] ?? 0]}
-              onValueChange={([v]) => setStagedPitches(prev => ({ ...prev, [pitchPopupIndex!]: v }))}
+              value={[stagedPitches[keyAt(pitchPopupIndex)] ?? 0]}
+              onValueChange={([v]) => setStagedPitches(prev => ({ ...prev, [keyAt(pitchPopupIndex)]: v }))}
               min={-6}
               max={6}
               step={1}
@@ -6634,26 +6652,26 @@ export function DubVerseEditor({
                 type="button"
                 className="h-9 w-9 rounded-full bg-slate-700 hover:bg-slate-600 text-white text-lg font-bold flex items-center justify-center transition-colors"
                 onClick={() => setSpeedPopupIndex(idx => {
-                  if (idx !== null) setStagedSpeeds(prev => ({ ...prev, [idx]: Math.max(0.5, parseFloat(((prev[idx] ?? 1.0) - 0.1).toFixed(2))) }))
+                  if (idx !== null) setStagedSpeeds(prev => ({ ...prev, [keyAt(idx)]: Math.max(0.5, parseFloat(((prev[keyAt(idx)] ?? 1.0) - 0.1).toFixed(2))) }))
                   return idx
                 })}
               >−</button>
               <span
                 className={cn(
                   "text-4xl font-mono w-28 text-center cursor-pointer select-none transition-colors",
-                  (stagedSpeeds[speedPopupIndex] ?? 1.0) !== 1.0 ? "text-orange-400" : "text-white"
+                  (stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0) !== 1.0 ? "text-orange-400" : "text-white"
                 )}
                 title="Click to reset"
-                onClick={() => setStagedSpeeds(prev => { const n = { ...prev }; delete n[speedPopupIndex!]; return n })}
+                onClick={() => setStagedSpeeds(prev => { const n = { ...prev }; delete n[keyAt(speedPopupIndex)]; return n })}
               >
-                {(stagedSpeeds[speedPopupIndex] ?? 1.0).toFixed(2)}
+                {(stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0).toFixed(2)}
                 <span className="text-lg ml-0.5 text-slate-400">×</span>
               </span>
               <button
                 type="button"
                 className="h-9 w-9 rounded-full bg-slate-700 hover:bg-slate-600 text-white text-lg font-bold flex items-center justify-center transition-colors"
                 onClick={() => setSpeedPopupIndex(idx => {
-                  if (idx !== null) setStagedSpeeds(prev => ({ ...prev, [idx]: Math.min(2.0, parseFloat(((prev[idx] ?? 1.0) + 0.1).toFixed(2))) }))
+                  if (idx !== null) setStagedSpeeds(prev => ({ ...prev, [keyAt(idx)]: Math.min(2.0, parseFloat(((prev[keyAt(idx)] ?? 1.0) + 0.1).toFixed(2))) }))
                   return idx
                 })}
               >+</button>
@@ -6661,8 +6679,8 @@ export function DubVerseEditor({
 
             {/* Slider */}
             <Slider
-              value={[stagedSpeeds[speedPopupIndex] ?? 1.0]}
-              onValueChange={([v]) => setStagedSpeeds(prev => ({ ...prev, [speedPopupIndex!]: v }))}
+              value={[stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0]}
+              onValueChange={([v]) => setStagedSpeeds(prev => ({ ...prev, [keyAt(speedPopupIndex)]: v }))}
               min={0.5}
               max={2.0}
               step={0.05}
@@ -6678,10 +6696,10 @@ export function DubVerseEditor({
                 <button
                   key={preset}
                   type="button"
-                  onClick={() => setStagedSpeeds(prev => ({ ...prev, [speedPopupIndex!]: preset }))}
+                  onClick={() => setStagedSpeeds(prev => ({ ...prev, [keyAt(speedPopupIndex)]: preset }))}
                   className={cn(
                     'text-[10px] px-2 py-1 rounded-md border transition-colors font-mono',
-                    (stagedSpeeds[speedPopupIndex] ?? 1.0) === preset
+                    (stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0) === preset
                       ? 'bg-orange-500/20 text-orange-300 border-orange-500/40'
                       : 'bg-slate-700 text-slate-400 border-slate-600 hover:bg-slate-600'
                   )}
@@ -7439,9 +7457,9 @@ export function DubVerseEditor({
                       onCopyText={handleCopyText}
                       onPasteText={handlePasteText}
                       onClearSegment={handleClearSegment}
-                      onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
+                      onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [keyAt(idx)]: emotion }))}
                       onClearEmotion={(idx) => {
-                    setStagedEmotions(prev => ({ ...prev, [idx]: '' }))
+                    setStagedEmotions(prev => ({ ...prev, [keyAt(idx)]: '' }))
                     updateSegment(idx, { committed_emotion: null })
                     setImportedSegments(prev => {
                       if (!prev) return prev
@@ -7477,7 +7495,7 @@ export function DubVerseEditor({
                         left: (effStart(segment) + delta) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0),
                         width: (() => {
                           const dur = effEnd(segment) - effStart(segment)
-                          const spd = dragSpeedPreview?.index === index ? dragSpeedPreview.speed : (stagedSpeeds[index] ?? 1.0)
+                          const spd = dragSpeedPreview?.index === index ? dragSpeedPreview.speed : (stagedSpeeds[keyAt(index)] ?? 1.0)
                           return (dur / spd) * PIXELS_PER_SECOND
                         })(),
                       }}
@@ -7720,9 +7738,9 @@ export function DubVerseEditor({
                       onCopyText={handleCopyText}
                       onPasteText={handlePasteText}
                       onClearSegment={handleClearSegment}
-                      onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [idx]: emotion }))}
+                      onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [keyAt(idx)]: emotion }))}
                       onClearEmotion={(idx) => {
-                    setStagedEmotions(prev => ({ ...prev, [idx]: '' }))
+                    setStagedEmotions(prev => ({ ...prev, [keyAt(idx)]: '' }))
                     updateSegment(idx, { committed_emotion: null })
                     setImportedSegments(prev => {
                       if (!prev) return prev
@@ -7774,7 +7792,7 @@ export function DubVerseEditor({
                           const originalDuration = effEnd(segment) - effStart(segment)
                           const activeSpeed = dragSpeedPreview?.index === index
                             ? dragSpeedPreview.speed
-                            : (stagedSpeeds[index] ?? 1.0)
+                            : (stagedSpeeds[keyAt(index)] ?? 1.0)
                           return (originalDuration / activeSpeed) * PIXELS_PER_SECOND
                         })(),
                       }}
@@ -7962,9 +7980,9 @@ export function DubVerseEditor({
                       <div className="px-3 truncate text-[10px] h-full flex items-center text-white/80 gap-1">
                         {dragSpeedPreview?.index === index ? (
                           <span className="text-amber-400 font-mono shrink-0">{dragSpeedPreview.speed.toFixed(2)}x</span>
-                        ) : stagedSpeeds[index] !== undefined ? (
+                        ) : stagedSpeeds[keyAt(index)] !== undefined ? (
                           <>
-                            <span className="text-amber-400 font-mono shrink-0">{stagedSpeeds[index].toFixed(2)}x</span>
+                            <span className="text-amber-400 font-mono shrink-0">{stagedSpeeds[keyAt(index)].toFixed(2)}x</span>
                             <span className="truncate">{segment.preview_text ?? segment.active_text ?? segment.target_text}</span>
                           </>
                         ) : (
@@ -8068,7 +8086,7 @@ export function DubVerseEditor({
                         width: Math.max(
                           (() => {
                             const dur = endT - startT
-                            const spd = dragSpeedPreview?.index === i ? dragSpeedPreview.speed : (stagedSpeeds[i] ?? 1.0)
+                            const spd = dragSpeedPreview?.index === i ? dragSpeedPreview.speed : (stagedSpeeds[keyAt(i)] ?? 1.0)
                             return (dur / spd) * PIXELS_PER_SECOND
                           })(),
                           2
@@ -8094,7 +8112,7 @@ export function DubVerseEditor({
                           const onMouseUp = () => {
                             setDragSpeedPreview(prev => {
                               if (prev?.index === i) {
-                                setStagedSpeeds(s => ({ ...s, [i]: prev.speed }))
+                                setStagedSpeeds(s => ({ ...s, [keyAt(i)]: prev.speed }))
                               }
                               return null
                             })
@@ -8125,7 +8143,7 @@ export function DubVerseEditor({
                           const onMouseUp = () => {
                             setDragSpeedPreview(prev => {
                               if (prev?.index === i) {
-                                setStagedSpeeds(s => ({ ...s, [i]: prev.speed }))
+                                setStagedSpeeds(s => ({ ...s, [keyAt(i)]: prev.speed }))
                               }
                               return null
                             })
@@ -8370,10 +8388,10 @@ export function DubVerseEditor({
                   setRegeneratingSegmentIndex(idx)
                   try {
                     const response = await apiClient.regenerateSegment(jobId, seg.transcript_index ?? idx, {
-                      speed: stagedSpeeds[idx] ?? 1.0,
-                      emotion: stagedEmotions[idx] ?? seg.committed_emotion,
-                      voice_key: stagedVoices[idx] ?? speakerVoiceMap[seg.speaker_id],
-                      pitch: stagedPitches[idx] ?? speakerPitchMap[seg.speaker_id] ?? 0,
+                      speed: stagedSpeeds[keyAt(idx)] ?? 1.0,
+                      emotion: stagedEmotions[keyAt(idx)] ?? seg.committed_emotion,
+                      voice_key: stagedVoices[keyAt(idx)] ?? speakerVoiceMap[seg.speaker_id],
+                      pitch: stagedPitches[keyAt(idx)] ?? speakerPitchMap[seg.speaker_id] ?? 0,
                       force_timing: true,
                     })
                     const filename = response.segment.path.split('/').pop() ?? ''
