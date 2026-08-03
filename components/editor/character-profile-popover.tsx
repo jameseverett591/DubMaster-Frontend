@@ -7,6 +7,10 @@ import type { Segment } from '@/lib/editor-types'
 
 interface CharacterProfilePopoverProps {
   segmentIndex: number
+  /** The segment's stable id. Staged state is keyed by identity, not by row
+   *  position, so that a delete above this segment can't shift its settings
+   *  onto a neighbour. segmentIndex remains only for onClearSegment. */
+  segmentKey: string
   x: number
   y: number
   onClose: () => void
@@ -14,9 +18,9 @@ interface CharacterProfilePopoverProps {
   segment: Segment
   speakerVoiceMap: Record<string, string>
   speakerPitchMap: Record<string, number>
-  stagedEmotions: Record<number, string>
-  stagedSpeeds: Record<number, number>
-  stagedVoices: Record<number, string>
+  stagedEmotions: Record<string, string>
+  stagedSpeeds: Record<string, number>
+  stagedVoices: Record<string, string>
 }
 
 const POPOVER_WIDTH = 300
@@ -24,6 +28,7 @@ const POPOVER_MAX_HEIGHT = 420
 
 export function CharacterProfilePopover({
   segmentIndex,
+  segmentKey,
   x, y,
   onClose,
   onClearSegment,
@@ -40,7 +45,7 @@ export function CharacterProfilePopover({
   const [confirmingClear, setConfirmingClear] = useState(false)
 
   // Resolve the voice that this segment effectively uses, plus override status
-  const overrideVoiceId = stagedVoices[segmentIndex] ?? segment.committed_voice_id
+  const overrideVoiceId = stagedVoices[segmentKey] ?? segment.committed_voice_id
   const speakerDefault = speakerVoiceMap[segment.speaker_id]
   const effectiveVoiceId = overrideVoiceId ?? speakerDefault
   const isOverride = !!(overrideVoiceId && overrideVoiceId !== speakerDefault)
@@ -81,8 +86,8 @@ export function CharacterProfilePopover({
   const safeY = Math.max(10, Math.min(y, winH - POPOVER_MAX_HEIGHT - 10))
 
   const traits = segment.attached_traits ?? []
-  const emotion = stagedEmotions[segmentIndex] ?? segment.committed_emotion
-  const speed = stagedSpeeds[segmentIndex] ?? segment.committed_speed ?? 1.0
+  const emotion = stagedEmotions[segmentKey] ?? segment.committed_emotion
+  const speed = stagedSpeeds[segmentKey] ?? segment.committed_speed ?? 1.0
   const pitch = speakerPitchMap[segment.speaker_id] ?? 0
 
   return (
