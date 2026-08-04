@@ -46,6 +46,7 @@ from app.services.lipsync_service import lipsync_service
 from app.services.transcription_service import transcription_service
 from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
+from app.services.respeecher_service import respeecher_tts
 from app.services.vozo_service import vozo_service, VOZO_STATUS_MAP, POLL_INTERVAL_SEC, MAX_POLL_ATTEMPTS
 from app.utils.language import normalize_language_code
 
@@ -5686,6 +5687,19 @@ async def reset_segment(job_id: str, index: int):
     return {"status": "ok", "job_id": job_id, "index": index}
 
 
+@router.get("/respeecher/voices")
+async def list_respeecher_voices():
+    """Respeecher's voice catalogue for the editor panel.
+
+    Free call — listing is not metered, so this works even when the account has
+    no generation balance. Cached in the service after the first fetch.
+    Returns [] when no API key is configured, so the panel degrades to an empty
+    state instead of erroring.
+    """
+    voices = await respeecher_tts.get_voices()
+    return {"voices": voices, "enabled": respeecher_tts.enabled}
+
+
 @router.post("/segment/regenerate/{job_id}/{index}")
 async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
     try:
@@ -5698,9 +5712,15 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
         # Resolve canonical voice key (e.g. "male-1") to Fish Audio reference_id.
         # Fall through to body.voice_key directly if unresolved — it may already
         # be a Fish Audio UUID dragged from the Voice Library.
+        # Respeecher voice ids are plain slugs from its own catalogue ("neal",
+        # "marta"), so they must NOT pass through Fish's key map — that would
+        # rewrite a valid Respeecher id into an unrelated Fish reference_id.
         if body.voice_key and not voice_id:
-            resolved = fish_audio_tts.get_voice_id(body.voice_key)
-            voice_id = resolved or body.voice_key
+            if (body.engine or "").lower() == "respeecher":
+                voice_id = body.voice_key
+            else:
+                resolved = fish_audio_tts.get_voice_id(body.voice_key)
+                voice_id = resolved or body.voice_key
 
         if getattr(body, "voice_params", None):
             if body.voice_params.voice_id is not None:
@@ -5727,6 +5747,10 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
             nuance_markers=body.nuance_markers,
             custom_nuance=body.custom_nuance,
             tts_text=body.tts_text,
+            engine=body.engine,
+            sampling_params=body.sampling_params,
+            seed=body.seed,
+            reroll=body.reroll,
             live_segment_start=body.live_segment_start,
             live_segment_end=body.live_segment_end,
             live_next_segment_start=body.live_next_segment_start,
@@ -5742,6 +5766,80 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"status": "ok", "segment": seg}
+
+
+@router.delete("/segment/seed/{job_id}/{index}/{seed}")
+async def delete_seed_history_entry(job_id: str, index: int, seed: int):
+    """Drop one take from a segment's Respeecher seed library.
+
+    `index` is the segment's transcript_index — a stable id, NOT its array
+    position, which drifts as segments are split (see commit_segment_timing).
+
+    Deleting is only ever a library edit: the seed identifies a take that can be
+    re-rendered, so removing the entry discards the ability to recall that read,
+    not any audio. The segment's CURRENT audio and its pinned `respeecher_seed`
+    are left alone even when they happen to share this seed — the live take is
+    still live, it just stops being listed.
+    """
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+
+    seg = next((s for s in data.get("segments", []) if s.get("transcript_index") == index), None)
+    if seg is None:
+        raise HTTPException(status_code=404, detail=f"Segment with transcript_index={index} not found")
+
+    history = list(seg.get("respeecher_seed_history") or [])
+    remaining = [e for e in history if e.get("seed") != seed]
+    if len(remaining) == len(history):
+        raise HTTPException(status_code=404, detail=f"Seed {seed} not in this segment's history")
+
+    seg["respeecher_seed_history"] = remaining
+    with open(segments_path, "w", encoding="utf-8") as f:
+        _json.dump(data, f, ensure_ascii=False, indent=2)
+
+    logger.info(f"[SEEDS] job {job_id} seg {index}: removed seed {seed} ({len(remaining)} left)")
+    return {"status": "ok", "respeecher_seed_history": remaining}
+
+
+@router.patch("/segment/seed/{job_id}/{index}/{seed}")
+async def set_seed_kept(job_id: str, index: int, seed: int, body: dict):
+    """Lock or unlock one take in a segment's seed library.
+
+    A locked entry is exempt from the SEED_HISTORY_MAX cap — it is never evicted
+    to make room for newer takes. This is the only way to guarantee a read stays
+    recallable, since four more races would otherwise push it off the end.
+
+    Locking does NOT protect the entry from an explicit delete: that is the user
+    saying so directly, and a lock that could not be undone by deleting would be
+    a trap rather than a safeguard.
+    """
+    kept = bool(body.get("kept"))
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+
+    seg = next((s for s in data.get("segments", []) if s.get("transcript_index") == index), None)
+    if seg is None:
+        raise HTTPException(status_code=404, detail=f"Segment with transcript_index={index} not found")
+
+    history = seg.get("respeecher_seed_history") or []
+    entry = next((e for e in history if e.get("seed") == seed), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Seed {seed} not in this segment's history")
+
+    entry["kept"] = kept
+    with open(segments_path, "w", encoding="utf-8") as f:
+        _json.dump(data, f, ensure_ascii=False, indent=2)
+
+    logger.info(f"[SEEDS] job {job_id} seg {index}: seed {seed} kept={kept}")
+    return {"status": "ok", "respeecher_seed_history": history}
 
 
 class ApplyVoiceRequest(BaseModel):

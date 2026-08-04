@@ -168,6 +168,20 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             flag_status: seg.flag_status ?? 'unreviewed',
             correction_type: seg.correction_type ?? null,
             qc_findings: seg.qc_findings ?? [],
+            // TTS engine + Respeecher take metadata. This mapper is a whitelist,
+            // so anything not named here is dropped on load — these were, which
+            // meant the engine chip never showed and a pinned seed silently
+            // reverted to "auto" on every refresh, re-racing takes that were
+            // already approved. The backend has persisted all of it since the
+            // engine landed; only the load path was missing.
+            engine: seg.engine ?? undefined,
+            respeecher_takes: seg.respeecher_takes ?? undefined,
+            respeecher_take_seeds: seg.respeecher_take_seeds ?? undefined,
+            respeecher_fits: seg.respeecher_fits ?? undefined,
+            respeecher_duration: seg.respeecher_duration ?? undefined,
+            respeecher_seed: seg.respeecher_seed ?? null,
+            respeecher_sampling_params: seg.respeecher_sampling_params ?? null,
+            respeecher_seed_history: seg.respeecher_seed_history ?? undefined,
             emotionalCurve: {
               combined: [
                 { x: 0, y: 0.5 },

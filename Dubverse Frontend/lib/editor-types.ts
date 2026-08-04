@@ -124,6 +124,35 @@ export interface Segment {
   flags?: Array<{ code: string; score: number | null; threshold: number; reason?: string | null }>
   flag_status?: 'unreviewed' | 'reviewed_no_change' | 'reviewed_corrected'
   correction_type?: 'timing' | 'text' | 'voice' | 'emotion' | null
+  // TTS engine that actually rendered this segment, after the child/availability
+  // fallbacks — not necessarily the one requested. "fish-audio" | "respeecher".
+  engine?: string
+  // Respeecher only. Duration is unstable (a 70% spread on identical input with
+  // no parameter to constrain it), so several takes are raced and the closest to
+  // the slot wins. takes[0] is the live one and equals the segment's path.
+  respeecher_takes?: string[]
+  // False when even the best take overruns the slot by more than time-stretch
+  // can absorb cleanly — surface it rather than squashing the audio to fit.
+  respeecher_fits?: boolean
+  respeecher_duration?: number
+  // Seed + params that produced this exact take. Replaying them re-renders it
+  // byte-for-byte, so an approved delivery survives any later regeneration.
+  // Null when the reproducible re-render failed — better no promise than a false one.
+  respeecher_seed?: number | null
+  respeecher_sampling_params?: Record<string, number> | null
+  // Parallel to respeecher_takes: the seed behind each take.
+  respeecher_take_seeds?: number[]
+  // Audition history across races, newest first. Seeds rather than audio: a
+  // pinned seed re-renders its take byte-for-byte, so this survives later
+  // renders that would overwrite the take files. voice + params ride along
+  // because a seed only reproduces its take under the same two.
+  respeecher_seed_history?: Array<{
+    seed: number
+    voice: string
+    params: Record<string, number> | null
+    /** Locked by the user: exempt from the history cap, never evicted. */
+    kept?: boolean
+  }>
 }
 
 export interface QCScore {

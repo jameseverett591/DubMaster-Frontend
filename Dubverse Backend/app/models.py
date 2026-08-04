@@ -195,6 +195,20 @@ class VoiceParams(BaseModel):
 class RegenerateRequest(BaseModel):
     voice_id: Optional[str] = None
     voice_key: Optional[str] = None   # canonical key e.g. "male-1", "female-1" — resolved to voice_id by backend
+    # Which engine synthesises this segment: "fish-audio" (default) or "respeecher".
+    # None keeps the segment's stored engine, then falls back to Fish — so existing
+    # clients that never send this field are completely unaffected.
+    engine: Optional[str] = None
+    # Respeecher tuning. Sent nested inside the voice object by the service —
+    # at the top level the API silently drops it and still returns 200.
+    sampling_params: Optional[Dict] = None
+    # Pin generation so a re-render reproduces the approved take byte-for-byte.
+    # None races several random seeds and returns the winner's.
+    seed: Optional[int] = None
+    # Force a fresh race, discarding the segment's stored seed. Without this an
+    # omitted seed falls back to the stored one, so a bad take could never be
+    # escaped — "re-roll" would silently replay the take you were trying to leave.
+    reroll: Optional[bool] = None
     speed: Optional[float] = None
     pitch: Optional[int] = None       # semitones: -12 to +12
     emotion: Optional[str] = None
@@ -204,9 +218,13 @@ class RegenerateRequest(BaseModel):
     nuances: Optional[Dict] = None
     nuance_markers: Optional[List[Dict]] = None
     custom_nuance: Optional[str] = None   # free-text write-in from the Nuances panel
-    # Delivery Script: the user-authored line + inline [tags] to synthesize VERBATIM.
-    # When set, this is exactly what Fish speaks (tags parse, not spoken); the segment's
-    # display text / subtitle / timing keep using the clean `text` instead.
+    # Delivery Script: the user-authored line + inline [tags], synthesized VERBATIM
+    # in place of the composed directive. FISH ONLY — the tags are Fish directives,
+    # and Respeecher (which has no directive language) speaks the text bubble
+    # instead, ignoring this field entirely. The editor sends engine="fish-audio"
+    # alongside it so a Respeecher segment moves to Fish rather than silently
+    # dropping the script. The segment's display text / subtitle / timing keep
+    # using the clean `text`.
     tts_text: Optional[str] = None
     # Live timeline boundaries from the frontend at the moment of regen — see
     # dubbing_service.regenerate_segment for why these can beat segments.json.

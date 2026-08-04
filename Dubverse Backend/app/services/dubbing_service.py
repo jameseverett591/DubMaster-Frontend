@@ -14,6 +14,7 @@ import httpx
 
 from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
+from app.services.respeecher_service import respeecher_tts, SEED_HISTORY_MAX
 from app.services.translation_service import (
     translation_service,
     natural_duration,
@@ -1994,6 +1995,28 @@ class DubbingService:
         return False
 
     @staticmethod
+    async def _apply_atempo(input_path: str, output_path: str, speed: float) -> bool:
+        """Change playback rate without altering pitch.
+
+        ffmpeg's atempo accepts 0.5-2.0 per instance; callers clamp use_speed to
+        exactly that range (see regenerate_segment), so one stage suffices.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-hide_banner", "-nostats", "-loglevel", "error",
+                "-i", input_path, "-filter:a", f"atempo={speed:.4f}", "-vn", output_path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logger.warning(f"atempo failed: {stderr.decode('utf-8', 'replace')[-200:]}")
+                return False
+            return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+        except Exception as e:
+            logger.warning(f"atempo error: {e}")
+            return False
+
+    @staticmethod
     def _mp3_duration_fast(path: str) -> float:
         """
         Estimate MP3 duration by reading the first valid MPEG frame header and
@@ -2784,6 +2807,10 @@ class DubbingService:
         nuance_markers: Optional[List[Dict]] = None,
         custom_nuance: Optional[str] = None,
         tts_text: Optional[str] = None,
+        engine: Optional[str] = None,
+        sampling_params: Optional[Dict] = None,
+        seed: Optional[int] = None,
+        reroll: Optional[bool] = None,
         live_segment_start: Optional[float] = None,
         live_segment_end: Optional[float] = None,
         live_next_segment_start: Optional[float] = None,
@@ -2878,33 +2905,210 @@ class DubbingService:
             tts_text_processed = self._nuance_translator.apply_markers_to_text(
                 tts_text_processed, nuance_markers, engine="fish_audio"
             )
-        # Delivery Script override: the user authored the exact line + inline [tags]
-        # to synthesize. Send it VERBATIM (tags parse, not spoken) and skip the
-        # composed directive so we don't double-tag. The clean display text
-        # (use_text) still drives seg["text"] / subtitle / timing below.
+        # Verbatim override: the user authored the exact line to synthesise, so the
+        # composed directive is skipped. Engine-agnostic — Fish parses [tags] in it,
+        # Respeecher reads the punctuation and structure as written.
         if tts_text and tts_text.strip():
-            fish_text = tts_text
+            speak_text = tts_text
             directive = ""
         else:
-            fish_text = tts_text_processed
+            speak_text = tts_text_processed
             # One composed S2 directive: traits + emotion + nuance delivery/cadence
             # clauses + the free-text write-in from the Nuances panel (last).
             directive = compose_fish_directive(
                 emotion=emotion, traits=traits,
                 nuance_directives=nuance_directives, extra=custom_nuance,
             )
-        result = await fish_audio_tts.text_to_speech(
-            text=fish_text,
-            voice_id=use_voice_id,
-            output_path=audio_path,
-            speed=use_speed,
-            emotion_tags=directive,
-            traits_tag="",  # folded into the composed directive above
+
+        # ---- Slot resolution --------------------------------------------------
+        # Computed BEFORE synthesis because Respeecher picks its take by fitting
+        # this number. Previously it derived its own target from segments.json
+        # while the fit pass below used the live timeline, so the two disagreed:
+        # a segment whose real slot was 10.8s had takes selected against 1.93s.
+        # One definition, used by both.
+        def _effective_start(s: Dict) -> float:
+            v = s.get("committed_start_time")
+            return float(v) if v is not None else float(s.get("start", 0))
+
+        def _effective_end(s: Dict) -> float:
+            v = s.get("committed_end_time")
+            return float(v) if v is not None else float(s.get("end", 0))
+
+        def _is_finite_number(v: Optional[float]) -> bool:
+            return v is not None and isinstance(v, (int, float)) and math.isfinite(v)
+
+        backend_slot_start = _effective_start(seg)
+        backend_slot_end   = _effective_end(seg)
+
+        # The frontend's live timeline can be ahead of segments.json — a split/resize's
+        # commitSegmentTiming sync is fire-and-forget (see dubverse-editor.tsx), so this
+        # persisted copy is sometimes stale. Prefer what the user is actually looking at,
+        # but only if it's sane; never trust a malformed value from the wire outright.
+        if (
+            _is_finite_number(live_segment_start)
+            and _is_finite_number(live_segment_end)
+            and live_segment_start >= 0
+            and live_segment_end > live_segment_start
+        ):
+            slot_start = float(live_segment_start)
+            slot_end = float(live_segment_end)
+            if abs(slot_start - backend_slot_start) > 0.01 or abs(slot_end - backend_slot_end) > 0.01:
+                logger.info(
+                    f"[REGEN-LIVE-OVERRIDE] seg {segment_index}: slot "
+                    f"backend=({backend_slot_start:.2f}, {backend_slot_end:.2f}) → "
+                    f"live=({slot_start:.2f}, {slot_end:.2f})"
+                )
+        else:
+            slot_start = backend_slot_start
+            slot_end = backend_slot_end
+        slot_dur = slot_end - slot_start
+
+        # ---- Engine selection ------------------------------------------------
+        # Precedence: explicit request > segment's stored engine > Fish.
+        # Deliberately NOT keyed off TTS_PROVIDER: regen has always used Fish
+        # regardless of that setting, and settings.TTS_PROVIDER still defaults to
+        # "elevenlabs", so reading it here would silently reroute every regen.
+        use_engine = (engine or seg.get("engine") or "fish-audio").lower()
+        # Respeecher's catalogue is adult-only — a child speaker always gets Fish.
+        # speaker_gender is stamped onto the in-memory transcript during translation
+        # but never reaches segments.json, so it is absent on every existing job and
+        # cannot be the only signal. The durable one is the voice itself: a segment
+        # rendered with a configured child voice is a child.
+        # Only keys actually present in the voice map count — get_voice_id() falls
+        # back to the FIRST configured voice for an unset key, so "child-2"/"child-3"
+        # resolve to male-1 and would misroute every male-1 segment to Fish.
+        _child_keys = set(_VOICES_BY_GENDER.get("child", []))
+        _child_voice_ids = {
+            _vid for _key, _vid in getattr(fish_audio_tts, "_voice_map", {}).items()
+            if _key in _child_keys and _vid
+        }
+        # Read the signal off the SEGMENT as previously rendered, or its speaker's
+        # mapping — never off the voice being requested now. Switching a segment to
+        # Respeecher supplies a Respeecher voice ("neal"), which would erase the very
+        # signal this guard depends on and let a child line through.
+        _seg_voice = seg.get("voice_id") or ""
+        _mapped_voice = (data.get("voice_mapping") or {}).get(seg.get("speaker") or "", "")
+        _is_child = (
+            seg.get("speaker_gender") == "child"
+            or _seg_voice in _child_voice_ids
+            or _mapped_voice in _child_voice_ids
+            or _mapped_voice in _child_keys
         )
+        if use_engine == "respeecher" and _is_child:
+            logger.info(f"[ENGINE] seg {segment_index}: child voice -> forcing fish-audio")
+            use_engine = "fish-audio"
+        if use_engine == "respeecher" and not respeecher_tts.enabled:
+            logger.warning("[ENGINE] Respeecher unavailable (no API key) -> fish-audio")
+            use_engine = "fish-audio"
+        if use_engine == "respeecher":
+            # A voice id from Fish's namespace (UUID or "male-1") means the caller
+            # wants Fish and only the stored engine says otherwise. Posting it to
+            # Respeecher fails every take and raises below, so route it instead.
+            # Gated on a non-empty catalogue: get_voices() returns [] when the
+            # fetch fails, and an empty cache must not knock every segment to Fish.
+            _catalogue = await respeecher_tts.get_voices()
+            if _catalogue and not respeecher_tts.has_voice(use_voice_id):
+                logger.info(
+                    f"[ENGINE] seg {segment_index}: {use_voice_id!r} not in Respeecher "
+                    f"catalogue -> fish-audio"
+                )
+                use_engine = "fish-audio"
+
+        # Every route to Fish above flips the ENGINE but leaves use_voice_id as
+        # whatever was requested — so a Respeecher slug ("neal") can arrive at
+        # Fish, which cannot resolve it and renders some default voice or fails.
+        # Observed in real data: a segment stored engine="fish-audio" with
+        # voice_id="neal". Re-resolve from the speaker's Fish mapping instead.
+        # Symmetric with the guard above, and keyed off the same catalogue.
+        # Mirrors get_voice_id's own resolution rules: a key in the map, or a raw
+        # reference_id (>15 chars), is a Fish voice. Anything else — "neal",
+        # "victoria-cyber" — is not, and get_voice_id would quietly substitute the
+        # first configured voice for it. Tested this way rather than against the
+        # Respeecher catalogue because has_voice() does not fetch, so on the child
+        # and no-API-key paths the cache can be cold and the guard would not fire.
+        _fish_map = getattr(fish_audio_tts, "_voice_map", {}) or {}
+        _is_fish_voice = use_voice_id in _fish_map or len(use_voice_id) > 15
+        if use_engine == "fish-audio" and use_voice_id and not _is_fish_voice:
+            if _mapped_voice:
+                _fish_voice = fish_audio_tts.get_voice_id(_mapped_voice) or _mapped_voice
+                logger.info(
+                    f"[ENGINE] seg {segment_index}: non-Fish voice {use_voice_id!r} on "
+                    f"fish-audio -> speaker {seg.get('speaker')!r} maps to {_fish_voice!r}"
+                )
+            else:
+                # No mapping for this speaker. A wrong-but-valid Fish voice still
+                # renders; a Respeecher slug does not, so take Fish's own default.
+                _fish_voice = fish_audio_tts.get_voice_id("")
+                logger.warning(
+                    f"[ENGINE] seg {segment_index}: non-Fish voice {use_voice_id!r} on "
+                    f"fish-audio and speaker {seg.get('speaker')!r} has no mapping "
+                    f"-> default {_fish_voice!r}"
+                )
+            if _fish_voice:
+                use_voice_id = _fish_voice
+
+        respeecher_meta: Optional[Dict] = None
+        if use_engine == "respeecher":
+            # Respeecher speaks the TEXT BUBBLE only, never the write-in: the
+            # Delivery Script is a Fish feature (its [tags] are Fish directives,
+            # and Respeecher has no directive language to retarget them to).
+            # Deliberately sourced from tts_text_processed, not speak_text —
+            # speak_text may be the verbatim write-in override. The write-in
+            # routes itself to Fish client-side; this is the authoritative guard
+            # for any direct or bulk caller that skips the UI.
+            # The strip stays as a backstop for [tags] emitted by the nuance
+            # marker pass, which Respeecher would otherwise read aloud.
+            resp_text = re.sub(r"\[[^\]]*\]", " ", tts_text_processed)
+            resp_text = re.sub(r"\s+", " ", resp_text).strip() or tts_text_processed
+            # Respeecher exposes no directive, speed or pitch parameters. Its only
+            # lever on duration is which take we keep, so hand it the slot and let
+            # it choose; staged speed is applied separately below.
+            _slot = slot_dur if slot_dur > 0 else None
+            # Fall back to whatever this segment was last rendered with, so a
+            # plain regen reproduces the approved take instead of re-rolling it.
+            _sp = sampling_params if sampling_params is not None else seg.get("respeecher_sampling_params")
+            # reroll wins over everything: it exists precisely to escape a stored
+            # seed. Otherwise an explicit seed, then the segment's stored one.
+            if reroll:
+                _sd = None
+            else:
+                _sd = seed if seed is not None else seg.get("respeecher_seed")
+            # A stored params blob carries the seed that produced it; strip it on a
+            # reroll or the service would pin from there and never race.
+            if reroll and isinstance(_sp, dict):
+                _sp = {k: v for k, v in _sp.items() if k != "seed"}
+            result = await respeecher_tts.text_to_speech(
+                text=resp_text,
+                voice_id=use_voice_id,
+                output_path=audio_path,
+                target_duration=target_duration or _slot,
+                sampling_params=_sp,
+                seed=_sd,
+            )
+            respeecher_meta = result
+        else:
+            result = await fish_audio_tts.text_to_speech(
+                text=speak_text,
+                voice_id=use_voice_id,
+                output_path=audio_path,
+                speed=use_speed,
+                emotion_tags=directive,
+                traits_tag="",  # folded into the composed directive above
+            )
         if not result:
-            raise RuntimeError(f"TTS failed for segment {segment_index} in job {job_id}")
+            raise RuntimeError(
+                f"TTS failed for segment {segment_index} in job {job_id} (engine={use_engine})"
+            )
 
         final_path = result["path"]
+
+        # Fish consumes use_speed natively; Respeecher has no speed parameter, so
+        # apply it here or the speed chip would silently do nothing on that engine.
+        if use_engine == "respeecher" and use_speed and abs(use_speed - 1.0) > 0.01:
+            sped_path = os.path.join(output_dir, f"segment_{segment_index:04d}_speed.mp3")
+            if await self._apply_atempo(final_path, sped_path, use_speed):
+                final_path = sped_path
+                logger.info(f"[SPEED] seg {segment_index}: atempo {use_speed:.2f}x (respeecher)")
 
         # Pitch is a post-process, not a Fish parameter: /v1/tts exposes prosody
         # {speed, volume, normalize_loudness} and no pitch field. The editor's pitch
@@ -2935,46 +3139,9 @@ class DubbingService:
         # If the TTS audio overflows the segment slot, time-stretch it with
         # rubberband (formant-preserving) so the editor regen is never worse
         # than re-running a full dub.
-        # Honor timeline drag/resize: committed_* is the source of truth once
-        # the user has moved this segment's slot, even before the post-fit
-        # sync-back below runs. Without this, a resized segment's fit check
-        # uses its original (pre-resize) transcript timing.
-        def _effective_start(s: Dict) -> float:
-            v = s.get("committed_start_time")
-            return float(v) if v is not None else float(s.get("start", 0))
-
-        def _effective_end(s: Dict) -> float:
-            v = s.get("committed_end_time")
-            return float(v) if v is not None else float(s.get("end", 0))
-
-        backend_slot_start = _effective_start(seg)
-        backend_slot_end   = _effective_end(seg)
-
-        # The frontend's live timeline can be ahead of segments.json — a split/resize's
-        # commitSegmentTiming sync is fire-and-forget (see dubverse-editor.tsx), so this
-        # persisted copy is sometimes stale. Prefer what the user is actually looking at,
-        # but only if it's sane; never trust a malformed value from the wire outright.
-        def _is_finite_number(v: Optional[float]) -> bool:
-            return v is not None and isinstance(v, (int, float)) and math.isfinite(v)
-
-        if (
-            _is_finite_number(live_segment_start)
-            and _is_finite_number(live_segment_end)
-            and live_segment_start >= 0
-            and live_segment_end > live_segment_start
-        ):
-            slot_start = float(live_segment_start)
-            slot_end = float(live_segment_end)
-            if abs(slot_start - backend_slot_start) > 0.01 or abs(slot_end - backend_slot_end) > 0.01:
-                logger.info(
-                    f"[REGEN-LIVE-OVERRIDE] seg {segment_index}: slot "
-                    f"backend=({backend_slot_start:.2f}, {backend_slot_end:.2f}) → "
-                    f"live=({slot_start:.2f}, {slot_end:.2f})"
-                )
-        else:
-            slot_start = backend_slot_start
-            slot_end = backend_slot_end
-        slot_dur = slot_end - slot_start
+        # Slot already resolved above the engine dispatch (live timeline preferred
+        # over segments.json), so Respeecher's take selection and this fit pass
+        # measure against the same number.
         if slot_dur > 0.2:
             trimmed_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen_notrim.mp3")
             trimmed_ok = await asyncio.to_thread(
@@ -3140,12 +3307,61 @@ class DubbingService:
             seg.pop("custom_nuance", None)
         elif custom_nuance:
             seg["custom_nuance"] = custom_nuance
-        # Delivery Script (verbatim line + tags): same contract. Kept separate from
-        # seg["text"] so the display/subtitle stays the clean line.
+        # Verbatim text override: same contract. Kept separate from seg["text"] so
+        # the display/subtitle stays the clean line.
         if tts_text == "":
             seg.pop("tts_text", None)
         elif tts_text:
             seg["tts_text"] = tts_text
+        # Engine actually used (post child/availability fallback), so the editor can
+        # show it and the next regen defaults to the same one without the client
+        # re-sending it. Take metadata drives the panel's audition list.
+        seg["engine"] = use_engine
+        if respeecher_meta:
+            seg["respeecher_takes"] = respeecher_meta.get("takes", [])
+            seg["respeecher_take_seeds"] = respeecher_meta.get("take_seeds", [])
+            seg["respeecher_fits"] = respeecher_meta.get("fits", True)
+            seg["respeecher_duration"] = respeecher_meta.get("duration")
+            # Audition history, kept as seeds rather than audio. Every take of
+            # every race stays replayable byte-for-byte from its seed, so the
+            # alternates survive later renders instead of being overwritten the
+            # way the _takeN.mp3 files are. Voice and params ride along because a
+            # seed only reproduces its take under the same two.
+            _hist = list(seg.get("respeecher_seed_history") or [])
+            _params = respeecher_meta.get("sampling_params")
+            _seen = {e.get("seed") for e in _hist if isinstance(e, dict)}
+            _fresh = [
+                {"seed": _s, "voice": use_voice_id, "params": _params}
+                for _s in (respeecher_meta.get("take_seeds") or [])
+                if _s not in _seen
+            ]
+            # Newest first, so the cap evicts the oldest — except entries the user
+            # has locked, which are exempt and never counted out. A locked take is
+            # an explicit "keep this", and silently dropping it off the end of the
+            # list would destroy the only record of a read they wanted back.
+            _combined = _fresh + _hist
+            _budget = max(0, SEED_HISTORY_MAX - sum(1 for e in _combined if e.get("kept")))
+            _out = []
+            for _e in _combined:                    # order preserved: newest first
+                if _e.get("kept"):
+                    _out.append(_e)
+                elif _budget > 0:
+                    _out.append(_e)
+                    _budget -= 1
+            seg["respeecher_seed_history"] = _out
+            # The seed + params that produced this exact performance. Replaying
+            # them re-renders it byte-for-byte, so an approved delivery survives
+            # any later regeneration.
+            seg["respeecher_seed"] = respeecher_meta.get("seed")
+            seg["respeecher_sampling_params"] = respeecher_meta.get("sampling_params")
+        else:
+            # Drop only what describes audio that is no longer live. seed and
+            # sampling_params are KEPT so switching to Fish and back reproduces the
+            # approved take byte-for-byte instead of re-racing — the toggle is a
+            # round trip, not a one-way door.
+            for _k in ("respeecher_takes", "respeecher_take_seeds", "respeecher_fits",
+                       "respeecher_duration"):
+                seg.pop(_k, None)
         if speed_ratio is not None:
             seg["speed_ratio"] = speed_ratio
         if target_duration is not None:
