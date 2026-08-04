@@ -3073,9 +3073,14 @@ class DubbingService:
                 _sd = None
             else:
                 _sd = seed if seed is not None else seg.get("respeecher_seed")
-            # A stored params blob carries the seed that produced it; strip it on a
-            # reroll or the service would pin from there and never race.
-            if reroll and isinstance(_sp, dict):
+            # ALWAYS strip the seed out of the params blob. respeecher_service pops
+            # a seed from sampling_params and treats the explicit `seed` argument as
+            # a mere fallback, so any seed riding inside the params silently outranks
+            # _sd — which is the one that encodes the caller's actual intent
+            # (explicit seed > stored seed > race). Two ways in observed: the blob
+            # stored on the segment, and a library entry carrying the winner's seed.
+            # Recalling an alternate re-rendered the winner and looked correct.
+            if isinstance(_sp, dict):
                 _sp = {k: v for k, v in _sp.items() if k != "seed"}
             result = await respeecher_tts.text_to_speech(
                 text=resp_text,
@@ -3328,11 +3333,28 @@ class DubbingService:
             # way the _takeN.mp3 files are. Voice and params ride along because a
             # seed only reproduces its take under the same two.
             _hist = list(seg.get("respeecher_seed_history") or [])
-            _params = respeecher_meta.get("sampling_params")
+            # Strip the seed out of the params blob. The winner's params carry its
+            # own seed, and attaching that blob to every entry gave each alternate
+            # the WINNER's seed — which then won on replay, because
+            # respeecher_service pops a seed out of sampling_params and only falls
+            # back to the explicit `seed` argument when there isn't one. Recalling
+            # an alternate would silently re-render the winner and look right.
+            _raw_params = respeecher_meta.get("sampling_params") or {}
+            _params = {k: v for k, v in _raw_params.items() if k != "seed"} or None
+            _race_seeds = list(respeecher_meta.get("take_seeds") or [])
+            # Refresh entries this race re-rendered rather than skipping them as
+            # already-seen. The same seed under different params is a DIFFERENT
+            # take, so a stale entry would recall something other than the audio
+            # currently on the segment. `kept` is preserved — only the recipe moves.
+            _race_set = set(_race_seeds)
+            for _e in _hist:
+                if isinstance(_e, dict) and _e.get("seed") in _race_set:
+                    _e["voice"] = use_voice_id
+                    _e["params"] = _params
             _seen = {e.get("seed") for e in _hist if isinstance(e, dict)}
             _fresh = [
                 {"seed": _s, "voice": use_voice_id, "params": _params}
-                for _s in (respeecher_meta.get("take_seeds") or [])
+                for _s in _race_seeds
                 if _s not in _seen
             ]
             # Newest first, so the cap evicts the oldest — except entries the user

@@ -44,7 +44,11 @@ export function buildSeedLibrary(segments: Segment[]): SeedLibraryEntry[] {
         seed: h.seed,
         voice: h.voice,
         params: h.params ?? null,
-        isLive: seg.respeecher_seed === h.seed,
+        // Engine must match too. respeecher_seed deliberately SURVIVES a render on
+        // Fish so the take stays recallable, which means a matching seed alone does
+        // not mean you are hearing it — after a Fish render the badge would claim a
+        // Respeecher take is live while the segment plays Fish audio.
+        isLive: seg.engine === 'respeecher' && seg.respeecher_seed === h.seed,
         kept: h.kept === true,
         // The editor models a frozen segment as status, not a boolean field —
         // it is what the backend's `locked` flag maps to on load.

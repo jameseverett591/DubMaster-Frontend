@@ -1237,7 +1237,12 @@ export function DubVerseEditor({
             selectSegment(hit.index)
             setCurrentTime(displaySegmentsRef.current[hit.index].start_time)
             console.log('[VOICE-DROP] calling handleGenerateSpeech (native)', { index: hit.index, voice_id: parsed.voice_id })
-            handleGenerateSpeechRef.current(hit.index, parsed.voice_id).then(ok => {
+            // A Fish voice implies the Fish engine — same reason as the React
+            // onDrop below. Missed here originally because the timeline drop is
+            // handled by this native listener rather than that one, so dropping
+            // onto the Dubbed track fell through to the backend's unknown-voice
+            // backstop instead of saying what it meant.
+            handleGenerateSpeechRef.current(hit.index, parsed.voice_id, undefined, undefined, 'fish-audio').then(ok => {
               if (ok) {
                 console.log('[VOICE-DROP] regen succeeded — showing applied chip (native)', { index: hit.index, voiceName: parsed.name })
                 setVoiceAppliedFeedback({ segmentIndex: hit.index, voiceName: parsed.name })
@@ -1388,7 +1393,18 @@ export function DubVerseEditor({
   // Tracks where playback started so Stop returns to that position (not 0)
   const lastStartPosRef = useRef(0)
   // Pending regen while one is in flight (depth 1, last-write-wins).
-  const regenQueueRef = useRef<{ segIdx?: number; voiceOverride?: string; textOverride?: string; ttsTextOverride?: string } | null>(null)
+  // engineOverride and extraPayload ride along: a deferred regen replayed without
+  // them silently falls back to the segment's stored engine and loses any pinned
+  // seed, so a voice drop or a library recall issued while another regen was in
+  // flight would come back on the wrong engine or as a fresh race.
+  const regenQueueRef = useRef<{
+    segIdx?: number
+    voiceOverride?: string
+    textOverride?: string
+    ttsTextOverride?: string
+    engineOverride?: string
+    extraPayload?: Partial<RegenerateSegmentRequest>
+  } | null>(null)
   const autoRegenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingAutoRegenRef = useRef<number | null>(null)
   const [editingText, setEditingText] = useState('')
@@ -3187,7 +3203,7 @@ export function DubVerseEditor({
     if (activeIndex === null) { console.warn('[REGEN] aborted — activeIndex null'); return false }
     if (isRegeneratingRef.current) {
       // Queue instead of dropping (depth 1, last-write-wins); drained in finally.
-      regenQueueRef.current = { segIdx, voiceOverride, textOverride, ttsTextOverride }
+      regenQueueRef.current = { segIdx, voiceOverride, textOverride, ttsTextOverride, engineOverride, extraPayload }
       setQueuedSegmentIndex(activeIndex)
       console.warn('[REGEN] queued — regen already in flight', { segIdx, voiceOverride })
       return false
@@ -3436,7 +3452,7 @@ export function DubVerseEditor({
         regenQueueRef.current = null
         setQueuedSegmentIndex(null)
         setTimeout(() => {
-          handleGenerateSpeechRef.current(queued.segIdx, queued.voiceOverride, queued.textOverride, queued.ttsTextOverride)
+          handleGenerateSpeechRef.current(queued.segIdx, queued.voiceOverride, queued.textOverride, queued.ttsTextOverride, queued.engineOverride, queued.extraPayload)
         }, 0)
       }
     }
