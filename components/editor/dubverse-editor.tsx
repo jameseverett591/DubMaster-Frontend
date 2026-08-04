@@ -50,11 +50,13 @@ import {
   Save,
   Loader2,
   AlertTriangle,
+  ArrowRightLeft,
 } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import { apiClient } from '@/lib/api-client'
+import type { RegenerateSegmentRequest } from '@/lib/api-client'
 import { VoiceLibraryPanel } from '@/components/voice-library-modal'
 import { CustomVoicesModal } from '@/components/editor/custom-voices-modal'
 import { EmotionLibraryPopup } from '@/components/editor/emotion-library-popup'
@@ -74,6 +76,8 @@ import { AdvancedChordBrowser } from '@/components/editor/advanced-chord-browser
 import { CharacterProfilesPanel } from '@/components/editor/character-profiles-panel'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import VelmaPanel from '@/components/editor/velma-panel'
+import RespeecherPanel from '@/components/editor/respeecher-panel'
+import SeedLibraryPanel, { buildSeedLibrary } from '@/components/editor/seed-library-panel'
 import { HeatmapBar } from '@/components/timeline/HeatmapBar'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { ExportModal } from '@/components/editor/export-modal'
@@ -823,7 +827,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'ei-library' | 'nuances' | 'chord' | 'advanced' | 'characters'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'respeecher' | 'seeds' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'ei-library' | 'nuances' | 'chord' | 'advanced' | 'characters'>('result')
   const [velmaEnrichLoading, setVelmaEnrichLoading] = useState(false)
   const [velmaEnrichResult, setVelmaEnrichResult] = useState<{ patched: number; total: number } | null>(null)
 
@@ -1037,6 +1041,16 @@ export function DubVerseEditor({
   // Live validation message for the open write-in box; null = valid. Only one
   // write-in is open at a time (inlineEmotionWriteIn), so a single slot is enough.
   const [writeInError, setWriteInError] = useState<string | null>(null)
+  // Transient notice, write-in only: the Delivery Script moves the segment off
+  // Respeecher, which the user didn't ask for and would otherwise only notice
+  // from the engine chip. A pill rather than a modal — it reports, it doesn't
+  // need an answer.
+  const [engineNotice, setEngineNotice] = useState<string | null>(null)
+  useEffect(() => {
+    if (!engineNotice) return
+    const t = setTimeout(() => setEngineNotice(null), 3000)
+    return () => clearTimeout(t)
+  }, [engineNotice])
   // Emotion Library popup: which segment it targets + whether picking stages the
   // emotion pill ('stage') or inserts a [tag] into the write-in draft ('insert').
   const [emotionLibraryTarget, setEmotionLibraryTarget] = useState<{ index: number; mode: 'stage' | 'insert' } | null>(null)
@@ -1428,6 +1442,11 @@ export function DubVerseEditor({
   const displaySegments: Segment[] = ((importedSegmentsJobId === jobId || importedSegmentsJobId === null) && Array.isArray(importedSegments))
     ? importedSegments.filter(Boolean)
     : (Array.isArray(segments) ? segments : []).filter(Boolean)
+
+  // Every recorded Respeecher take across the job, flattened out of the segments.
+  // Built here rather than inside the panel so the tab can be sized without
+  // mounting it, and so it recomputes on the same input the timeline renders from.
+  const seedLibrary = useMemo(() => buildSeedLibrary(displaySegments), [displaySegments])
 
   /**
    * Resolve a row position to the stable key of whatever segment is sitting
@@ -3162,7 +3181,7 @@ export function DubVerseEditor({
   }, [initialSegments, jobId, updateSegment, editingSegmentIndex, displaySegments, keyAt])
 
   // Handle Generate Speech - calls backend TTS regeneration for the selected segment
-  const handleGenerateSpeech = useCallback(async (segIdx?: number, voiceOverride?: string, textOverride?: string, ttsTextOverride?: string): Promise<boolean> => {
+  const handleGenerateSpeech = useCallback(async (segIdx?: number, voiceOverride?: string, textOverride?: string, ttsTextOverride?: string, engineOverride?: string, extraPayload?: Partial<RegenerateSegmentRequest>): Promise<boolean> => {
     const activeIndex = segIdx ?? selectedSegmentIndex
     console.log('[REGEN] called', { segIdx, voiceOverride, textOverride, activeIndex, isRegenerating, selectedSegmentIndex })
     if (activeIndex === null) { console.warn('[REGEN] aborted — activeIndex null'); return false }
@@ -3241,9 +3260,15 @@ export function DubVerseEditor({
         // write-in (explicit override). A normal regen sends nothing → clean/pill mode,
         // so there's no sticky-forever state to get trapped in.
         tts_text: ttsTextOverride,
+        // Omitted on a normal regen, so the backend keeps whatever engine this
+        // segment last rendered with — no sticky state to get trapped in.
+        engine: engineOverride,
         live_segment_start: liveStart,
         live_segment_end: liveEnd,
         live_next_segment_start: liveNextStart,
+        // Engine-specific extras (Respeecher sampling_params / seed). Last so an
+        // explicit caller value wins over the defaults assembled above.
+        ...(extraPayload ?? {}),
       }
       console.log('[REGEN] payload', { activeIndex, regenPayload })
       const response = await apiClient.regenerateSegment(jobId, segment.transcript_index ?? activeIndex, regenPayload)
@@ -3313,6 +3338,25 @@ export function DubVerseEditor({
               was_truncated: false,
               committed_emotion: stagedEmotions[keyAt(activeIndex)] ?? seg.committed_emotion,
               ...(shouldShrink ? { end_time: shrunkEnd } : {}),
+              // Read the engine + take metadata off the RESPONSE, never off the
+              // request: the backend re-routes to Fish on a child voice, a missing
+              // API key, or a voice outside Respeecher's catalogue, so what was
+              // asked for is not necessarily what rendered.
+              // Assigned unconditionally, including when absent, so that a render
+              // which drops the take list actually clears it — spreading ...seg
+              // alone left the panel auditioning takes the backend had discarded
+              // and showing an engine chip for the previous engine.
+              engine: response.segment.engine ?? undefined,
+              respeecher_takes: response.segment.respeecher_takes ?? undefined,
+              respeecher_take_seeds: response.segment.respeecher_take_seeds ?? undefined,
+              respeecher_fits: response.segment.respeecher_fits ?? undefined,
+              respeecher_duration: response.segment.respeecher_duration ?? undefined,
+              respeecher_seed: response.segment.respeecher_seed ?? null,
+              respeecher_sampling_params: response.segment.respeecher_sampling_params ?? null,
+              // Not cleared when absent, unlike the fields above: history is
+              // cumulative and a Fish render simply has nothing to add to it.
+              respeecher_seed_history:
+                response.segment.respeecher_seed_history ?? seg.respeecher_seed_history,
             }
           : seg)
       })
@@ -4606,7 +4650,10 @@ export function DubVerseEditor({
                           if (speakerId) {
                             applyVoiceToSpeaker(speakerId, parsed.voice_id)
                           } else {
-                            handleGenerateSpeech(index, parsed.voice_id)
+                            // A Fish voice implies the Fish engine. Without this the
+                            // segment's stored engine wins and the Fish UUID is handed
+                            // to Respeecher, which 500s on an unknown voice id.
+                            handleGenerateSpeech(index, parsed.voice_id, undefined, undefined, 'fish-audio')
                           }
                         } else {
                           console.warn('[VOICE-DROP] payload missing voice_id', parsed)
@@ -4939,7 +4986,13 @@ export function DubVerseEditor({
                             selectSegment(index)
                             if (isScript) {
                               setImportedSegments(prev => prev ? prev.map((s, i) => i === index ? { ...s, tts_text: draft } : s) : prev)
-                              handleGenerateSpeech(index, undefined, undefined, draft)
+                              // Delivery Script is Fish-only — Respeecher ignores it
+                              // and would silently render the bubble text instead. Pull
+                              // the segment onto Fish so the script is actually spoken.
+                              if (displaySegments[index]?.engine === 'respeecher') {
+                                setEngineNotice('Delivery Script is Fish-only — moving this segment to Fish Audio.')
+                              }
+                              handleGenerateSpeech(index, undefined, undefined, draft, 'fish-audio')
                             } else {
                               setStagedEmotions(prev => ({ ...prev, [keyAt(index)]: draft }))
                               handleGenerateSpeech(index)
@@ -5532,6 +5585,8 @@ export function DubVerseEditor({
                 { id: 'result',     label: 'Video' },
                 { id: 'quality',    label: 'Quality' },
                 { id: 'velma',      label: 'Velma',        feature: 'velmaPanel' },
+                { id: 'respeecher', label: 'Respeecher' },
+                { id: 'seeds',      label: 'Seed Library' },
                 { id: 'studio',     label: 'Studio',       feature: 'studioCollaboration' },
                 { id: 'adaptation', label: 'Adaptation' },
                 { id: 'speakers',   label: 'Speakers' },
@@ -5780,6 +5835,89 @@ export function DubVerseEditor({
                 segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
                 voices={[]}
                 setRightPanelTab={setRightPanelTab}
+              />
+            </div>
+          )}
+
+          {rightPanelTab === 'respeecher' && (
+            // overflow-hidden, not auto: the panel manages its own scrolling so the
+            // tuning column stays fixed while only the voice list moves.
+            <div className="flex-1 min-h-0 overflow-hidden bg-neutral-950">
+              <RespeecherPanel
+                segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
+                jobId={jobId}
+                isRegenerating={isRegenerating}
+                onGenerate={(voiceId, samplingParams, seed) => {
+                  if (selectedSegmentIndex === null) return
+                  handleGenerateSpeech(
+                    selectedSegmentIndex, voiceId, undefined, undefined, 'respeecher',
+                    // seed null = re-roll. The flag is required: without it the
+                    // backend falls back to the segment's stored seed and would
+                    // replay the very take you're trying to leave.
+                    {
+                      sampling_params: samplingParams,
+                      seed: seed ?? undefined,
+                      reroll: seed === null ? true : undefined,
+                    },
+                  )
+                }}
+                onUseFish={() => {
+                  if (selectedSegmentIndex === null) return
+                  // voiceOverride omitted so voice_key falls back to the speaker's
+                  // Fish mapping — a Respeecher slug would be meaningless to Fish.
+                  handleGenerateSpeech(selectedSegmentIndex, undefined, undefined, undefined, 'fish-audio')
+                }}
+              />
+            </div>
+          )}
+
+          {rightPanelTab === 'seeds' && (
+            <div className="flex-1 min-h-0 overflow-hidden bg-neutral-950">
+              <SeedLibraryPanel
+                entries={seedLibrary}
+                isRegenerating={isRegenerating}
+                selectedTranscriptIndex={
+                  selectedSegmentIndex !== null
+                    ? displaySegments[selectedSegmentIndex]?.transcript_index ?? null
+                    : null
+                }
+                onJumpToSegment={(i) => {
+                  selectSegment(i)
+                  setCurrentTime(displaySegments[i]?.start_time ?? 0)
+                }}
+                onUse={(e) => {
+                  // Recall renders the entry's OWN segment, not the selected one —
+                  // the seed only reproduces its take against its own line.
+                  handleGenerateSpeech(
+                    e.segmentIndex, e.voice, undefined, undefined, 'respeecher',
+                    { sampling_params: e.params ?? undefined, seed: e.seed },
+                  )
+                }}
+                onToggleKept={(e, kept) => {
+                  const prevHist = displaySegments[e.segmentIndex]?.respeecher_seed_history
+                  updateSegment(e.segmentIndex, {
+                    respeecher_seed_history: (prevHist ?? []).map(h =>
+                      h.seed === e.seed ? { ...h, kept } : h),
+                  })
+                  apiClient.setSeedKept(jobId, e.transcriptIndex, e.seed, kept)
+                    .catch((err) => {
+                      console.warn('[SEEDS] lock toggle failed', err)
+                      updateSegment(e.segmentIndex, { respeecher_seed_history: prevHist })
+                    })
+                }}
+                onDelete={(e) => {
+                  // Optimistic: the row disappears immediately, and a failed
+                  // delete restores it rather than leaving a phantom gone.
+                  const prevHist = displaySegments[e.segmentIndex]?.respeecher_seed_history
+                  updateSegment(e.segmentIndex, {
+                    respeecher_seed_history: (prevHist ?? []).filter(h => h.seed !== e.seed),
+                  })
+                  apiClient.deleteSeedHistoryEntry(jobId, e.transcriptIndex, e.seed)
+                    .catch((err) => {
+                      console.warn('[SEEDS] delete failed', err)
+                      updateSegment(e.segmentIndex, { respeecher_seed_history: prevHist })
+                    })
+                }}
               />
             </div>
           )}
@@ -8310,6 +8448,15 @@ export function DubVerseEditor({
       </div>
       
       {/* Timing Exclusion — Hard block (overlap > 0.3s): rewrite only */}
+      {engineNotice && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] px-3.5 py-2 rounded-full
+                        border border-amber-500/40 bg-neutral-900/95 shadow-lg
+                        text-xs text-amber-200 flex items-center gap-2 pointer-events-none">
+          <ArrowRightLeft className="h-3.5 w-3.5 shrink-0" />
+          {engineNotice}
+        </div>
+      )}
+
       {timingExclusion && timingExclusion.overlap > 0.3 && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="bg-neutral-900 border border-red-500/50 rounded-lg p-6 w-[440px] shadow-xl">

@@ -176,6 +176,20 @@ export interface DubResponse {
   message: string
 }
 
+/** A voice from Respeecher's catalogue. `sampling_params` describes how the voice
+ *  was tuned server-side — it is NOT settable. The public generation endpoint
+ *  silently ignores temperature/top_p/seed sent on a request (verified by probe:
+ *  a nonsense field returns 200, and three runs at a fixed seed give three
+ *  different durations). Surface it as metadata, never as controls. */
+export interface RespeecherVoice {
+  id: string
+  full_name?: string
+  gender?: string
+  accent?: string
+  is_best?: boolean
+  sampling_params?: Record<string, number>
+}
+
 export interface RegenerateSegmentRequest {
   text?: string
   voice_id?: string
@@ -190,6 +204,18 @@ export interface RegenerateSegmentRequest {
   nuance_markers?: Array<{ id: string; startChar: number; endChar: number; type: string; intensity: number }>
   custom_nuance?: string
   tts_text?: string
+  // "fish-audio" (default) | "respeecher". Omitted keeps the segment's stored
+  // engine, so callers that never set it are unaffected.
+  engine?: string
+  // Respeecher tuning. The backend nests these inside the voice object — sent at
+  // the top level of the vendor request they are silently dropped.
+  sampling_params?: Record<string, number>
+  // Pin generation so a re-render reproduces the approved take byte-for-byte.
+  // Omitted falls back to the segment's stored seed.
+  seed?: number
+  // Force a fresh race, discarding the segment's stored seed. Required to escape
+  // a take you don't want — an omitted seed alone would just replay it.
+  reroll?: boolean
   // Live timeline boundaries at the moment of regen — segments.json can go stale
   // after a split/resize whose commitSegmentTiming call hasn't landed yet (it's
   // fire-and-forget). Backend validates these before trusting them.
@@ -212,6 +238,22 @@ export interface RegenerateSegmentResponse {
     duration: number
     locked: boolean
     audio_duration?: number
+    // Engine actually used, after the backend's child / availability / unknown-voice
+    // fallbacks — not necessarily the one requested. The caller MUST read these off
+    // the response rather than assuming its request took effect.
+    engine?: string
+    respeecher_takes?: string[]
+    respeecher_take_seeds?: number[]
+    respeecher_fits?: boolean
+    respeecher_duration?: number
+    respeecher_seed?: number | null
+    respeecher_sampling_params?: Record<string, number> | null
+    respeecher_seed_history?: Array<{
+      seed: number
+      voice: string
+      params: Record<string, number> | null
+      kept?: boolean
+    }>
   }
 }
 
@@ -974,6 +1016,41 @@ class DubVerseAPIClient {
     return response.json()
   }
 
+  /**
+   * Remove one take from a segment's Respeecher seed library.
+   * `index` is the segment's transcript_index, not its row position.
+   */
+  async deleteSeedHistoryEntry(
+    jobId: string,
+    index: number,
+    seed: number
+  ): Promise<{ status: string; respeecher_seed_history: Array<{ seed: number; voice: string; params: Record<string, number> | null; kept?: boolean }> }> {
+    const res = await fetch(`${this.baseURL}/api/segment/seed/${jobId}/${index}/${seed}`, {
+      method: 'DELETE',
+    })
+    if (!res.ok) throw new Error(`Failed to delete seed: ${res.status}`)
+    return res.json()
+  }
+
+  /**
+   * Lock or unlock a take in the seed library. A locked entry is exempt from the
+   * history cap and is never evicted to make room for newer takes.
+   */
+  async setSeedKept(
+    jobId: string,
+    index: number,
+    seed: number,
+    kept: boolean
+  ): Promise<{ status: string }> {
+    const res = await fetch(`${this.baseURL}/api/segment/seed/${jobId}/${index}/${seed}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kept }),
+    })
+    if (!res.ok) throw new Error(`Failed to update seed: ${res.status}`)
+    return res.json()
+  }
+
   async resetSegment(jobId: string, index: number): Promise<{ status: string }> {
     const response = await fetch(
       `${this.baseURL}/api/segment/reset/${jobId}/${index}`,
@@ -984,6 +1061,19 @@ class DubVerseAPIClient {
       throw new Error(error.detail || `Reset failed: ${response.statusText}`)
     }
     return await response.json()
+  }
+
+  /** Respeecher's voice catalogue. Listing is not metered, so this succeeds even
+   *  when the account has no generation balance. Returns [] when the backend has
+   *  no API key configured, letting the panel show an empty state. */
+  async listRespeecherVoices(): Promise<RespeecherVoice[]> {
+    const response = await fetch(`${this.baseURL}/api/respeecher/voices`)
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Failed to load Respeecher voices: ${response.statusText}`)
+    }
+    const data = await response.json()
+    return data.voices ?? []
   }
 
   getAudioFileUrl(jobId: string, filename: string): string {
