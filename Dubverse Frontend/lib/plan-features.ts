@@ -30,6 +30,7 @@ export type FeatureKey =
   | 'performanceNotes'
   | 'voiceCloning'
   | 'customVoices'
+  | 'voiceChanger'
 
 export const FEATURE_MATRIX: Record<FeatureKey, PlanType[]> = {
   // All plans
@@ -55,6 +56,8 @@ export const FEATURE_MATRIX: Record<FeatureKey, PlanType[]> = {
   performanceNotes:     ['professional'],
   voiceCloning:         ['basic', 'professional'],
   customVoices:         ['professional'],
+  // Same gate as customVoices: burns ElevenLabs credits per use.
+  voiceChanger:         ['professional'],
 }
 
 export function planHasFeature(plan: PlanType | null, feature: FeatureKey): boolean {

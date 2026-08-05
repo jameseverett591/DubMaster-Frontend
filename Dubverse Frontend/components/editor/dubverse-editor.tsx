@@ -78,6 +78,7 @@ import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import VelmaPanel from '@/components/editor/velma-panel'
 import RespeecherPanel from '@/components/editor/respeecher-panel'
 import SeedLibraryPanel, { buildSeedLibrary } from '@/components/editor/seed-library-panel'
+import PerformPanel from '@/components/editor/perform-panel'
 import { HeatmapBar } from '@/components/timeline/HeatmapBar'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { ExportModal } from '@/components/editor/export-modal'
@@ -827,7 +828,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'respeecher' | 'seeds' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'ei-library' | 'nuances' | 'chord' | 'advanced' | 'characters'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'respeecher' | 'perform' | 'seeds' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'ei-library' | 'nuances' | 'chord' | 'advanced' | 'characters'>('result')
   const [velmaEnrichLoading, setVelmaEnrichLoading] = useState(false)
   const [velmaEnrichResult, setVelmaEnrichResult] = useState<{ patched: number; total: number } | null>(null)
 
@@ -888,8 +889,15 @@ export function DubVerseEditor({
           : name.slice(0, 2).toUpperCase()
       )
     })
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      apiClient.setToken(session?.access_token ?? null)
+    // Only clear on an explicit sign-out — see the same guard in the editor page.
+    // Supabase emits events with a null session while the user is still signed
+    // in, and clearing on those left every authenticated request tokenless.
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (session?.access_token) {
+        apiClient.setToken(session.access_token)
+      } else if (event === 'SIGNED_OUT') {
+        apiClient.setToken(null)
+      }
     })
     return () => subscription.unsubscribe()
   }, [])
@@ -4050,7 +4058,10 @@ export function DubVerseEditor({
       )}
       {/* Header */}
       <header className="relative flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-neutral-900">
-        <span className="absolute left-1/2 -translate-x-1/2 text-xs font-mono text-amber-400 select-all">
+        {/* Offset right of true centre: Make Movie now sits at the end of the
+            nav and reaches into the middle of the header, which this used to
+            overlap. */}
+        <span className="absolute left-1/2 -translate-x-1/2 ml-40 text-xs font-mono text-amber-400 select-all">
           {jobId}
         </span>
         <div className="flex items-center gap-4">
@@ -4086,6 +4097,39 @@ export function DubVerseEditor({
               Voice Library
             </Button>
             <Button variant="ghost" size="sm" className="bg-slate-800 text-white">Editor</Button>
+
+            {/* Make Movie lives up here, well away from the transport controls:
+                it kicks off a full render, and sitting beside play/stop invited
+                mis-clicks on a button you don't want fired by accident. */}
+            <Button
+              className={cn(
+                "ml-6 h-8 px-5 rounded-full text-xs font-bold tracking-widest uppercase",
+                "bg-transparent transition-colors",
+                rebuildStatus === 'idle' &&
+                  "bg-teal-500/10 hover:bg-teal-500/20 border border-teal-400/70 hover:border-teal-300 " +
+                  "text-teal-100 [text-shadow:0_0_6px_rgba(45,212,191,0.9)] " +
+                  "shadow-[0_0_10px_rgba(45,212,191,0.25),inset_0_0_12px_rgba(45,212,191,0.12)]",
+                rebuildStatus === 'processing' &&
+                  "bg-teal-500/15 border border-teal-300 animate-pulse text-teal-50 " +
+                  "[text-shadow:0_0_8px_rgba(45,212,191,1)] shadow-[0_0_16px_rgba(45,212,191,0.45)]",
+                rebuildStatus === 'complete' &&
+                  "bg-emerald-500/10 border border-emerald-400/70 text-emerald-100 " +
+                  "[text-shadow:0_0_6px_rgba(52,211,153,0.9)]",
+                rebuildStatus === 'error' &&
+                  "bg-red-500/10 border border-red-400/70 text-red-100 " +
+                  "[text-shadow:0_0_6px_rgba(248,113,113,0.9)]",
+              )}
+              onClick={handleRebuildVideo}
+              disabled={isRebuilding}
+              title="Render the finished dubbed video from the current timeline"
+            >
+              {rebuildStatus === 'complete'
+                ? <Check className="h-3.5 w-3.5 mr-1.5" />
+                : <RefreshCw className={cn("h-3.5 w-3.5 mr-1.5", isRebuilding && "animate-spin")} />}
+              {rebuildStatus === 'processing' ? 'MAKING MOVIE…'
+                : rebuildStatus === 'complete' ? 'MOVIE READY'
+                : 'MAKE MOVIE'}
+            </Button>
           </nav>
         </div>
         
@@ -4318,7 +4362,7 @@ export function DubVerseEditor({
               setImportedVideoFile(file)
             }}
             maxSeconds={recordingLimit}
-            triggerClassName="flex items-center gap-1.5 h-8 px-3 text-sm border border-slate-700 rounded-md hover:bg-slate-800 text-slate-200 transition-colors"
+            triggerClassName="flex items-center gap-1.5 h-8 px-3 text-sm border border-red-500/70 rounded-md bg-red-500/10 hover:bg-red-500/20 hover:border-red-400 text-red-200 transition-colors"
             triggerLabel="Record"
           />
           
@@ -5137,6 +5181,12 @@ export function DubVerseEditor({
                               'text-sm cursor-pointer select-none inline-flex items-center gap-1 px-3 py-1 rounded-full border-2 text-white',
                               lockedSegments.has(keyAt(index))
                                 ? 'border-emerald-400 bg-emerald-500/20 shadow-[0_0_10px_rgba(34,197,94,0.4)]'
+                                // Violet = driven by a recording. Deliberately not
+                                // greyed or disabled: the text still sets the
+                                // subtitle, QC and timing, it just no longer
+                                // decides how the segment SOUNDS.
+                                : segment.engine === 'elevenlabs-sts'
+                                  ? 'border-violet-400 bg-violet-500/10 shadow-[0_0_8px_rgba(167,139,250,0.35)]'
                                 : segment.isPreviewing
                                   ? 'border-orange-400 bg-orange-500/10 shadow-[0_0_8px_rgba(251,146,60,0.3)]'
                                   : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
@@ -5155,6 +5205,12 @@ export function DubVerseEditor({
                             }}
                           >
                             {lockedSegments.has(keyAt(index)) && <Lock className="h-3 w-3 shrink-0" />}
+                            {segment.engine === 'elevenlabs-sts' && (
+                              <Mic2
+                                className="h-3 w-3 shrink-0 text-violet-300"
+                                aria-label="Audio comes from a recording"
+                              />
+                            )}
                             {(segment.preview_text ?? segment.active_text ?? segment.target_text)
                               || <span className="text-slate-500 italic">Enter text…</span>}
                           </div>
@@ -5602,6 +5658,7 @@ export function DubVerseEditor({
                 { id: 'quality',    label: 'Quality' },
                 { id: 'velma',      label: 'Velma',        feature: 'velmaPanel' },
                 { id: 'respeecher', label: 'Respeecher' },
+                { id: 'perform',    label: 'Perform',      feature: 'voiceChanger' },
                 { id: 'seeds',      label: 'Seed Library' },
                 { id: 'studio',     label: 'Studio',       feature: 'studioCollaboration' },
                 { id: 'adaptation', label: 'Adaptation' },
@@ -5633,24 +5690,6 @@ export function DubVerseEditor({
                 </button>
               ))}
             </div>
-            <Button
-              className={cn(
-                "h-7 px-4 text-xs font-bold tracking-widest uppercase text-white",
-                rebuildStatus === 'idle' && "bg-red-600 hover:bg-red-700",
-                rebuildStatus === 'processing' && "bg-red-800 border border-red-500 animate-pulse shadow-[0_0_14px_rgba(239,68,68,0.5)]",
-                rebuildStatus === 'complete' && "bg-emerald-700 hover:bg-emerald-800",
-                rebuildStatus === 'error' && "bg-red-600 hover:bg-red-700",
-              )}
-              onClick={handleRebuildVideo}
-              disabled={isRebuilding}
-            >
-              {rebuildStatus === 'complete'
-                ? <Check className="h-3.5 w-3.5 mr-1" />
-                : <RefreshCw className={cn("h-3.5 w-3.5 mr-1", isRebuilding && "animate-spin")} />}
-              {rebuildStatus === 'processing' ? 'REBUILDING…'
-                : rebuildStatus === 'complete' ? 'REBUILD COMPLETE'
-                : 'REBUILD VIDEO'}
-            </Button>
             {rightPanelTab === 'result' && (
               <div className="flex items-center gap-1">
                 <Button
@@ -5882,6 +5921,37 @@ export function DubVerseEditor({
                   // voiceOverride omitted so voice_key falls back to the speaker's
                   // Fish mapping — a Respeecher slug would be meaningless to Fish.
                   handleGenerateSpeech(selectedSegmentIndex, undefined, undefined, undefined, 'fish-audio')
+                }}
+              />
+            </div>
+          )}
+
+          {rightPanelTab === 'perform' && (
+            <div className="flex-1 min-h-0 overflow-hidden bg-neutral-950">
+              <PerformPanel
+                segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
+                jobId={jobId}
+                isRegenerating={isRegenerating}
+                onPerformed={(updated) => {
+                  if (selectedSegmentIndex === null) return
+                  // Merge the backend's segment: the engine, the stored
+                  // performance and the new audio all come from the response,
+                  // never from what we asked for.
+                  const u = updated as Record<string, any>
+                  updateSegment(selectedSegmentIndex, {
+                    engine: u.engine,
+                    perf_path: u.perf_path,
+                    perf_model_id: u.perf_model_id,
+                    perf_denoise: u.perf_denoise,
+                    audio_url: u.path ? `${u.path}?ts=${Date.now()}` : undefined,
+                    committed_audio_url: u.path,
+                    status: 'edited',
+                    // Respeecher take metadata no longer describes this audio.
+                    respeecher_takes: undefined,
+                    respeecher_take_seeds: undefined,
+                    respeecher_fits: undefined,
+                    respeecher_duration: undefined,
+                  })
                 }}
               />
             </div>
@@ -6945,14 +7015,16 @@ export function DubVerseEditor({
               <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Clear editor" onClick={() => setShowRevertAllConfirm(true)}>
                 <Trash2 className="h-4 w-4" />
               </Button>
+              {/* Timecode lives here rather than in the centred group: it is ~90px
+                  of left-side weight that pushed everything after it off-centre. */}
+              <span className="ml-2 text-sm font-mono text-slate-400 tabular-nums">
+                {formatTime(currentTime)} / {formatTime(videoDuration)}
+              </span>
             </div>
           </div>
-          
+
           {/* Playback controls — absolute center */}
           <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2">
-            <span className="text-sm font-mono text-slate-400">
-              {formatTime(currentTime)} / {formatTime(videoDuration)}
-            </span>
             <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => setCurrentTime(0)}>
               <SkipBack className="h-4 w-4" />
             </Button>
@@ -7040,8 +7112,9 @@ export function DubVerseEditor({
             <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => setCurrentTime(videoDuration)}>
               <SkipForward className="h-4 w-4" />
             </Button>
+
           </div>
-          
+
           {/* Zoom + panel tab toggles — grouped on the right */}
           <div className="flex items-center gap-2">
             <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => setZoomLevel(zoomLevel / 1.5)}>

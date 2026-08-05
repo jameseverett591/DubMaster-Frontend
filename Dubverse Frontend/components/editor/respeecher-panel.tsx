@@ -254,43 +254,87 @@ export default function RespeecherPanel({
     setLocked(false)
   }
 
+  // Blank slate for the CONTROLS only — nothing on the segment is touched: its
+  // audio, takes, pinned seed and Seed Library entries all survive. Deliberately
+  // clears `selected` too, which resetAll doesn't, since resetAll only restores
+  // the current voice's defaults.
+  //
+  // This sticks: the hydration and preselect effects key off segment id / stored
+  // seed / params, none of which change here, so nothing races in behind it and
+  // repopulates. Selecting another segment starts them again as normal.
+  const clearPanel = () => {
+    setSelected(null)
+    setParams(FALLBACK_DEFAULTS)
+    setSeed(null)
+    setLocked(false)
+  }
+
   return (
     // Fills the pane and manages its own scrolling: the tuning column stays put
     // while the voice list scrolls, so the controls never slide out of reach.
     <div className="h-full flex flex-col p-3 gap-2.5 text-xs text-slate-300 min-h-0">
       {/* ── header ─────────────────────────────────────────────── */}
       <div className="flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-2 text-slate-200 font-medium min-w-0">
+        {/* Engine toggle. Both halves are buttons and the lit one comes from the
+            segment's stored engine, so one control both shows the state and
+            changes it — replacing the separate title, Fish button and chip.
+            Clicking the engine a segment is ALREADY on is a no-op: re-rendering
+            is what Generate and Re-roll are for, and an unpinned Respeecher
+            render costs three requests, so a stray click on the lit half must
+            not spend that. */}
+        <div className="flex items-center gap-2 min-w-0">
           <Mic2 className="h-3.5 w-3.5 text-cyan-400 shrink-0" />
-          Respeecher
-          {/* Always rendered, never gated on the segment's stored engine: that
-              field only exists once a segment has been regenerated, so gating it
-              hid the control on every segment that most needs it. */}
-          <button
-            onClick={onUseFish}
-            disabled={isRegenerating}
-            title="Re-render this segment on Fish Audio using the speaker's mapped voice"
-            className="shrink-0 text-[9px] px-2 py-0.5 rounded-full border border-teal-400/60
-                       bg-teal-500/25 text-white font-medium
-                       hover:bg-teal-500/40 hover:border-teal-300
-                       disabled:opacity-40 disabled:hover:bg-teal-500/25 transition-colors"
-          >
-            Fish Audio
-          </button>
+          <div className="flex rounded-full border border-slate-700 overflow-hidden shrink-0">
+            <button
+              onClick={() => {
+                if (lastEngine === 'respeecher' || !selected) return
+                onGenerate(selected, { ...params }, locked ? seed : null)
+              }}
+              disabled={isRegenerating || !selected}
+              title={
+                lastEngine === 'respeecher'
+                  ? 'This segment is on Respeecher'
+                  : selected
+                    ? `Re-render this segment on Respeecher with ${selected}`
+                    : 'Pick a voice first'
+              }
+              className={cn(
+                'text-[10px] px-2.5 py-1 font-medium transition-colors disabled:opacity-40',
+                lastEngine === 'respeecher'
+                  ? 'bg-cyan-500/30 text-white cursor-default'
+                  : 'bg-slate-900 text-slate-400 hover:bg-slate-800 hover:text-cyan-200'
+              )}
+            >
+              Respeecher
+            </button>
+            <button
+              onClick={() => { if (lastEngine !== 'fish-audio') onUseFish() }}
+              disabled={isRegenerating}
+              title={
+                lastEngine === 'fish-audio'
+                  ? 'This segment is on Fish Audio'
+                  : "Re-render this segment on Fish Audio using the speaker's mapped voice"
+              }
+              className={cn(
+                'text-[10px] px-2.5 py-1 font-medium border-l border-slate-700 transition-colors disabled:opacity-40',
+                lastEngine === 'fish-audio'
+                  ? 'bg-teal-500/30 text-white cursor-default'
+                  : 'bg-slate-900 text-slate-400 hover:bg-slate-800 hover:text-teal-200'
+              )}
+            >
+              Fish Audio
+            </button>
+          </div>
         </div>
-        {lastEngine && (
-          <span
-            title="The engine that rendered this segment"
-            className={cn(
-              'text-[9px] px-1.5 py-0.5 rounded-full border font-mono shrink-0',
-              lastEngine === 'respeecher'
-                ? 'border-cyan-500/40 bg-cyan-500/15 text-cyan-200'
-                : 'border-slate-700 bg-slate-800 text-slate-400'
-            )}
-          >
-            {lastEngine}
-          </span>
-        )}
+        <button
+          onClick={clearPanel}
+          title="Clear the voice, sampling and seed controls. Does not change this segment's audio, takes or saved seeds."
+          className="shrink-0 text-[10px] px-2.5 py-1 rounded-full border border-teal-400/60
+                     bg-teal-500/25 text-white font-medium
+                     hover:bg-teal-500/40 hover:border-teal-300 transition-colors"
+        >
+          Clear
+        </button>
       </div>
 
       {lastEngine === 'fish-audio' && (
