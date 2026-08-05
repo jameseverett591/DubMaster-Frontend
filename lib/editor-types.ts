@@ -153,6 +153,13 @@ export interface Segment {
     /** Locked by the user: exempt from the history cap, never evicted. */
     kept?: boolean
   }>
+  // Set when a segment is driven by a RECORDING rather than by its text.
+  // perf_path is the stored performance and is the segment's source of truth —
+  // re-renders convert from it, so editing the text does not change the audio.
+  // The text still drives the subtitle, QC and timing.
+  perf_path?: string
+  perf_model_id?: string
+  perf_denoise?: boolean
 }
 
 export interface QCScore {

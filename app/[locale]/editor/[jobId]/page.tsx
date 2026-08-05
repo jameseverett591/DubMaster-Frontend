@@ -56,8 +56,18 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
       }
     })
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        apiClient.setToken(session?.access_token ?? null)
+      (event, session) => {
+        // Only ever CLEAR on an explicit sign-out. Supabase fires events such as
+        // INITIAL_SESSION and TOKEN_REFRESHED that can carry a null session while
+        // the user is still signed in, and clearing on those disarmed the API
+        // client: the UI kept showing the signed-in user (read from the earlier
+        // getSession) while every authenticated request went out with no token
+        // and came back 401.
+        if (session?.access_token) {
+          apiClient.setToken(session.access_token)
+        } else if (event === 'SIGNED_OUT') {
+          apiClient.setToken(null)
+        }
       }
     )
     return () => subscription.unsubscribe()
@@ -182,6 +192,11 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             respeecher_seed: seg.respeecher_seed ?? null,
             respeecher_sampling_params: seg.respeecher_sampling_params ?? null,
             respeecher_seed_history: seg.respeecher_seed_history ?? undefined,
+            // Performance fields — same whitelist that dropped the Respeecher
+            // ones on load, so they go in up front rather than after the bug.
+            perf_path: seg.perf_path ?? undefined,
+            perf_model_id: seg.perf_model_id ?? undefined,
+            perf_denoise: seg.perf_denoise ?? undefined,
             emotionalCurve: {
               combined: [
                 { x: 0, y: 0.5 },

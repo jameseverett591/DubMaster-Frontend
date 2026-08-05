@@ -119,9 +119,16 @@ export function Dashboard() {
 
   // Keep API client token in sync with Supabase auth state
   useEffect(() => {
+    // Only clear on an explicit sign-out: Supabase emits events carrying a null
+    // session while the user is still signed in, and clearing on those left the
+    // API client tokenless while the UI still showed a signed-in user.
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        apiClient.setToken(session?.access_token ?? null)
+      (event, session) => {
+        if (session?.access_token) {
+          apiClient.setToken(session.access_token)
+        } else if (event === 'SIGNED_OUT') {
+          apiClient.setToken(null)
+        }
       }
     )
     return () => subscription.unsubscribe()

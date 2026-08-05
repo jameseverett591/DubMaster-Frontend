@@ -1016,6 +1016,78 @@ class DubVerseAPIClient {
     return response.json()
   }
 
+  /** Target voices for the Voice Changer panel (ElevenLabs stock voices). */
+  async listElevenLabsVoices(): Promise<{
+    voices: Array<{
+      id: string
+      name: string
+      gender: string | null
+      accent: string | null
+      description: string | null
+      preview_url: string | null
+    }>
+    enabled: boolean
+  }> {
+    const res = await fetch(`${this.baseURL}/api/elevenlabs/voices`)
+    if (!res.ok) return { voices: [], enabled: false }
+    return res.json()
+  }
+
+  /**
+   * Audition a performance against a target voice WITHOUT touching any segment.
+   * Returns the converted audio as a Blob for local playback.
+   */
+  async previewSts(
+    file: File,
+    voiceId: string,
+    opts?: { modelId?: string; removeBackgroundNoise?: boolean }
+  ): Promise<Blob> {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('voice_id', voiceId)
+    fd.append('model_id', opts?.modelId ?? 'eleven_english_sts_v2')
+    fd.append('remove_background_noise', String(opts?.removeBackgroundNoise ?? true))
+    const res = await fetch(`${this.baseURL}/api/elevenlabs/sts-preview`, {
+      method: 'POST',
+      headers: { ...this._authHeaders() },
+      body: fd,
+    })
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({ detail: res.statusText }))
+      throw new Error(e.detail || `Preview failed: ${res.status}`)
+    }
+    return res.blob()
+  }
+
+  /**
+   * Apply a recorded performance to a segment via ElevenLabs speech-to-speech.
+   * `index` is the segment's transcript_index, not its row position.
+   * No Content-Type header: the browser must set the multipart boundary itself.
+   */
+  async performSegment(
+    jobId: string,
+    index: number,
+    file: File,
+    voiceId: string,
+    opts?: { modelId?: string; removeBackgroundNoise?: boolean }
+  ): Promise<{ status: string; segment: Record<string, unknown> }> {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('voice_id', voiceId)
+    fd.append('model_id', opts?.modelId ?? 'eleven_english_sts_v2')
+    fd.append('remove_background_noise', String(opts?.removeBackgroundNoise ?? true))
+    const res = await fetch(`${this.baseURL}/api/segment/perform/${jobId}/${index}`, {
+      method: 'POST',
+      headers: { ...this._authHeaders() },
+      body: fd,
+    })
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({ detail: res.statusText }))
+      throw new Error(e.detail || `Perform failed: ${res.status}`)
+    }
+    return res.json()
+  }
+
   /**
    * Remove one take from a segment's Respeecher seed library.
    * `index` is the segment's transcript_index, not its row position.
