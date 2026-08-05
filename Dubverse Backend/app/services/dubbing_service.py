@@ -3020,6 +3020,20 @@ class DubbingService:
         # Observed in real data: a segment stored engine="fish-audio" with
         # voice_id="neal". Re-resolve from the speaker's Fish mapping instead.
         # Symmetric with the guard above, and keyed off the same catalogue.
+        # A performed segment re-renders from its stored recording. If that file
+        # is gone there is nothing to convert — fall back rather than fail, since
+        # the text is still there and Fish can speak it.
+        if use_engine == "elevenlabs-sts":
+            _perf = seg.get("perf_path")
+            if not _perf or not os.path.exists(_perf):
+                logger.warning(
+                    f"[ENGINE] seg {segment_index}: no stored performance -> fish-audio"
+                )
+                use_engine = "fish-audio"
+            elif not elevenlabs_tts.enabled:
+                logger.warning("[ENGINE] ElevenLabs unavailable (no API key) -> fish-audio")
+                use_engine = "fish-audio"
+
         # Mirrors get_voice_id's own resolution rules: a key in the map, or a raw
         # reference_id (>15 chars), is a Fish voice. Anything else — "neal",
         # "victoria-cyber" — is not, and get_voice_id would quietly substitute the
@@ -3091,6 +3105,24 @@ class DubbingService:
                 seed=_sd,
             )
             respeecher_meta = result
+        elif use_engine == "elevenlabs-sts":
+            # Re-convert from the stored performance. The recording is the source
+            # of truth here, so text edits, emotion pills and Delivery Scripts do
+            # NOT reach this engine — same as Respeecher, for the same reason:
+            # there is no directive channel to put them through.
+            with open(seg["perf_path"], "rb") as _pf:
+                _perf_bytes = _pf.read()
+            _payload = await elevenlabs_tts.speech_to_speech(
+                audio_bytes=_perf_bytes,
+                voice_id=use_voice_id,
+                output_path=audio_path,
+                model_id=seg.get("perf_model_id") or "eleven_english_sts_v2",
+                # Replay the isolation setting the take was made with, or the
+                # re-render would differ from the audio it is meant to reproduce.
+                remove_background_noise=bool(seg.get("perf_denoise")),
+                filename=os.path.basename(seg["perf_path"]),
+            )
+            result = {"path": audio_path, "engine": "elevenlabs-sts"} if _payload else None
         else:
             result = await fish_audio_tts.text_to_speech(
                 text=speak_text,
@@ -3109,7 +3141,9 @@ class DubbingService:
 
         # Fish consumes use_speed natively; Respeecher has no speed parameter, so
         # apply it here or the speed chip would silently do nothing on that engine.
-        if use_engine == "respeecher" and use_speed and abs(use_speed - 1.0) > 0.01:
+        # Neither Respeecher nor ElevenLabs STS has a speed parameter, so the
+        # speed chip has to be applied to the finished audio on both.
+        if use_engine in ("respeecher", "elevenlabs-sts") and use_speed and abs(use_speed - 1.0) > 0.01:
             sped_path = os.path.join(output_dir, f"segment_{segment_index:04d}_speed.mp3")
             if await self._apply_atempo(final_path, sped_path, use_speed):
                 final_path = sped_path

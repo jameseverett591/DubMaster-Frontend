@@ -5768,6 +5768,156 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
     return {"status": "ok", "segment": seg}
 
 
+@router.get("/elevenlabs/voices")
+async def get_elevenlabs_voices():
+    """Target voices for the Voice Changer panel.
+
+    Stock voices only. Cloned voices need a paid ElevenLabs plan, so on a Free
+    account this is the whole catalogue — the panel should say so rather than
+    showing an empty "your voices" section.
+    """
+    voices = await elevenlabs_tts.get_voices()
+    out = []
+    for v in voices:
+        lab = v.get("labels") or {}
+        out.append({
+            "id": v.get("voice_id"),
+            "name": v.get("name"),
+            "gender": lab.get("gender"),
+            "accent": lab.get("accent"),
+            "description": lab.get("description") or v.get("description"),
+            "preview_url": v.get("preview_url"),
+        })
+    return {"voices": out, "enabled": elevenlabs_tts.enabled}
+
+
+@router.post("/segment/perform/{job_id}/{index}")
+async def perform_segment(
+    job_id: str,
+    index: int,
+    request: Request,
+    file: UploadFile = File(...),
+    voice_id: str = Form(...),
+    model_id: str = Form("eleven_english_sts_v2"),
+    remove_background_noise: bool = Form(False),
+):
+    """Render a segment from a recorded performance instead of from its text.
+
+    `index` is the segment's transcript_index — a stable id, NOT its array
+    position (see commit_segment_timing).
+
+    The uploaded performance is STORED beside the segment and becomes its
+    source of truth, the way text is for the TTS engines. Without that, any
+    later re-render — a speed tweak, a bulk pass — would have nothing to
+    convert and would silently fall back to a different engine.
+
+    Gated to Professional, matching Custom Voices: each call spends ElevenLabs
+    credits, so it can't be reachable by hitting the API directly either.
+    """
+    _require_plan(request, ("professional",), "Voice Changer")
+
+    dubbed_dir = os.path.join(settings.DUBBED_DIR, job_id)
+    segments_path = os.path.join(dubbed_dir, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    seg = next((s for s in data.get("segments", []) if s.get("transcript_index") == index), None)
+    if seg is None:
+        raise HTTPException(status_code=404, detail=f"Segment with transcript_index={index} not found")
+    # Same choke point as regenerate: a locked segment's audio is frozen.
+    if seg.get("locked"):
+        raise HTTPException(status_code=423, detail=f"Segment {index} is locked — unlock it to change its audio")
+
+    audio = await file.read()
+    if not audio:
+        raise HTTPException(status_code=422, detail="Empty audio upload")
+
+    os.makedirs(dubbed_dir, exist_ok=True)
+    ext = os.path.splitext(file.filename or "")[1].lower() or ".mp3"
+    perf_path = os.path.join(dubbed_dir, f"segment_{index:04d}_perf{ext}")
+    with open(perf_path, "wb") as f:
+        f.write(audio)
+
+    audio_path = os.path.join(dubbed_dir, f"segment_{index:04d}_regen.mp3")
+    payload = await elevenlabs_tts.speech_to_speech(
+        audio_bytes=audio,
+        voice_id=voice_id,
+        output_path=audio_path,
+        model_id=model_id,
+        remove_background_noise=remove_background_noise,
+        filename=os.path.basename(perf_path),
+    )
+    if payload is None:
+        raise HTTPException(status_code=502, detail="ElevenLabs speech-to-speech failed — see server log")
+
+    seg["path"] = audio_path
+    seg["engine"] = "elevenlabs-sts"
+    seg["voice_id"] = voice_id
+    seg["perf_path"] = perf_path
+    seg["perf_model_id"] = model_id
+    # Stored so a re-render reproduces THIS conversion. Without it a take made
+    # with isolation on would quietly come back without it — the same shape of
+    # bug as sampling params that didn't survive a seed replay.
+    seg["perf_denoise"] = bool(remove_background_noise)
+    seg["audio_duration"] = dubbing_service._get_audio_duration(audio_path)
+    # Take metadata describes Respeecher audio that is no longer live.
+    for _k in ("respeecher_takes", "respeecher_take_seeds",
+               "respeecher_fits", "respeecher_duration"):
+        seg.pop(_k, None)
+
+    with open(segments_path, "w", encoding="utf-8") as f:
+        _json.dump(data, f, ensure_ascii=False, indent=2)
+
+    logger.info(
+        f"[PERFORM] job {job_id} seg {index}: {os.path.basename(perf_path)} "
+        f"-> {voice_id} denoise={remove_background_noise} "
+        f"({seg['audio_duration']:.2f}s)"
+    )
+    return {"status": "ok", "segment": seg}
+
+
+@router.post("/elevenlabs/sts-preview")
+async def elevenlabs_sts_preview(
+    request: Request,
+    file: UploadFile = File(...),
+    voice_id: str = Form(...),
+    model_id: str = Form("eleven_english_sts_v2"),
+    seed: Optional[int] = Form(None),
+    remove_background_noise: bool = Form(False),
+):
+    """Convert a performance onto a target voice and return the audio directly.
+
+    Deliberately stateless: no job, no segment, nothing written to
+    segments.json — this is the audition, and /segment/perform is the commit.
+
+    Gated like perform: a preview spends the same ElevenLabs credits as the
+    real thing, so an ungated audition endpoint would be a free hole through
+    a paid feature.
+    """
+    _require_plan(request, ("professional",), "Voice Changer")
+
+    audio = await file.read()
+    if not audio:
+        raise HTTPException(status_code=422, detail="Empty audio upload")
+
+    result = await elevenlabs_tts.speech_to_speech(
+        audio_bytes=audio,
+        voice_id=voice_id,
+        model_id=model_id,
+        seed=seed,
+        remove_background_noise=remove_background_noise,
+        filename=file.filename or "performance.wav",
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=502,
+            detail="ElevenLabs speech-to-speech failed — see server log",
+        )
+    return Response(content=result, media_type="audio/mpeg")
+
+
 @router.delete("/segment/seed/{job_id}/{index}/{seed}")
 async def delete_seed_history_entry(job_id: str, index: int, seed: int):
     """Drop one take from a segment's Respeecher seed library.

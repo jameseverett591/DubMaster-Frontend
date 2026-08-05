@@ -288,7 +288,72 @@ class ElevenLabsTTS:
             if fallback_path:
                 return {"path": fallback_path, "engine": "edge-tts"}
             return None
-    
+
+    # ----- Speech-to-speech (Voice Changer) -------------------------------- #
+
+    async def speech_to_speech(
+        self,
+        audio_bytes: bytes,
+        voice_id: str,
+        output_path: Optional[str] = None,
+        model_id: str = "eleven_english_sts_v2",
+        seed: Optional[int] = None,
+        remove_background_noise: bool = False,
+        filename: str = "performance.wav",
+    ) -> Optional[bytes]:
+        """Map a performance onto a target voice, keeping its delivery.
+
+        Unlike text_to_speech this takes AUDIO as the content source: words,
+        timing and emotion all come from the recording and only the timbre is
+        replaced. It does NOT translate — feed it Cantonese and you get
+        Cantonese in a new voice.
+
+        Returns the converted MP3 bytes, and writes them to output_path when
+        one is given.
+        """
+        if not self.enabled:
+            logger.warning("[EL-STS] ELEVENLABS_API_KEY not set")
+            return None
+
+        url = f"{ELEVENLABS_BASE_URL}/speech-to-speech/{voice_id}"
+        # 44.1 kHz mono MP3 is what the rest of the pipeline works in, so the
+        # result can sit beside other segments with no transcode. Also the
+        # default tier-wise: 192 kbps needs Creator+, PCM/WAV 44.1 needs Pro+.
+        params = {"output_format": "mp3_44100_128"}
+        data = {
+            "model_id": model_id,
+            "remove_background_noise": str(remove_background_noise).lower(),
+        }
+        if seed is not None:
+            data["seed"] = str(seed)
+        files = {"audio": (filename, audio_bytes, "application/octet-stream")}
+        # Deliberately NOT self.headers: that pins Content-Type: application/json,
+        # which would override the multipart boundary httpx needs to set here and
+        # the upload would be rejected.
+        headers = {"xi-api-key": self.api_key}
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                r = await client.post(url, params=params, data=data,
+                                      files=files, headers=headers)
+            if r.status_code != 200:
+                logger.error(f"[EL-STS] {r.status_code}: {r.text[:300]}")
+                return None
+            payload = r.content
+        except Exception as e:
+            logger.error(f"[EL-STS] request failed: {e}")
+            return None
+
+        if output_path:
+            os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+            with open(output_path, "wb") as f:
+                f.write(payload)
+        logger.info(
+            f"[EL-STS] voice={voice_id} model={model_id} seed={seed} "
+            f"bytes={len(payload)}"
+        )
+        return payload
+
     async def _fallback_tts(
         self,
         text: str,
