@@ -68,13 +68,60 @@ are remembered across sessions (saved in the browser):
   change voice, emotion, QC scores, or other segments. Requires a Premium or
   Professional plan.
 
+## Voice engines — Fish Audio and Respeecher
+
+DubMaster can render a segment with either of two voice engines, chosen per
+segment. The **Respeecher** tab shows which one a segment last used as a small
+chip in its header (`fish-audio` or `respeecher`).
+
+- **To use Respeecher:** open the Respeecher tab, pick a voice, press Generate.
+- **To go back to Fish Audio:** press the **Fish Audio** button next to the
+  Respeecher tab's title. It re-renders the segment with the voice that
+  speaker is mapped to.
+- **Dropping a Fish voice** onto a segment also moves it to Fish Audio.
+
+Some segments always render on Fish Audio regardless: **child speakers**
+(Respeecher has no child voice), and any segment whose voice isn't in
+Respeecher's catalogue.
+
+### The two engines take direction very differently
+
+**Fish Audio** understands performance direction. Emotion pills, Nuances and
+Delivery Script tags all reach it and shape the read.
+
+**Respeecher has no directive language at all.** It speaks the segment's text
+and nothing else — emotion pills, nuance directives and Delivery Script tags
+do **not** reach a Respeecher render. On Respeecher your levers are:
+
+- **Punctuation and phrasing.** A comma buys a beat; a full stop buys more.
+  This is the main way to shape a Respeecher read.
+- **The voice you cast.** Each Respeecher voice ships its own tuning.
+- **The sampling controls** in the Respeecher tab.
+
+Respeecher also has no speed or pitch parameter. The speed chip still works —
+DubMaster time-stretches the finished audio instead.
+
+### Why Respeecher gives you three takes
+
+Respeecher's read length varies noticeably between generations of the same
+line. DubMaster generates three takes and keeps the one that best fits the
+segment's slot — the longest that still fits, since that's closest to natural
+pacing. The other two stay listed as `alt1` and `alt2` so you can hear them.
+
+If even the best take overruns the slot by more than can be corrected cleanly,
+DubMaster tells you rather than squashing the audio to fit.
+
 ## How emotions reach the voice (emotion pills)
 
-DubMaster's voice engine (Fish Audio S2) takes performance direction as
-free-form natural-language descriptions. When you set an emotion pill on a
+DubMaster's Fish Audio S2 engine takes performance direction as free-form
+natural-language descriptions. When you set an emotion pill on a
 segment, DubMaster does NOT send the bare word — it automatically expands it
 into a rich delivery description the voice engine acts on. You never type tags
 yourself; setting a pill changes delivery on the segment's next (re)generation.
+
+**This applies to segments rendered with Fish Audio.** Respeecher has no
+directive language, so a pill set on a Respeecher segment does not change its
+audio — see "Voice engines" above.
 
 The 20 pills map as follows — **pill → what the voice engine actually receives**:
 
@@ -159,6 +206,10 @@ better than maxing everything at once. Like the rest of this panel, it is discar
 if the segment has a Delivery Script.
 
 ## Delivery Script — inline tags placed exactly where you want them
+
+**Delivery Script is a Fish Audio feature.** Writing one on a segment that's
+currently on Respeecher moves that segment to Fish Audio so the tags are
+actually honoured — a brief notice tells you when that happens.
 
 For fine, positional control you can write the line together with inline delivery
 tags in **square brackets**, placed at the exact point where the shift should
@@ -378,6 +429,34 @@ the top of the library and are assigned the same way. A "Clear All Voices" butto
 removes every speaker's voice assignment for the whole job at once (with a confirmation
 dialog showing how many segments are affected) — this is a bulk action, separate from
 clearing one segment via the context menu.
+
+## Seed Library
+
+Every Respeecher take is produced from a **seed** — a number that, replayed
+with the same voice and settings, reproduces that same read in a single
+request rather than generating three fresh ones. The **Seed Library** tab
+lists every take this job has produced.
+
+A seed only reproduces **its own line**. The text is part of the take, so a
+seed recalled after you've rewritten the line gives you an unrelated read.
+
+Each row shows the line, the voice, and the seed, with:
+
+- **use** — re-render that entry's own segment from its seed. One request,
+  and normally the exact take back. Occasionally the read varies slightly;
+  that's the engine, not a fault.
+- **padlock** (gold when on) — keep this take forever. Unlocked entries are
+  dropped once a segment accumulates more than twelve, so lock anything you
+  want to keep.
+- **trash** — forget the entry. This only removes it from the list; the
+  segment's current audio is untouched.
+- **live** — this seed is what the segment plays right now.
+- **#number** — jumps the timeline to that segment.
+
+There's also a filter box (line, voice or seed) and a **this segment** toggle.
+
+The library is per job. Locking a seed protects it from being dropped
+automatically; it does not stop you deleting it deliberately.
 
 ## QC (Quality Control) panel
 
