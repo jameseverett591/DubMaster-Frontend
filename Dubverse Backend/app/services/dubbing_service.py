@@ -15,6 +15,7 @@ import httpx
 from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
 from app.services.respeecher_service import respeecher_tts, SEED_HISTORY_MAX
+from app.services import tts_usage
 from app.services.translation_service import (
     translation_service,
     natural_duration,
@@ -1137,6 +1138,18 @@ class DubbingService:
 
                 if result:
                     actual_engine = result.get("engine", provider_name)
+                    # First-pass cost, kept separate from regenerations so the
+                    # iteration tail can be seen on its own.
+                    try:
+                        tts_usage.record(
+                            output_dir,
+                            actual_engine,
+                            characters=len(tts_text or text or ""),
+                            api_requests=1,
+                            regeneration=False,
+                        )
+                    except Exception:
+                        pass
                     logger.info(
                         f"Segment {i}: engine={actual_engine} speaker={speaker} "
                         f"voice={voice_id} speed={tts_kwargs.get('speed', 1.0) if tts_kwargs else 1.0} "
@@ -3138,6 +3151,28 @@ class DubbingService:
             )
 
         final_path = result["path"]
+
+        # Cost accounting for this regeneration. api_requests is what the vendor
+        # actually billed: a Respeecher race is three requests for one segment,
+        # so counting "one call" would understate it threefold.
+        try:
+            _billed = 1
+            _audio_s = 0.0
+            if use_engine == "respeecher" and respeecher_meta:
+                _billed = max(1, len(respeecher_meta.get("take_seeds") or []) or 1)
+                _audio_s = float(respeecher_meta.get("duration") or 0.0)
+            elif use_engine == "elevenlabs-sts":
+                _audio_s = float(self._get_audio_duration(final_path) or 0.0)
+            tts_usage.record(
+                output_dir,
+                use_engine,
+                characters=len(speak_text or ""),
+                audio_seconds=_audio_s,
+                api_requests=_billed,
+                regeneration=True,
+            )
+        except Exception as _e:
+            logger.warning(f"[TTS-USAGE] regen accounting skipped: {_e}")
 
         # Fish consumes use_speed natively; Respeecher has no speed parameter, so
         # apply it here or the speed chip would silently do nothing on that engine.

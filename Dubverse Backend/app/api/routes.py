@@ -34,6 +34,7 @@ from app.models import (
 from app.config import get_settings
 from app.storage.manager import StorageManager
 from app.services.job_manager import job_manager
+from app.services import usage_service
 from app.services.supabase_client import verify_jwt
 from app.pipeline.chunk_video import VideoChunker
 from app.pipeline.extract_audio import extract_audio
@@ -999,10 +1000,26 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
     if not runpod_job_id:
         raise RuntimeError(f"RunPod did not return a job ID: {submit_result}")
 
+    async def _record_gpu_cost(exec_s: float, queue_s: float) -> None:
+        # Stored on the job so cost per source minute accumulates across runs
+        # rather than living only in a log line that rotates away.
+        j = await job_manager.get_job(job_id)
+        if j is None:
+            return
+        j.gpu_execution_seconds = exec_s
+        j.gpu_queue_seconds = queue_s
+        dur = getattr(j, "video_duration", None)
+        if dur:
+            logger.info(
+                f"[RUNPOD-COST] job {job_id}: {exec_s:.1f}s GPU for {dur:.1f}s source "
+                f"({exec_s / (dur / 60):.1f}s GPU per source minute)"
+            )
+
     result = await runpod_service.poll_until_complete(
         runpod_job_id=runpod_job_id,
         timeout=runpod_poll_timeout,
         progress_callback=_progress_cb,
+        timing_callback=_record_gpu_cost,
     )
 
     if result.get("error"):
@@ -2028,10 +2045,54 @@ async def upload_video(
                         detail=f"File too large. Max size: {settings.MAX_UPLOAD_SIZE / (1024**3):.1f}GB"
                     )
         
+        # Per-plan length cap. The uploader checks this before transferring, so
+        # this copy exists for callers that skip the UI — without it the limit
+        # is a UI courtesy, not an entitlement.
+        _plan = await asyncio.to_thread(_plan_for_user, user_id)
+        _dur = await asyncio.to_thread(_probe_video_duration, video_path)
+        if _plan != _PLAN_UNKNOWN:
+            # No subscription is treated as basic (most restrictive); a failed
+            # lookup is not, so an outage can't cap a paying customer.
+            _plan_key = _plan or "basic"
+            _cap = UPLOAD_DURATION_LIMITS.get(_plan_key)
+            if _cap and _dur and _dur > _cap:
+                os.remove(video_path)
+                await job_manager.delete_job(job_id)
+                _hours = _cap // 3600
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"Video is {_dur / 60:.0f} min. Your plan allows up to "
+                        f"{_hours} hour{'' if _hours == 1 else 's'}."
+                    ),
+                )
+
+            # Reserve the minutes before any work starts. Refunded in full by
+            # job_manager if the job ends FAILED or CANCELLED.
+            _pool = PLAN_MINUTES.get(_plan_key)
+            if _pool and _dur:
+                _need = usage_service.minutes_for(_dur)
+                _used = await asyncio.to_thread(usage_service.get_used_minutes, user_id)
+                _left = _pool - _used
+                if _need > _left:
+                    os.remove(video_path)
+                    await job_manager.delete_job(job_id)
+                    raise HTTPException(
+                        status_code=402,
+                        detail=(
+                            f"This video needs {_need} min but you have {max(0, _left)} "
+                            f"of your {_pool}-minute monthly allowance left."
+                        ),
+                    )
+                if await asyncio.to_thread(usage_service.adjust, user_id, _need):
+                    _j = await job_manager.get_job(job_id)
+                    if _j is not None:
+                        _j.minutes_charged = _need
+
         job = await job_manager.get_job(job_id)
         if job:
             job.video_size = file_size
-        
+
         logger.info(f"File uploaded: {file.filename} ({file_size} bytes) -> Job {job_id}")
         
         background_tasks.add_task(process_video_pipeline, job_id, video_path)
@@ -4047,6 +4108,67 @@ def _save_custom_voices(voices: list) -> None:
         _json.dump(voices, f, indent=2, ensure_ascii=False)
 
 
+# Max length of an UPLOADED video per plan, in seconds. Professional is absent
+# from the map, meaning unlimited. Mirrors UPLOAD_DURATION_LIMITS in the
+# frontend's lib/plan-features.ts — the client checks this too, for a fast
+# rejection; this is the copy that actually enforces it.
+# Monthly dubbing allowance in MINUTES, pooled across every video in the period.
+# Mirrors PLAN_MINUTES in the frontend's lib/plan-features.ts — keep in step.
+PLAN_MINUTES = {
+    "basic":         60,
+    "premium":      120,
+    "professional": 300,
+}
+
+# A single file may not exceed the whole monthly pool, so one upload can't
+# swallow the billing period. Derived so the two can't drift apart.
+UPLOAD_DURATION_LIMITS = {k: v * 60 for k, v in PLAN_MINUTES.items()}
+
+# Returned when the plan lookup itself fails, as distinct from "no subscription".
+_PLAN_UNKNOWN = "__lookup_failed__"
+
+
+def _plan_for_user(user_id: str) -> Optional[str]:
+    """The caller's active plan, None if they have no subscription, or
+    _PLAN_UNKNOWN if the lookup failed.
+
+    The three cases are kept apart deliberately: no subscription should be
+    treated as the most restrictive plan, but a Supabase blip should NOT
+    suddenly cap a paying customer's upload — see the caller.
+    """
+    from app.services.supabase_client import supabase_writer
+    try:
+        res = supabase_writer.table("subscriptions") \
+            .select("plan_type") \
+            .eq("user_id", user_id) \
+            .in_("status", ["active", "trialing"]) \
+            .limit(1) \
+            .execute()
+        return res.data[0]["plan_type"] if res.data else None
+    except Exception as e:
+        logger.warning(f"[PLAN] lookup failed for {user_id}: {e}")
+        return _PLAN_UNKNOWN
+
+
+def _probe_video_duration(path: str) -> Optional[float]:
+    """Duration in seconds via ffprobe, or None when it can't be read.
+
+    Unreadable is NOT treated as over-length: better to accept a file we
+    couldn't measure than to reject a valid one on our own limitation.
+    """
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=60,
+        )
+        val = out.stdout.strip()
+        return float(val) if out.returncode == 0 and val else None
+    except Exception as e:
+        logger.warning(f"[UPLOAD] ffprobe failed for {path}: {e}")
+        return None
+
+
 def _require_plan(request: Request, allowed: tuple, feature: str) -> str:
     """Enforce plan entitlement server-side — mirrors the auth pattern in /ask-ai
     so a gated feature can't be reached by hitting the API directly. Raises 403 if
@@ -5688,20 +5810,30 @@ async def reset_segment(job_id: str, index: int):
 
 
 @router.get("/respeecher/voices")
-async def list_respeecher_voices():
+async def list_respeecher_voices(request: Request):
     """Respeecher's voice catalogue for the editor panel.
 
     Free call — listing is not metered, so this works even when the account has
     no generation balance. Cached in the service after the first fetch.
     Returns [] when no API key is configured, so the panel degrades to an empty
     state instead of erroring.
+
+    Professional only, matching the engine itself.
     """
+    _require_plan(request, ("professional",), "Respeecher")
     voices = await respeecher_tts.get_voices()
     return {"voices": voices, "enabled": respeecher_tts.enabled}
 
 
 @router.post("/segment/regenerate/{job_id}/{index}")
-async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
+async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest, request: Request):
+    # Respeecher is Professional-only: each generate races three takes, so every
+    # use is three billable vendor requests. Gated on the REQUESTED engine, not
+    # on the segment's stored one — a Premium user must still be able to
+    # regenerate a segment that was previously rendered on Respeecher, which
+    # falls through to Fish.
+    if (body.engine or "").lower() == "respeecher":
+        _require_plan(request, ("professional",), "Respeecher")
     try:
         voice_id = body.voice_id
         speed = body.speed

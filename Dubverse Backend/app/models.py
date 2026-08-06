@@ -74,6 +74,16 @@ class Job(BaseModel):
     video_path: str
     video_duration: Optional[float] = None
     video_size: int
+    # Cost accounting. RunPod bills per millisecond of EXECUTION; queue wait is
+    # free but recorded because it's the number that decides whether a bigger,
+    # pricier GPU tier is worth it. Paired with video_duration these give a real
+    # GPU cost per source minute instead of an estimate.
+    gpu_execution_seconds: Optional[float] = None
+    gpu_queue_seconds: Optional[float] = None
+    # Minutes reserved from the user's monthly pool when this job was accepted.
+    # Cleared once refunded, so a job that fails twice — or a retried status
+    # update — can't return the same minutes more than once.
+    minutes_charged: Optional[int] = None
     expected_speakers: int = 2
     source_language: Optional[str] = None  # ISO code (e.g. "yue", "en") or None for auto-detect
     target_language: Optional[str] = None  # ISO code (e.g. "en", "es") set at upload time

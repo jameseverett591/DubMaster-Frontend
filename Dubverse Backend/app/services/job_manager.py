@@ -4,6 +4,7 @@ import asyncio
 import logging
 import json
 import os
+import uuid as _uuid
 from pathlib import Path
 
 from app.models import Job, JobStatus
@@ -17,9 +18,20 @@ async def _upsert_job(job) -> None:
         from app.services.supabase_client import supabase_writer
         if os.environ.get("PERSIST_JOBS", "1") != "1":
             return
+        # user_id is a uuid column. Two paths put a non-uuid in it — the
+        # rehydrate-from-disk helper passes nothing (so ""), and the reference
+        # transcription path passes the literal "ref". Postgres rejected both
+        # with 22P02, which meant EVERY upsert for those jobs 400'd and the job
+        # never persisted at all. Send NULL rather than something it can't parse.
+        _uid = job.user_id
+        try:
+            _uuid.UUID(str(_uid))
+        except (ValueError, AttributeError, TypeError):
+            _uid = None
+
         payload = {
             "job_id": job.job_id,
-            "user_id": job.user_id,
+            "user_id": _uid,
             "status": job.status.value,
             "progress": job.progress,
             "current_stage": job.current_stage,
@@ -131,6 +143,25 @@ class JobManager:
             if status == JobStatus.COMPLETED:
                 job.completed_at = datetime.now()
                 job.progress = 100
+
+            # Refund the reserved minutes when a job ends badly. Done HERE rather
+            # than at the half-dozen call sites that set FAILED, because every
+            # status change funnels through this method — a per-site refund would
+            # be one `raise` away from being missed.
+            #
+            # minutes_charged is cleared first so a repeated terminal update
+            # can't return the same minutes twice.
+            if status in (JobStatus.FAILED, JobStatus.CANCELLED) and job.minutes_charged:
+                refund = job.minutes_charged
+                job.minutes_charged = None
+                try:
+                    from app.services.usage_service import adjust
+                    await asyncio.to_thread(adjust, job.user_id, -refund)
+                    logger.info(
+                        f"Job {job_id} {status.value}: refunded {refund} min to {job.user_id}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Job {job_id}: refund failed: {e}")
 
             asyncio.create_task(_upsert_job(job))
             logger.info(f"Job {job_id} updated: status={status}, progress={progress}%")
