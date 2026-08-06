@@ -39,24 +39,45 @@ import Link from "next/link"
 import { LanguageSwitcher } from "@/components/language-switcher"
 
 /* ─── Floating particles component ─── */
+
+/** Deterministic pseudo-random in [0,1) from a particle index and a salt.
+ *
+ *  These used Math.random() during render, which returns different values on
+ *  the server and the client — a guaranteed hydration mismatch on every page
+ *  load, which React reports and which makes it discard the server HTML for
+ *  this subtree. Seeding from the index keeps the scatter looking random while
+ *  producing identical markup on both sides. */
+function particleRand(i: number, salt: number): number {
+  const x = Math.sin(i * 127.1 + salt * 311.7) * 43758.5453
+  return x - Math.floor(x)
+}
+
 function Particles() {
   return (
     <div className="absolute inset-0 overflow-hidden pointer-events-none">
-      {Array.from({ length: 30 }).map((_, i) => (
-        <div
-          key={i}
-          className="absolute rounded-full opacity-0"
-          style={{
-            width: `${Math.random() * 4 + 2}px`,
-            height: `${Math.random() * 4 + 2}px`,
-            left: `${Math.random() * 100}%`,
-            top: `${Math.random() * 100}%`,
-            background: i % 3 === 0 ? "#A855F7" : i % 3 === 1 ? "#22D3EE" : "#C084FC",
-            boxShadow: `0 0 ${Math.random() * 10 + 5}px ${i % 2 === 0 ? "#A855F7" : "#22D3EE"}`,
-            animation: `floatParticle ${Math.random() * 8 + 6}s ease-in-out ${Math.random() * 5}s infinite`,
-          }}
-        />
-      ))}
+      {Array.from({ length: 30 }).map((_, i) => {
+        const size  = particleRand(i, 1) * 4 + 2
+        const left  = particleRand(i, 2) * 100
+        const top   = particleRand(i, 3) * 100
+        const glow  = particleRand(i, 4) * 10 + 5
+        const dur   = particleRand(i, 5) * 8 + 6
+        const delay = particleRand(i, 6) * 5
+        return (
+          <div
+            key={i}
+            className="absolute rounded-full opacity-0"
+            style={{
+              width: `${size}px`,
+              height: `${size}px`,
+              left: `${left}%`,
+              top: `${top}%`,
+              background: i % 3 === 0 ? "#A855F7" : i % 3 === 1 ? "#22D3EE" : "#C084FC",
+              boxShadow: `0 0 ${glow}px ${i % 2 === 0 ? "#A855F7" : "#22D3EE"}`,
+              animation: `floatParticle ${dur}s ease-in-out ${delay}s infinite`,
+            }}
+          />
+        )
+      })}
     </div>
   )
 }

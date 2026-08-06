@@ -68,6 +68,9 @@ export function BasicVideoPanel({ jobId, onStale, onReviewingChange }: BasicVide
   const [translatedSegments, setTranslatedSegments] = useState<Array<{ text: string; start: number; end: number; speaker: string; source_text?: string; segment_id?: string }> | null>(null)
   const [sourceLang, setSourceLang] = useState<string | null>(null)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Counts polls seen in the "completed but no URL yet" window, so the wait
+  // for a late URL is bounded rather than indefinite.
+  const completedNoUrlRef = useRef(0)
 
   useEffect(() => {
     const poll = async () => {
@@ -82,10 +85,21 @@ export function BasicVideoPanel({ jobId, onStale, onReviewingChange }: BasicVide
             const url = s.dubbed_video_url
             setDubbedUrl(url.startsWith("http") ? url : `${apiBase}${url}`)
             setPhase("complete")
-          } else {
-            setPhase(prev => prev === "dubbing" || prev === "reviewing" ? prev : "ready")
+            clearInterval(intervalRef.current!)
+            return
           }
-          clearInterval(intervalRef.current!)
+
+          // Completed, but the dubbed URL is not in the payload yet: the job
+          // flips to "completed" a moment before that URL is persisted.
+          // Previously this stopped polling anyway, leaving the panel stuck on
+          // "Generating dubbed audio..." until the user refreshed — the refresh
+          // was the only thing that ever recovered it. Keep polling instead,
+          // bounded so a URL that never arrives can't spin forever.
+          completedNoUrlRef.current += 1
+          if (completedNoUrlRef.current >= 15) {   // ~60s at the 4s interval
+            setPhase(prev => prev === "dubbing" || prev === "reviewing" ? prev : "ready")
+            clearInterval(intervalRef.current!)
+          }
           return
         }
 
@@ -333,7 +347,14 @@ export function BasicVideoPanel({ jobId, onStale, onReviewingChange }: BasicVide
               asChild
               className="w-full bg-gradient-to-r from-[#A855F7] to-[#22D3EE] text-white font-semibold hover:opacity-90 transition-opacity"
             >
-              <a href={dubbedUrl} download>
+              {/* ?attachment=1 rather than the `download` attribute: that
+                  attribute is ignored cross-origin, and the API is on a
+                  different port, so the link only ever played the video.
+                  Content-Disposition from the server is what saves it. */}
+              <a
+                href={`${dubbedUrl}${dubbedUrl.includes("?") ? "&" : "?"}attachment=1`}
+                download
+              >
                 <Download className="mr-2 h-4 w-4" />
                 Download Dubbed Video
               </a>
