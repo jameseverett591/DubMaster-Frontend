@@ -79,6 +79,56 @@ def record(
         logger.warning(f"[TTS-USAGE] record failed for {job_dir}: {e}")
 
 
+def record_lipsync(
+    job_dir: str,
+    provider: str,
+    *,
+    video_seconds: float,
+    succeeded: bool,
+) -> None:
+    """Record one lip-sync pass.
+
+    Kept in its own bucket rather than folded in with the TTS engines: lip-sync
+    is billed by the minute of VIDEO (not of speech), by a different vendor, at
+    a different rate — the market prices it at 2-3x audio-only. Pricing it as a
+    separate currency only works if it's measured as one.
+
+    Failures are recorded too. A failed pass still costs vendor time, and a
+    provider that fails often is a cost you cannot see if only successes count.
+    """
+    if not job_dir:
+        return
+    try:
+        with _lock:
+            os.makedirs(job_dir, exist_ok=True)
+            p = _path(job_dir)
+            data: Dict = {}
+            if os.path.exists(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+
+            section = data.setdefault("lipsync", {})
+            e = section.setdefault(provider, {
+                "calls": 0, "failed": 0, "video_seconds": 0.0,
+            })
+            e["calls"] += 1
+            if not succeeded:
+                e["failed"] += 1
+            e["video_seconds"] += float(video_seconds or 0.0)
+
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        logger.info(
+            f"[LIPSYNC-USAGE] {provider}: {video_seconds:.1f}s video "
+            f"({'ok' if succeeded else 'FAILED'})"
+        )
+    except Exception as e:
+        logger.warning(f"[LIPSYNC-USAGE] record failed for {job_dir}: {e}")
+
+
 def summary(job_dir: str) -> Optional[Dict]:
     """The recorded tally for a job, or None if nothing was recorded."""
     p = _path(job_dir)

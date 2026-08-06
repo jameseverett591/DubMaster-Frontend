@@ -36,6 +36,7 @@ from app.config import get_settings
 from app.storage.manager import StorageManager
 from app.services.job_manager import job_manager
 from app.services import usage_service
+from app.services import tts_usage
 from app.services.supabase_client import verify_jwt
 from app.pipeline.chunk_video import VideoChunker
 from app.pipeline.extract_audio import extract_audio
@@ -3357,6 +3358,20 @@ async def process_dubbing_pipeline(
                         audio_path=audio_path,        # merged dubbed audio
                         output_path=dubbed_output_path,  # overwrites dubbed video in-place
                     )
+                    # Metered by VIDEO duration, which is what lip-sync vendors
+                    # bill on — unlike TTS, which bills speech. Recorded even
+                    # on failure: a failed pass still costs vendor time.
+                    try:
+                        _lj = await job_manager.get_job(job_id)
+                        tts_usage.record_lipsync(
+                            os.path.join(settings.DUBBED_DIR, job_id),
+                            "synclabs",
+                            video_seconds=float(getattr(_lj, "video_duration", 0) or 0),
+                            succeeded=bool(lipsync_ok),
+                        )
+                    except Exception as _e:
+                        logger.warning(f"[LIPSYNC-USAGE] accounting skipped: {_e}")
+
                     if lipsync_ok:
                         logger.info(f"Job {job_id}: lip sync applied successfully")
                     else:
