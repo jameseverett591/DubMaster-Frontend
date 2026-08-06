@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "ยกระดับเนื้อหาของคุณ เข้าถึงทั่วโลก",
     "uploadTitle": "อัปโหลดวิดีโอของคุณ",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • สูงสุด 2 ชั่วโมง • สูงสุด 5GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • สูงสุด 5GB",
     "dragAndDrop": "ลากและวางวิดีโอของคุณ",
     "clickToBrowse": "คลิกเพื่อเรียกดู",
     "fromYourComputer": "จากคอมพิวเตอร์ของคุณ",
@@ -143,7 +143,7 @@
       "audience": "ครีเอเตอร์เนื้อหาและ YouTuber",
       "cta": "เริ่มแผนเบสิก",
       "features": {
-        "minutes": "วิดีโอ 45 นาที/เดือน",
+        "minutes": "วิดีโอ 60 นาที/เดือน",
         "voiceCloning": "โคลนเสียงจากวิดีโอ",
         "autoDubbing": "พากย์เสียงอัตโนมัติ",
         "languages": "กว่า 50 ภาษา",
@@ -160,7 +160,7 @@
       "audience": "ครีเอเตอร์มืออาชีพและสตูดิโอขนาดเล็ก",
       "cta": "เริ่มแผนพรีเมียม",
       "features": {
-        "minutes": "วิดีโอ 90 นาที/เดือน",
+        "minutes": "วิดีโอ 120 นาที/เดือน",
         "editor": "โปรแกรมตัดต่อ Timeline มืออาชีพ",
         "qc": "QC ขั้นสูง (7 ตัวชี้วัด)",
         "turnaround": "ส่งมอบภายใน 24 ชั่วโมงแบบเร่งด่วน",
@@ -175,9 +175,9 @@
       "tagline": "พากย์เสียงมืออาชีพไม่จำกัดสำหรับผู้สร้างภาพยนตร์จริงจัง",
       "taglineShort": "พากย์เสียงมืออาชีพไม่จำกัด",
       "audience": "สตูดิโอภาพยนตร์และผู้จัดจำหน่าย",
-      "cta": "นัดหมาย Enterprise Demo",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "ภาพยนตร์ยาวกว่า 2 ชั่วโมงไม่จำกัด/เดือน",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "รวมฟีเจอร์ Premium ทั้งหมด",
         "editor": "โปรแกรมตัดต่อ Timeline มืออาชีพ",
         "revisions": "แก้ไขไม่จำกัดครั้ง",

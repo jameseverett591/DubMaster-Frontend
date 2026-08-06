@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "अपनी सामग्री बदलें। दुनिया तक पहुँचें।",
     "uploadTitle": "अपना वीडियो अपलोड करें",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • 2 घंटे तक • अधिकतम 5GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • अधिकतम 5GB",
     "dragAndDrop": "अपना वीडियो खींचें और छोड़ें",
     "clickToBrowse": "ब्राउज़ करने के लिए क्लिक करें",
     "fromYourComputer": "अपने कंप्यूटर से",
@@ -143,7 +143,7 @@
       "audience": "कंटेंट क्रिएटर्स और YouTubers",
       "cta": "बेसिक प्लान शुरू करें",
       "features": {
-        "minutes": "45 मिनट वीडियो/माह",
+        "minutes": "60 मिनट वीडियो/माह",
         "voiceCloning": "वीडियो से वॉयस क्लोनिंग",
         "autoDubbing": "स्वचालित डबिंग",
         "languages": "50+ भाषाएं",
@@ -160,7 +160,7 @@
       "audience": "प्रोफेशनल क्रिएटर्स और छोटे स्टूडियो",
       "cta": "प्रीमियम प्लान शुरू करें",
       "features": {
-        "minutes": "90 मिनट वीडियो/माह",
+        "minutes": "120 मिनट वीडियो/माह",
         "editor": "प्रोफेशनल टाइमलाइन एडिटर",
         "qc": "उन्नत QC (7 मेट्रिक्स)",
         "turnaround": "24 घंटे में प्राथमिकता डिलीवरी",
@@ -175,9 +175,9 @@
       "tagline": "गंभीर फिल्मकारों के लिए असीमित प्रोफेशनल डबिंग",
       "taglineShort": "असीमित प्रोफेशनल डबिंग",
       "audience": "फिल्म स्टूडियो और वितरक",
-      "cta": "एंटरप्राइज़ डेमो शेड्यूल करें",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "असीमित 2+ घंटे की फीचर फिल्में/माह",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "सभी प्रीमियम सुविधाएं शामिल",
         "editor": "प्रोफेशनल टाइमलाइन एडिटर",
         "revisions": "असीमित संशोधन",

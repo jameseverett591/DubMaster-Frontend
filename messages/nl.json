@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "Transformeer uw content. Bereik de wereld.",
     "uploadTitle": "Upload uw video",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Tot 2 uur • Max. 10 GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Max. 10 GB",
     "dragAndDrop": "Sleep uw video hierheen",
     "clickToBrowse": "klik om te bladeren",
     "fromYourComputer": "vanaf uw computer",
@@ -143,7 +143,7 @@
       "audience": "Contentmakers en YouTubers",
       "cta": "Basic-abonnement starten",
       "features": {
-        "minutes": "45 minuten video/maand",
+        "minutes": "60 minuten video/maand",
         "voiceCloning": "Stemklonen vanuit video",
         "autoDubbing": "Automatische nasynchronisatie",
         "languages": "50+ talen",
@@ -160,7 +160,7 @@
       "audience": "Professionele creators en kleine studio's",
       "cta": "Premium-abonnement starten",
       "features": {
-        "minutes": "90 minuten video/maand",
+        "minutes": "120 minuten video/maand",
         "editor": "Professionele tijdlijneditor",
         "qc": "Geavanceerde QC (7 statistieken)",
         "turnaround": "Prioriteitslevertijd 24 uur",
@@ -175,9 +175,9 @@
       "tagline": "Onbeperkte professionele nasynchronisatie voor serieuze filmmakers",
       "taglineShort": "Onbeperkte professionele nasynchronisatie",
       "audience": "Filmstudio's en distributeurs",
-      "cta": "Enterprise-demo inplannen",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "Onbeperkte speelfilms van 2u+/maand",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "Alle Premium-functies inbegrepen",
         "editor": "Professionele tijdlijneditor",
         "revisions": "Onbeperkte revisies",

@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "Baguhin ang Iyong Nilalaman. Abutin ang Buong Mundo.",
     "uploadTitle": "I-upload ang Iyong Video",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Hanggang 2 oras • Maks 5GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Maks 5GB",
     "dragAndDrop": "I-drag at I-drop ang Iyong Video",
     "clickToBrowse": "i-click para mag-browse",
     "fromYourComputer": "mula sa iyong computer",
@@ -143,7 +143,7 @@
       "audience": "Mga Content Creator at YouTuber",
       "cta": "Simulan ang Basic na Plano",
       "features": {
-        "minutes": "45 minutong video/buwan",
+        "minutes": "60 minutong video/buwan",
         "voiceCloning": "Pag-clone ng boses mula sa video",
         "autoDubbing": "Awtomatikong dubbing",
         "languages": "50+ wika",
@@ -160,7 +160,7 @@
       "audience": "Mga Propesyonal na Creator at Maliliit na Studio",
       "cta": "Simulan ang Premium na Plano",
       "features": {
-        "minutes": "90 minutong video/buwan",
+        "minutes": "120 minutong video/buwan",
         "editor": "Propesyonal na timeline editor",
         "qc": "Advanced na QC (7 sukatan)",
         "turnaround": "24-oras na priority turnaround",
@@ -175,9 +175,9 @@
       "tagline": "Walang limitasyong propesyonal na dubbing para sa seryosong mga filmmaker",
       "taglineShort": "Walang limitasyong propesyonal na dubbing",
       "audience": "Mga Film Studio at Distributor",
-      "cta": "Mag-iskedyul ng Enterprise Demo",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "Walang limitasyong 2-oras+ na pelikula/buwan",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "Kasama ang lahat ng Premium na feature",
         "editor": "Propesyonal na timeline editor",
         "revisions": "Walang limitasyong rebisyon",

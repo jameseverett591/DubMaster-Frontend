@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "Nâng tầm nội dung. Tiếp cận toàn cầu.",
     "uploadTitle": "Tải video của bạn lên",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Tối đa 2 giờ • Tối đa 5GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Tối đa 5GB",
     "dragAndDrop": "Kéo và thả video của bạn",
     "clickToBrowse": "nhấp để duyệt",
     "fromYourComputer": "từ máy tính của bạn",
@@ -143,7 +143,7 @@
       "audience": "Nhà sáng tạo nội dung và YouTuber",
       "cta": "Bắt đầu gói Cơ bản",
       "features": {
-        "minutes": "45 phút video/tháng",
+        "minutes": "60 phút video/tháng",
         "voiceCloning": "Nhân bản giọng nói từ video",
         "autoDubbing": "Lồng tiếng tự động",
         "languages": "Hơn 50 ngôn ngữ",
@@ -160,7 +160,7 @@
       "audience": "Nhà sáng tạo chuyên nghiệp và studio nhỏ",
       "cta": "Bắt đầu gói Premium",
       "features": {
-        "minutes": "90 phút video/tháng",
+        "minutes": "120 phút video/tháng",
         "editor": "Trình chỉnh sửa timeline chuyên nghiệp",
         "qc": "QC nâng cao (7 chỉ số)",
         "turnaround": "Ưu tiên hoàn thành trong 24 giờ",
@@ -175,9 +175,9 @@
       "tagline": "Lồng tiếng chuyên nghiệp không giới hạn cho các nhà làm phim nghiêm túc",
       "taglineShort": "Lồng tiếng chuyên nghiệp không giới hạn",
       "audience": "Hãng phim và nhà phân phối",
-      "cta": "Đặt lịch demo Enterprise",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "Phim dài 2 giờ+ không giới hạn/tháng",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "Bao gồm tất cả tính năng Premium",
         "editor": "Trình chỉnh sửa timeline chuyên nghiệp",
         "revisions": "Chỉnh sửa không giới hạn",

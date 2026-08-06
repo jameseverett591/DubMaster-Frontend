@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "Przekształć swój content. Dotrzyj do całego świata.",
     "uploadTitle": "Prześlij swoje wideo",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Do 2 godzin • Maks. 10 GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Maks. 10 GB",
     "dragAndDrop": "Przeciągnij i upuść wideo",
     "clickToBrowse": "kliknij, aby przeglądać",
     "fromYourComputer": "ze swojego komputera",
@@ -143,7 +143,7 @@
       "audience": "Twórcy contentu i YouTuberzy",
       "cta": "Zacznij plan Basic",
       "features": {
-        "minutes": "45 minut wideo miesięcznie",
+        "minutes": "60 minut wideo miesięcznie",
         "voiceCloning": "Klonowanie głosu z wideo",
         "autoDubbing": "Automatyczny dubbing",
         "languages": "50+ języków",
@@ -160,7 +160,7 @@
       "audience": "Profesjonalni twórcy i małe studia",
       "cta": "Zacznij plan Premium",
       "features": {
-        "minutes": "90 minut wideo miesięcznie",
+        "minutes": "120 minut wideo miesięcznie",
         "editor": "Profesjonalny edytor osi czasu",
         "qc": "Zaawansowana kontrola jakości (7 metryk)",
         "turnaround": "Priorytetowy czas realizacji 24 godziny",
@@ -175,9 +175,9 @@
       "tagline": "Nieograniczony profesjonalny dubbing dla poważnych filmowców",
       "taglineShort": "Nieograniczony profesjonalny dubbing",
       "audience": "Studia filmowe i dystrybutorzy",
-      "cta": "Umów demo dla firm",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "Nieograniczone pełnometrażowe filmy 2h+ miesięcznie",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "Wszystkie funkcje planu Premium włączone",
         "editor": "Profesjonalny edytor osi czasu",
         "revisions": "Nieograniczone poprawki",

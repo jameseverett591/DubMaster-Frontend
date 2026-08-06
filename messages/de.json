@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "Verwandeln Sie Ihre Inhalte. Erreichen Sie die Welt.",
     "uploadTitle": "Laden Sie Ihr Video hoch",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Bis zu 2 Stunden • Max. 10 GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Max. 10 GB",
     "dragAndDrop": "Ziehen Sie Ihr Video hierher",
     "clickToBrowse": "zum Durchsuchen klicken",
     "fromYourComputer": "von Ihrem Computer",
@@ -143,7 +143,7 @@
       "audience": "Content Creator und YouTuber",
       "cta": "Basic-Plan starten",
       "features": {
-        "minutes": "45 Minuten Video/Monat",
+        "minutes": "60 Minuten Video/Monat",
         "voiceCloning": "Stimmklonierung aus Video",
         "autoDubbing": "Automatische Synchronisation",
         "languages": "50+ Sprachen",
@@ -160,7 +160,7 @@
       "audience": "Professionelle Creator und kleine Studios",
       "cta": "Premium-Plan starten",
       "features": {
-        "minutes": "90 Minuten Video/Monat",
+        "minutes": "120 Minuten Video/Monat",
         "editor": "Professioneller Timeline-Editor",
         "qc": "Erweitertes QC (7 Metriken)",
         "turnaround": "24h Prioritätsbearbeitung",
@@ -175,9 +175,9 @@
       "tagline": "Unbegrenzte professionelle Synchronisation für anspruchsvolle Filmemacher",
       "taglineShort": "Unbegrenzte professionelle Synchronisation",
       "audience": "Filmstudios und Verleiher",
-      "cta": "Enterprise-Demo vereinbaren",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "Unbegrenzte Spielfilme ab 2h/Monat",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "Alle Premium-Funktionen inklusive",
         "editor": "Professioneller Timeline-Editor",
         "revisions": "Unbegrenzte Überarbeitungen",

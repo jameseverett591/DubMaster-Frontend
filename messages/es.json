@@ -44,7 +44,7 @@
     "title": "Estudio DubMaster",
     "subtitle": "Transforma Tu Contenido. Alcanza El Mundo.",
     "uploadTitle": "Sube Tu Video",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Hasta 2 horas • Máx 5GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Máx 5GB",
     "dragAndDrop": "Arrastra y Suelta Tu Video",
     "clickToBrowse": "haz clic para buscar",
     "fromYourComputer": "desde tu computadora",
@@ -134,7 +134,7 @@
     "redirecting": "Redirigiendo...",
     "everythingIn": "Todo en {plan}, más:",
     "forAudience": "Para: {audience}",
-    "allPlansInclude": "Todos los planes incluyen proyectos ilimitados \u2022 Cancela cuando quieras \u2022 Sin tarifas ocultas",
+    "allPlansInclude": "Todos los planes incluyen proyectos ilimitados • Cancela cuando quieras • Sin tarifas ocultas",
     "perYear": "año",
     "perMonth": "mes",
     "basic": {
@@ -143,7 +143,7 @@
       "audience": "Creadores de Contenido y YouTubers",
       "cta": "Comenzar Plan Básico",
       "features": {
-        "minutes": "45 minutos de vídeo/mes",
+        "minutes": "60 minutos de vídeo/mes",
         "voiceCloning": "Clonación de voz desde vídeo",
         "autoDubbing": "Doblaje automático",
         "languages": "Más de 50 idiomas",
@@ -160,7 +160,7 @@
       "audience": "Creadores Profesionales y Estudios Pequeños",
       "cta": "Comenzar Plan Premium",
       "features": {
-        "minutes": "90 minutos de vídeo/mes",
+        "minutes": "120 minutos de vídeo/mes",
         "editor": "Editor de línea de tiempo profesional",
         "qc": "Control de calidad avanzado (7 métricas)",
         "turnaround": "Entrega prioritaria en 24 horas",
@@ -175,9 +175,9 @@
       "tagline": "Doblaje profesional ilimitado para cineastas serios",
       "taglineShort": "Doblaje profesional ilimitado",
       "audience": "Estudios de Cine y Distribuidores",
-      "cta": "Programar Demo Empresarial",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "Largometrajes ilimitados de +2h/mes",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "Todas las funciones Premium incluidas",
         "editor": "Editor de línea de tiempo profesional",
         "revisions": "Revisiones ilimitadas",

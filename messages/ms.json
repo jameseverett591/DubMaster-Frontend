@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "Transformasi Kandungan Anda. Capai Seluruh Dunia.",
     "uploadTitle": "Muat Naik Video Anda",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Sehingga 2 jam • Maks 5GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Maks 5GB",
     "dragAndDrop": "Seret & Lepas Video Anda",
     "clickToBrowse": "klik untuk layar",
     "fromYourComputer": "daripada komputer anda",
@@ -143,7 +143,7 @@
       "audience": "Pencipta Kandungan & YouTuber",
       "cta": "Mula Pelan Asas",
       "features": {
-        "minutes": "45 minit video/bulan",
+        "minutes": "60 minit video/bulan",
         "voiceCloning": "Klon suara dari video",
         "autoDubbing": "Pengisian suara automatik",
         "languages": "50+ bahasa",
@@ -160,7 +160,7 @@
       "audience": "Pencipta Profesional & Studio Kecil",
       "cta": "Mula Pelan Premium",
       "features": {
-        "minutes": "90 minit video/bulan",
+        "minutes": "120 minit video/bulan",
         "editor": "Editor garis masa profesional",
         "qc": "QC lanjutan (7 metrik)",
         "turnaround": "Keutamaan 24 jam",
@@ -175,9 +175,9 @@
       "tagline": "Pengisian suara profesional tanpa had untuk pembuat filem serius",
       "taglineShort": "Pengisian suara profesional tanpa had",
       "audience": "Studio Filem & Pengedar",
-      "cta": "Jadualkan Demo Enterprise",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "Filem panjang 2 jam+ tanpa had/bulan",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "Semua ciri Premium termasuk",
         "editor": "Editor garis masa profesional",
         "revisions": "Semakan tanpa had",

@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "コンテンツを変革し、世界へ届けよう。",
     "uploadTitle": "動画をアップロード",
-    "uploadSubtitle": "MP4、MOV、AVI、MKV、WebM • 最大2時間 • 最大5GB",
+    "uploadSubtitle": "MP4、MOV、AVI、MKV、WebM • 最大5GB",
     "dragAndDrop": "動画をドラッグ＆ドロップ",
     "clickToBrowse": "クリックして参照",
     "fromYourComputer": "コンピューターから選択",
@@ -143,7 +143,7 @@
       "audience": "コンテンツクリエイター・YouTuber",
       "cta": "ベーシックプランを開始",
       "features": {
-        "minutes": "月45分の動画",
+        "minutes": "月60分の動画",
         "voiceCloning": "動画からの音声クローン",
         "autoDubbing": "自動吹き替え",
         "languages": "50以上の言語",
@@ -160,7 +160,7 @@
       "audience": "プロクリエイター・小規模スタジオ",
       "cta": "プレミアムプランを開始",
       "features": {
-        "minutes": "月90分の動画",
+        "minutes": "月120分の動画",
         "editor": "プロ向けタイムラインエディター",
         "qc": "高度な品質チェック（7項目）",
         "turnaround": "24時間以内優先納品",
@@ -175,9 +175,9 @@
       "tagline": "本格的な映像クリエイター向け無制限プロ吹き替え",
       "taglineShort": "無制限のプロ吹き替え",
       "audience": "映画スタジオ・配給会社",
-      "cta": "エンタープライズデモを予約",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "月間2時間以上の長編映画が無制限",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "プレミアムの全機能を含む",
         "editor": "プロ向けタイムラインエディター",
         "revisions": "無制限の修正",

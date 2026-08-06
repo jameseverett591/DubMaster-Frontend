@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "اپنا مواد بدلیں۔ دنیا تک پہنچیں۔",
     "uploadTitle": "اپنی ویڈیو اپ لوڈ کریں",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • 2 گھنٹے تک • زیادہ سے زیادہ 5GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • زیادہ سے زیادہ 5GB",
     "dragAndDrop": "اپنی ویڈیو یہاں گھسیٹیں اور چھوڑیں",
     "clickToBrowse": "براؤز کرنے کے لیے کلک کریں",
     "fromYourComputer": "اپنے کمپیوٹر سے",
@@ -143,7 +143,7 @@
       "audience": "مواد بنانے والے اور YouTubers",
       "cta": "بنیادی پلان شروع کریں",
       "features": {
-        "minutes": "45 منٹ ویڈیو/مہینہ",
+        "minutes": "60 منٹ ویڈیو/مہینہ",
         "voiceCloning": "ویڈیو سے آواز کلوننگ",
         "autoDubbing": "خودکار ڈبنگ",
         "languages": "50 سے زیادہ زبانیں",
@@ -160,7 +160,7 @@
       "audience": "پروفیشنل تخلیق کار اور چھوٹے اسٹوڈیوز",
       "cta": "پریمیم پلان شروع کریں",
       "features": {
-        "minutes": "90 منٹ ویڈیو/مہینہ",
+        "minutes": "120 منٹ ویڈیو/مہینہ",
         "editor": "پروفیشنل ٹائم لائن ایڈیٹر",
         "qc": "اعلیٰ QC (7 معیار)",
         "turnaround": "24 گھنٹوں میں ترجیحی تکمیل",
@@ -175,9 +175,9 @@
       "tagline": "سنجیدہ فلم سازوں کے لیے لامحدود پروفیشنل ڈبنگ",
       "taglineShort": "لامحدود پروفیشنل ڈبنگ",
       "audience": "فلم اسٹوڈیوز اور تقسیم کار",
-      "cta": "انٹرپرائز ڈیمو شیڈول کریں",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "لامحدود 2+ گھنٹے کی فیچر فلمیں/مہینہ",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "تمام پریمیم فیچرز شامل",
         "editor": "پروفیشنل ٹائم لائن ایڈیٹر",
         "revisions": "لامحدود ترامیم",
