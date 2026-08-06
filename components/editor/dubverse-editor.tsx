@@ -2840,6 +2840,8 @@ export function DubVerseEditor({
   
   // Handle preview panel resize
   const handlePreviewResizeStart = useCallback((e: React.MouseEvent) => {
+    // Frozen by the layout lock — the panes hold their size.
+    if (layoutLocked) return
     e.preventDefault()
     setIsResizingPreview(true)
     
@@ -2867,6 +2869,8 @@ export function DubVerseEditor({
   
   // Handle timeline resize (vertical)
   const handleTimelineResizeStart = useCallback((e: React.MouseEvent) => {
+    // Frozen by the layout lock — the panes hold their size.
+    if (layoutLocked) return
     e.preventDefault()
     setIsResizingTimeline(true)
     
@@ -4100,7 +4104,9 @@ export function DubVerseEditor({
 
             {/* Make Movie lives up here, well away from the transport controls:
                 it kicks off a full render, and sitting beside play/stop invited
-                mis-clicks on a button you don't want fired by accident. */}
+                mis-clicks on a button you don't want fired by accident.
+                Professional only — hidden for Premium. */}
+            {isProfessional && (
             <Button
               className={cn(
                 "ml-6 h-8 px-5 rounded-full text-xs font-bold tracking-widest uppercase",
@@ -4130,6 +4136,8 @@ export function DubVerseEditor({
                 : rebuildStatus === 'complete' ? 'MOVIE READY'
                 : 'MAKE MOVIE'}
             </Button>
+            )}
+
           </nav>
         </div>
         
@@ -4144,7 +4152,9 @@ export function DubVerseEditor({
                 : "text-slate-400 hover:text-white"
             )}
             onClick={toggleLayoutLock}
-            title={layoutLocked ? "Layout locked - click to unlock" : "Click to lock layout"}
+            title={layoutLocked
+              ? "Editor locked — click to unlock"
+              : "Lock the editor so nothing can be moved or changed while you're away"}
           >
             {layoutLocked ? (
               <>
@@ -4154,7 +4164,7 @@ export function DubVerseEditor({
             ) : (
               <>
                 <Unlock className="h-3.5 w-3.5" />
-                <span>Lock Layout</span>
+                <span>Lock Editor</span>
               </>
             )}
           </Button>
@@ -4355,17 +4365,6 @@ export function DubVerseEditor({
             className="hidden"
             onChange={handleVideoImport}
           />
-          <VideoRecorder
-            onFileCaptured={(file) => {
-              const url = URL.createObjectURL(file)
-              setImportedVideoUrl(url)
-              setImportedVideoFile(file)
-            }}
-            maxSeconds={recordingLimit}
-            triggerClassName="flex items-center gap-1.5 h-8 px-3 text-sm border border-red-500/70 rounded-md bg-red-500/10 hover:bg-red-500/20 hover:border-red-400 text-red-200 transition-colors"
-            triggerLabel="Record"
-          />
-          
           {/* Advanced menu for Import Transcript and Add Segment */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -4441,6 +4440,17 @@ export function DubVerseEditor({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          <VideoRecorder
+            onFileCaptured={(file) => {
+              const url = URL.createObjectURL(file)
+              setImportedVideoUrl(url)
+              setImportedVideoFile(file)
+            }}
+            maxSeconds={recordingLimit}
+            triggerClassName="flex items-center gap-1.5 h-8 px-3 text-sm border border-red-500/70 rounded-md bg-red-500/10 hover:bg-red-500/20 hover:border-red-400 text-red-200 transition-colors"
+            triggerLabel="Record"
+          />
+          
           <input
             ref={transcriptInputRef}
             type="file"
@@ -4465,14 +4475,20 @@ export function DubVerseEditor({
             <Sparkles className="h-4 w-4 mr-1" />
             Upgrade
           </Button>
-          <Button
-            size="sm"
-            className="h-8 bg-amber-500 hover:bg-amber-600 text-black font-medium"
-            onClick={() => setShowExportModal(true)}
-          >
-            <Download className="h-4 w-4 mr-1" />
-            Export
-          </Button>
+          {/* Hidden for Professional: Make Movie already rebuilds AND exports,
+              opening this same modal when it finishes, so a separate Download
+              would be a second door to the same place. Premium has no Make
+              Movie, so this is its only route to the file. */}
+          {!isProfessional && (
+            <Button
+              size="sm"
+              className="h-8 bg-amber-500 hover:bg-amber-600 text-black font-medium"
+              onClick={() => setShowExportModal(true)}
+            >
+              <Download className="h-4 w-4 mr-1" />
+              Download
+            </Button>
+          )}
           <Link href="/profile">
             <Button variant="ghost" size="sm" className="h-8" title="Profile">
               <User className="h-4 w-4" />
@@ -7734,6 +7750,8 @@ export function DubVerseEditor({
                         const startX = e.clientX
                         const originalStart = effStart(segment)
                         const originalEnd = effEnd(segment)
+                        // Layout lock freezes the timeline: nothing moves.
+                        if (layoutLocked) return
                         if (lockedSegments.has(keyAt(index))) return // locked — position frozen
                         setDraggingSegment({ index, track: 'original', startX, originalStart, originalEnd, currentDelta: 0 })
                         const onMouseMove = (ev: MouseEvent) => {
@@ -7804,7 +7822,7 @@ export function DubVerseEditor({
                       {/* Left handle — drag to move start_time */}
                       <div
                         data-resize-handle={true}
-                        className={cn("absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-l", lockedSegments.has(keyAt(index)) && 'pointer-events-none')}
+                        className={cn("absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-l", (layoutLocked || lockedSegments.has(keyAt(index))) && 'pointer-events-none')}
                         onMouseDown={(e) => {
                           e.preventDefault()
                           e.stopPropagation()
@@ -7851,7 +7869,7 @@ export function DubVerseEditor({
                       {/* Right handle — drag to move end_time */}
                       <div
                         data-resize-handle={true}
-                        className={cn("absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-r", lockedSegments.has(keyAt(index)) && 'pointer-events-none')}
+                        className={cn("absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-r", (layoutLocked || lockedSegments.has(keyAt(index))) && 'pointer-events-none')}
                         onMouseDown={(e) => {
                           e.preventDefault()
                           e.stopPropagation()
@@ -8052,6 +8070,8 @@ export function DubVerseEditor({
                         let startX = e.clientX
                         const originalStart = effStart(segment)
                         const originalEnd = effEnd(segment)
+                        // Layout lock freezes the timeline: nothing moves.
+                        if (layoutLocked) return
                         if (lockedSegments.has(keyAt(index))) return // locked — position frozen
                         setDraggingSegment({ index, track: 'dubbed', startX, originalStart, originalEnd, currentDelta: 0 })
                         const onMouseMove = (ev: MouseEvent) => {
@@ -8161,7 +8181,7 @@ export function DubVerseEditor({
                       {/* Left timing handle (green) */}
                       <div
                         data-resize-handle={true}
-                        className={cn("absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-green-500/40 hover:bg-green-500/70 rounded-l transition-colors", lockedSegments.has(keyAt(index)) && 'pointer-events-none')}
+                        className={cn("absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-green-500/40 hover:bg-green-500/70 rounded-l transition-colors", (layoutLocked || lockedSegments.has(keyAt(index))) && 'pointer-events-none')}
                         onMouseDown={(e) => {
                           e.preventDefault()
                           e.stopPropagation()
@@ -8234,7 +8254,7 @@ export function DubVerseEditor({
                       {/* Right timing handle (green) */}
                       <div
                         data-resize-handle={true}
-                        className={cn("absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-green-500/40 hover:bg-green-500/70 rounded-r transition-colors", lockedSegments.has(keyAt(index)) && 'pointer-events-none')}
+                        className={cn("absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-green-500/40 hover:bg-green-500/70 rounded-r transition-colors", (layoutLocked || lockedSegments.has(keyAt(index))) && 'pointer-events-none')}
                         onMouseDown={(e) => {
                           e.preventDefault()
                           e.stopPropagation()
@@ -8324,7 +8344,7 @@ export function DubVerseEditor({
                       {/* Left speed handle (blue) */}
                       <div
                         data-resize-handle={true}
-                        className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-blue-500/40 hover:bg-blue-500/70 rounded-l transition-colors z-10"
+                        className={cn("absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-blue-500/40 hover:bg-blue-500/70 rounded-l transition-colors z-10", layoutLocked && 'pointer-events-none')}
                         onMouseDown={(e) => {
                           e.preventDefault()
                           e.stopPropagation()
@@ -8355,7 +8375,7 @@ export function DubVerseEditor({
                       {/* Right speed handle (blue) */}
                       <div
                         data-resize-handle={true}
-                        className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-blue-500/40 hover:bg-blue-500/70 rounded-r transition-colors z-10"
+                        className={cn("absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-blue-500/40 hover:bg-blue-500/70 rounded-r transition-colors z-10", layoutLocked && 'pointer-events-none')}
                         onMouseDown={(e) => {
                           e.preventDefault()
                           e.stopPropagation()
@@ -8537,6 +8557,41 @@ export function DubVerseEditor({
       </div>
       
       {/* Timing Exclusion — Hard block (overlap > 0.3s): rewrite only */}
+      {/* Editor lock — a shield, not a set of disabled buttons.
+          Covering everything is complete by construction: there is no control
+          I could have forgotten to disable, because nothing underneath is
+          reachable. It survives a reload (persisted in localStorage), which is
+          the point — you lock it and walk away.
+          Not security: it stops accidents, not people. Anyone can press Unlock. */}
+      {layoutLocked && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center
+                        bg-neutral-950/70 backdrop-blur-sm cursor-not-allowed">
+          <div className="flex flex-col items-center gap-3 rounded-2xl border border-amber-400/40
+                          bg-neutral-900/95 px-8 py-7 shadow-[0_0_40px_rgba(251,191,36,0.15)]">
+            <div className="h-12 w-12 rounded-full bg-amber-400/15 flex items-center justify-center">
+              <Lock className="h-6 w-6 text-amber-400" />
+            </div>
+            <div className="text-center">
+              <p className="text-sm font-semibold text-white tracking-wide">Editor locked</p>
+              <p className="text-xs text-slate-400 mt-1 max-w-[16rem]">
+                Nothing can be moved or changed. Your work stays exactly as you left it.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={toggleLayoutLock}
+              className="mt-1 inline-flex items-center gap-1.5 rounded-full px-5 py-1.5
+                         border border-amber-400/60 bg-amber-400/10 text-amber-200
+                         hover:bg-amber-400/20 hover:border-amber-300 text-xs font-bold
+                         uppercase tracking-widest transition-colors cursor-pointer"
+            >
+              <Unlock className="h-3.5 w-3.5" />
+              Unlock
+            </button>
+          </div>
+        </div>
+      )}
+
       {engineNotice && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] px-3.5 py-2 rounded-full
                         border border-amber-500/40 bg-neutral-900/95 shadow-lg
