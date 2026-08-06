@@ -1016,8 +1016,13 @@ class DubVerseAPIClient {
     return response.json()
   }
 
-  /** Target voices for the Voice Changer panel (ElevenLabs stock voices). */
-  async listElevenLabsVoices(): Promise<{
+  /**
+   * Target voices for the Voice Changer panel: stock `premade` voices plus
+   * everything in the user's ElevenLabs library.
+   * `refresh` bypasses the backend's process-lifetime cache — needed to see a
+   * voice added to the ElevenLabs account since the backend started.
+   */
+  async listElevenLabsVoices(refresh = false): Promise<{
     voices: Array<{
       id: string
       name: string
@@ -1025,10 +1030,12 @@ class DubVerseAPIClient {
       accent: string | null
       description: string | null
       preview_url: string | null
+      category: string | null
     }>
     enabled: boolean
   }> {
-    const res = await fetch(`${this.baseURL}/api/elevenlabs/voices`)
+    const url = `${this.baseURL}/api/elevenlabs/voices${refresh ? '?refresh=true' : ''}`
+    const res = await fetch(url)
     if (!res.ok) return { voices: [], enabled: false }
     return res.json()
   }

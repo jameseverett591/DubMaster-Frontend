@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Mic2, Search, Loader2, Upload, AlertTriangle, Play, Pause, X } from 'lucide-react'
+import { Mic2, Search, Loader2, Upload, AlertTriangle, Play, Pause, X, RefreshCw } from 'lucide-react'
 import { apiClient } from '@/lib/api-client'
 import type { Segment } from '@/lib/editor-types'
 import { cn } from '@/lib/utils'
@@ -13,6 +13,8 @@ interface ElevenVoice {
   accent: string | null
   description: string | null
   preview_url: string | null
+  /** "premade" = ElevenLabs stock; anything else came from the user's library. */
+  category: string | null
 }
 
 const MODELS = [
@@ -145,14 +147,15 @@ export default function PerformPanel({
     a.play().then(() => setPreviewing(v.id)).catch(() => setPreviewing(null))
   }, [previewing])
 
-  useEffect(() => {
-    let cancelled = false
-    apiClient.listElevenLabsVoices()
-      .then((d) => { if (!cancelled) { setVoices(d.voices); setEnabled(d.enabled) } })
-      .catch(() => { if (!cancelled) setEnabled(false) })
-      .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
+  const loadVoices = useCallback((refresh = false) => {
+    setLoading(true)
+    return apiClient.listElevenLabsVoices(refresh)
+      .then((d) => { setVoices(d.voices); setEnabled(d.enabled) })
+      .catch(() => setEnabled(false))
+      .finally(() => setLoading(false))
   }, [])
+
+  useEffect(() => { void loadVoices() }, [loadVoices])
 
   // Object URLs must be revoked or every re-pick leaks one.
   useEffect(() => {
@@ -168,9 +171,21 @@ export default function PerformPanel({
     return voices.filter((v) =>
       v.name.toLowerCase().includes(n) ||
       (v.accent ?? '').toLowerCase().includes(n) ||
+      (v.gender ?? '').toLowerCase().includes(n) ||
       (v.description ?? '').toLowerCase().includes(n)
     )
   }, [voices, q])
+
+  // Your library first, stock voices after — with 100+ entries the ones you
+  // deliberately added are what you're looking for, not ElevenLabs' defaults.
+  const groups = useMemo(() => {
+    const mine = shown.filter((v) => v.category && v.category !== 'premade')
+    const stock = shown.filter((v) => !v.category || v.category === 'premade')
+    return [
+      { label: `My voices (${mine.length})`, list: mine },
+      { label: `Stock (${stock.length})`, list: stock },
+    ].filter((g) => g.list.length > 0)
+  }, [shown])
 
   const takeFile = useCallback((f: File | null | undefined) => {
     if (!f) return
@@ -354,24 +369,44 @@ export default function PerformPanel({
       {/* ── split: voices | controls ───────────────────────────── */}
       <div className="flex-1 min-h-0 grid grid-cols-2 gap-2.5 items-stretch">
         <div className="flex flex-col min-h-0 min-w-0 gap-1">
-          <div className="relative shrink-0">
-            <Search className="absolute left-1.5 top-1/2 -translate-y-1/2 h-3 w-3 text-slate-600" />
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Filter voices…"
-              className="w-full rounded-md border border-slate-800 bg-slate-900/60 pl-6 pr-2 py-1
-                         text-[10px] text-slate-200 placeholder:text-slate-600
-                         focus:outline-none focus:border-violet-500/60"
-            />
+          <div className="flex items-center gap-1.5 shrink-0">
+            <div className="relative flex-1 min-w-0">
+              <Search className="absolute left-1.5 top-1/2 -translate-y-1/2 h-3 w-3 text-slate-600" />
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder={`Filter ${voices.length} voices…`}
+                className="w-full rounded-md border border-slate-800 bg-slate-900/60 pl-6 pr-2 py-1
+                           text-[10px] text-slate-200 placeholder:text-slate-600
+                           focus:outline-none focus:border-violet-500/60"
+              />
+            </div>
+            {/* The backend caches the catalogue for its process lifetime, so a
+                voice added to ElevenLabs after startup needs this to appear. */}
+            <button
+              type="button"
+              onClick={() => void loadVoices(true)}
+              disabled={loading}
+              title="Re-fetch from ElevenLabs — use after adding a voice there"
+              className="shrink-0 h-6 w-6 rounded-md border border-slate-800 bg-slate-900/60
+                         text-slate-400 hover:text-violet-200 hover:border-violet-500/60
+                         disabled:opacity-40 flex items-center justify-center transition-colors"
+            >
+              <RefreshCw className={cn('h-3 w-3', loading && 'animate-spin')} />
+            </button>
           </div>
           {loading && (
             <div className="flex items-center gap-1.5 text-slate-500 text-[10px] py-2">
               <Loader2 className="h-3 w-3 animate-spin" /> Loading…
             </div>
           )}
-          <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-0.5">
-            {shown.map((v) => (
+          <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-2">
+            {groups.map((g) => (
+            <div key={g.label} className="space-y-0.5">
+              <div className="text-[9px] text-slate-600 uppercase tracking-wider sticky top-0 bg-neutral-950 py-0.5">
+                {g.label}
+              </div>
+              {g.list.map((v) => (
               <div
                 key={v.id}
                 className={cn(
@@ -413,10 +448,13 @@ export default function PerformPanel({
                   )}
                 </button>
               </div>
+              ))}
+            </div>
             ))}
           </div>
           <p className="text-[9px] text-slate-600 leading-snug shrink-0">
-            Stock voices only — cloning your own voice needs a paid ElevenLabs plan.
+            Cloning a NEW voice needs a paid ElevenLabs plan; voices already in
+            your library are all usable here.
           </p>
         </div>
 
