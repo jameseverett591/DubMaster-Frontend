@@ -2,7 +2,8 @@
 
 import { createContext, useContext, useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { type PlanType, type FeatureKey, planHasFeature, RECORDING_LIMITS, RECORDING_LIMIT_DEFAULT } from '@/lib/plan-features'
+import { type PlanType, type FeatureKey, planHasFeature, RECORDING_LIMITS, RECORDING_LIMIT_DEFAULT,
+         UPLOAD_DURATION_LIMITS, UPLOAD_DURATION_DEFAULT } from '@/lib/plan-features'
 
 interface PlanInfo {
   plan: PlanType | null
@@ -12,6 +13,8 @@ interface PlanInfo {
   isProfessional: boolean
   hasFeature: (feature: FeatureKey) => boolean
   recordingLimit: number
+  /** Max length of an uploaded video, in seconds. Infinity = unlimited. */
+  uploadDurationLimit: number
 }
 
 const PlanContext = createContext<PlanInfo>({
@@ -22,6 +25,7 @@ const PlanContext = createContext<PlanInfo>({
   isProfessional: false,
   hasFeature: () => false,
   recordingLimit: RECORDING_LIMIT_DEFAULT,
+  uploadDurationLimit: UPLOAD_DURATION_DEFAULT,
 })
 
 export function PlanProvider({ children }: { children: React.ReactNode }) {
@@ -68,6 +72,7 @@ export function PlanProvider({ children }: { children: React.ReactNode }) {
     isProfessional: plan === 'professional',
     hasFeature: (feature: FeatureKey) => planHasFeature(plan, feature),
     recordingLimit: plan ? RECORDING_LIMITS[plan] : RECORDING_LIMIT_DEFAULT,
+    uploadDurationLimit: plan ? UPLOAD_DURATION_LIMITS[plan] : UPLOAD_DURATION_DEFAULT,
   }
 
   return <PlanContext.Provider value={value}>{children}</PlanContext.Provider>

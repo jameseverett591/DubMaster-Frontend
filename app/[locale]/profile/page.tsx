@@ -16,6 +16,7 @@ import {
 } from "lucide-react"
 import Link from "next/link"
 import type { Database } from "@/lib/supabase/types"
+import { PLAN_MINUTES, PLAN_MINUTES_DEFAULT, type PlanType } from "@/lib/plan-features"
 
 type Profile = Database["public"]["Tables"]["profiles"]["Row"]
 type Subscription = Database["public"]["Tables"]["subscriptions"]["Row"]
@@ -26,7 +27,7 @@ const PLAN_COLORS: Record<string, string> = {
   premium: "#A855F7",
   professional: "#FDB022",
 }
-const PLAN_LIMITS: Record<string, number> = { basic: 45, premium: 90, professional: -1 }
+
 
 export default function ProfilePage() {
   const [profile, setProfile]           = useState<Profile | null>(null)
@@ -160,7 +161,7 @@ export default function ProfilePage() {
 
   const planType   = subscription?.plan_type || "basic"
   const planColor  = PLAN_COLORS[planType] || "#22D3EE"
-  const planLimit  = PLAN_LIMITS[planType] || 45
+  const planLimit  = PLAN_MINUTES[planType as PlanType] ?? PLAN_MINUTES_DEFAULT
   const minutesUsed = usage?.minutes_used || 0
   const usagePct   = planLimit > 0 ? Math.min((minutesUsed / planLimit) * 100, 100) : 0
 

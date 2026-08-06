@@ -17,6 +17,7 @@ import { BonusMinutesDialog } from "@/components/bonus-minutes-dialog"
 import { createClient } from "@/lib/supabase/client"
 import { apiClient } from "@/lib/api-client"
 import { usePlan } from "@/lib/use-plan"
+import { PLAN_MINUTES, PLAN_MINUTES_DEFAULT, type PlanType } from "@/lib/plan-features"
 
 export type VideoSource = {
   id: string
@@ -68,8 +69,7 @@ export function Dashboard() {
   const [bonusDialogOpen, setBonusDialogOpen] = useState(false)
   const [loadingUsage, setLoadingUsage] = useState(true)
 
-  const PLAN_LIMITS: Record<string, number> = { basic: 45, premium: 90, professional: -1 }
-  const planLimit = PLAN_LIMITS[plan ?? 'basic'] ?? 45
+  const planLimit = PLAN_MINUTES[(plan ?? 'basic') as PlanType] ?? PLAN_MINUTES_DEFAULT
 
   const supabase = createClient()
 
