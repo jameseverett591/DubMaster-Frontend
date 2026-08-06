@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse, FileResponse, Response
 import uuid
 import os
 import json as _json
+from datetime import datetime, timedelta
 from pathlib import Path
 import logging
 import asyncio
@@ -2906,6 +2907,53 @@ async def list_all_jobs(request: Request):
     }
 
 
+def _project_expired(meta: dict) -> bool:
+    """True when a project is past its retention date.
+
+    Absent or unparseable expires_at means permanent — never expire a project
+    because we couldn't read a date. Professional projects have no date at all.
+    """
+    raw = meta.get("expires_at")
+    if not raw:
+        return False
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "")) < datetime.utcnow()
+    except Exception:
+        return False
+
+
+def _sweep_expired_projects(owner: Optional[str] = None) -> int:
+    """Delete projects past their retention date. Scoped to one owner when
+    given, which is what the list endpoint uses so a user's own visit tidies
+    their own projects without touching anyone else's."""
+    import shutil
+    removed = 0
+    base = _projects_base_dir()
+    if not base.exists():
+        return 0
+    for entry in base.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            with open(entry / "project.json", "r", encoding="utf-8") as f:
+                meta = _json.load(f)
+        except Exception:
+            continue
+        if owner is not None and meta.get("user_id") != owner:
+            continue
+        if _project_expired(meta):
+            try:
+                shutil.rmtree(entry)
+                removed += 1
+                logger.info(
+                    f"[RETENTION] removed expired project {entry.name} "
+                    f"(expired {meta.get('expires_at')})"
+                )
+            except Exception as e:
+                logger.warning(f"[RETENTION] could not remove {entry.name}: {e}")
+    return removed
+
+
 @router.get("/projects")
 async def list_projects(request: Request):
     """The caller's projects.
@@ -2917,6 +2965,11 @@ async def list_projects(request: Request):
     """
     auth_header = request.headers.get("Authorization", "")
     caller = verify_jwt(auth_header.removeprefix("Bearer ").strip())
+
+    # A user's own visit tidies their own expired projects. There is no
+    # scheduler, so without this an expired project would linger until
+    # /cleanup happened to be called.
+    await asyncio.to_thread(_sweep_expired_projects, caller)
 
     base = _projects_base_dir()
     base.mkdir(parents=True, exist_ok=True)
@@ -2959,6 +3012,9 @@ async def save_project(job_id: str, request: Request, body: SaveProjectBody = Sa
     if getattr(job, "user_id", None) and job.user_id != caller:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    _plan = await asyncio.to_thread(_plan_for_user, caller)
+    _plan_key = "basic" if _plan in (None, _PLAN_UNKNOWN) else _plan
+
     from datetime import datetime
 
     project_id = job_id
@@ -2966,6 +3022,30 @@ async def save_project(job_id: str, request: Request, body: SaveProjectBody = Sa
     base.mkdir(parents=True, exist_ok=True)
 
     now = datetime.utcnow().isoformat()
+
+    # Project cap. Counted only for NEW projects — re-saving one you already
+    # have must never be blocked, or a user at their limit could no longer
+    # save changes to existing work.
+    _limit = PROJECT_LIMITS.get(_plan_key)
+    if _limit is not None and not (base / "project.json").exists():
+        _owned = 0
+        for _e in _projects_base_dir().iterdir():
+            if not _e.is_dir():
+                continue
+            try:
+                with open(_e / "project.json", "r", encoding="utf-8") as _f:
+                    if _json.load(_f).get("user_id") == caller:
+                        _owned += 1
+            except Exception:
+                continue
+        if _owned >= _limit:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"You have {_owned} of {_limit} projects. Delete one, or "
+                    f"upgrade for more."
+                ),
+            )
 
     # Preserve created_at if project already exists
     existing_created_at = now
@@ -2984,6 +3064,13 @@ async def save_project(job_id: str, request: Request, body: SaveProjectBody = Sa
         # Ownership. Without this the projects list had nothing to filter on,
         # so /projects returned every project on disk to every caller.
         "user_id": getattr(job, "user_id", None) or None,
+        # Retention. Absent/None means permanent (Professional). Recomputed on
+        # every save, so editing a project resets its clock — work you are
+        # actively touching shouldn't quietly expire.
+        "expires_at": (
+            (datetime.utcnow() + timedelta(days=PROJECT_RETENTION_DAYS[_plan_key])).isoformat()
+            if _plan_key in PROJECT_RETENTION_DAYS else None
+        ),
         "title": body.title or getattr(job, "video_filename", None) or job_id,
         "video_filename": getattr(job, "video_filename", None),
         "source_language": getattr(job, "source_language", None),
@@ -3075,7 +3162,13 @@ async def delete_project(project_id: str, request: Request):
 async def cleanup_old_files():
     try:
         storage.cleanup_old_files()
-        return {"message": "Cleanup completed successfully"}
+        # Covers users who never log in — the lazy sweep on /projects only
+        # runs for people who actually visit.
+        removed = await asyncio.to_thread(_sweep_expired_projects, None)
+        return {
+            "message": "Cleanup completed successfully",
+            "expired_projects_removed": removed,
+        }
     except Exception as e:
         logger.error(f"Cleanup failed: {e}")
         raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
@@ -4167,6 +4260,20 @@ PLAN_MINUTES = {
 # A single file may not exceed the whole monthly pool, so one upload can't
 # swallow the billing period. Derived so the two can't drift apart.
 UPLOAD_DURATION_LIMITS = {k: v * 60 for k, v in PLAN_MINUTES.items()}
+
+# How many saved projects a plan may keep. Professional is absent, meaning
+# unlimited. Mirrors PROJECT_LIMITS in the frontend's lib/plan-features.ts.
+PROJECT_LIMITS = {
+    "basic":   3,
+    "premium": 10,
+}
+
+# How long a saved project survives, in days. Professional is absent, meaning
+# permanent. Mirrors PROJECT_RETENTION_DAYS in lib/plan-features.ts.
+PROJECT_RETENTION_DAYS = {
+    "basic":   30,
+    "premium": 90,
+}
 
 # Returned when the plan lookup itself fails, as distinct from "no subscription".
 _PLAN_UNKNOWN = "__lookup_failed__"

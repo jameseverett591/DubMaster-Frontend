@@ -1218,6 +1218,8 @@ class DubVerseAPIClient {
     progress: number
     created_at: string
     updated_at: string
+    /** Retention date. null/absent = permanent (Professional). */
+    expires_at?: string | null
   }>> {
     const res = await fetch(`${this.baseURL}/api/projects`, {
       headers: this._authHeaders(),
