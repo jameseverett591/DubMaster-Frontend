@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import { Loader2, Film } from "lucide-react"
 import { apiClient, API_BASE_URL } from "@/lib/api-client"
 import { createClient } from "@/lib/supabase/client"
+import { expiryLevel, daysUntil } from "@/lib/plan-features"
 
 type Project = {
   project_id: string
@@ -18,6 +19,8 @@ type Project = {
   progress: number
   created_at: string
   updated_at: string
+  /** Retention date. null/absent = permanent (Professional). */
+  expires_at?: string | null
 }
 
 interface RecentProjectsProps {
@@ -95,6 +98,35 @@ export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
               ) : (
                 <Film className="h-10 w-10 text-slate-700" />
               )}
+              {/* Retention traffic light. Three dots, the live one lit:
+                  green > 10 days, amber 3-10, red under 3. Professional
+                  projects never expire, so nothing is shown at all rather
+                  than a permanently green light that means nothing. */}
+              {(() => {
+                const level = expiryLevel(project.expires_at)
+                if (level === 'none') return null
+                const left = daysUntil(project.expires_at)
+                const dots = [
+                  { key: 'green', on: level === 'green', lit: 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.9)]' },
+                  { key: 'amber', on: level === 'amber', lit: 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.9)]' },
+                  { key: 'red',   on: level === 'red',   lit: 'bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.9)]' },
+                ]
+                return (
+                  <div
+                    className="absolute right-2 top-2 flex items-center gap-1 rounded-full bg-black/60 px-1.5 py-1 backdrop-blur-sm"
+                    title={left === 0
+                      ? 'Expires today'
+                      : `Expires in ${left} day${left === 1 ? '' : 's'}`}
+                  >
+                    {dots.map(d => (
+                      <span
+                        key={d.key}
+                        className={`h-1.5 w-1.5 rounded-full ${d.on ? d.lit : 'bg-white/20'}`}
+                      />
+                    ))}
+                  </div>
+                )
+              })()}
               {project.target_language && (
                 <div className="absolute left-2 top-2 rounded bg-primary/90 px-2 py-1 text-xs font-medium text-primary-foreground uppercase">
                   {project.target_language}

@@ -23,6 +23,41 @@ export const PLAN_MINUTES: Record<PlanType, number> = {
 }
 export const PLAN_MINUTES_DEFAULT = 60
 
+/** How many saved projects a plan may keep. Professional is absent, meaning
+ *  unlimited. Mirrors PROJECT_LIMITS in the backend's routes.py. */
+export const PROJECT_LIMITS: Partial<Record<PlanType, number>> = {
+  basic:   3,
+  premium: 10,
+}
+
+/** How long a saved project survives, in days. Professional is absent, meaning
+ *  permanent. Mirrors PROJECT_RETENTION_DAYS in the backend's routes.py. */
+export const PROJECT_RETENTION_DAYS: Partial<Record<PlanType, number>> = {
+  basic:   30,
+  premium: 90,
+}
+
+/** Traffic light for how long a project has left.
+ *  'none' = permanent (Professional, or no expiry recorded). */
+export type ExpiryLevel = 'none' | 'green' | 'amber' | 'red'
+
+export function expiryLevel(expiresAt?: string | null): ExpiryLevel {
+  if (!expiresAt) return 'none'
+  const ms = new Date(expiresAt).getTime() - Date.now()
+  if (Number.isNaN(ms)) return 'none'   // unreadable date is not a warning
+  const days = ms / 86_400_000
+  if (days <= 3) return 'red'
+  if (days <= 10) return 'amber'
+  return 'green'
+}
+
+export function daysUntil(expiresAt?: string | null): number | null {
+  if (!expiresAt) return null
+  const ms = new Date(expiresAt).getTime() - Date.now()
+  if (Number.isNaN(ms)) return null
+  return Math.max(0, Math.ceil(ms / 86_400_000))
+}
+
 /** Max length of an UPLOADED video, in seconds. Distinct from RECORDING_LIMITS
  *  above, which caps the in-browser recorder — you can upload far longer than
  *  you can sit and record. */
