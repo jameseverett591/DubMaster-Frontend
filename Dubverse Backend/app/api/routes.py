@@ -2907,7 +2907,17 @@ async def list_all_jobs(request: Request):
 
 
 @router.get("/projects")
-async def list_projects():
+async def list_projects(request: Request):
+    """The caller's projects.
+
+    Previously unauthenticated and unfiltered: it walked the projects
+    directory and returned everything on disk to anyone who asked, with no
+    token required. Projects carry a user_id now, and anything without one is
+    withheld rather than shown to everybody.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    caller = verify_jwt(auth_header.removeprefix("Bearer ").strip())
+
     base = _projects_base_dir()
     base.mkdir(parents=True, exist_ok=True)
     projects = []
@@ -2918,11 +2928,14 @@ async def list_projects():
         if meta_path.exists():
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
-                    projects.append(_json.load(f))
+                    meta = _json.load(f)
+                if meta.get("user_id") == caller:
+                    projects.append(meta)
                 continue
             except Exception:
                 pass
-        projects.append({"project_id": entry.name})
+        # A directory with no readable project.json has no provable owner, so
+        # it is withheld. Previously these were returned to everyone.
     projects.sort(key=lambda p: p.get("updated_at") or p.get("created_at") or "", reverse=True)
     return {"total": len(projects), "projects": projects}
 
@@ -2934,9 +2947,16 @@ class SaveProjectBody(BaseModel):
 
 
 @router.post("/projects/save/{job_id}")
-async def save_project(job_id: str, body: SaveProjectBody = SaveProjectBody()):
+async def save_project(job_id: str, request: Request, body: SaveProjectBody = SaveProjectBody()):
+    auth_header = request.headers.get("Authorization", "")
+    caller = verify_jwt(auth_header.removeprefix("Bearer ").strip())
+
     job = await job_manager.get_job(job_id)
     if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # 404 rather than 403 for someone else's job: a 403 would confirm the id
+    # exists, which is itself a disclosure.
+    if getattr(job, "user_id", None) and job.user_id != caller:
         raise HTTPException(status_code=404, detail="Job not found")
 
     from datetime import datetime
@@ -2961,6 +2981,9 @@ async def save_project(job_id: str, body: SaveProjectBody = SaveProjectBody()):
     meta = {
         "project_id": project_id,
         "job_id": job_id,
+        # Ownership. Without this the projects list had nothing to filter on,
+        # so /projects returned every project on disk to every caller.
+        "user_id": getattr(job, "user_id", None) or None,
         "title": body.title or getattr(job, "video_filename", None) or job_id,
         "video_filename": getattr(job, "video_filename", None),
         "source_language": getattr(job, "source_language", None),
@@ -3018,11 +3041,32 @@ async def save_project(job_id: str, body: SaveProjectBody = SaveProjectBody()):
 
 
 @router.delete("/projects/{project_id}")
-async def delete_project(project_id: str):
+async def delete_project(project_id: str, request: Request):
+    """Delete one of the caller's projects.
+
+    Was unauthenticated: any caller could delete any project by id.
+    """
     import shutil
+    auth_header = request.headers.get("Authorization", "")
+    caller = verify_jwt(auth_header.removeprefix("Bearer ").strip())
+
     base = _projects_base_dir() / project_id
     if not base.exists():
         raise HTTPException(status_code=404, detail="Project not found")
+
+    meta_path = base / "project.json"
+    owner = None
+    if meta_path.exists():
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                owner = _json.load(f).get("user_id")
+        except Exception:
+            owner = None
+    if owner != caller:
+        # Unowned projects are not deletable either — they predate ownership
+        # and we can't prove they're the caller's.
+        raise HTTPException(status_code=404, detail="Project not found")
+
     shutil.rmtree(base)
     return {"deleted": True, "project_id": project_id}
 
