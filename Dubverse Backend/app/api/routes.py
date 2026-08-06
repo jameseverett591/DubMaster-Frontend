@@ -5769,14 +5769,19 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest):
 
 
 @router.get("/elevenlabs/voices")
-async def get_elevenlabs_voices():
+async def get_elevenlabs_voices(refresh: bool = False):
     """Target voices for the Voice Changer panel.
 
-    Stock voices only. Cloned voices need a paid ElevenLabs plan, so on a Free
-    account this is the whole catalogue — the panel should say so rather than
-    showing an empty "your voices" section.
+    Everything the account can reach: the stock `premade` voices plus every
+    voice added to the user's ElevenLabs library (`professional` and any clones,
+    which need a paid plan). `category` is passed through so the panel can group
+    "your voices" apart from the stock ones.
+
+    The service caches for the process lifetime, so `refresh=true` is what picks
+    up a voice added to the ElevenLabs account since the backend started —
+    otherwise it stays invisible until a restart.
     """
-    voices = await elevenlabs_tts.get_voices()
+    voices = await elevenlabs_tts.get_voices(refresh=refresh)
     out = []
     for v in voices:
         lab = v.get("labels") or {}
@@ -5787,7 +5792,9 @@ async def get_elevenlabs_voices():
             "accent": lab.get("accent"),
             "description": lab.get("description") or v.get("description"),
             "preview_url": v.get("preview_url"),
+            "category": v.get("category"),
         })
+    out.sort(key=lambda v: (v.get("name") or "").lower())
     return {"voices": out, "enabled": elevenlabs_tts.enabled}
 
 

@@ -147,8 +147,12 @@ class ElevenLabsTTS:
         if not self.edge_tts_available:
             logger.warning("edge-tts not installed; fallback TTS is unavailable.")
     
-    async def get_voices(self) -> List[Dict]:
-        if self._voices_cache:
+    async def get_voices(self, refresh: bool = False) -> List[Dict]:
+        # Cached for the process lifetime, so voices added to the ElevenLabs
+        # account after the backend started are invisible until something asks
+        # for a refresh. `refresh=True` is how the Perform panel picks up a
+        # newly added voice without a restart.
+        if self._voices_cache and not refresh:
             return self._voices_cache
 
         if not self.enabled:
