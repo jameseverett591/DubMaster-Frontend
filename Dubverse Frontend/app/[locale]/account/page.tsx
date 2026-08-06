@@ -25,13 +25,14 @@ import {
 } from "@/components/ui/dialog"
 import { Header } from "@/components/header"
 import type { Database } from "@/lib/supabase/types"
+import { PLAN_MINUTES, PLAN_MINUTES_DEFAULT, type PlanType } from "@/lib/plan-features"
 
 type Profile = Database["public"]["Tables"]["profiles"]["Row"]
 type Subscription = Database["public"]["Tables"]["subscriptions"]["Row"]
 type Usage = Database["public"]["Tables"]["usage"]["Row"]
 type Payment = Database["public"]["Tables"]["payments"]["Row"]
 
-const PLAN_LIMITS: Record<string, number> = { basic: 45, premium: 90, professional: -1 }
+
 const PLAN_COLORS: Record<string, string> = {
   basic: "#22D3EE",
   premium: "#A855F7",
@@ -135,7 +136,7 @@ export default function AccountPage() {
     )
   }
 
-  const planLimit = PLAN_LIMITS[subscription?.plan_type || "basic"] || 45
+  const planLimit = PLAN_MINUTES[(subscription?.plan_type || "basic") as PlanType] ?? PLAN_MINUTES_DEFAULT
   const minutesUsed = usage?.minutes_used || 0
   const usagePercent = planLimit > 0 ? Math.min((minutesUsed / planLimit) * 100, 100) : 0
   const planColor = PLAN_COLORS[subscription?.plan_type || "basic"] || "#22D3EE"

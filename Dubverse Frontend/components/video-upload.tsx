@@ -15,6 +15,7 @@ import PipelineMonitor from "@/components/pipeline-monitor"
 import { BasicVideoPanel } from "@/components/basic-video-panel"
 import { VideoRecorder } from "@/components/video-recorder"
 import { usePlan } from "@/lib/use-plan"
+import { formatDurationLimit } from "@/lib/plan-features"
 
 const STORAGE_KEY = "dubverse_uploaded_files"
 const SOURCE_LANG_STORAGE_KEY = "dubverse_source_language"
@@ -93,15 +94,23 @@ export function VideoUpload({
 }: VideoUploadProps) {
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
   const [sourceLanguage, setSourceLanguage] = useState<string>("auto")
-  const [targetLanguage, setTargetLanguage] = useState<string>(() => localStorage.getItem(TARGET_LANG_STORAGE_KEY) ?? "en")
+  // Guarded: this runs during the SERVER render too, where localStorage does
+  // not exist. Reading it unguarded threw and forced Next to abandon SSR and
+  // fall back to client rendering for the whole page.
+  const [targetLanguage, setTargetLanguage] = useState<string>(
+    () => (typeof window === "undefined" ? "en" : localStorage.getItem(TARGET_LANG_STORAGE_KEY) ?? "en")
+  )
   const [numSpeakers, setNumSpeakers] = useState<string>("auto")
   const numSpeakersRef = useRef<string>("auto")
   // Ref mirrors so dropzone/upload callbacks always see current selections.
   const sourceLanguageRef = useRef<string>("auto")
-  const targetLanguageRef = useRef<string>(localStorage.getItem(TARGET_LANG_STORAGE_KEY) ?? "en")
+  const targetLanguageRef = useRef<string>(
+    typeof window === "undefined" ? "en" : localStorage.getItem(TARGET_LANG_STORAGE_KEY) ?? "en"
+  )
   const t = useTranslations('upload')
   const ts = useTranslations('studio')
-  const { hasFeature, recordingLimit } = usePlan()
+  const { hasFeature, recordingLimit, uploadDurationLimit } = usePlan()
+  const [durationError, setDurationError] = useState<string | null>(null)
   const resetEditor = useEditorStore((s) => s.resetEditor)
 
   // ── Inline recording ───────────────────────────────────────────────────
@@ -253,11 +262,51 @@ export function VideoUpload({
     localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave))
   }
 
-  const onDrop = useCallback((acceptedFiles: File[]) => {
+  /** Read a video's duration without uploading it — metadata only, no decode. */
+  const probeDuration = (file: File): Promise<number | null> =>
+    new Promise((resolve) => {
+      const url = URL.createObjectURL(file)
+      const v = document.createElement('video')
+      v.preload = 'metadata'
+      const done = (d: number | null) => { URL.revokeObjectURL(url); resolve(d) }
+      v.onloadedmetadata = () => done(Number.isFinite(v.duration) ? v.duration : null)
+      // A container we can't read is NOT rejected: the server will handle it.
+      // Better to let an unreadable file through than to block a valid one.
+      v.onerror = () => done(null)
+      v.src = url
+    })
+
+  const onDrop = useCallback(async (acceptedFiles: File[]) => {
     // Block upload if quota exceeded
     if (quotaExceeded) {
       return
     }
+
+    // Per-plan length cap, checked BEFORE the transfer starts. Without this a
+    // three-hour file uploaded in full and only then hit a limit.
+    if (Number.isFinite(uploadDurationLimit)) {
+      const tooLong: string[] = []
+      const okFiles: File[] = []
+      for (const f of acceptedFiles) {
+        const dur = await probeDuration(f)
+        if (dur !== null && dur > uploadDurationLimit) {
+          const mins = Math.round(dur / 60)
+          tooLong.push(`${f.name} (${mins} min)`)
+        } else {
+          okFiles.push(f)
+        }
+      }
+      if (tooLong.length) {
+        setDurationError(
+          `Too long for your plan (max ${formatDurationLimit(uploadDurationLimit)}): ${tooLong.join(', ')}`
+        )
+      } else {
+        setDurationError(null)
+      }
+      if (!okFiles.length) return
+      acceptedFiles = okFiles
+    }
+
     const newFiles = acceptedFiles.map((file) => ({
       file,
       id: Math.random().toString(36).substring(7),
@@ -275,7 +324,7 @@ export function VideoUpload({
     newFiles.forEach((uploadedFile) => {
       startUpload(uploadedFile.id, uploadedFile.file, langForBatch, targetForBatch, speakersForBatch)
     })
-  }, [])
+  }, [quotaExceeded, uploadDurationLimit])
 
   const handleUseRecording = useCallback(() => {
     if (recordedFile) onDrop([recordedFile])
@@ -482,7 +531,11 @@ export function VideoUpload({
     accept: {
       "video/*": [".mp4", ".mov", ".avi", ".mkv", ".webm"],
     },
-    maxSize: 10 * 1024 * 1024 * 1024, // 10GB max
+    // Mirrors the server's MAX_UPLOAD_SIZE (app/config.py). It used to be 10GB
+    // while the backend enforced 5GB, so an oversized file was accepted here,
+    // uploaded, and only rejected once 5GB had streamed in — after the wait.
+    // Keep these two numbers in step.
+    maxSize: 5 * 1024 * 1024 * 1024, // 5GB max
     disabled: quotaExceeded,
   })
 
@@ -507,6 +560,12 @@ export function VideoUpload({
           <h2 className="text-2xl font-bold text-white mb-1">{ts('uploadTitle')}</h2>
           <p className="text-[#94A3B8] text-sm">
             {ts('uploadSubtitle')}
+          </p>
+          {/* Stated separately from the translated subtitle because the cap is
+              per plan — Basic 1h, Premium 2h, Professional unlimited — and a
+              single localised string can't say all three. */}
+          <p className="text-[#64748B] text-xs mt-0.5">
+            Your plan: videos up to {formatDurationLimit(uploadDurationLimit).toLowerCase()}
           </p>
         </div>
 
@@ -652,9 +711,16 @@ export function VideoUpload({
               or <span className="text-[#22D3EE] font-semibold">{ts('clickToBrowse')}</span> {ts('fromYourComputer')}
             </p>
 
+            {durationError && (
+              <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-left">
+                <AlertCircle className="h-4 w-4 text-red-400 mt-0.5 shrink-0" />
+                <span className="text-xs text-red-300">{durationError}</span>
+              </div>
+            )}
+
             <div className="flex flex-wrap justify-center gap-2">
               <span className="px-3 py-1.5 rounded-full bg-[#A855F7]/20 border border-[#A855F7]/40 text-[#C084FC] text-xs font-medium">
-                ✨ {ts('maxDuration')}
+                ✨ Max {formatDurationLimit(uploadDurationLimit)}
               </span>
               <span className="px-3 py-1.5 rounded-full bg-[#22D3EE]/20 border border-[#22D3EE]/40 text-[#22D3EE] text-xs font-medium">
                 🚀 {ts('maxSize')}

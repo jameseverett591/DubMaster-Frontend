@@ -116,6 +116,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
   
   // Own video upload state
   const [ownVideoFile, setOwnVideoFile] = useState<File | null>(null)
+  const [ownVideoError, setOwnVideoError] = useState<string | null>(null)
   const [captionSource, setCaptionSource] = useState<"youtube" | "upload" | null>(null)
 
   const handleSearch = () => {
@@ -219,11 +220,23 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
     return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`
   }
 
+  // Mirrors MAX_UPLOAD_SIZE in app/config.py. Without this the input accepted
+  // any size and the file only failed server-side, after the whole transfer.
+  const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024 // 5GB
+
   const handleOwnVideoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file) {
-      setOwnVideoFile(file)
+    if (!file) return
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setOwnVideoError(
+        `That file is ${(file.size / 1024 ** 3).toFixed(1)}GB. The limit is 5GB — try a smaller export.`
+      )
+      setOwnVideoFile(null)
+      e.target.value = ''   // let the same file be re-picked after re-encoding
+      return
     }
+    setOwnVideoError(null)
+    setOwnVideoFile(file)
   }
 
   const handleStartDubbingWithOwnVideo = () => {
@@ -432,7 +445,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                       {ownVideoFile ? ownVideoFile.name : "Click to upload your video"}
                     </span>
                     <span className="text-xs text-muted-foreground mt-1">
-                      MP4, WebM, MOV up to 10GB
+                      MP4, WebM, MOV up to 5GB
                     </span>
                     <input 
                       type="file" 
@@ -441,6 +454,12 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                       onChange={handleOwnVideoUpload}
                     />
                   </label>
+                  {ownVideoError && (
+                    <div className="mt-2 flex items-start gap-2 text-sm text-red-500">
+                      <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                      {ownVideoError}
+                    </div>
+                  )}
                   {ownVideoFile && (
                     <div className="mt-2 flex items-center gap-2 text-sm text-green-500">
                       <CheckCircle2 className="h-4 w-4" />
