@@ -3796,12 +3796,28 @@ async def render_dubbed_video(request: DubRequest, background_tasks: BackgroundT
 
 
 @router.get("/download/{job_id}/{language}")
-async def download_dubbed_video(job_id: str, language: str):
+async def download_dubbed_video(job_id: str, language: str, attachment: bool = False):
+    """Serve the finished dub.
+
+    Defaults to `inline` because the same URL backs the <video> player. Pass
+    ?attachment=1 to get a real download: the HTML `download` attribute is
+    IGNORED for cross-origin URLs, and the app runs on a different port from
+    the API, so a plain link only ever played the file. Content-Disposition is
+    the only thing that actually makes the browser save it.
+    """
     dubbed_path = os.path.join(settings.DUBBED_DIR, job_id, f"dubbed_{language}.mp4")
-    
+
     if not os.path.exists(dubbed_path):
         raise HTTPException(status_code=404, detail="Dubbed video not found")
-    
+
+    if attachment:
+        filename = f"dubbed_{language}_{job_id[:8]}.mp4"
+        return FileResponse(
+            dubbed_path,
+            media_type="video/mp4",
+            filename=filename,   # sets Content-Disposition: attachment
+        )
+
     return FileResponse(
         dubbed_path,
         media_type="video/mp4",
