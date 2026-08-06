@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "Transformez votre contenu. Touchez le monde entier.",
     "uploadTitle": "Téléversez votre vidéo",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Jusqu'à 2 heures • Max 10 Go",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Max 10 Go",
     "dragAndDrop": "Glissez-déposez votre vidéo",
     "clickToBrowse": "cliquez pour parcourir",
     "fromYourComputer": "depuis votre ordinateur",
@@ -143,7 +143,7 @@
       "audience": "Créateurs de contenu et YouTubeurs",
       "cta": "Démarrer le forfait Basique",
       "features": {
-        "minutes": "45 minutes de vidéo/mois",
+        "minutes": "60 minutes de vidéo/mois",
         "voiceCloning": "Clonage de voix à partir de la vidéo",
         "autoDubbing": "Doublage automatique",
         "languages": "50+ langues",
@@ -160,7 +160,7 @@
       "audience": "Créateurs professionnels et petits studios",
       "cta": "Démarrer le forfait Premium",
       "features": {
-        "minutes": "90 minutes de vidéo/mois",
+        "minutes": "120 minutes de vidéo/mois",
         "editor": "Éditeur de chronologie professionnel",
         "qc": "Contrôle qualité avancé (7 métriques)",
         "turnaround": "Délai prioritaire de 24 h",
@@ -175,9 +175,9 @@
       "tagline": "Doublage professionnel illimité pour les cinéastes sérieux",
       "taglineShort": "Doublage professionnel illimité",
       "audience": "Studios de cinéma et distributeurs",
-      "cta": "Planifier une démo entreprise",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "Longs métrages illimités de 2 h+/mois",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "Toutes les fonctionnalités Premium incluses",
         "editor": "Éditeur de chronologie professionnel",
         "revisions": "Révisions illimitées",

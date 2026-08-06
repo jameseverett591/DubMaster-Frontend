@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "Alakítsa át tartalmait. Érje el az egész világot.",
     "uploadTitle": "Töltse fel videóját",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Legfeljebb 2 óra • Max. 10 GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Max. 10 GB",
     "dragAndDrop": "Húzza ide a videót",
     "clickToBrowse": "kattintson a tallózáshoz",
     "fromYourComputer": "a számítógépéről",
@@ -143,7 +143,7 @@
       "audience": "Tartalomkészítők és YouTuberek",
       "cta": "Basic terv indítása",
       "features": {
-        "minutes": "45 perc videó havonta",
+        "minutes": "60 perc videó havonta",
         "voiceCloning": "Hangklónozás videóból",
         "autoDubbing": "Automatikus dubbingolás",
         "languages": "50+ nyelv",
@@ -160,7 +160,7 @@
       "audience": "Professzionális alkotók és kis stúdiók",
       "cta": "Premium terv indítása",
       "features": {
-        "minutes": "90 perc videó havonta",
+        "minutes": "120 perc videó havonta",
         "editor": "Professzionális idővonal-szerkesztő",
         "qc": "Haladó minőségellenőrzés (7 metrika)",
         "turnaround": "Prioritásos 24 órás átfutási idő",
@@ -175,9 +175,9 @@
       "tagline": "Korlátlan professzionális dubbingolás komoly filmeseknek",
       "taglineShort": "Korlátlan professzionális dubbingolás",
       "audience": "Filmstúdiók és forgalmazók",
-      "cta": "Vállalati bemutató egyeztetése",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "Korlátlan 2 órás+ egész estés filmek havonta",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "Minden Premium funkció belefoglalva",
         "editor": "Professzionális idővonal-szerkesztő",
         "revisions": "Korlátlan javítás",

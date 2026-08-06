@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "升华您的内容，触达全球受众。",
     "uploadTitle": "上传您的视频",
-    "uploadSubtitle": "MP4、MOV、AVI、MKV、WebM • 最长 2 小时 • 最大 5GB",
+    "uploadSubtitle": "MP4、MOV、AVI、MKV、WebM • 最大 5GB",
     "dragAndDrop": "拖放您的视频",
     "clickToBrowse": "点击浏览",
     "fromYourComputer": "从您的电脑中选择",
@@ -143,7 +143,7 @@
       "audience": "内容创作者和 YouTuber",
       "cta": "开始基础套餐",
       "features": {
-        "minutes": "每月 45 分钟视频",
+        "minutes": "每月 60 分钟视频",
         "voiceCloning": "从视频克隆声音",
         "autoDubbing": "自动配音",
         "languages": "50 多种语言",
@@ -160,7 +160,7 @@
       "audience": "专业创作者和小型工作室",
       "cta": "开始高级套餐",
       "features": {
-        "minutes": "每月 90 分钟视频",
+        "minutes": "每月 120 分钟视频",
         "editor": "专业时间轴编辑器",
         "qc": "高级质量控制（7 项指标）",
         "turnaround": "24 小时优先交付",
@@ -175,9 +175,9 @@
       "tagline": "面向专业电影人的无限配音服务",
       "taglineShort": "无限专业配音",
       "audience": "电影公司和发行商",
-      "cta": "预约企业演示",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "每月无限 2 小时以上长片",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "包含所有高级版功能",
         "editor": "专业时间轴编辑器",
         "revisions": "无限修改次数",

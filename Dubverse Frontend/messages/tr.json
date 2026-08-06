@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "İçeriğinizi Dönüştürün. Tüm Dünyaya Ulaşın.",
     "uploadTitle": "Videonuzu Yükleyin",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • 2 saate kadar • Maks. 10 GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Maks. 10 GB",
     "dragAndDrop": "Videonuzu Sürükleyip Bırakın",
     "clickToBrowse": "göz atmak için tıklayın",
     "fromYourComputer": "bilgisayarınızdan",
@@ -143,7 +143,7 @@
       "audience": "İçerik üreticileri ve YouTuberlar",
       "cta": "Basic Planı Başlat",
       "features": {
-        "minutes": "Aylık 45 dakika video",
+        "minutes": "Aylık 60 dakika video",
         "voiceCloning": "Videodan ses klonlama",
         "autoDubbing": "Otomatik seslendirme",
         "languages": "50'den fazla dil",
@@ -160,7 +160,7 @@
       "audience": "Profesyonel içerik üreticileri ve küçük stüdyolar",
       "cta": "Premium Planı Başlat",
       "features": {
-        "minutes": "Aylık 90 dakika video",
+        "minutes": "Aylık 120 dakika video",
         "editor": "Profesyonel zaman çizelgesi editörü",
         "qc": "Gelişmiş kalite kontrolü (7 metrik)",
         "turnaround": "24 saatlik öncelikli teslimat",
@@ -175,9 +175,9 @@
       "tagline": "Ciddi film yapımcıları için sınırsız profesyonel seslendirme",
       "taglineShort": "Sınırsız profesyonel seslendirme",
       "audience": "Film stüdyoları ve dağıtıcılar",
-      "cta": "Kurumsal Demo Planla",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "Aylık sınırsız 2 saat+ uzun metrajlı film",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "Tüm Premium özellikler dahil",
         "editor": "Profesyonel zaman çizelgesi editörü",
         "revisions": "Sınırsız revizyon",

@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "Proměňte svůj obsah. Oslovte celý svět.",
     "uploadTitle": "Nahrajte své video",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Do 2 hodin • Max. 10 GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Max. 10 GB",
     "dragAndDrop": "Přetáhněte video sem",
     "clickToBrowse": "klikněte pro procházení",
     "fromYourComputer": "z vašeho počítače",
@@ -143,7 +143,7 @@
       "audience": "Tvůrci obsahu a YouTubeři",
       "cta": "Začít plán Basic",
       "features": {
-        "minutes": "45 minut videa měsíčně",
+        "minutes": "60 minut videa měsíčně",
         "voiceCloning": "Klonování hlasu z videa",
         "autoDubbing": "Automatické dabování",
         "languages": "50+ jazyků",
@@ -160,7 +160,7 @@
       "audience": "Profesionální tvůrci a malá studia",
       "cta": "Začít plán Premium",
       "features": {
-        "minutes": "90 minut videa měsíčně",
+        "minutes": "120 minut videa měsíčně",
         "editor": "Profesionální editor časové osy",
         "qc": "Pokročilá kontrola kvality (7 metrik)",
         "turnaround": "Prioritní doba zpracování 24 hodin",
@@ -175,9 +175,9 @@
       "tagline": "Neomezené profesionální dabování pro seriózní filmaře",
       "taglineShort": "Neomezené profesionální dabování",
       "audience": "Filmová studia a distributoři",
-      "cta": "Domluvit firemní demo",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "Neomezené celovečerní filmy 2h+ měsíčně",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "Všechny funkce plánu Premium zahrnuty",
         "editor": "Profesionální editor časové osy",
         "revisions": "Neomezené opravy",

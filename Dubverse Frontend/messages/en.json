@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "Transform Your Content. Reach The World.",
     "uploadTitle": "Upload Your Video",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Up to 2 hours • Max 5GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • Max 5GB",
     "dragAndDrop": "Drag & Drop Your Video",
     "clickToBrowse": "click to browse",
     "fromYourComputer": "from your computer",
@@ -134,7 +134,7 @@
     "redirecting": "Redirecting...",
     "everythingIn": "Everything in {plan}, plus:",
     "forAudience": "For: {audience}",
-    "allPlansInclude": "All plans include unlimited projects \u2022 Cancel anytime \u2022 No hidden fees",
+    "allPlansInclude": "All plans include unlimited projects • Cancel anytime • No hidden fees",
     "perYear": "year",
     "perMonth": "month",
     "basic": {
@@ -143,7 +143,7 @@
       "audience": "Content Creators & YouTubers",
       "cta": "Start Basic Plan",
       "features": {
-        "minutes": "45 minutes video/month",
+        "minutes": "60 minutes video/month",
         "voiceCloning": "Voice cloning from video",
         "autoDubbing": "Automatic dubbing",
         "languages": "50+ languages",
@@ -160,7 +160,7 @@
       "audience": "Professional Creators & Small Studios",
       "cta": "Start Premium Plan",
       "features": {
-        "minutes": "90 minutes video/month",
+        "minutes": "120 minutes video/month",
         "editor": "Professional timeline editor",
         "qc": "Advanced QC (7 metrics)",
         "turnaround": "24hr priority turnaround",
@@ -175,9 +175,9 @@
       "tagline": "Unlimited professional dubbing for serious filmmakers",
       "taglineShort": "Unlimited professional dubbing",
       "audience": "Film Studios & Distributors",
-      "cta": "Schedule Enterprise Demo",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "Unlimited 2hr+ feature films/month",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "All Premium features included",
         "editor": "Professional timeline editor",
         "revisions": "Unlimited revisions",

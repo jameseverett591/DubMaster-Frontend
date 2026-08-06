@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "שנה את התוכן שלך. הגע לכל העולם.",
     "uploadTitle": "העלה את הסרטון שלך",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • עד שעתיים • מקסימום 5GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • מקסימום 5GB",
     "dragAndDrop": "גרור ושחרר את הסרטון שלך",
     "clickToBrowse": "לחץ לעיון",
     "fromYourComputer": "מהמחשב שלך",
@@ -143,7 +143,7 @@
       "audience": "יוצרי תוכן וYouTubers",
       "cta": "התחל תוכנית בסיסית",
       "features": {
-        "minutes": "45 דקות וידאו/חודש",
+        "minutes": "60 דקות וידאו/חודש",
         "voiceCloning": "שכפול קול מהסרטון",
         "autoDubbing": "דיבוב אוטומטי",
         "languages": "יותר מ-50 שפות",
@@ -160,7 +160,7 @@
       "audience": "יוצרים מקצועיים ואולפנים קטנים",
       "cta": "התחל תוכנית פרמיום",
       "features": {
-        "minutes": "90 דקות וידאו/חודש",
+        "minutes": "120 דקות וידאו/חודש",
         "editor": "עורך ציר זמן מקצועי",
         "qc": "QC מתקדם (7 מדדים)",
         "turnaround": "אספקה בעדיפות תוך 24 שעות",
@@ -175,9 +175,9 @@
       "tagline": "דיבוב מקצועי ללא הגבלה לקולנוענים רציניים",
       "taglineShort": "דיבוב מקצועי ללא הגבלה",
       "audience": "אולפני קולנוע ומפיצים",
-      "cta": "קבע הדגמה ארגונית",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "סרטי עלילה ללא הגבלה (מעל שעתיים)/חודש",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "כל תכונות הפרמיום כלולות",
         "editor": "עורך ציר זמן מקצועי",
         "revisions": "תיקונים ללא הגבלה",

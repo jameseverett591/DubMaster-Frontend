@@ -44,7 +44,7 @@
     "title": "DubMaster Studio",
     "subtitle": "콘텐츠를 혁신하고, 전 세계에 도달하세요.",
     "uploadTitle": "동영상 업로드",
-    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • 최대 2시간 • 최대 5GB",
+    "uploadSubtitle": "MP4, MOV, AVI, MKV, WebM • 최대 5GB",
     "dragAndDrop": "동영상을 드래그 앤 드롭",
     "clickToBrowse": "클릭하여 탐색",
     "fromYourComputer": "컴퓨터에서 선택",
@@ -143,7 +143,7 @@
       "audience": "콘텐츠 크리에이터 및 유튜버",
       "cta": "베이직 플랜 시작",
       "features": {
-        "minutes": "월 45분 동영상",
+        "minutes": "월 60분 동영상",
         "voiceCloning": "동영상에서 목소리 클론",
         "autoDubbing": "자동 더빙",
         "languages": "50개 이상의 언어",
@@ -160,7 +160,7 @@
       "audience": "전문 크리에이터 및 소규모 스튜디오",
       "cta": "프리미엄 플랜 시작",
       "features": {
-        "minutes": "월 90분 동영상",
+        "minutes": "월 120분 동영상",
         "editor": "전문가용 타임라인 편집기",
         "qc": "고급 QC (7가지 지표)",
         "turnaround": "24시간 내 우선 납품",
@@ -175,9 +175,9 @@
       "tagline": "진지한 영화 제작자를 위한 무제한 전문 더빙",
       "taglineShort": "무제한 전문 더빙",
       "audience": "영화 스튜디오 및 배급사",
-      "cta": "엔터프라이즈 데모 예약",
+      "cta": "Start Professional Plan",
       "features": {
-        "unlimited": "월 2시간 이상 장편 영화 무제한",
+        "unlimited": "300 minutes video/month",
         "allFeatures": "프리미엄 모든 기능 포함",
         "editor": "전문가용 타임라인 편집기",
         "revisions": "무제한 수정",
