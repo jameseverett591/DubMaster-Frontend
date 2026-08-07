@@ -151,7 +151,13 @@ export default function PerformPanel({
     setLoading(true)
     return apiClient.listElevenLabsVoices(refresh)
       .then((d) => { setVoices(d.voices); setEnabled(d.enabled) })
-      .catch(() => setEnabled(false))
+      .catch((err) => {
+        // Any failure here renders as "ElevenLabs is not configured", which is
+        // only sometimes true — a 401/403 lands in the same branch and sends
+        // you looking for a missing API key that is actually present.
+        console.error('[CustomVoices] voice list failed:', err)
+        setEnabled(false)
+      })
       .finally(() => setLoading(false))
   }, [])
 

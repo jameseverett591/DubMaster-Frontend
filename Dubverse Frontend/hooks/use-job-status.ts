@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from "react"
+import { apiClient } from "@/lib/api-client"
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
@@ -40,7 +41,9 @@ export function useJobStatus({ jobId, pollInterval = 2000, onComplete, onError }
   const fetchStatus = useCallback(async () => {
     if (!jobId) return
     try {
-      const response = await fetch(`${BACKEND_URL}/api/status/${jobId}`)
+      const response = await fetch(`${BACKEND_URL}/api/status/${jobId}`, {
+        headers: await apiClient.ensureAuthHeaders(),
+      })
       if (!response.ok) {
         if (response.status === 404) return
         throw new Error(`Failed to fetch status: ${response.statusText}`)

@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { apiClient } from "@/lib/api-client"
 import {
   Activity, Upload, AudioLines, Scissors, FileText, Users, Sparkles,
   Languages, Mic2, Clock, Gauge, CheckCircle2, XCircle,
@@ -155,7 +156,9 @@ export default function PipelineMonitor({ jobId }: { jobId: string }) {
   const fetchPipeline = useCallback(async () => {
     if (!jobId) return
     try {
-      const res = await fetch(`${BACKEND_URL}/api/pipeline/${jobId}`)
+      const res = await fetch(`${BACKEND_URL}/api/pipeline/${jobId}`, {
+        headers: await apiClient.ensureAuthHeaders(),
+      })
       if (!res.ok) { if (res.status === 404) return; throw new Error(res.statusText) }
       const data: PipelineData = await res.json()
       setPipelineData(data)

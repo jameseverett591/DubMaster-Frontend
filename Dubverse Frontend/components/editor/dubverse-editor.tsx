@@ -1316,8 +1316,8 @@ export function DubVerseEditor({
   // Fetch and decode separated accompaniment audio for waveform — runs once on mount
   useEffect(() => {
     if (!jobId) return
-    const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-    const url = `${apiBase}/api/media/${jobId}/separated/accompaniment`
+    // Media is owner-only; toAbsoluteUrl attaches the access token.
+    const url = apiClient.toAbsoluteUrl(`/api/media/${jobId}/separated/accompaniment`)
     fetch(url)
       .then(res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -3631,6 +3631,8 @@ export function DubVerseEditor({
     if (!toSave.length) return
     setIsSaving(true)
     const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+    // Resolved once, not per segment — a Save can fan out to dozens of PATCHes.
+    const authHeaders = await apiClient.ensureAuthHeaders()
     try {
       await Promise.all(
         toSave.map((seg, i) =>
@@ -3640,7 +3642,7 @@ export function DubVerseEditor({
           // checkpoint for lock state, not just the fire-and-forget per-lock write.
           fetch(`${base}/api/segment/commit/${jobId}/${seg.transcript_index ?? seg.index}`, {
             method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...authHeaders },
             body: JSON.stringify({
               committed_audio_url: seg.committed_audio_url,
               committed_adapted_text: seg.committed_adapted_text,
@@ -4405,7 +4407,9 @@ export function DubVerseEditor({
               </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => {
-                  const url = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/transcript/export/${jobId}`
+                  // Anchor download = browser navigation, so the token has to
+                  // ride in the query string (toAbsoluteUrl attaches it).
+                  const url = apiClient.toAbsoluteUrl(`/api/transcript/export/${jobId}`)
                   const a = document.createElement('a')
                   a.href = url
                   a.download = `transcript_${jobId.slice(0, 8)}.srt`
@@ -5674,7 +5678,7 @@ export function DubVerseEditor({
                 { id: 'quality',    label: 'Quality' },
                 { id: 'velma',      label: 'Velma',        feature: 'velmaPanel' },
                 { id: 'respeecher', label: 'Respeecher',   feature: 'respeecher' },
-                { id: 'perform',    label: 'Perform',      feature: 'voiceChanger' },
+                { id: 'perform',    label: 'Custom Voices', feature: 'voiceChanger' },
                 { id: 'seeds',      label: 'Seed Library', feature: 'respeecher' },
                 { id: 'studio',     label: 'Studio',       feature: 'studioCollaboration' },
                 { id: 'adaptation', label: 'Adaptation' },

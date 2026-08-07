@@ -468,6 +468,68 @@ class DubVerseAPIClient {
       : {}
   }
 
+  /** Auth headers for callers outside this class (components, hooks).
+   *  Every backend route except /api/dubbing-engines and /health now requires
+   *  a token, so a bare this._fetch() to the API will 401.
+   *
+   *  Prefer ensureAuthHeaders() — this sync version returns empty headers if
+   *  the token has not been set yet. */
+  authHeaders(): Record<string, string> {
+    return this._authHeaders()
+  }
+
+  /** Auth headers, hydrating the token from Supabase first if it is missing.
+   *
+   *  setToken() is called from four separate components, each with its own
+   *  onAuthStateChange. A component that mounts before its page's setter
+   *  resolves would otherwise send no token and get a 401 — which is exactly
+   *  what the status/pipeline pollers did. */
+  async ensureAuthHeaders(): Promise<Record<string, string>> {
+    await this._ensureToken()
+    return this._authHeaders()
+  }
+
+  private async _ensureToken(): Promise<void> {
+    if (this._token) return
+    try {
+      const { createClient } = await import('@/lib/supabase/client')
+      const { data } = await createClient().auth.getSession()
+      if (data.session?.access_token) this._token = data.session.access_token
+    } catch {
+      // No session available — the request will 401 and the caller handles it.
+    }
+  }
+
+  /** this._fetch() with the bearer token always attached.
+   *
+   *  Most endpoints used to be public, so ~26 call sites here sent no token at
+   *  all and started returning 401 the moment the routes were guarded. Rather
+   *  than sprinkle _authHeaders() through call sites with three different
+   *  shapes (no init, init without headers, init with headers), everything
+   *  goes through here. Caller-supplied headers still win.
+   */
+  private async _fetch(input: string, init: RequestInit = {}): Promise<Response> {
+    await this._ensureToken()
+    const headers = {
+      ...this._authHeaders(),
+      ...((init.headers as Record<string, string> | undefined) ?? {}),
+    }
+    return fetch(input, { ...init, headers })
+  }
+
+  /** Build a media URL carrying the auth token in the query string.
+   *
+   *  <video src> and <audio src> cannot send an Authorization header, so the
+   *  backend accepts `access_token` as an alternative on media routes. Every
+   *  media/download URL must go through here — a plain URL now returns 401.
+   */
+  private _mediaUrl(path: string): string {
+    const url = `${this.baseURL}${path}`
+    if (!this._token) return url
+    const sep = path.includes('?') ? '&' : '?'
+    return `${url}${sep}access_token=${encodeURIComponent(this._token)}`
+  }
+
   constructor(baseURL: string = API_BASE_URL) {
     this.baseURL = baseURL
   }
@@ -539,7 +601,7 @@ class DubVerseAPIClient {
    * Get the current status of a processing job
    */
   async getJobStatus(jobId: string): Promise<JobStatus> {
-    const response = await fetch(`${this.baseURL}/api/status/${jobId}`)
+    const response = await this._fetch(`${this.baseURL}/api/status/${jobId}`)
     if (!response.ok) {
       if (response.status === 404) {
         throw new JobNotFoundError(jobId)
@@ -554,7 +616,7 @@ class DubVerseAPIClient {
    * Get the transcript for a job (includes speaker-labeled segments)
    */
   async getTranscript(jobId: string): Promise<Transcript> {
-    const response = await fetch(`${this.baseURL}/api/transcript/${jobId}`)
+    const response = await this._fetch(`${this.baseURL}/api/transcript/${jobId}`)
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }))
       throw new Error(error.detail || `Failed to fetch transcript: ${response.statusText}`)
@@ -566,7 +628,7 @@ class DubVerseAPIClient {
    * Get the segment state for a dubbed job (segments.json)
    */
   async getSegments(jobId: string): Promise<SegmentsData> {
-    const response = await fetch(`${this.baseURL}/api/segments/${jobId}`)
+    const response = await this._fetch(`${this.baseURL}/api/segments/${jobId}`)
     if (!response.ok) {
       if (response.status === 404) throw new JobNotFoundError(jobId)
       const error = await response.json().catch(() => ({ detail: response.statusText }))
@@ -601,7 +663,7 @@ class DubVerseAPIClient {
     const form = new FormData()
     form.append('file', file)
     if (language) form.append('language', language)
-    const response = await fetch(`${this.baseURL}/api/transcribe-video`, {
+    const response = await this._fetch(`${this.baseURL}/api/transcribe-video`, {
       method: 'POST',
       body: form,
     })
@@ -633,7 +695,7 @@ class DubVerseAPIClient {
     }>
     error?: string
   }> {
-    const response = await fetch(`${this.baseURL}/api/ref-transcript/${refJobId}`)
+    const response = await this._fetch(`${this.baseURL}/api/ref-transcript/${refJobId}`)
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }))
       throw new Error(error.detail || `Poll failed: ${response.statusText}`)
@@ -645,7 +707,7 @@ class DubVerseAPIClient {
    * Start the dubbing pipeline for a job
    */
   async startDubbing(request: DubRequest): Promise<DubResponse> {
-    const response = await fetch(`${this.baseURL}/api/dub`, {
+    const response = await this._fetch(`${this.baseURL}/api/dub`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
@@ -675,7 +737,7 @@ class DubVerseAPIClient {
       words?: Array<{ word: string; start: number; end: number; confidence: number }>
     }>
   }> {
-    const response = await fetch(`${this.baseURL}/api/translate-only`, {
+    const response = await this._fetch(`${this.baseURL}/api/translate-only`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
@@ -688,7 +750,7 @@ class DubVerseAPIClient {
   }
 
   async startRender(request: DubRequest): Promise<DubResponse> {
-    const response = await fetch(`${this.baseURL}/api/render`, {
+    const response = await this._fetch(`${this.baseURL}/api/render`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
@@ -729,7 +791,7 @@ class DubVerseAPIClient {
     const url = params.toString()
       ? `${this.baseURL}/api/voices?${params}`
       : `${this.baseURL}/api/voices`
-    const response = await fetch(url)
+    const response = await this._fetch(url)
     if (!response.ok) {
       throw new Error(`Failed to fetch voices: ${response.statusText}`)
     }
@@ -745,14 +807,14 @@ class DubVerseAPIClient {
 
   // ── Custom voices (user-added Fish Audio / ElevenLabs voices) ──────────────
   async getCustomVoices(): Promise<CustomVoice[]> {
-    const res = await fetch(`${this.baseURL}/api/voices/custom`)
+    const res = await this._fetch(`${this.baseURL}/api/voices/custom`)
     if (!res.ok) return []
     const data = await res.json()
     return (data.voices || []) as CustomVoice[]
   }
 
   async addCustomVoice(provider: 'fish-audio' | 'elevenlabs', voiceId: string, name?: string): Promise<CustomVoice> {
-    const res = await fetch(`${this.baseURL}/api/voices/custom`, {
+    const res = await this._fetch(`${this.baseURL}/api/voices/custom`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify({ provider, voice_id: voiceId, name: name ?? '' }),
@@ -770,7 +832,7 @@ class DubVerseAPIClient {
     const form = new FormData()
     form.append('file', file)
     form.append('name', name)
-    const res = await fetch(`${this.baseURL}/api/voices/clone`, {
+    const res = await this._fetch(`${this.baseURL}/api/voices/clone`, {
       method: 'POST',
       headers: { ...this._authHeaders() },
       body: form,
@@ -784,7 +846,7 @@ class DubVerseAPIClient {
 
   async deleteCustomVoice(voiceId: string, provider?: string): Promise<void> {
     const q = provider ? `?provider=${encodeURIComponent(provider)}` : ''
-    await fetch(`${this.baseURL}/api/voices/custom/${encodeURIComponent(voiceId)}${q}`, {
+    await this._fetch(`${this.baseURL}/api/voices/custom/${encodeURIComponent(voiceId)}${q}`, {
       method: 'DELETE',
       headers: { ...this._authHeaders() },
     })
@@ -802,7 +864,7 @@ class DubVerseAPIClient {
       public_url_set?: boolean
     }>
   }> {
-    const response = await fetch(`${this.baseURL}/api/dubbing-engines`)
+    const response = await this._fetch(`${this.baseURL}/api/dubbing-engines`)
     if (!response.ok) return { engines: {} }
     return response.json()
   }
@@ -811,7 +873,7 @@ class DubVerseAPIClient {
    * Get the active TTS provider info
    */
   async getTTSProvider(): Promise<{ active: string; providers: Record<string, { available: boolean; voice_cloning?: boolean }> }> {
-    const response = await fetch(`${this.baseURL}/api/tts-provider`)
+    const response = await this._fetch(`${this.baseURL}/api/tts-provider`)
     if (!response.ok) {
       return { active: "elevenlabs", providers: {} }
     }
@@ -822,7 +884,7 @@ class DubVerseAPIClient {
    * Switch the active TTS provider
    */
   async setTTSProvider(provider: string): Promise<{ active: string; providers: Record<string, { available: boolean; voice_cloning?: boolean }> }> {
-    const response = await fetch(`${this.baseURL}/api/tts-provider`, {
+    const response = await this._fetch(`${this.baseURL}/api/tts-provider`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider }),
@@ -838,7 +900,7 @@ class DubVerseAPIClient {
    * Get the chunk manifest for a job
    */
   async getChunks(jobId: string): Promise<ChunkInfo[]> {
-    const response = await fetch(`${this.baseURL}/api/chunks/${jobId}`)
+    const response = await this._fetch(`${this.baseURL}/api/chunks/${jobId}`)
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }))
       throw new Error(error.detail || `Failed to fetch chunks: ${response.statusText}`)
@@ -851,7 +913,7 @@ class DubVerseAPIClient {
    * Delete a job and its associated files
    */
   async deleteJob(jobId: string): Promise<void> {
-    const response = await fetch(`${this.baseURL}/api/job/${jobId}`, {
+    const response = await this._fetch(`${this.baseURL}/api/job/${jobId}`, {
       method: 'DELETE',
     })
     if (!response.ok) {
@@ -864,7 +926,7 @@ class DubVerseAPIClient {
    * List all jobs
    */
   async listJobs(): Promise<JobStatus[]> {
-    const response = await fetch(`${this.baseURL}/api/jobs`, {
+    const response = await this._fetch(`${this.baseURL}/api/jobs`, {
       headers: this._authHeaders(),
     })
     if (!response.ok) {
@@ -879,7 +941,7 @@ class DubVerseAPIClient {
    */
   async healthCheck(): Promise<boolean> {
     try {
-      const response = await fetch(`${this.baseURL}/health`, { method: 'GET' })
+      const response = await this._fetch(`${this.baseURL}/health`, { method: 'GET' })
       return response.ok
     } catch {
       return false
@@ -890,14 +952,14 @@ class DubVerseAPIClient {
    * Build the URL for downloading a dubbed video
    */
   getDubDownloadURL(jobId: string, language: string): string {
-    return `${this.baseURL}/api/download/${jobId}/${language}`
+    return this._mediaUrl(`/api/download/${jobId}/${language}`)
   }
 
   /**
    * Trigger quality analysis for a dubbed video
    */
   async triggerAnalysis(jobId: string, language: string): Promise<AnalysisResponse> {
-    const response = await fetch(`${this.baseURL}/api/analyze/${jobId}/${language}`, {
+    const response = await this._fetch(`${this.baseURL}/api/analyze/${jobId}/${language}`, {
       method: 'POST',
     })
     if (!response.ok && response.status !== 202) {
@@ -913,7 +975,7 @@ class DubVerseAPIClient {
    * { status: 'complete', analysis: {...} } if done
    */
   async getAnalysis(jobId: string, language: string): Promise<AnalysisResponse> {
-    const response = await fetch(`${this.baseURL}/api/analysis/${jobId}/${language}`)
+    const response = await this._fetch(`${this.baseURL}/api/analysis/${jobId}/${language}`)
     if (response.status === 202) {
       return { status: 'running', message: 'Analysis in progress' }
     }
@@ -947,7 +1009,7 @@ class DubVerseAPIClient {
     // there was nothing to analyse at all.
     analysis_method?: 'emotion2vec-sliding-window' | 'velma-labels' | 'no-data-fallback' | string
   }> {
-    const response = await fetch(`${this.baseURL}/api/emotion/analyze-segment/${jobId}`, {
+    const response = await this._fetch(`${this.baseURL}/api/emotion/analyze-segment/${jobId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ start_time: startTime, end_time: endTime }),
@@ -966,7 +1028,7 @@ class DubVerseAPIClient {
     segments_patched: number
     total_segments: number
   }> {
-    const response = await fetch(`${this.baseURL}/api/jobs/${jobId}/rediarize-velma`, {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/rediarize-velma`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     })
@@ -978,7 +1040,7 @@ class DubVerseAPIClient {
   }
 
   async getCharacterProfiles(jobId: string): Promise<CharacterProfile[]> {
-    const response = await fetch(`${this.baseURL}/api/jobs/${jobId}/character-profiles`, {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/character-profiles`, {
       headers: this._authHeaders(),
     })
     if (!response.ok) throw new Error('Failed to load character profiles')
@@ -987,7 +1049,7 @@ class DubVerseAPIClient {
   }
 
   async saveCharacterProfiles(jobId: string, profiles: CharacterProfile[]): Promise<void> {
-    const response = await fetch(`${this.baseURL}/api/jobs/${jobId}/character-profiles`, {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/character-profiles`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify({ character_profiles: profiles }),
@@ -1000,11 +1062,13 @@ class DubVerseAPIClient {
     index: number,
     request: RegenerateSegmentRequest
   ): Promise<RegenerateSegmentResponse> {
-    const response = await fetch(
+    const response = await this._fetch(
       `${this.baseURL}/api/segment/regenerate/${jobId}/${index}`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        // Token always sent: the backend only checks it when engine is
+        // "respeecher", but the client can't know that here.
+        headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
         body: JSON.stringify(request),
       }
     )
@@ -1035,7 +1099,7 @@ class DubVerseAPIClient {
     enabled: boolean
   }> {
     const url = `${this.baseURL}/api/elevenlabs/voices${refresh ? '?refresh=true' : ''}`
-    const res = await fetch(url)
+    const res = await this._fetch(url)
     if (!res.ok) return { voices: [], enabled: false }
     return res.json()
   }
@@ -1054,7 +1118,7 @@ class DubVerseAPIClient {
     fd.append('voice_id', voiceId)
     fd.append('model_id', opts?.modelId ?? 'eleven_english_sts_v2')
     fd.append('remove_background_noise', String(opts?.removeBackgroundNoise ?? true))
-    const res = await fetch(`${this.baseURL}/api/elevenlabs/sts-preview`, {
+    const res = await this._fetch(`${this.baseURL}/api/elevenlabs/sts-preview`, {
       method: 'POST',
       headers: { ...this._authHeaders() },
       body: fd,
@@ -1083,7 +1147,7 @@ class DubVerseAPIClient {
     fd.append('voice_id', voiceId)
     fd.append('model_id', opts?.modelId ?? 'eleven_english_sts_v2')
     fd.append('remove_background_noise', String(opts?.removeBackgroundNoise ?? true))
-    const res = await fetch(`${this.baseURL}/api/segment/perform/${jobId}/${index}`, {
+    const res = await this._fetch(`${this.baseURL}/api/segment/perform/${jobId}/${index}`, {
       method: 'POST',
       headers: { ...this._authHeaders() },
       body: fd,
@@ -1104,7 +1168,7 @@ class DubVerseAPIClient {
     index: number,
     seed: number
   ): Promise<{ status: string; respeecher_seed_history: Array<{ seed: number; voice: string; params: Record<string, number> | null; kept?: boolean }> }> {
-    const res = await fetch(`${this.baseURL}/api/segment/seed/${jobId}/${index}/${seed}`, {
+    const res = await this._fetch(`${this.baseURL}/api/segment/seed/${jobId}/${index}/${seed}`, {
       method: 'DELETE',
     })
     if (!res.ok) throw new Error(`Failed to delete seed: ${res.status}`)
@@ -1121,7 +1185,7 @@ class DubVerseAPIClient {
     seed: number,
     kept: boolean
   ): Promise<{ status: string }> {
-    const res = await fetch(`${this.baseURL}/api/segment/seed/${jobId}/${index}/${seed}`, {
+    const res = await this._fetch(`${this.baseURL}/api/segment/seed/${jobId}/${index}/${seed}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ kept }),
@@ -1131,7 +1195,7 @@ class DubVerseAPIClient {
   }
 
   async resetSegment(jobId: string, index: number): Promise<{ status: string }> {
-    const response = await fetch(
+    const response = await this._fetch(
       `${this.baseURL}/api/segment/reset/${jobId}/${index}`,
       { method: 'POST' }
     )
@@ -1146,7 +1210,11 @@ class DubVerseAPIClient {
    *  when the account has no generation balance. Returns [] when the backend has
    *  no API key configured, letting the panel show an empty state. */
   async listRespeecherVoices(): Promise<RespeecherVoice[]> {
-    const response = await fetch(`${this.baseURL}/api/respeecher/voices`)
+    // Auth required: this endpoint is Professional-gated. Without the token it
+    // returns 401 and the panel shows "Missing authentication token".
+    const response = await this._fetch(`${this.baseURL}/api/respeecher/voices`, {
+      headers: this._authHeaders(),
+    })
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }))
       throw new Error(error.detail || `Failed to load Respeecher voices: ${response.statusText}`)
@@ -1156,7 +1224,7 @@ class DubVerseAPIClient {
   }
 
   getAudioFileUrl(jobId: string, filename: string): string {
-    return `${this.baseURL}/api/media/${jobId}/audio/${filename}`
+    return this._mediaUrl(`/api/media/${jobId}/audio/${filename}`)
   }
 
   async exportVideo(
@@ -1165,7 +1233,7 @@ class DubVerseAPIClient {
     aspect: 'widescreen' | 'fill',
     format: 'mp4' | 'mov' | 'avi' | 'mkv',
   ): Promise<{ export_id: string; filename: string }> {
-    const res = await fetch(`${this.baseURL}/api/dub/export/${jobId}`, {
+    const res = await this._fetch(`${this.baseURL}/api/dub/export/${jobId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify({ resolution, aspect, format }),
@@ -1178,7 +1246,7 @@ class DubVerseAPIClient {
   }
 
   getExportDownloadUrl(jobId: string, filename: string): string {
-    return `${this.baseURL}/api/dub/export/download/${jobId}/${filename}`
+    return this._mediaUrl(`/api/dub/export/download/${jobId}/${filename}`)
   }
 
   async getExportProgress(exportId: string): Promise<{
@@ -1189,17 +1257,17 @@ class DubVerseAPIClient {
     job_id: string
     error?: string
   }> {
-    const res = await fetch(`${this.baseURL}/api/dub/export/progress/${exportId}`)
+    const res = await this._fetch(`${this.baseURL}/api/dub/export/progress/${exportId}`)
     if (!res.ok) throw new Error('Export not found')
     return res.json()
   }
 
   async cancelExport(exportId: string): Promise<void> {
-    await fetch(`${this.baseURL}/api/dub/export/progress/${exportId}`, { method: 'DELETE' })
+    await this._fetch(`${this.baseURL}/api/dub/export/progress/${exportId}`, { method: 'DELETE' })
   }
 
   async saveProject(jobId: string, meta: { title?: string; target_language?: string; thumbnail_url?: string }): Promise<void> {
-    await fetch(`${this.baseURL}/api/projects/save/${jobId}`, {
+    await this._fetch(`${this.baseURL}/api/projects/save/${jobId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify(meta),
@@ -1221,7 +1289,7 @@ class DubVerseAPIClient {
     /** Retention date. null/absent = permanent (Professional). */
     expires_at?: string | null
   }>> {
-    const res = await fetch(`${this.baseURL}/api/projects`, {
+    const res = await this._fetch(`${this.baseURL}/api/projects`, {
       headers: this._authHeaders(),
     })
     if (!res.ok) return []
@@ -1230,7 +1298,7 @@ class DubVerseAPIClient {
   }
 
   async retranslateJob(jobId: string): Promise<RetranslateResponse> {
-    const response = await fetch(`${this.baseURL}/api/jobs/${jobId}/retranslate`, {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/retranslate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
     })
@@ -1242,7 +1310,7 @@ class DubVerseAPIClient {
   }
 
   async remixDub(jobId: string): Promise<RemixResponse> {
-    const response = await fetch(`${this.baseURL}/api/dub/remix/${jobId}`, {
+    const response = await this._fetch(`${this.baseURL}/api/dub/remix/${jobId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
     })
@@ -1270,7 +1338,7 @@ class DubVerseAPIClient {
       text_locked?: boolean
     }
   ): Promise<void> {
-    await fetch(`${this.baseURL}/api/segment/commit/${jobId}/${index}`, {
+    await this._fetch(`${this.baseURL}/api/segment/commit/${jobId}/${index}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify(data),
@@ -1290,7 +1358,7 @@ class DubVerseAPIClient {
     skipped_locked: number[]
     failed: Array<{ transcript_index: number; error: string }>
   }> {
-    const res = await fetch(`${this.baseURL}/api/segments/apply-voice/${jobId}`, {
+    const res = await this._fetch(`${this.baseURL}/api/segments/apply-voice/${jobId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify({ speaker_id: speakerId, voice_id: voiceId }),
@@ -1303,7 +1371,7 @@ class DubVerseAPIClient {
     jobId: string,
     segments: Array<Record<string, unknown>>
   ): Promise<{ status: string; segments: Array<{ id: string; transcript_index: number; start_time: number; end_time: number; [key: string]: unknown }> }> {
-    const response = await fetch(`${this.baseURL}/api/segment/sync/${jobId}`, {
+    const response = await this._fetch(`${this.baseURL}/api/segment/sync/${jobId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify({ segments }),
@@ -1313,7 +1381,7 @@ class DubVerseAPIClient {
   }
 
   async askAIChat(jobId: string, message: string, history: { role: 'user' | 'assistant'; content: string }[]): Promise<{ reply: string }> {
-    const res = await fetch(`${this.baseURL}/api/ask-ai-chat`, {
+    const res = await this._fetch(`${this.baseURL}/api/ask-ai-chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify({ message, history }),
@@ -1339,7 +1407,7 @@ class DubVerseAPIClient {
     speaker_label?: string
     speaker_gender?: string
   }): Promise<{ status: string; suggestion: string; explanation: string }> {
-    const response = await fetch(`${this.baseURL}/api/ask-ai`, {
+    const response = await this._fetch(`${this.baseURL}/api/ask-ai`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify(request),
@@ -1352,7 +1420,7 @@ class DubVerseAPIClient {
   }
 
   async updateVoiceMapping(jobId: string, voiceMapping: Record<string, string>): Promise<void> {
-    await fetch(`${this.baseURL}/api/jobs/${jobId}/voice-mapping`, {
+    await this._fetch(`${this.baseURL}/api/jobs/${jobId}/voice-mapping`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(voiceMapping),
@@ -1360,7 +1428,7 @@ class DubVerseAPIClient {
   }
 
   async getVoiceById(voiceId: string): Promise<{ voice_id: string; name: string; tags: string[] }> {
-    const response = await fetch(`${this.baseURL}/api/voices/by-id/${encodeURIComponent(voiceId)}`)
+    const response = await this._fetch(`${this.baseURL}/api/voices/by-id/${encodeURIComponent(voiceId)}`)
     if (!response.ok) {
       throw new Error(`Voice ${voiceId} not found`)
     }
@@ -1368,7 +1436,7 @@ class DubVerseAPIClient {
   }
 
   async updateTraitsMapping(jobId: string, traitsMapping: Record<string, string[]>): Promise<void> {
-    await fetch(`${this.baseURL}/api/jobs/${jobId}/traits-mapping`, {
+    await this._fetch(`${this.baseURL}/api/jobs/${jobId}/traits-mapping`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(traitsMapping),
@@ -1376,7 +1444,7 @@ class DubVerseAPIClient {
   }
 
   async reassignSpeaker(jobId: string, segmentIndex: number, newSpeakerId: string): Promise<void> {
-    await fetch(`${this.baseURL}/api/jobs/${jobId}/speaker-reassign`, {
+    await this._fetch(`${this.baseURL}/api/jobs/${jobId}/speaker-reassign`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ segment_index: segmentIndex, new_speaker_id: newSpeakerId }),
@@ -1386,11 +1454,20 @@ class DubVerseAPIClient {
   toAbsoluteUrl(url: string): string {
     if (!url) return ''
     if (url.startsWith('http://') || url.startsWith('https://')) return url
-    return `${this.baseURL}${url.startsWith('/') ? url : `/${url}`}`
+    const path = url.startsWith('/') ? url : `/${url}`
+    // Media routes are owner-only now. They are consumed by <video>/<img>,
+    // which cannot send headers, so the token rides in the query string.
+    // transcript/export is included because it is opened as a browser
+    // navigation (anchor download), which cannot carry an Authorization header
+    // any more than <video src> can.
+    if (/^\/api\/(media|download|transcript\/export|dub\/export\/download|projects\/[^/]+\/thumbnail)/.test(path)) {
+      return this._mediaUrl(path)
+    }
+    return `${this.baseURL}${path}`
   }
 
   async getEmotionalLibrary(): Promise<EmotionalChord[]> {
-    const response = await fetch(`${this.baseURL}/api/emotional-library`, {
+    const response = await this._fetch(`${this.baseURL}/api/emotional-library`, {
       headers: { ...this._authHeaders() },
     })
     if (!response.ok) return []
@@ -1399,7 +1476,7 @@ class DubVerseAPIClient {
   }
 
   async saveEmotionalChord(chord: Omit<EmotionalChord, 'id' | 'user_id' | 'created_at'>): Promise<EmotionalChord | null> {
-    const response = await fetch(`${this.baseURL}/api/emotional-library`, {
+    const response = await this._fetch(`${this.baseURL}/api/emotional-library`, {
       method: 'POST',
       headers: { ...this._authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(chord),
@@ -1409,14 +1486,14 @@ class DubVerseAPIClient {
   }
 
   async deleteEmotionalChord(id: string): Promise<void> {
-    await fetch(`${this.baseURL}/api/emotional-library/${id}`, {
+    await this._fetch(`${this.baseURL}/api/emotional-library/${id}`, {
       method: 'DELETE',
       headers: { ...this._authHeaders() },
     })
   }
 
   async clearEmotionalLibrary(): Promise<void> {
-    await fetch(`${this.baseURL}/api/emotional-library`, {
+    await this._fetch(`${this.baseURL}/api/emotional-library`, {
       method: 'DELETE',
       headers: { ...this._authHeaders() },
     })
@@ -1431,7 +1508,7 @@ class DubVerseAPIClient {
     core_emotion: string
     source_segment_text?: string
   }): Promise<{ id: string; name: string }> {
-    const res = await fetch(`${this.baseURL}/api/ei/curves`, {
+    const res = await this._fetch(`${this.baseURL}/api/ei/curves`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify(payload),
@@ -1451,7 +1528,7 @@ class DubVerseAPIClient {
     source_segment_text?: string
     created_at: string
   }> }> {
-    const res = await fetch(`${this.baseURL}/api/ei/curves`, {
+    const res = await this._fetch(`${this.baseURL}/api/ei/curves`, {
       headers: { ...this._authHeaders() },
     })
     if (!res.ok) return { curves: [] }
@@ -1459,7 +1536,7 @@ class DubVerseAPIClient {
   }
 
   async deleteEmotionCurve(id: string): Promise<void> {
-    await fetch(`${this.baseURL}/api/ei/curves/${id}`, {
+    await this._fetch(`${this.baseURL}/api/ei/curves/${id}`, {
       method: 'DELETE',
       headers: { ...this._authHeaders() },
     })
