@@ -15,7 +15,11 @@ class Settings(BaseSettings):
             return v.lower() not in ("release", "production", "prod")
         return v
     
-    CORS_ORIGINS: list[str] = ["*"]
+    # Wildcard origins let any site on the internet drive this API, and paired
+    # with allow_credentials=True browsers reject the combination anyway — so
+    # "*" was never doing what it looked like it was doing. Override per
+    # environment via the CORS_ORIGINS env var (comma-separated).
+    CORS_ORIGINS: list[str] = ["http://localhost:3001", "http://localhost:3000"]
     
     UPLOAD_DIR: str = "data/uploads"
     CHUNKS_DIR: str = "data/chunks"

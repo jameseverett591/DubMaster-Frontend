@@ -1,7 +1,7 @@
 from typing import Optional, Dict, List, Any
 from pydantic import BaseModel, Field
 import fastapi
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Request, Body
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Request, Body, Depends
 from fastapi.responses import JSONResponse, FileResponse, Response
 import uuid
 import os
@@ -242,6 +242,97 @@ async def _get_or_rehydrate_job(job_id: str):
     if job:
         return job
     return await _rehydrate_job(job_id)
+
+
+# ---------------------------------------------------------------------------
+# Request guards.
+#
+# Defined here, above the first @router decorator, because decorators run at
+# import time: a dependencies=[Depends(_dep_auth)] below a later definition
+# raises NameError before the app can start.
+# ---------------------------------------------------------------------------
+def _caller(request: Request) -> str:
+    """The verified user behind a request.
+
+    Accepts the token from the Authorization header OR an `access_token` query
+    param. The query param is not laziness: media is loaded by <video src> and
+    <audio src>, which cannot carry custom headers, so a header-only rule would
+    force those endpoints to stay public. Same verification either way.
+
+    Tokens in query strings do land in access logs and browser history. The
+    durable fix is short-lived signed media URLs; this is the step that closes
+    the hole without breaking playback.
+    """
+    token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not token:
+        token = request.query_params.get("access_token", "").strip()
+    return verify_jwt(token)
+
+
+async def _require_job(job_id: str, caller: str):
+    """Fetch a job the caller is allowed to see, or 404.
+
+    404 rather than 403 for someone else's job: a 403 would confirm the id
+    exists, which is itself a disclosure. Mirrors save_project.
+
+    Jobs with no user_id predate ownership and stay readable by any
+    authenticated caller — the same accommodation the projects endpoints make.
+    Tighten to a hard deny once every job row has an owner.
+    """
+    job = await _get_or_rehydrate_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if getattr(job, "user_id", None) and job.user_id != caller:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+def _require_internal(request: Request) -> None:
+    """Server-to-server auth for the RunPod worker. No user context exists on
+    these calls, so a user JWT is the wrong instrument."""
+    expected = os.environ.get("INTERNAL_API_SECRET", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="INTERNAL_API_SECRET not configured")
+    if request.headers.get("X-Internal-Secret", "") != expected:
+        raise HTTPException(status_code=401, detail="Invalid internal secret")
+
+
+_ADMIN_USER_IDS = {u.strip() for u in os.environ.get("ADMIN_USER_IDS", "").split(",") if u.strip()}
+
+
+def _require_admin(request: Request) -> str:
+    """Operator-only endpoints: destructive cleanup and global server config."""
+    user_id = _caller(request)
+    if user_id not in _ADMIN_USER_IDS:
+        raise HTTPException(status_code=403, detail="Admin only")
+    return user_id
+
+
+# --- Route guards -----------------------------------------------------------
+# Applied via `dependencies=[Depends(...)]` on the decorator rather than by
+# editing 50 handler bodies. FastAPI resolves `job_id` from the path for
+# _dep_job_access, so ownership is enforced without the handler knowing.
+# Routes that carry job_id in the BODY (/dub, /adapt, /render, /translate-only)
+# cannot use this and check ownership inline instead.
+
+async def _dep_auth(request: Request) -> str:
+    """Authenticated caller required. No resource ownership implied."""
+    return _caller(request)
+
+
+async def _dep_job_access(job_id: str, request: Request):
+    """Authenticated caller who owns `job_id`."""
+    return await _require_job(job_id, _caller(request))
+
+
+async def _dep_admin(request: Request) -> str:
+    return _require_admin(request)
+
+
+async def _dep_internal(request: Request) -> None:
+    _require_internal(request)
+
+
 
 
 def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, **__):
@@ -2230,7 +2321,7 @@ async def _transcribe_ref_runpod_bg(ref_id: str, video_path: str, lang: str):
         )
 
 
-@router.post("/transcribe-video")
+@router.post("/transcribe-video", dependencies=[Depends(_dep_auth)])
 async def transcribe_video_only(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -2332,7 +2423,7 @@ async def transcribe_video_only(
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
 
-@router.get("/ref-transcript/{ref_job_id}")
+@router.get("/ref-transcript/{ref_job_id}", dependencies=[Depends(_dep_auth)])
 async def get_ref_transcript(ref_job_id: str):
     """Poll endpoint for reference transcription status. Returns segments when ready."""
     out_path = os.path.join("data", "jobs", ref_job_id, "ref_transcript.json")
@@ -2350,7 +2441,7 @@ async def get_ref_transcript(ref_job_id: str):
     return {"status": "processing", "ref_job_id": ref_job_id, "segments": []}
 
 
-@router.get("/status/{job_id}", response_model=StatusResponse)
+@router.get("/status/{job_id}", response_model=StatusResponse, dependencies=[Depends(_dep_job_access)])
 async def get_job_status(job_id: str):
     job = await _get_or_rehydrate_job(job_id)
     
@@ -2382,7 +2473,7 @@ async def get_job_status(job_id: str):
     )
 
 
-@router.get("/chunks/{job_id}", response_model=ChunkManifest)
+@router.get("/chunks/{job_id}", response_model=ChunkManifest, dependencies=[Depends(_dep_job_access)])
 async def get_chunk_manifest(job_id: str):
     job = await _get_or_rehydrate_job(job_id)
     
@@ -2402,7 +2493,7 @@ async def get_chunk_manifest(job_id: str):
     )
 
 
-@router.get("/transcript/export/{job_id}")
+@router.get("/transcript/export/{job_id}", dependencies=[Depends(_dep_job_access)])
 async def export_transcript_srt(job_id: str):
     """Export dubbed segment text as a downloadable SRT file."""
     segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
@@ -2437,7 +2528,7 @@ async def export_transcript_srt(job_id: str):
     )
 
 
-@router.get("/transcript/{job_id}")
+@router.get("/transcript/{job_id}", dependencies=[Depends(_dep_job_access)])
 async def get_transcript(job_id: str):
     job = await _get_or_rehydrate_job(job_id)
     
@@ -2491,7 +2582,7 @@ async def get_transcript(job_id: str):
     raise HTTPException(status_code=404, detail="Transcript not available yet")
 
 
-@router.get("/transcript/{job_id}/editor-format")
+@router.get("/transcript/{job_id}/editor-format", dependencies=[Depends(_dep_job_access)])
 async def get_transcript_editor_format(job_id: str):
     """Serve transcript in the format expected by the standalone Transcript Editor.
 
@@ -2700,8 +2791,8 @@ async def clear_all_jobs(request: Request, force: bool = False):
     }
 
 
-@router.delete("/job/{job_id}")
-@router.delete("/jobs/{job_id}")
+@router.delete("/job/{job_id}", dependencies=[Depends(_dep_job_access)])
+@router.delete("/jobs/{job_id}", dependencies=[Depends(_dep_job_access)])
 async def delete_job(job_id: str, request: Request):
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.removeprefix("Bearer ").strip()
@@ -2785,7 +2876,7 @@ def _persist_job_metadata_field(job_id: str, field: str, value) -> None:
         logger.warning(f"Job {job_id}: failed to persist {field} to segments.json: {e}")
 
 
-@router.patch("/jobs/{job_id}/voice-mapping", status_code=204)
+@router.patch("/jobs/{job_id}/voice-mapping", status_code=204, dependencies=[Depends(_dep_job_access)])
 async def update_voice_mapping(job_id: str, body: Dict[str, str] = Body(...)):
     """Persist a speaker_id → voice_key mapping for this job."""
     job = await _get_or_rehydrate_job(job_id)
@@ -2796,7 +2887,7 @@ async def update_voice_mapping(job_id: str, body: Dict[str, str] = Body(...)):
     logger.info(f"[VOICE MAP] Job {job_id} voice mapping updated: {body}")
 
 
-@router.patch("/jobs/{job_id}/traits-mapping", status_code=204)
+@router.patch("/jobs/{job_id}/traits-mapping", status_code=204, dependencies=[Depends(_dep_job_access)])
 async def update_traits_mapping(job_id: str, body: Dict[str, List[str]] = Body(...)):
     """Persist a speaker_id → traits[] mapping for this job. Applied on regenerate
     via segment.attached_traits, and on initial batch dub via Job.traits_mapping."""
@@ -2808,7 +2899,7 @@ async def update_traits_mapping(job_id: str, body: Dict[str, List[str]] = Body(.
     logger.info(f"[TRAITS MAP] Job {job_id} traits mapping updated: {body}")
 
 
-@router.patch("/jobs/{job_id}/speaker-reassign", status_code=204)
+@router.patch("/jobs/{job_id}/speaker-reassign", status_code=204, dependencies=[Depends(_dep_job_access)])
 async def reassign_segment_speaker(job_id: str, body: dict = Body(...)):
     """Reassign a single transcript segment to a different speaker."""
     job = await _get_or_rehydrate_job(job_id)
@@ -2835,7 +2926,7 @@ async def reassign_segment_speaker(job_id: str, body: dict = Body(...)):
     await job_manager.update_job_transcript(job_id, job.transcript)
 
 
-@router.post("/jobs/{job_id}/cancel")
+@router.post("/jobs/{job_id}/cancel", dependencies=[Depends(_dep_job_access)])
 async def cancel_job(job_id: str):
     """Cancel an in-flight job.
 
@@ -3000,7 +3091,7 @@ class SaveProjectBody(BaseModel):
     thumbnail_url: Optional[str] = None
 
 
-@router.post("/projects/save/{job_id}")
+@router.post("/projects/save/{job_id}", dependencies=[Depends(_dep_job_access)])
 async def save_project(job_id: str, request: Request, body: SaveProjectBody = SaveProjectBody()):
     auth_header = request.headers.get("Authorization", "")
     caller = verify_jwt(auth_header.removeprefix("Bearer ").strip())
@@ -3159,7 +3250,7 @@ async def delete_project(project_id: str, request: Request):
     return {"deleted": True, "project_id": project_id}
 
 
-@router.post("/cleanup")
+@router.post("/cleanup", dependencies=[Depends(_dep_admin)])
 async def cleanup_old_files():
     try:
         storage.cleanup_old_files()
@@ -3417,13 +3508,17 @@ async def process_dubbing_pipeline(
 
 
 @router.post("/adapt", response_model=AdaptResponse)
-async def run_adaptation(request: AdaptRequest):
+async def run_adaptation(request: AdaptRequest, http_request: Request):
     """
     On-demand: generate 3 adaptation variants (faithful / performable / sync_fit)
     for the provided segments. Called by the editor when the Adaptation Panel is
     opened. Does NOT trigger TTS — variants are stored in editor state only.
     Always returns HTTP 200; sets fallback=True if the LLM was unavailable.
+
+    job_id arrives in the body, so this cannot use the _dep_job_access guard the
+    path-param routes use — ownership is checked inline instead.
     """
+    await _require_job(request.job_id, _caller(http_request))
     from dataclasses import asdict
     from app.services.adaptation_engine import adapt_batch
 
@@ -3453,7 +3548,12 @@ async def run_adaptation(request: AdaptRequest):
 
 
 @router.post("/dub", response_model=DubResponse)
-async def dub_video(request: DubRequest, background_tasks: BackgroundTasks):
+async def dub_video(request: DubRequest, http_request: Request, background_tasks: BackgroundTasks):
+    # job_id is in the body, so the _dep_job_access guard cannot reach it.
+    # Without this, /transcribe-video -> /dub is a complete unauthenticated,
+    # unmetered dubbing pipeline.
+    await _require_job(request.job_id, _caller(http_request))
+
     job = await _get_or_rehydrate_job(request.job_id)
 
     if not job:
@@ -3596,12 +3696,13 @@ async def dub_video(request: DubRequest, background_tasks: BackgroundTasks):
 
 
 @router.post("/translate-only")
-async def translate_only(request: DubRequest):
+async def translate_only(request: DubRequest, http_request: Request):
     """Run translation + adaptation only — no TTS or mixing.
 
     Returns the translated segments so the frontend can show them in the
     inline editor for user review before rendering.
     """
+    await _require_job(request.job_id, _caller(http_request))
     import json as _json_to
     from app.services.translation_service import translation_service as _ts
 
@@ -3734,12 +3835,13 @@ async def translate_only(request: DubRequest):
 
 
 @router.post("/render")
-async def render_dubbed_video(request: DubRequest, background_tasks: BackgroundTasks):
+async def render_dubbed_video(request: DubRequest, http_request: Request, background_tasks: BackgroundTasks):
     """Pick up translated (and user-edited) segments and run TTS + mix.
 
     Called after the user reviews the translation in the inline editor.
     The request.transcript contains the corrected translated text.
     """
+    await _require_job(request.job_id, _caller(http_request))
     job = await _get_or_rehydrate_job(request.job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -3810,7 +3912,7 @@ async def render_dubbed_video(request: DubRequest, background_tasks: BackgroundT
     )
 
 
-@router.get("/download/{job_id}/{language}")
+@router.get("/download/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
 async def download_dubbed_video(job_id: str, language: str, attachment: bool = False):
     """Serve the finished dub.
 
@@ -3840,7 +3942,7 @@ async def download_dubbed_video(job_id: str, language: str, attachment: bool = F
     )
 
 
-@router.get("/projects/{project_id}/thumbnail")
+@router.get("/projects/{project_id}/thumbnail", dependencies=[Depends(_dep_auth)])
 async def serve_project_thumbnail(project_id: str):
     """Serve a saved project's generated thumbnail image."""
     thumb_path = _projects_base_dir() / project_id / "thumbnail.jpg"
@@ -3849,7 +3951,7 @@ async def serve_project_thumbnail(project_id: str):
     return FileResponse(thumb_path, media_type="image/jpeg")
 
 
-@router.get("/media/{job_id}/video")
+@router.get("/media/{job_id}/video", dependencies=[Depends(_dep_job_access)])
 async def serve_job_video(job_id: str):
     """Serve the original uploaded video so Sync.Labs can fetch it by URL."""
     job = await _get_or_rehydrate_job(job_id)
@@ -3883,7 +3985,7 @@ _NO_STORE_HEADERS = {
 }
 
 
-@router.get("/media/{job_id}/audio/{filename}")
+@router.get("/media/{job_id}/audio/{filename}", dependencies=[Depends(_dep_job_access)])
 async def serve_job_audio(job_id: str, filename: str):
     """Serve a dubbed audio file so Sync.Labs can fetch it by URL."""
     if "/" in filename or "\\" in filename or ".." in filename:
@@ -3897,7 +3999,7 @@ async def serve_job_audio(job_id: str, filename: str):
         headers=_NO_STORE_HEADERS)
 
 
-@router.get("/media/{job_id}/separated/{audio_type}")
+@router.get("/media/{job_id}/separated/{audio_type}", dependencies=[Depends(_dep_job_access)])
 async def get_separated_audio(job_id: str, audio_type: str):
     """Serve a separated audio track (vocals or accompaniment) for waveform rendering."""
     if audio_type not in ("vocals", "accompaniment"):
@@ -3910,7 +4012,7 @@ async def get_separated_audio(job_id: str, audio_type: str):
         headers={"Cache-Control": "public, max-age=3600"})
 
 
-@router.get("/media/{job_id}/{filename}")
+@router.get("/media/{job_id}/{filename}", dependencies=[Depends(_dep_job_access)])
 async def serve_job_audio_legacy(job_id: str, filename: str):
     """Backwards-compat: serve segment audio without the /audio/ sub-path.
     Resolves stale URLs persisted in client localStorage before the /audio/
@@ -3950,7 +4052,7 @@ async def get_dubbing_engines():
     }
 
 
-@router.get("/pipeline/{job_id}")
+@router.get("/pipeline/{job_id}", dependencies=[Depends(_dep_job_access)])
 async def get_pipeline_status(job_id: str):
     """Return structured pipeline stage data for the Pipeline Monitor frontend component."""
     from app.services.pipeline_tracker import pipeline_tracker
@@ -3995,7 +4097,7 @@ async def get_pipeline_status(job_id: str):
     }
 
 
-@router.post("/worker-stage")
+@router.post("/worker-stage", dependencies=[Depends(_dep_internal)])
 async def worker_stage_update(request: Request):
     """
     Called by the RunPod worker at each stage boundary so the backend can
@@ -4069,7 +4171,7 @@ async def worker_stage_update(request: Request):
     return {"ok": True}
 
 
-@router.get("/gpu-status")
+@router.get("/gpu-status", dependencies=[Depends(_dep_auth)])
 async def get_gpu_status():
     from app.services.runpod_service import runpod_service
     health = await runpod_service.get_endpoint_health()
@@ -4082,7 +4184,7 @@ async def get_gpu_status():
     }
 
 
-@router.get("/tts-provider")
+@router.get("/tts-provider", dependencies=[Depends(_dep_auth)])
 async def get_tts_provider():
     """Return the currently active TTS provider and availability info."""
     provider = os.getenv("TTS_PROVIDER", settings.TTS_PROVIDER).lower().strip()
@@ -4098,7 +4200,7 @@ async def get_tts_provider():
     }
 
 
-@router.post("/tts-provider")
+@router.post("/tts-provider", dependencies=[Depends(_dep_admin)])
 async def set_tts_provider(body: dict):
     """Switch the active TTS provider at runtime.
 
@@ -4129,7 +4231,7 @@ async def set_tts_provider(body: dict):
     }
 
 
-@router.get("/voices")
+@router.get("/voices", dependencies=[Depends(_dep_auth)])
 async def get_available_voices(
     page: int = 1,
     page_size: int = 50,
@@ -4178,7 +4280,7 @@ async def get_available_voices(
         raise HTTPException(status_code=500, detail="Failed to fetch voices")
 
 
-@router.get("/voice-preview/{voice_id:path}")
+@router.get("/voice-preview/{voice_id:path}", dependencies=[Depends(_dep_auth)])
 async def get_voice_preview(voice_id: str):
     """Generate and serve a voice preview sample using the active TTS provider."""
     preview_dir = Path("data/voice_previews")
@@ -4232,7 +4334,7 @@ async def get_voice_preview(voice_id: str):
         raise HTTPException(status_code=500, detail="Failed to generate voice preview")
 
 
-@router.get("/voices/by-id/{voice_id:path}")
+@router.get("/voices/by-id/{voice_id:path}", dependencies=[Depends(_dep_auth)])
 async def get_voice_by_id(voice_id: str):
     """Resolve a Fish voice ID to its name + tags for display in UI components
     like the Character Profile popover. Returns 404 for unknown IDs (e.g.
@@ -4377,12 +4479,12 @@ class CustomVoiceRequest(BaseModel):
     name: str = ""
 
 
-@router.get("/voices/custom")
+@router.get("/voices/custom", dependencies=[Depends(_dep_auth)])
 async def list_custom_voices():
     return {"voices": _load_custom_voices()}
 
 
-@router.post("/voices/custom")
+@router.post("/voices/custom", dependencies=[Depends(_dep_auth)])
 async def add_custom_voice(body: CustomVoiceRequest, request: Request):
     _require_plan(request, ("professional",), "Custom Voices")
     provider = (body.provider or "").lower().strip()
@@ -4424,7 +4526,7 @@ async def add_custom_voice(body: CustomVoiceRequest, request: Request):
     return entry
 
 
-@router.delete("/voices/custom/{voice_id:path}")
+@router.delete("/voices/custom/{voice_id:path}", dependencies=[Depends(_dep_auth)])
 async def delete_custom_voice(voice_id: str, provider: Optional[str] = None):
     voices = _load_custom_voices()
     before = len(voices)
@@ -4496,7 +4598,7 @@ async def clone_voice(
 # Quality Analysis endpoints
 # ---------------------------------------------------------------------------
 
-@router.post("/analyze/{job_id}/{language}")
+@router.post("/analyze/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
 async def trigger_analysis(job_id: str, language: str, background_tasks: BackgroundTasks):
     """Trigger post-dub quality analysis. Returns 202 immediately."""
     job = await _get_or_rehydrate_job(job_id)
@@ -4537,7 +4639,7 @@ async def trigger_analysis(job_id: str, language: str, background_tasks: Backgro
     )
 
 
-@router.post("/analyze-segment/{job_id}/{segment_index}")
+@router.post("/analyze-segment/{job_id}/{segment_index}", dependencies=[Depends(_dep_job_access)])
 async def analyze_segment(job_id: str, segment_index: int):
     """Verify a single segment's lip-sync WITHOUT requiring a full video rebuild.
 
@@ -4583,7 +4685,7 @@ async def analyze_segment(job_id: str, segment_index: int):
     return result
 
 
-@router.get("/analysis/{job_id}/{language}")
+@router.get("/analysis/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
 async def get_analysis(job_id: str, language: str):
     """Get quality analysis results. 202 if running, 200 if complete, 404 if not triggered."""
     lang_norm = language.lower().strip()
@@ -4704,7 +4806,7 @@ class SegmentAnalyzeRequest(BaseModel):
     end_time: float
 
 
-@router.post("/jobs/{job_id}/rediarize-velma")
+@router.post("/jobs/{job_id}/rediarize-velma", dependencies=[Depends(_dep_job_access)])
 async def rediarize_with_velma(job_id: str, request: Request):
     """
     Re-run Velma diarization on an existing job's source audio and patch
@@ -4979,7 +5081,7 @@ async def _analyze_segment_with_emotion2vec(job, start_time: float, end_time: fl
         return None
 
 
-@router.post("/emotion/analyze-segment/{job_id}")
+@router.post("/emotion/analyze-segment/{job_id}", dependencies=[Depends(_dep_job_access)])
 async def emotion_analyze_segment(job_id: str, body: SegmentAnalyzeRequest):
     """
     Build a 50-point emotion curve from Velma emotion labels on overlapping
@@ -5127,7 +5229,7 @@ async def emotion_analyze_segment(job_id: str, body: SegmentAnalyzeRequest):
     }
 
 
-@router.post("/dub/remix/{job_id}")
+@router.post("/dub/remix/{job_id}", dependencies=[Depends(_dep_job_access)])
 async def remix_dub(job_id: str, request: Request):
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.removeprefix("Bearer ").strip()
@@ -5159,7 +5261,7 @@ async def remix_dub(job_id: str, request: Request):
     return result
 
 
-@router.post("/jobs/{job_id}/retranslate")
+@router.post("/jobs/{job_id}/retranslate", dependencies=[Depends(_dep_job_access)])
 async def retranslate_job(job_id: str, request: Request):
     """Re-run translation only against the existing Velma transcript stored in Supabase.
 
@@ -5457,7 +5559,7 @@ FORMAT_MAP = {
 }
 
 
-@router.post("/dub/export/{job_id}")
+@router.post("/dub/export/{job_id}", dependencies=[Depends(_dep_job_access)])
 async def export_video(job_id: str, body: ExportRequest, request: Request):
     """Export the dubbed video — stream-copies when no re-encode is needed, re-encodes otherwise."""
     import subprocess as _sp
@@ -5618,7 +5720,7 @@ async def export_video(job_id: str, body: ExportRequest, request: Request):
     return {"export_id": export_id, "filename": out_filename}
 
 
-@router.get("/dub/export/progress/{export_id}")
+@router.get("/dub/export/progress/{export_id}", dependencies=[Depends(_dep_auth)])
 async def export_progress(export_id: str):
     """Poll export progress. Returns status, pct, filename, download_url."""
     info = _export_progress.get(export_id)
@@ -5627,7 +5729,7 @@ async def export_progress(export_id: str):
     return info
 
 
-@router.delete("/dub/export/progress/{export_id}")
+@router.delete("/dub/export/progress/{export_id}", dependencies=[Depends(_dep_auth)])
 async def cancel_export(export_id: str):
     """Cancel an in-progress export."""
     info = _export_progress.get(export_id)
@@ -5643,7 +5745,7 @@ async def cancel_export(export_id: str):
     return {"status": "cancelled"}
 
 
-@router.get("/dub/export/download/{job_id}/{filename}")
+@router.get("/dub/export/download/{job_id}/{filename}", dependencies=[Depends(_dep_job_access)])
 async def download_export(job_id: str, filename: str):
     """Serve the exported file as a download attachment."""
     safe = os.path.basename(filename)
@@ -5657,7 +5759,7 @@ async def download_export(job_id: str, filename: str):
     )
 
 
-@router.get("/segments/{job_id}")
+@router.get("/segments/{job_id}", dependencies=[Depends(_dep_job_access)])
 async def get_segments(job_id: str):
     segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
     if not os.path.exists(segments_path):
@@ -5667,7 +5769,7 @@ async def get_segments(job_id: str):
     return data
 
 
-@router.get("/segments/{job_id}/snapshot")
+@router.get("/segments/{job_id}/snapshot", dependencies=[Depends(_dep_job_access)])
 async def get_segments_snapshot(job_id: str):
     """Return the original pipeline snapshot — never modified by user edits."""
     dubbed_dir = os.path.join(settings.DUBBED_DIR, job_id)
@@ -5680,7 +5782,7 @@ async def get_segments_snapshot(job_id: str):
         return _json.load(f)
 
 
-@router.patch("/segment/commit/{job_id}/{index}")
+@router.patch("/segment/commit/{job_id}/{index}", dependencies=[Depends(_dep_job_access)])
 async def commit_segment_timing(job_id: str, index: int, body: dict, request: Request):
     """Save committed timing and audio URL for a single segment to Supabase and segments.json.
 
@@ -5786,7 +5888,7 @@ class SyncSegmentsRequest(BaseModel):
     segments: List[dict]
 
 
-@router.post("/segment/sync/{job_id}")
+@router.post("/segment/sync/{job_id}", dependencies=[Depends(_dep_job_access)])
 async def sync_segments(job_id: str, body: SyncSegmentsRequest):
     """Persist the frontend's current segment layout to segments.json.
 
@@ -5949,7 +6051,7 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest):
     return {"status": "ok", "segments": response_segments}
 
 
-@router.post("/segment/reset/{job_id}/{index}")
+@router.post("/segment/reset/{job_id}/{index}", dependencies=[Depends(_dep_job_access)])
 async def reset_segment(job_id: str, index: int):
     """Clear all editor overrides on a segment — drops emotion + committed_* keys from segments.json.
 
@@ -6007,7 +6109,7 @@ async def list_respeecher_voices(request: Request):
     return {"voices": voices, "enabled": respeecher_tts.enabled}
 
 
-@router.post("/segment/regenerate/{job_id}/{index}")
+@router.post("/segment/regenerate/{job_id}/{index}", dependencies=[Depends(_dep_job_access)])
 async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest, request: Request):
     # Respeecher is Professional-only: each generate races three takes, so every
     # use is three billable vendor requests. Gated on the REQUESTED engine, not
@@ -6082,7 +6184,7 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest, r
     return {"status": "ok", "segment": seg}
 
 
-@router.get("/elevenlabs/voices")
+@router.get("/elevenlabs/voices", dependencies=[Depends(_dep_auth)])
 async def get_elevenlabs_voices(refresh: bool = False):
     """Target voices for the Voice Changer panel.
 
@@ -6112,7 +6214,7 @@ async def get_elevenlabs_voices(refresh: bool = False):
     return {"voices": out, "enabled": elevenlabs_tts.enabled}
 
 
-@router.post("/segment/perform/{job_id}/{index}")
+@router.post("/segment/perform/{job_id}/{index}", dependencies=[Depends(_dep_job_access)])
 async def perform_segment(
     job_id: str,
     index: int,
@@ -6239,7 +6341,7 @@ async def elevenlabs_sts_preview(
     return Response(content=result, media_type="audio/mpeg")
 
 
-@router.delete("/segment/seed/{job_id}/{index}/{seed}")
+@router.delete("/segment/seed/{job_id}/{index}/{seed}", dependencies=[Depends(_dep_job_access)])
 async def delete_seed_history_entry(job_id: str, index: int, seed: int):
     """Drop one take from a segment's Respeecher seed library.
 
@@ -6276,7 +6378,7 @@ async def delete_seed_history_entry(job_id: str, index: int, seed: int):
     return {"status": "ok", "respeecher_seed_history": remaining}
 
 
-@router.patch("/segment/seed/{job_id}/{index}/{seed}")
+@router.patch("/segment/seed/{job_id}/{index}/{seed}", dependencies=[Depends(_dep_job_access)])
 async def set_seed_kept(job_id: str, index: int, seed: int, body: dict):
     """Lock or unlock one take in a segment's seed library.
 
@@ -6323,7 +6425,7 @@ class ApplyVoiceRequest(BaseModel):
     pitch: Optional[int] = None
 
 
-@router.post("/segments/apply-voice/{job_id}")
+@router.post("/segments/apply-voice/{job_id}", dependencies=[Depends(_dep_job_access)])
 async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
     """Set ONE voice across every segment of a speaker, server-side and atomically.
 
@@ -6762,7 +6864,7 @@ async def delete_ei_curve(curve_id: str, request: Request):
     return {"status": "ok"}
 
 
-@router.get("/jobs/{job_id}/character-profiles")
+@router.get("/jobs/{job_id}/character-profiles", dependencies=[Depends(_dep_job_access)])
 async def get_character_profiles(job_id: str, request: Request):
     """Return the per-job character profiles."""
     auth_header = request.headers.get("Authorization", "")
@@ -6772,7 +6874,7 @@ async def get_character_profiles(job_id: str, request: Request):
     return {"character_profiles": job.character_profiles or []}
 
 
-@router.put("/jobs/{job_id}/character-profiles")
+@router.put("/jobs/{job_id}/character-profiles", dependencies=[Depends(_dep_job_access)])
 async def save_character_profiles(job_id: str, request: Request):
     """Save per-job character profiles. Body: {character_profiles: [{name, traits, speech_style}]}"""
     auth_header = request.headers.get("Authorization", "")

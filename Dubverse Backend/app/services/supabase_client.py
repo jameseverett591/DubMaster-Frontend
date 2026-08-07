@@ -1,5 +1,8 @@
+import hashlib
 import logging
 import os
+import threading
+import time
 
 from fastapi import HTTPException
 from supabase import create_client, Client
@@ -25,6 +28,19 @@ supabase_writer: Client = (
 )
 
 
+# Verified tokens, cached briefly. Every guarded route calls verify_jwt, and
+# some call it twice (route dependency + an inline check inside the handler),
+# so an uncached implementation costs two Supabase round trips on hot paths
+# like segment regenerate. 60s is short enough that a revoked session stops
+# working almost immediately, long enough to collapse the duplicate calls.
+#
+# Only SUCCESSES are cached. Caching failures would let one bad request pin a
+# 401 for a token that has since become valid.
+_JWT_TTL_SECONDS = 60
+_jwt_cache: "dict[str, tuple[float, str]]" = {}
+_jwt_cache_lock = threading.Lock()
+
+
 def verify_jwt(token: str) -> str:
     """Validate a Supabase JWT and return the verified user_id.
 
@@ -32,16 +48,32 @@ def verify_jwt(token: str) -> str:
     """
     if not token:
         raise HTTPException(status_code=401, detail="Missing authentication token")
+
+    now = time.time()
+    key = hashlib.sha256(token.encode("utf-8")).hexdigest()  # don't hold raw tokens in memory
+    with _jwt_cache_lock:
+        hit = _jwt_cache.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+
     try:
         response = supabase.auth.get_user(token)
         if not response or not response.user:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
-        return str(response.user.id)
+        user_id = str(response.user.id)
     except HTTPException:
         raise
     except Exception as exc:
         logger.warning(f"JWT verification failed: {exc}")
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    with _jwt_cache_lock:
+        _jwt_cache[key] = (now + _JWT_TTL_SECONDS, user_id)
+        if len(_jwt_cache) > 2048:   # bounded; drop whatever has already expired
+            for k, (exp, _) in list(_jwt_cache.items()):
+                if exp <= now:
+                    _jwt_cache.pop(k, None)
+    return user_id
 
 
 async def upsert_segments(job_id: str, segments: list) -> None:

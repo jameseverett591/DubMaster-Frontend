@@ -1,3 +1,16 @@
 __pycache__/
 *.pyc
 dub_request.json
+
+# Secrets. Nothing here is tracked today; this keeps a stray `git add -A`
+# from committing Fish / ElevenLabs / Respeecher / Supabase / Stripe keys.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.json
+service-account*.json
+
+# Runtime data — job dirs, uploads, renders
+data/
