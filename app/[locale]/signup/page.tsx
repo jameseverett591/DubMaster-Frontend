@@ -73,9 +73,9 @@ export default function SignUpPage() {
       key: "professional" as const,
       name: tp('professional.name'),
       tagline: tp('professional.taglineShort'),
-      monthlyPrice: 1400,
-      yearlyPrice: 13440,
-      yearlySavings: 3360,
+      monthlyPrice: 149,
+      yearlyPrice: 1430,
+      yearlySavings: 358,
       color: "#FDB022",
       features: [
         tp('professional.features.unlimited'),

@@ -57,8 +57,8 @@ export const PLANS = {
   },
   professional: {
     name: "Professional",
-    monthlyPrice: 1400,
-    yearlyPrice: 13440,
+    monthlyPrice: 149,
+    yearlyPrice: 1430,
     minutesPerMonth: -1, // unlimited
     features: [
       "Unlimited 2hr+ feature films/month",

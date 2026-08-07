@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Loader2, Film } from "lucide-react"
-import { apiClient, API_BASE_URL } from "@/lib/api-client"
+import { apiClient } from "@/lib/api-client"
 import { createClient } from "@/lib/supabase/client"
 import { expiryLevel, daysUntil } from "@/lib/plan-features"
 
@@ -31,6 +31,7 @@ export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
   const router = useRouter()
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
 
   useEffect(() => {
     const supabase = createClient()
@@ -91,7 +92,7 @@ export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
             <div className="relative aspect-video bg-slate-900 flex items-center justify-center">
               {project.thumbnail_url ? (
                 <img
-                  src={project.thumbnail_url.startsWith('http') ? project.thumbnail_url : `${API_BASE_URL}${project.thumbnail_url}`}
+                  src={apiClient.toAbsoluteUrl(project.thumbnail_url)}
                   alt={project.title}
                   className="h-full w-full object-cover"
                 />
@@ -139,6 +140,23 @@ export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
               <h3 className="font-medium text-foreground group-hover:text-primary truncate" title={project.title}>
                 {project.title || project.video_filename || project.job_id.slice(0, 8)}
               </h3>
+              {/* Job id, in full. This is the handle used everywhere else —
+                  the editor header, logs, support requests — so a truncated
+                  form would defeat the point of showing it. Click to copy;
+                  stopPropagation so it doesn't also open the project. */}
+              <button
+                type="button"
+                title="Click to copy job ID"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  void navigator.clipboard?.writeText(project.job_id)
+                  setCopiedId(project.job_id)
+                  window.setTimeout(() => setCopiedId(null), 1200)
+                }}
+                className="mt-1 block w-full truncate text-left font-mono text-[10px] text-cyan-400/70 hover:text-cyan-300"
+              >
+                {copiedId === project.job_id ? 'Copied' : project.job_id}
+              </button>
               <div className="mt-1 flex items-center justify-between text-xs text-muted-foreground">
                 <span className="capitalize">{project.status}</span>
                 <span>{formatDate(project.updated_at)}</span>
