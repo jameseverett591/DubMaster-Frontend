@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react'
 import { useEditorStore } from '@/lib/editor-store'
-import { API_BASE_URL } from '@/lib/api-client'
+import { API_BASE_URL, apiClient } from '@/lib/api-client'
 import { cn } from '@/lib/utils'
 import {
   VARIANT_LABELS,
@@ -63,7 +63,7 @@ export function AdaptationPanel() {
       }
       const res = await fetch(`${API_BASE_URL}/api/adapt`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await apiClient.ensureAuthHeaders()) },
         body: JSON.stringify(body),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)

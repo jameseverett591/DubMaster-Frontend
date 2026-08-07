@@ -933,7 +933,10 @@ export function VideoUpload({
                 localStorage.removeItem(STORAGE_KEY)
                 resetEditor()
                 try {
-                  await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/jobs/clear-all?force=true`, { method: "DELETE" })
+                  await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/jobs/clear-all?force=true`, {
+                    method: "DELETE",
+                    headers: await apiClient.ensureAuthHeaders(),
+                  })
                 } catch (e) {
                   console.error("Failed to clear jobs on backend:", e)
                 }

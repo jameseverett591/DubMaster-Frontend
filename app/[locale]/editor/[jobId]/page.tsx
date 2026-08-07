@@ -17,10 +17,11 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 // voice assignments, traits, etc.) on every parent re-render (e.g. QC poll).
 const NO_FINDINGS: QCFinding[] = []
 
+// Delegates to the client's version, which attaches the access token to media
+// URLs. A local copy silently produced token-less /api/media/{job}/video URLs
+// and the player just went black.
 function toAbsoluteUrl(url: string): string {
-  if (!url) return ''
-  if (url.startsWith('http://') || url.startsWith('https://')) return url
-  return `${API_BASE}${url.startsWith('/') ? url : `/${url}`}`
+  return apiClient.toAbsoluteUrl(url)
 }
 
 export default function EditorJobPage({ params }: { params: Promise<{ jobId: string }> }) {
@@ -88,10 +89,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     async function loadJob() {
       try {
         const [statusRes, segmentsRes, transcriptRes, snapshotRes] = await Promise.allSettled([
-          fetch(`${API_BASE}/api/status/${jobId}`),
-          fetch(`${API_BASE}/api/segments/${jobId}`),
-          fetch(`${API_BASE}/api/transcript/${jobId}`),
-          fetch(`${API_BASE}/api/segments/${jobId}/snapshot`),
+          fetch(`${API_BASE}/api/status/${jobId}`, { headers: await apiClient.ensureAuthHeaders() }),
+          fetch(`${API_BASE}/api/segments/${jobId}`, { headers: await apiClient.ensureAuthHeaders() }),
+          fetch(`${API_BASE}/api/transcript/${jobId}`, { headers: await apiClient.ensureAuthHeaders() }),
+          fetch(`${API_BASE}/api/segments/${jobId}/snapshot`, { headers: await apiClient.ensureAuthHeaders() }),
         ])
 
         const statusFetch = statusRes.status === 'fulfilled' ? statusRes.value : null
@@ -305,7 +306,9 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         return
       }
       try {
-        const res = await fetch(`${API_BASE}/api/analysis/${jobId}/${lang}`)
+        const res = await fetch(`${API_BASE}/api/analysis/${jobId}/${lang}`, {
+          headers: await apiClient.ensureAuthHeaders(),
+        })
         if (res.ok) {
           const data = await res.json()
           if (data.status === 'complete' && data.analysis) {
@@ -335,7 +338,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         } else if (res.status === 404) {
           // Not yet triggered — kick it off
           try {
-            await fetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, { method: 'POST' })
+            await fetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, {
+              method: 'POST',
+              headers: await apiClient.ensureAuthHeaders(),
+            })
           } catch {}
           if (!cancelled) setQcLoading(true)
         }
@@ -365,7 +371,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     setQcLoading(true)
     let res: Response | null = null
     try {
-      res = await fetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, { method: 'POST' })
+      res = await fetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, {
+        method: 'POST',
+        headers: await apiClient.ensureAuthHeaders(),
+      })
     } catch {}
     if (!res || !res.ok) {
       // No dubbed video to analyze (404) or network error — abort cleanly.
