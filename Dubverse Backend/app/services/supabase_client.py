@@ -18,14 +18,20 @@ if not _SUPABASE_URL:
 if not _SUPABASE_ANON_KEY:
     raise RuntimeError("SUPABASE_ANON_KEY environment variable is not set")
 
-supabase: Client = create_client(_SUPABASE_URL, _SUPABASE_ANON_KEY)
 if not _SUPABASE_SERVICE_ROLE_KEY:
-    logger.warning("SUPABASE_SERVICE_ROLE_KEY not set — segment writes will fail RLS")
-supabase_writer: Client = (
-    create_client(_SUPABASE_URL, _SUPABASE_SERVICE_ROLE_KEY)
-    if _SUPABASE_SERVICE_ROLE_KEY
-    else supabase
-)
+    # Fatal, not a warning. Falling back to the anon client here is what made
+    # the job persistence chain fail invisibly: RLS blocks anon on `jobs`, so
+    # the startup loader read zero rows and both delete paths removed zero
+    # rows, all while reporting success. Refusing to boot is the only outcome
+    # that cannot be mistaken for working.
+    raise RuntimeError(
+        "SUPABASE_SERVICE_ROLE_KEY environment variable is not set — the anon "
+        "client cannot read or write `jobs` under RLS, so job persistence, "
+        "restore and delete would all silently no-op"
+    )
+
+supabase: Client = create_client(_SUPABASE_URL, _SUPABASE_ANON_KEY)
+supabase_writer: Client = create_client(_SUPABASE_URL, _SUPABASE_SERVICE_ROLE_KEY)
 
 
 # Verified tokens, cached briefly. Every guarded route calls verify_jwt, and

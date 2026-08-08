@@ -3483,7 +3483,11 @@ class DubbingService:
 
         try:
             from app.services.supabase_client import upsert_segments
-            asyncio.create_task(upsert_segments(job_id, data["segments"]))
+            from app.services.job_manager import _spawn
+            # _spawn, not a bare create_task: asyncio keeps only a weak
+            # reference to a task, so a fire-and-forget write nobody holds can
+            # be collected before it reaches Supabase.
+            _spawn(upsert_segments(job_id, data["segments"]))
         except Exception as exc:
             logger.warning(
                 f"Job {job_id}: segment {segment_index} upsert failed: {exc}"
