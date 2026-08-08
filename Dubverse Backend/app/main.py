@@ -36,7 +36,12 @@ async def _load_jobs_from_db() -> None:
     job store on startup. Logs a warning and continues
     if Supabase is unavailable. Never raises."""
     try:
-        from app.services.supabase_client import supabase
+        # service_role, not anon: RLS on `jobs` blocks the anon client
+        # entirely, so this loader silently restored nothing on every restart
+        # and logged "loaded 0 jobs" — indistinguishable from there being no
+        # jobs. _upsert_job already writes with supabase_writer; the read has
+        # to match it or persistence is write-only.
+        from app.services.supabase_client import supabase_writer as supabase
         from app.services.job_manager import job_manager
         from app.models import Job, JobStatus, VideoChunk, Transcript
         from datetime import datetime
@@ -74,7 +79,12 @@ async def _load_jobs_from_db() -> None:
 
                 job = Job(
                     job_id=row["job_id"],
-                    user_id=row.get("user_id", ""),
+                    # `or ""` not a dict default: the default only applies when
+                    # the key is ABSENT, and these rows carry an explicit NULL.
+                    # Job.user_id is a required str, so None raises
+                    # ValidationError and the row is swallowed by the except
+                    # below — silently dropping exactly the jobs we just fixed.
+                    user_id=row.get("user_id") or "",
                     status=JobStatus(row.get("status", "pending")),
                     progress=row.get("progress", 0),
                     current_stage=row.get("current_stage"),
@@ -96,6 +106,10 @@ async def _load_jobs_from_db() -> None:
                     segment_tts_engines=row.get("segment_tts_engines"),
                     dubbing_engine=row.get("dubbing_engine"),
                     error_message=row.get("error_message"),
+                    # Without this, a job reloaded after a restart has no
+                    # record of what it was charged, and update_job_status
+                    # skips the refund entirely.
+                    minutes_charged=row.get("minutes_charged"),
                     created_at=_parse_dt(row.get("created_at")) or datetime.now(),
                     updated_at=_parse_dt(row.get("updated_at")) or datetime.now(),
                     completed_at=_parse_dt(row.get("completed_at")),

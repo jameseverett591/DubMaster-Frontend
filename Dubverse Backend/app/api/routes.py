@@ -153,6 +153,31 @@ def _load_transcript_from_disk(job_id: str) -> Transcript | None:
         return None
 
 
+def _owner_from_project(job_id: str) -> str:
+    """Recover a job's owner from its saved project.json.
+
+    A rehydrated job is rebuilt from disk, and create_job's user_id defaulted
+    to "". _upsert_job coerces that to NULL, and jobs.user_id is NOT NULL, so
+    every upsert for a rehydrated job failed with 23502 — silently, because the
+    upsert is fire-and-forget and only logs at WARNING. The jobs table was
+    empty as a result, which in turn meant minutes_charged never persisted and
+    a failed job could not be refunded after a restart.
+
+    The owner was never actually lost: project.json carries user_id, written
+    when the project was saved. Reading it back is the whole fix.
+
+    Returns "" when there is no readable project.json. A job with no provable
+    owner keeps today's behaviour rather than being assigned a guessed one —
+    inventing an owner would be a worse bug than having none.
+    """
+    try:
+        meta = _projects_base_dir() / job_id / "project.json"
+        with open(meta, "r", encoding="utf-8") as f:
+            return str(_json.load(f).get("user_id") or "")
+    except Exception:
+        return ""
+
+
 async def _rehydrate_job(job_id: str):
     if os.getenv("REHYDRATE_JOBS", "0") != "1":
         return None
@@ -176,6 +201,9 @@ async def _rehydrate_job(job_id: str):
         video_filename=video_name,
         video_path=video_path,
         video_size=video_size,
+        # Without this the job is created ownerless, and every subsequent
+        # upsert violates the NOT NULL constraint on jobs.user_id.
+        user_id=_owner_from_project(job_id),
     )
 
     transcript = _load_transcript_from_disk(job_id)
@@ -2178,9 +2206,10 @@ async def upload_video(
                         ),
                     )
                 if await asyncio.to_thread(usage_service.adjust, user_id, _need):
-                    _j = await job_manager.get_job(job_id)
-                    if _j is not None:
-                        _j.minutes_charged = _need
+                    # Through job_manager, not a direct mutation: this has to
+                    # persist immediately, or a crash before the next status
+                    # change loses the record and the refund with it.
+                    await job_manager.set_minutes_charged(job_id, _need)
 
         job = await job_manager.get_job(job_id)
         if job:
@@ -2323,6 +2352,7 @@ async def _transcribe_ref_runpod_bg(ref_id: str, video_path: str, lang: str):
 
 @router.post("/transcribe-video", dependencies=[Depends(_dep_auth)])
 async def transcribe_video_only(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     language: Optional[str] = Form(None),
@@ -2350,6 +2380,7 @@ async def transcribe_video_only(
             lang = normalized
 
     ref_id = f"ref_{uuid.uuid4().hex[:12]}"
+    owner_id = _caller(request)
 
     try:
         video_path = storage.get_upload_path(ref_id, file.filename)
@@ -2358,7 +2389,11 @@ async def transcribe_video_only(
             video_filename=file.filename,
             video_path=video_path,
             video_size=0,
-            user_id="ref",
+            # The real caller, not the literal "ref". A magic non-UUID can
+            # never satisfy the uuid column, so these jobs failed every upsert
+            # and were unattributable. /transcribe-video is authenticated now,
+            # so the owner is available.
+            user_id=owner_id,
         )
         if lang:
             job_obj = await job_manager.get_job(ref_id)
@@ -2750,13 +2785,19 @@ async def clear_all_jobs(request: Request, force: bool = False):
     # Delete from Supabase — scoped to this user (CASCADE removes segments + speakers)
     if cleared_ids:
         try:
-            from app.services.supabase_client import supabase
+            # service_role, not anon: RLS blocks the anon client, so this
+            # delete silently affected zero rows and reported success. Jobs
+            # "deleted" months ago were still in the table and came back into
+            # memory once the startup loader was fixed to read with the same
+            # service_role client. The .eq("user_id") filter below is what
+            # scopes this to the caller — RLS was never doing that job here.
+            from app.services.supabase_client import supabase_writer
             for jid in cleared_ids:
-                supabase.table("jobs").delete().eq(
+                supabase_writer.table("jobs").delete().eq(
                     "job_id", jid
                 ).eq("user_id", user_id).execute()
         except Exception as exc:
-            logger.warning(f"[CLEAR-ALL] Supabase delete failed: {exc}")
+            logger.error(f"[CLEAR-ALL] Supabase delete failed: {exc}", exc_info=True)
 
     # Clean up disk artifacts per job — safe for multi-tenant
     import glob as _glob
@@ -2821,12 +2862,14 @@ async def delete_job(job_id: str, request: Request):
 
     # Delete from Supabase (CASCADE removes segments + job_speakers)
     try:
-        from app.services.supabase_client import supabase
-        supabase.table("jobs").delete().eq(
+        # service_role, not anon — see the note in /jobs/clear-all. Ownership
+        # is enforced by the .eq("user_id") filter, not by RLS.
+        from app.services.supabase_client import supabase_writer
+        supabase_writer.table("jobs").delete().eq(
             "job_id", job_id
         ).eq("user_id", user_id).execute()
     except Exception as exc:
-        logger.warning(f"Job {job_id}: Supabase delete failed: {exc}")
+        logger.error(f"Job {job_id}: Supabase delete failed: {exc}", exc_info=True)
 
     # Mark as deleted FIRST to prevent rehydration race
     await job_manager.delete_job(job_id)

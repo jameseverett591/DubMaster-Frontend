@@ -11,6 +11,19 @@ from app.models import Job, JobStatus
 
 logger = logging.getLogger(__name__)
 
+# asyncio only holds a WEAK reference to a running task, so a bare
+# create_task(...) whose result nobody keeps can be garbage-collected
+# mid-flight. Every persistence write here is fire-and-forget, including the
+# final FAILED-status write that records a refund — losing one loses the record
+# that money was returned. Hold a strong reference until the task completes.
+_bg_tasks: "set[asyncio.Task]" = set()
+
+
+def _spawn(coro) -> None:
+    t = asyncio.create_task(coro)
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
+
 
 async def _upsert_job(job) -> None:
     """Fire-and-forget upsert of job state to Supabase. Never raises."""
@@ -56,13 +69,22 @@ async def _upsert_job(job) -> None:
             "segment_tts_engines": job.segment_tts_engines,
             "dubbing_engine": job.dubbing_engine,
             "error_message": job.error_message,
+            # Persisted because the refund in update_job_status reads it. Held
+            # only in memory, it vanished on restart — so a job that failed
+            # after a restart silently never refunded, and the customer lost
+            # those minutes permanently.
+            "minutes_charged": job.minutes_charged,
             "created_at": job.created_at.isoformat(),
             "updated_at": job.updated_at.isoformat(),
             "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         }
         supabase_writer.table("jobs").upsert(payload).execute()
     except Exception as exc:
-        logger.warning(f"Job {job.job_id}: Supabase upsert failed: {exc}")
+        # ERROR, not WARNING: a job that fails to persist is the failure this
+        # whole chain was blind to for weeks. jobs.user_id is NOT NULL, so the
+        # UUID->NULL coercion above cannot save a job with no recoverable
+        # owner — it fails here, and must be loud when it does.
+        logger.error(f"Job {job.job_id}: Supabase upsert FAILED: {exc}", exc_info=True)
 
 
 async def _upsert_job_speakers(
@@ -109,12 +131,33 @@ class JobManager:
             )
             self._jobs[job_id] = job
             logger.info(f"Created job {job_id} for file {video_filename}")
-            asyncio.create_task(_upsert_job(job))
+            _spawn(_upsert_job(job))
             return job
     
     async def get_job(self, job_id: str) -> Job:
         async with self._lock:
             return self._jobs.get(job_id)
+
+    async def set_minutes_charged(self, job_id: str, minutes: int) -> None:
+        """Record a minutes reservation against a job, durably.
+
+        Callers used to mutate job.minutes_charged directly, which never
+        triggered an upsert — so the charge existed only in memory until some
+        later status change happened to persist it. A crash before that point
+        lost the record, and with it the ability to refund.
+
+        Writing through here puts the change inside the lock and persists it
+        immediately.
+        """
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                logger.error(f"Job {job_id}: cannot record {minutes} min — job not found")
+                return
+            job.minutes_charged = minutes
+            job.updated_at = datetime.now()
+            _spawn(_upsert_job(job))
+            logger.info(f"Job {job_id}: recorded {minutes} min charged")
     
     async def update_job_status(
         self,
@@ -154,16 +197,29 @@ class JobManager:
             if status in (JobStatus.FAILED, JobStatus.CANCELLED) and job.minutes_charged:
                 refund = job.minutes_charged
                 job.minutes_charged = None
+                ok = False
                 try:
                     from app.services.usage_service import adjust
-                    await asyncio.to_thread(adjust, job.user_id, -refund)
+                    ok = await asyncio.to_thread(adjust, job.user_id, -refund)
+                except Exception as e:
+                    logger.error(f"Job {job_id}: refund raised: {e}", exc_info=True)
+
+                if ok:
                     logger.info(
                         f"Job {job_id} {status.value}: refunded {refund} min to {job.user_id}"
                     )
-                except Exception as e:
-                    logger.warning(f"Job {job_id}: refund failed: {e}")
+                else:
+                    # Put the claim back. Clearing it unconditionally meant a
+                    # refund that never landed could never be retried, and the
+                    # old code logged "refunded N min" either way — a line that
+                    # said money moved when it hadn't.
+                    job.minutes_charged = refund
+                    logger.error(
+                        f"Job {job_id} {status.value}: REFUND FAILED, {refund} min "
+                        f"still owed to {job.user_id or '<no owner>'}"
+                    )
 
-            asyncio.create_task(_upsert_job(job))
+            _spawn(_upsert_job(job))
             logger.info(f"Job {job_id} updated: status={status}, progress={progress}%")
     
     async def update_job_chunks(self, job_id: str, chunks: list):
@@ -173,7 +229,7 @@ class JobManager:
                 job.chunks = chunks
                 job.total_chunks = len(chunks)
                 job.updated_at = datetime.now()
-                asyncio.create_task(_upsert_job(job))
+                _spawn(_upsert_job(job))
     
     async def update_chunk_processed(self, job_id: str):
         async with self._lock:
@@ -181,7 +237,7 @@ class JobManager:
             if job:
                 job.processed_chunks += 1
                 job.updated_at = datetime.now()
-                asyncio.create_task(_upsert_job(job))
+                _spawn(_upsert_job(job))
     
     async def update_job_transcript(self, job_id: str, transcript):
         async with self._lock:
@@ -189,7 +245,7 @@ class JobManager:
             if job:
                 job.transcript = transcript
                 job.updated_at = datetime.now()
-                asyncio.create_task(_upsert_job(job))
+                _spawn(_upsert_job(job))
                 logger.info(f"Job {job_id} transcript updated with {len(transcript.segments) if transcript else 0} segments")
 
                 if transcript:
@@ -225,8 +281,8 @@ class JobManager:
             if job:
                 job.speaker_genders = speaker_genders
                 job.updated_at = datetime.now()
-                asyncio.create_task(_upsert_job(job))
-                asyncio.create_task(
+                _spawn(_upsert_job(job))
+                _spawn(
                     _upsert_job_speakers(job_id, speaker_genders, job.voice_mapping)
                 )
                 logger.info(f"Job {job_id} speaker genders updated: {speaker_genders}")
@@ -246,7 +302,7 @@ class JobManager:
                 if segment_tts_engines is not None:
                     job.segment_tts_engines = segment_tts_engines
                 job.updated_at = datetime.now()
-                asyncio.create_task(_upsert_job(job))
+                _spawn(_upsert_job(job))
                 logger.info(f"Job {job_id} dubbing result updated: url={dubbed_video_url}, engine={tts_engine}")
 
     async def delete_job(self, job_id: str) -> bool:

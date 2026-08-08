@@ -66,7 +66,13 @@ def adjust(user_id: str, delta_minutes: int) -> bool:
     any subscription webhook has initialised one. Never lets the total go
     below zero, so a double refund can't mint minutes.
     """
-    if not user_id or not delta_minutes:
+    # A missing user_id is a FAILURE, not a no-op success. Returning True here
+    # meant a refund to an ownerless job reported success while crediting
+    # nobody, and the caller cleared the claim on the strength of it.
+    if not user_id:
+        logger.error(f"[USAGE] adjust({delta_minutes}) with no user_id — nobody to credit")
+        return False
+    if not delta_minutes:
         return True
     month = _current_month()
     try:
