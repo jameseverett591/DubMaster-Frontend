@@ -947,6 +947,50 @@ async def _get_runpod_file_url(job_id: str, video_path: str) -> str:
     )
 
 
+async def _delete_runpod_file(job_id: str, video_path: str) -> None:
+    """Remove the R2 copy of a source video once the GPU job is done with it.
+
+    The object exists for exactly one reason: to give the RunPod worker a URL it
+    can download from. Nothing reads it afterwards — a re-run calls
+    _get_runpod_file_url again, which re-uploads.
+
+    Without this there is no delete path at all, so every source file ever
+    uploaded accumulates in R2 forever. A customer dubbing feature films adds
+    tens of GB a month that is never reclaimed.
+
+    Best-effort: a failure here must never fail a dub that already succeeded.
+    """
+    r2_bucket  = os.getenv("R2_BUCKET_NAME", "")
+    r2_key_id  = os.getenv("R2_ACCESS_KEY_ID", "")
+    r2_secret  = os.getenv("R2_SECRET_ACCESS_KEY", "")
+    r2_account = os.getenv("R2_ACCOUNT_ID", "")
+    if not (r2_bucket and r2_key_id and r2_secret and r2_account):
+        return
+
+    try:
+        import re
+        import boto3
+        from botocore.config import Config
+
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=f"https://{r2_account}.r2.cloudflarestorage.com",
+            aws_access_key_id=r2_key_id,
+            aws_secret_access_key=r2_secret,
+            config=Config(signature_version="s3v4"),
+            region_name="auto",
+        )
+        # Must match the key built in _get_runpod_file_url exactly.
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(video_path).name)
+        object_key = f"{job_id}/{safe_name}"
+        await asyncio.get_event_loop().run_in_executor(
+            None, lambda: s3.delete_object(Bucket=r2_bucket, Key=object_key)
+        )
+        logger.info(f"Job {job_id}: R2 source object deleted ({object_key})")
+    except Exception as e:
+        logger.warning(f"Job {job_id}: R2 cleanup failed (object left behind): {e}")
+
+
 async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float):
     from app.services.runpod_service import runpod_service
 
@@ -1608,7 +1652,13 @@ async def process_video_pipeline(job_id: str, video_path: str):
                 pipeline_tracker.init_pipeline(job_id, "gpu")
                 pipeline_tracker.start_stage(job_id, "download")
                 try:
-                    await _run_runpod_gpu_pipeline(job_id, video_path, duration)
+                    try:
+                        await _run_runpod_gpu_pipeline(job_id, video_path, duration)
+                    finally:
+                        # The R2 copy exists only to hand the file to the worker.
+                        # Dropped on failure too — a failed run leaves an object
+                        # nothing will ever read, and there is no other reaper.
+                        await _delete_runpod_file(job_id, video_path)
                     # Mark all GPU stages complete
                     for sid in ["download", "extract", "separate", "transcribe", "diarize"]:
                         if pipeline_tracker.get_pipeline(job_id):
@@ -2418,8 +2468,41 @@ async def upload_presign_parts(body: PresignPartsRequest, request: Request):
     return {"parts": parts}
 
 
+async def _ensure_local_source(job_id: str, filename: str) -> Optional[str]:
+    """Fetch the uploaded video from R2 to local disk for CPU pipeline processing.
+
+    Returns the local path if successful, None on failure.
+    """
+    try:
+        row = await asyncio.to_thread(upload_reservations._get, job_id)
+        if not row or not row.get("object_key"):
+            logger.error(f"[UPLOAD] cannot fetch {job_id}: no reservation or object_key")
+            return None
+
+        object_key = row["object_key"]
+        url = await asyncio.to_thread(upload_reservations.presign_get, object_key)
+        if not url:
+            logger.error(f"[UPLOAD] cannot fetch {job_id}: presign_get failed")
+            return None
+
+        local_path = storage.get_upload_path(job_id, filename)
+        import requests
+        response = requests.get(url, stream=True, timeout=300)
+        response.raise_for_status()
+
+        with open(local_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        logger.info(f"[UPLOAD] fetched {job_id} from R2 to {local_path}")
+        return local_path
+    except Exception as e:
+        logger.error(f"[UPLOAD] fetch failed for {job_id}: {e}", exc_info=True)
+        return None
+
+
 @router.post("/upload/complete", dependencies=[Depends(_dep_auth)])
-async def upload_complete(body: CompleteUploadRequest, request: Request):
+async def upload_complete(body: CompleteUploadRequest, request: Request, background_tasks: BackgroundTasks):
     """Assemble the upload, verify it, and settle the reservation.
 
     Everything from presign time is re-checked against reality here: the
@@ -2485,7 +2568,7 @@ async def upload_complete(body: CompleteUploadRequest, request: Request):
     job = await job_manager.create_job(
         job_id=body.job_id,
         video_filename=body.filename,
-        video_path="",          # not local yet — Scope 4 fetches on demand
+        video_path="",          # not local yet — fetch on demand below
         video_size=body.size_bytes,
         user_id=caller,
     )
@@ -2496,6 +2579,20 @@ async def upload_complete(body: CompleteUploadRequest, request: Request):
     logger.info(
         f"[UPLOAD] completed {body.job_id}: {real:.1f}s, {value} min charged"
     )
+
+    # Fetch video from R2 to local disk for CPU pipeline
+    local_path = await _ensure_local_source(body.job_id, body.filename)
+    if not local_path:
+        await job_manager.delete_job(body.job_id)
+        raise HTTPException(status_code=500, detail="Failed to fetch video from R2")
+
+    # Update job with local path and start CPU pipeline
+    job = await job_manager.get_job(body.job_id)
+    if job:
+        job.video_path = local_path
+
+    background_tasks.add_task(process_video_pipeline, body.job_id, local_path)
+
     return {
         "job_id": body.job_id,
         "duration_seconds": real,
@@ -2628,6 +2725,7 @@ async def _transcribe_ref_runpod_bg(ref_id: str, video_path: str, lang: str):
 
     except Exception as e:
         logger.error(f"[TRANSCRIBE-VIDEO] {ref_id}: RunPod background task failed: {e}", exc_info=True)
+        # fall through to the finally below — the R2 object is dropped either way
         # Write an error marker so the GET endpoint can report failure
         try:
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -2639,6 +2737,11 @@ async def _transcribe_ref_runpod_bg(ref_id: str, video_path: str, lang: str):
             ref_id, JobStatus.ERROR, progress=0,
             current_stage=f"Transcription failed: {e}"
         )
+
+    finally:
+        # Same reasoning as the dub pipeline: the R2 copy is a handoff to the
+        # worker, and nothing reads it afterwards.
+        await _delete_runpod_file(ref_id, video_path)
 
 
 @router.post("/transcribe-video", dependencies=[Depends(_dep_auth)])
