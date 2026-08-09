@@ -11,11 +11,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Upload, FileVideo, X, CheckCircle2, AlertCircle, Languages, Users, Mic, Square } from "lucide-react"
 import type { VideoSource } from "@/components/dashboard"
 import { apiClient, isTerminalStatus, JobNotFoundError, type JobStatusValue } from "@/lib/api-client"
+import { startDirectUpload, resumeDirectUpload, findResumable, cancelDirectUpload, UploadError } from "@/lib/upload-client"
 import PipelineMonitor from "@/components/pipeline-monitor"
 import { BasicVideoPanel } from "@/components/basic-video-panel"
 import { VideoRecorder } from "@/components/video-recorder"
 import { usePlan } from "@/lib/use-plan"
-import { formatDurationLimit } from "@/lib/plan-features"
+import { formatDurationLimit, MAX_UPLOAD_BYTES, MAX_UPLOAD_GB } from "@/lib/plan-features"
 
 const STORAGE_KEY = "dubverse_uploaded_files"
 const SOURCE_LANG_STORAGE_KEY = "dubverse_source_language"
@@ -110,7 +111,7 @@ export function VideoUpload({
   const t = useTranslations('upload')
   const ts = useTranslations('studio')
   const { hasFeature, recordingLimit, uploadDurationLimit } = usePlan()
-  const [durationError, setDurationError] = useState<string | null>(null)
+  const [uploadError, setUploadError] = useState<string | null>(null)
   const resetEditor = useEditorStore((s) => s.resetEditor)
 
   // ── Inline recording ───────────────────────────────────────────────────
@@ -297,11 +298,11 @@ export function VideoUpload({
         }
       }
       if (tooLong.length) {
-        setDurationError(
+        setUploadError(
           `Too long for your plan (max ${formatDurationLimit(uploadDurationLimit)}): ${tooLong.join(', ')}`
         )
       } else {
-        setDurationError(null)
+        setUploadError(null)
       }
       if (!okFiles.length) return
       acceptedFiles = okFiles
@@ -344,37 +345,71 @@ export function VideoUpload({
   }
 
   const startUpload = async (tempId: string, file: File, langOverride?: string, targetLangOverride?: string, speakersOverride?: string) => {
+    const abortController = new AbortController()
     try {
       const lang = langOverride ?? sourceLanguageRef.current
       const targetLang = targetLangOverride ?? targetLanguageRef.current
       const spkRaw = speakersOverride ?? numSpeakersRef.current
       const numSpk = spkRaw && spkRaw !== 'auto' ? parseInt(spkRaw, 10) : undefined
-      const response = await apiClient.uploadVideo(
-        file,
-        (progress) => {
-          setUploadedFiles((prev) =>
-            prev.map((f) => (f.id === tempId ? { ...f, progress } : f))
-          )
-        },
-        lang,
-        numSpk,
-        targetLang,
-      )
+
+      // Probe duration for presign request
+      const durationSeconds = await probeDuration(file) || 0
+
+      // Check for resumable upload
+      const saved = findResumable(file)
+      let response
+
+      if (saved) {
+        response = await resumeDirectUpload(file, saved, {
+          onProgress: (progress) => {
+            setUploadedFiles((prev) =>
+              prev.map((f) => (f.id === tempId ? { ...f, progress } : f))
+            )
+          },
+          signal: abortController.signal,
+        })
+      } else {
+        response = await startDirectUpload(file, durationSeconds, {
+          onProgress: (progress) => {
+            setUploadedFiles((prev) =>
+              prev.map((f) => (f.id === tempId ? { ...f, progress } : f))
+            )
+          },
+          signal: abortController.signal,
+        })
+      }
 
       // Upload received by backend — now it's processing
       setUploadedFiles((prev) => {
         const next = prev.map((f) =>
           f.id === tempId
-            ? { ...f, progress: 100, status: "processing" as const, jobId: response.job_id, name: f.file?.name, statusLabel: t('analysingVideo') }
+            ? { ...f, progress: 100, status: "processing" as const, jobId: response.jobId, name: f.file?.name, statusLabel: t('analysingVideo') }
             : f
         )
         persistFiles(next)
         return next
       })
 
-      pollJobStatus(tempId, response.job_id)
+      pollJobStatus(tempId, response.jobId)
       localStorage.setItem('dubverse.lastEditorJobId', response.job_id)
     } catch (err) {
+      if (err instanceof UploadError) {
+        const errorMessages: Record<string, string> = {
+          cors_etag: 'CORS configuration error - ETag not exposed',
+          resign_loop: 'Upload URLs expired repeatedly - check system clock',
+          part_failed: 'Upload failed after multiple retries',
+          file_mismatch: 'File changed - cannot resume different file',
+          cancelled: 'Upload cancelled',
+        }
+        const msg = errorMessages[err.code] || err.message
+        setUploadedFiles((prev) =>
+          prev.map((f) =>
+            f.id === tempId ? { ...f, status: "error", statusLabel: msg } : f
+          )
+        )
+        return
+      }
+
       const msg = err instanceof Error ? err.message : t('uploadFailed')
       if (msg === "Upload cancelled") {
         try {
@@ -535,8 +570,25 @@ export function VideoUpload({
     // while the backend enforced 5GB, so an oversized file was accepted here,
     // uploaded, and only rejected once 5GB had streamed in — after the wait.
     // Keep these two numbers in step.
-    maxSize: 5 * 1024 * 1024 * 1024, // 5GB max
+    maxSize: MAX_UPLOAD_BYTES,
     disabled: quotaExceeded,
+    // Without this, react-dropzone discards an oversized or wrong-type file
+    // silently: nothing appears, no error, no upload. A customer dragging in a
+    // 7GB film sees the app do literally nothing and concludes it is broken.
+    onDropRejected: (rejections) => {
+      const msgs = rejections.map((r) => {
+        const why = r.errors[0]?.code
+        if (why === 'file-too-large') {
+          const gb = (r.file.size / 1024 ** 3).toFixed(1)
+          return `${r.file.name} is ${gb}GB — the limit is ${MAX_UPLOAD_GB}GB.`
+        }
+        if (why === 'file-invalid-type') {
+          return `${r.file.name} is not a supported video (MP4, MOV, AVI, MKV, WebM).`
+        }
+        return `${r.file.name} was rejected: ${r.errors[0]?.message ?? 'unknown reason'}`
+      })
+      setUploadError(msgs.join(' '))
+    },
   })
 
   // Premium+: show PipelineMonitor while actively processing
@@ -711,10 +763,10 @@ export function VideoUpload({
               or <span className="text-[#22D3EE] font-semibold">{ts('clickToBrowse')}</span> {ts('fromYourComputer')}
             </p>
 
-            {durationError && (
+            {uploadError && (
               <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-left">
                 <AlertCircle className="h-4 w-4 text-red-400 mt-0.5 shrink-0" />
-                <span className="text-xs text-red-300">{durationError}</span>
+                <span className="text-xs text-red-300">{uploadError}</span>
               </div>
             )}
 
