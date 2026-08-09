@@ -32,12 +32,13 @@ from app.models import (
     WordAlignment,
     RegenerateRequest,
 )
-from app.config import get_settings
+from app.config import get_settings, upload_size_cap
 from app.storage.manager import StorageManager
 from app.services.job_manager import job_manager
 from app.services import usage_service
 from app.services import tts_usage
 from app.services.supabase_client import verify_jwt
+from app.services import upload_reservations
 from app.pipeline.chunk_video import VideoChunker
 from app.pipeline.extract_audio import extract_audio
 from app.pipeline.diarize_audio import diarize_audio
@@ -2233,6 +2234,296 @@ async def upload_video(
         logger.error(f"Upload failed: {e}")
         await job_manager.delete_job(job_id)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Direct-to-R2 upload
+#
+# The client uploads parts straight to R2 and the bytes never cross this
+# backend. That gives resumability (a dropped connection retries one part),
+# removes the double transfer the old path made (client -> disk -> R2), and
+# puts the source where cold storage wants it from the moment it lands.
+#
+# Minutes are reserved at PRESIGN time, before a byte moves, so nobody can
+# push 50GB and only then discover they cannot afford it. The claimed duration
+# is untrusted, but lying is self-defeating: the size cap scales with duration,
+# so understating it shrinks the file size permitted.
+#
+# NOTE: these run alongside the old /upload route until Scope 3 ships a client.
+# That is two enforcement flows, temporarily — Scope 4 deletes the old one.
+# ---------------------------------------------------------------------------
+
+class PresignRequest(BaseModel):
+    filename: str
+    size_bytes: int
+    claimed_duration_seconds: float
+
+
+class PresignPartsRequest(BaseModel):
+    job_id: str
+    part_numbers: List[int]
+
+
+class CompletedPart(BaseModel):
+    part_number: int
+    etag: str
+
+
+class CompleteUploadRequest(BaseModel):
+    job_id: str
+    filename: str
+    size_bytes: int
+    parts: List[CompletedPart]
+
+
+class AbortUploadRequest(BaseModel):
+    job_id: str
+
+
+def _gb(n: float) -> str:
+    return f"{n / 1024 ** 3:.1f}"
+
+
+async def _owned_pending_reservation(job_id: str, caller: str) -> Dict[str, Any]:
+    """The caller's in-flight reservation, or 404.
+
+    404 rather than 403 for someone else's reservation: a 403 would confirm
+    the id exists. Mirrors _require_job.
+    """
+    row = await asyncio.to_thread(upload_reservations._get, job_id)
+    if row is None or row.get("user_id") != caller:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    if row.get("state") != "pending":
+        raise HTTPException(status_code=409, detail=f"Upload already {row['state']}")
+    return row
+
+
+@router.post("/upload/presign", dependencies=[Depends(_dep_auth)])
+async def upload_presign(body: PresignRequest, request: Request):
+    """Reserve minutes and hand back presigned part URLs.
+
+    Every check that can reject an upload happens here, before any bytes move.
+    Each failure after the reservation is taken releases it again — holding a
+    customer's minutes for a 24h sweep because storage hiccuped is not
+    acceptable.
+    """
+    caller = _caller(request)
+
+    # Lazy sweep: stale rows accumulate only because uploads happen, so the
+    # endpoint that creates them also clears them. No scheduler to fail
+    # silently, and a customer blocked by their own orphaned hold is freed by
+    # their next attempt.
+    await asyncio.to_thread(upload_reservations.sweep_stale)
+
+    if Path(body.filename).suffix.lower() not in settings.ALLOWED_VIDEO_FORMATS:
+        raise HTTPException(status_code=400, detail="Unsupported video format")
+    if body.size_bytes <= 0:
+        raise HTTPException(status_code=400, detail="Invalid file size")
+
+    cap = upload_size_cap(body.claimed_duration_seconds)
+    if body.size_bytes > cap:
+        raise HTTPException(status_code=413, detail={
+            "error": "file_too_large",
+            "message": (
+                f"{_gb(body.size_bytes)}GB for "
+                f"{body.claimed_duration_seconds / 60:.0f} min of video. The "
+                f"limit at that length is {_gb(cap)}GB — try exporting at a "
+                f"lower bitrate."
+            ),
+        })
+
+    _plan = await asyncio.to_thread(_plan_for_user, caller)
+    _plan_key = "basic" if _plan in (None, _PLAN_UNKNOWN) else _plan
+    _pool = PLAN_MINUTES.get(_plan_key)
+    _need = usage_service.minutes_for(body.claimed_duration_seconds)
+    if _pool:
+        _used = await asyncio.to_thread(usage_service.get_used_minutes, caller)
+        if _need > _pool - _used:
+            raise HTTPException(status_code=402, detail={
+                "error": "insufficient_minutes",
+                "message": (
+                    f"This video needs {_need} min but you have "
+                    f"{max(0, _pool - _used)} of your {_pool}-minute monthly "
+                    f"allowance left."
+                ),
+            })
+
+    job_id = str(uuid.uuid4())
+    key = upload_reservations.object_key_for(job_id, body.filename)
+
+    # 1. Durable record FIRST, with no upload_id yet. R2 cannot reliably
+    #    enumerate multipart uploads, so anything created before its row
+    #    exists is undiscoverable until the 7-day lifecycle rule.
+    minutes = await asyncio.to_thread(
+        upload_reservations.create, caller, job_id, None, key,
+        body.claimed_duration_seconds,
+    )
+    if minutes is None:
+        raise HTTPException(status_code=503, detail="Could not reserve minutes")
+
+    # 2. Create the external state.
+    upload_id = await asyncio.to_thread(upload_reservations.create_multipart, key)
+    if not upload_id:
+        await asyncio.to_thread(
+            upload_reservations.release, job_id, "multipart create failed")
+        raise HTTPException(status_code=503, detail="Storage unavailable")
+
+    # 3. Link them. If this fails we hold an upload we can no longer reference.
+    if not await asyncio.to_thread(upload_reservations.set_upload_id, job_id, upload_id):
+        await asyncio.to_thread(upload_reservations.abort_multipart, upload_id, key)
+        await asyncio.to_thread(
+            upload_reservations.release, job_id, "upload_id write failed")
+        raise HTTPException(status_code=503, detail="Could not record upload")
+
+    n = upload_reservations.part_count(body.size_bytes)
+    parts = await asyncio.to_thread(
+        upload_reservations.presign_parts, key, upload_id, list(range(1, n + 1)))
+    if parts is None:
+        await asyncio.to_thread(upload_reservations.abort_multipart, upload_id, key)
+        await asyncio.to_thread(upload_reservations.release, job_id, "presign failed")
+        raise HTTPException(status_code=503, detail="Could not sign upload URLs")
+
+    logger.info(
+        f"[UPLOAD] presigned {job_id}: {n} part(s), {_gb(body.size_bytes)}GB, "
+        f"{minutes} min held for {caller}"
+    )
+    return {
+        "job_id": job_id,
+        "upload_id": upload_id,
+        "object_key": key,
+        "part_size": upload_reservations.PART_SIZE,
+        "parts": parts,
+        "minutes_reserved": minutes,
+        "expires_in": upload_reservations.PRESIGN_TTL_SECONDS,
+    }
+
+
+@router.post("/upload/presign-parts", dependencies=[Depends(_dep_auth)])
+async def upload_presign_parts(body: PresignPartsRequest, request: Request):
+    """Reissue part URLs for an upload already in flight.
+
+    Presigned URLs expire after 24h. Without this a resume the next morning is
+    impossible: the multipart upload is still perfectly valid in R2, but the
+    client has no signed URLs left. This is what makes resume work across
+    sessions, not just across dropped connections.
+    """
+    row = await _owned_pending_reservation(body.job_id, _caller(request))
+    if not row.get("upload_id"):
+        raise HTTPException(status_code=409, detail="Upload was never started")
+    parts = await asyncio.to_thread(
+        upload_reservations.presign_parts,
+        row["object_key"], row["upload_id"], body.part_numbers)
+    if parts is None:
+        raise HTTPException(status_code=503, detail="Could not sign upload URLs")
+    return {"parts": parts}
+
+
+@router.post("/upload/complete", dependencies=[Depends(_dep_auth)])
+async def upload_complete(body: CompleteUploadRequest, request: Request):
+    """Assemble the upload, verify it, and settle the reservation.
+
+    Everything from presign time is re-checked against reality here: the
+    claimed duration was untrusted, so the true duration decides both the size
+    cap and the charge. Safe to call twice — reconcile only settles a
+    reservation still pending.
+    """
+    caller = _caller(request)
+    row = await _owned_pending_reservation(body.job_id, caller)
+
+    if not await asyncio.to_thread(
+        upload_reservations.complete_multipart,
+        row["object_key"], row["upload_id"],
+        [p.model_dump() for p in body.parts],
+    ):
+        # Reservation stays pending: the client can retry, or the sweep will
+        # release it. Nothing is deleted — the parts may still be good.
+        raise HTTPException(status_code=400, detail="Upload could not be completed")
+
+    # ffprobe reads the header over https; the object is never downloaded.
+    url = await asyncio.to_thread(upload_reservations.presign_get, row["object_key"])
+    real = await asyncio.to_thread(_probe_video_duration, url) if url else None
+
+    if not real:
+        await asyncio.to_thread(upload_reservations.reject, body.job_id, "unreadable")
+        await asyncio.to_thread(upload_reservations.delete_object, row["object_key"])
+        raise HTTPException(status_code=400, detail="Could not read that file as video")
+
+    if body.size_bytes > upload_size_cap(real):
+        await asyncio.to_thread(upload_reservations.reject, body.job_id, "over cap")
+        await asyncio.to_thread(upload_reservations.delete_object, row["object_key"])
+        raise HTTPException(
+            status_code=413,
+            detail=f"That file is {_gb(body.size_bytes)}GB for {real / 60:.0f} min "
+                   f"of video — over the limit for its duration.",
+        )
+
+    _plan = await asyncio.to_thread(_plan_for_user, caller)
+    _plan_key = "basic" if _plan in (None, _PLAN_UNKNOWN) else _plan
+    _pool = PLAN_MINUTES.get(_plan_key) or 0
+    _used = await asyncio.to_thread(usage_service.get_used_minutes, caller)
+
+    status, value = await asyncio.to_thread(
+        upload_reservations.reconcile, body.job_id, real, max(0, _pool - _used))
+
+    if status == "insufficient":
+        await asyncio.to_thread(upload_reservations.reject, body.job_id, "unaffordable")
+        await asyncio.to_thread(upload_reservations.delete_object, row["object_key"])
+        raise HTTPException(
+            status_code=402,
+            detail=f"This video needs {value} more minutes than you have left.",
+        )
+    if status == "settle_failed":
+        # The object stays. Deleting it here would destroy the upload AND keep
+        # the minutes; the reservation is still pending and retryable.
+        raise HTTPException(
+            status_code=500,
+            detail="Could not settle your reserved minutes; the upload was kept",
+        )
+    if status == "missing":
+        raise HTTPException(status_code=404, detail="Reservation not found")
+
+    job = await job_manager.create_job(
+        job_id=body.job_id,
+        video_filename=body.filename,
+        video_path="",          # not local yet — Scope 4 fetches on demand
+        video_size=body.size_bytes,
+        user_id=caller,
+    )
+    await job_manager.set_minutes_charged(body.job_id, value)
+    if job:
+        job.video_duration = real
+
+    logger.info(
+        f"[UPLOAD] completed {body.job_id}: {real:.1f}s, {value} min charged"
+    )
+    return {
+        "job_id": body.job_id,
+        "duration_seconds": real,
+        "minutes_charged": value,
+        "status": "uploaded",
+    }
+
+
+@router.post("/upload/abort", dependencies=[Depends(_dep_auth)])
+async def upload_abort(body: AbortUploadRequest, request: Request):
+    """Cancel an in-flight upload and give the minutes back.
+
+    The fast path for a user who changed their mind; the 24h sweep is the
+    backstop for clients that cannot tell us.
+    """
+    row = await _owned_pending_reservation(body.job_id, _caller(request))
+    if row.get("upload_id"):
+        await asyncio.to_thread(
+            upload_reservations.abort_multipart, row["upload_id"], row["object_key"])
+
+    if not await asyncio.to_thread(
+        upload_reservations.release, body.job_id, "user aborted"
+    ):
+        # Reporting a clean cancel while the minutes are still held is the same
+        # lie as logging "refunded N min" when nothing moved.
+        raise HTTPException(
+            status_code=500, detail="Could not release your reserved minutes")
+    return {"status": "aborted"}
 
 
 def _build_ref_segments(raw_segments: list, ref_id: str, lang: str) -> list:
