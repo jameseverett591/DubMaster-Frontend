@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import os
 import sys
@@ -177,9 +178,37 @@ async def root():
 
 @app.get("/health")
 async def health_check():
+    """Liveness plus a small set of degradation signals.
+
+    Deliberately returns 200 even when degraded. A non-200 marks the container
+    unhealthy to Docker's healthcheck, which can trigger restarts — turning a
+    quota-accounting problem into an outage. Degradation belongs in the body,
+    where an uptime monitor can alert on it without the orchestrator acting.
+
+    stale_reservations is here rather than in a log line because a log line is
+    only ever seen by someone already reading logs.
+    """
+    checks = {}
+    status = "healthy"
+
+    try:
+        from app.services.upload_reservations import stale_count, DEGRADED_AFTER_HOURS
+        stale = await asyncio.to_thread(stale_count)
+        checks["stale_reservations"] = stale
+        # Old pending rows mean the sweep has stopped running entirely — both
+        # the lazy path on presign and any scheduled path. An unreadable table
+        # is degraded too: it means the alarm itself is blind, which is worse
+        # than a backlog it can still see.
+        if stale.get("error") or stale.get("oldest_hours", 0) > DEGRADED_AFTER_HOURS:
+            status = "degraded"
+    except Exception as e:
+        # A health check must not fail because a check failed.
+        checks["stale_reservations"] = {"error": str(e)}
+
     return {
-        "status": "healthy",
-        "service": settings.APP_NAME
+        "status": status,
+        "service": settings.APP_NAME,
+        "checks": checks,
     }
 
 
