@@ -899,6 +899,7 @@ async def _get_runpod_file_url(job_id: str, video_path: str) -> str:
         import re
         import boto3
         from botocore.config import Config
+        from botocore.exceptions import ClientError
 
         endpoint = f"https://{r2_account}.r2.cloudflarestorage.com"
         s3 = boto3.client(
@@ -913,6 +914,24 @@ async def _get_runpod_file_url(job_id: str, video_path: str) -> str:
         safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(video_path).name)
         object_key = f"{job_id}/{safe_name}"
         last_r2_err = None
+
+        # Check if already in R2 from direct upload — skip re-upload if so
+        try:
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: s3.head_object(Bucket=r2_bucket, Key=object_key),
+            )
+            logger.info(f"Job {job_id}: video already in R2 at {object_key}, skipping upload")
+            url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": r2_bucket, "Key": object_key},
+                ExpiresIn=7200,
+            )
+            return url
+        except ClientError as head_err:
+            if head_err.response["Error"]["Code"] != "404":
+                logger.warning(f"Job {job_id}: head_object failed unexpectedly: {head_err}")
+            # 404 = not in R2 yet, fall through to upload loop
 
         for attempt in range(1, 4):
             try:
