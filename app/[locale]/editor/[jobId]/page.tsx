@@ -423,8 +423,6 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         qcUpdatedAt={qcUpdatedAt}
         canReanalyze={!!editorProps.dubbedVideoUrl}
         onReanalyze={handleReanalyze}
-        pointsLeft={100}
-        minutesAvailable={60}
         speakerGenders={editorProps.speakerGenders}
         voiceMapping={editorProps.voiceMapping}
         traitsMapping={editorProps.traitsMapping}

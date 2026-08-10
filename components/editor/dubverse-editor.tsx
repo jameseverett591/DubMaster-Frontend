@@ -125,6 +125,7 @@ import {
 // Additional QC tab icons not in main import block
 import { LayoutList, AudioLines, Zap, GitBranch, Sliders, MessageCircle, ArrowUp } from 'lucide-react'
 import { usePlan } from '@/lib/use-plan'
+import { useUsage } from '@/hooks/use-usage'
 
 // QC Tab definitions - main navigation tabs + QC-specific tabs
 type QCCategory = 'speech' | 'lip-sync' | 'pipeline' | 'voices' | 'script' | 'timeline-tab' | 'timing' | 'pronunciation' | 'translation' | 'delivery' | 'sync'
@@ -385,8 +386,6 @@ interface DubVerseEditorProps {
   qcUpdatedAt?: string | null
   canReanalyze?: boolean
   onReanalyze?: () => void
-  pointsLeft?: number
-  minutesAvailable?: number
   speakerGenders?: Record<string, string>
   voiceMapping?: Record<string, string>
   traitsMapping?: Record<string, string[]>
@@ -710,8 +709,6 @@ export function DubVerseEditor({
   qcUpdatedAt = null,
   canReanalyze = false,
   onReanalyze,
-  pointsLeft = 6.88,
-  minutesAvailable = 2.29,
   speakerGenders,
   voiceMapping: initialVoiceMapping,
   traitsMapping: initialTraitsMapping,
@@ -775,6 +772,7 @@ export function DubVerseEditor({
   const importedSegmentsJobId = useEditorStore((state) => state.importedSegmentsJobId)
   const setImportedSegmentsRaw = useEditorStore((state) => state.setImportedSegments)
   const { hasFeature, recordingLimit, isPremium, isProfessional } = usePlan()
+  const usage = useUsage()
   // Wrap the store setter so every write to importedSegments also stamps the
   // owning jobId directly via Zustand's static setState — always available,
   // never undefined, never dependent on a store action that may be missing
@@ -4191,17 +4189,33 @@ export function DubVerseEditor({
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Points display - compact badge style */}
-          <div className="flex items-center gap-2 bg-slate-800/50 rounded-md px-2.5 py-1 border border-slate-700/50">
-            <div className="flex items-center gap-1">
-              <span className="text-amber-400 font-semibold text-sm">{pointsLeft}</span>
-              <span className="text-slate-500 text-xs">pts</span>
-            </div>
-            <div className="w-px h-4 bg-slate-600" />
-            <div className="flex items-center gap-1">
-              <span className="text-slate-300 font-medium text-sm">{minutesAvailable}</span>
-              <span className="text-slate-500 text-xs">min</span>
-            </div>
+          {/* Remaining monthly minutes, from the same source as the dashboard.
+              The old "pts" half of this badge was dropped: there is no points
+              concept anywhere in the product, so it could only ever show a
+              made-up constant. */}
+          <div
+            className="flex items-center gap-1 bg-slate-800/50 rounded-md px-2.5 py-1 border border-slate-700/50"
+            title={usage.loading
+              ? 'Loading usage…'
+              : usage.planLimit > 0
+                ? `${usage.minutesUsed} of ${usage.planLimit} min used this month` +
+                  (usage.bonusBalance ? ` · ${usage.bonusBalance} bonus min` : '')
+                : 'Monthly usage'}
+          >
+            {usage.loading ? (
+              <span className="text-slate-500 text-xs">— min</span>
+            ) : (
+              <>
+                <span className={
+                  usage.minutesRemaining === 0 ? 'text-red-400 font-semibold text-sm'
+                  : usage.minutesRemaining < 10 ? 'text-amber-400 font-semibold text-sm'
+                  : 'text-slate-300 font-medium text-sm'
+                }>
+                  {usage.minutesRemaining}
+                </span>
+                <span className="text-slate-500 text-xs">min left</span>
+              </>
+            )}
           </div>
           <Button variant="ghost" size="sm" className="h-8" onClick={handleGlobalUndo} title="Undo last edit">
             <RotateCcw className="h-4 w-4" />
