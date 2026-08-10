@@ -1033,7 +1033,24 @@ async def _get_runpod_file_url(job_id: str, video_path: str) -> str:
 
 
 async def _delete_runpod_file(job_id: str, video_path: str) -> None:
-    """Remove the R2 copy of a source video once the GPU job is done with it.
+    """UNUSED — deliberately. Do not call this without reading the note below.
+
+    Both call sites (the dub pipeline and the transcribe-video path) were
+    removed: this deleted the key {job_id}/{safe_name}, which is the SAME key
+    the direct-to-R2 upload writes the user's source video to. R2 is permanent
+    source storage, not a GPU handoff scratch area, so every completed job was
+    destroying its own source and leaving the local disk as the only copy.
+    Both calls sat in finally blocks, so failed runs lost their source too —
+    precisely when you would want to retry from it.
+
+    The storage-reclamation intent was valid; this implementation was not.
+    Reclamation belongs in an explicit retention policy — delete after N days,
+    or when a user deletes a project — never as a silent side effect of a
+    pipeline finishing.
+
+    Original docstring follows.
+
+    Remove the R2 copy of a source video once the GPU job is done with it.
 
     The object exists for exactly one reason: to give the RunPod worker a URL it
     can download from. Nothing reads it afterwards — a re-run calls
@@ -1737,13 +1754,7 @@ async def process_video_pipeline(job_id: str, video_path: str):
                 pipeline_tracker.init_pipeline(job_id, "gpu")
                 pipeline_tracker.start_stage(job_id, "download")
                 try:
-                    try:
-                        await _run_runpod_gpu_pipeline(job_id, video_path, duration)
-                    finally:
-                        # The R2 copy exists only to hand the file to the worker.
-                        # Dropped on failure too — a failed run leaves an object
-                        # nothing will ever read, and there is no other reaper.
-                        await _delete_runpod_file(job_id, video_path)
+                    await _run_runpod_gpu_pipeline(job_id, video_path, duration)
                     # Mark all GPU stages complete
                     for sid in ["download", "extract", "separate", "transcribe", "diarize"]:
                         if pipeline_tracker.get_pipeline(job_id):
@@ -2646,7 +2657,6 @@ async def _transcribe_ref_runpod_bg(ref_id: str, video_path: str, lang: str):
 
     except Exception as e:
         logger.error(f"[TRANSCRIBE-VIDEO] {ref_id}: RunPod background task failed: {e}", exc_info=True)
-        # fall through to the finally below — the R2 object is dropped either way
         # Write an error marker so the GET endpoint can report failure
         try:
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -2658,11 +2668,6 @@ async def _transcribe_ref_runpod_bg(ref_id: str, video_path: str, lang: str):
             ref_id, JobStatus.ERROR, progress=0,
             current_stage=f"Transcription failed: {e}"
         )
-
-    finally:
-        # Same reasoning as the dub pipeline: the R2 copy is a handoff to the
-        # worker, and nothing reads it afterwards.
-        await _delete_runpod_file(ref_id, video_path)
 
 
 @router.post("/transcribe-video", dependencies=[Depends(_dep_auth)])
