@@ -268,6 +268,10 @@ class DubbingService:
     # translation cap (MAX_SPEED_RATIO ~1.15) and matches the editor regen path, so
     # a long line fits by speeding up rather than being hard-trimmed (truncated).
     _FIT_MAX_SPEED = float(os.getenv("DUBMASTER_FIT_MAX_SPEED", "1.5"))
+    # How far a segment may be placed EARLIER than its word-level start time in
+    # order to borrow room from the silence before it. 0.2s ≈ 4-5 frames at 24fps:
+    # noticeable on a tight close-up, but the ear forgives that much drift.
+    _MAX_BORROW = 0.2
 
     # Patterns that identify non-dialogue hallucination segments that must be
     # dropped before translation and TTS.
@@ -1303,12 +1307,38 @@ class DubbingService:
                     expansion = min(_needed, gap_to_next * 0.8) if gap_to_next > 0 else 0.0
                     comfortable_duration = max(0.2, segment_duration + expansion)
                     # Level 2 — hard ceiling: never overflow into the next segment.
-                    max_slot = max(0.2, next_start - start_time - 0.05)
+                    # Computed below as full_room, which supersedes the old forward-only
+                    # max_slot (next_start - start_time - 0.05): that measured from the
+                    # word start rather than from where the audio is actually placed.
                     target_duration = comfortable_duration
+                    # Bidirectional room: gap before this segment (from the previous
+                    # segment's ACTUAL placed end, not its transcript end) + gap after
+                    # (to next segment's start). Mirrors the regen path's full_room
+                    # calculation — without this, split sub-segments with contiguous
+                    # windows can't borrow time from surrounding gaps and get forced
+                    # into aggressive atempo speed-ups.
+                    #
+                    # The borrowed room is taken by moving PLACEMENT earlier, not by
+                    # extending the tail: sizing to a backward-extended window while
+                    # still placing at start_time would push the tail past next_start
+                    # by exactly the leading gap, silently overlapping the next line.
+                    # _placed_start is what the segment is actually laid down at, so
+                    # the window we fit to is the window we occupy.
+                    _prev_placed_end = audio_segments[-1]["end"] if audio_segments else 0.0
+                    _window_start = max(0.0, _prev_placed_end + 0.05)
+                    # Cap: 0.2s ≈ 4-5 frames at 24fps — noticeable on a tight close-up
+                    # but within the range where the ear forgives the eye. Below 50ms
+                    # there is less than a syllable to gain, so don't shift at all.
+                    _raw_borrow = start_time - _window_start
+                    _borrow = min(_raw_borrow, self._MAX_BORROW) if _raw_borrow > 0.05 else 0.0
+                    _placed_start = start_time - _borrow
+                    full_room = max(0.2, next_start - _placed_start - 0.05)
                 else:
                     max_slot = max(0.2, end_time - start_time)
                     comfortable_duration = max_slot
                     target_duration = max_slot
+                    full_room = max_slot
+                    _placed_start = start_time
 
                 final_path = result["path"]
 
@@ -1332,9 +1362,10 @@ class DubbingService:
                 # Two-level slot expansion: if TTS overflows the comfortable slot
                 # but still fits within the hard ceiling, expand silently rather
                 # than trimming — preserves breathing room for short speech, avoids
-                # cut-offs for translations that run long.
+                # cut-offs for translations that run long. Use full_room (bidirectional)
+                # so split sub-segments can borrow time from the gap before them.
                 if actual_duration > target_duration:
-                    target_duration = min(actual_duration, max_slot)
+                    target_duration = min(actual_duration, full_room)
 
                 # --- Hard-fit: TTS audio NEVER overflows into the next segment ---
                 #
@@ -1344,17 +1375,25 @@ class DubbingService:
                 # so the window is tight and precise.
                 #
                 # Two-stage enforcement:
-                #   1. Time-stretch via ffmpeg atempo (no speedup cap — correctness
-                #      over quality when the slot is tight).  Fish Audio pre-speed
-                #      gets a wider tolerance (150ms) before atempo fires, to avoid
-                #      compounding two back-to-back speed operations on audio that
-                #      already fits.  For larger overflows, atempo fires regardless.
-                #   2. Hard-trim to 20ms tolerance as an absolute guarantee.
+                #   1. Time-stretch via ffmpeg atempo. Tolerance matches the regen
+                #      path (0.3s) so small overflows into a gap don't trigger a
+                #      speed-up — a 0.3s overflow is far less jarring than 1.5x
+                #      atempo. Fit target is full_room (bidirectional window), not
+                #      max_slot (forward-only), so split sub-segments with
+                #      contiguous windows can use surrounding gaps.
+                #   2. Hard-trim as an absolute guarantee — but only past the SAME
+                #      tolerance, never inside it. Trimming at 20ms while atempo
+                #      waited until 300ms left a dead band where a segment was too
+                #      long to pass untouched and too short to be sped up, so it
+                #      was silently tail-cut instead. Overflow within tolerance is
+                #      accepted as-is: a 0.3s run-on into a gap is far less jarring
+                #      than a clipped final syllable.
                 _fish_speed_was_applied = raw.get("fish_speed_applied", False)
-                _atempo_tolerance = 0.15 if _fish_speed_was_applied else 0.05
+                _atempo_tolerance = 0.3
                 _speed_applied = 1.0
-                if actual_duration > target_duration + _atempo_tolerance and target_duration > 0.2:
-                    _speed_applied = actual_duration / target_duration
+                _fit_target = full_room
+                if actual_duration > _fit_target + _atempo_tolerance and _fit_target > 0.2:
+                    _speed_applied = actual_duration / _fit_target
                     # Anti-truncation (step 2 — speed): fit by speeding up to the FIT
                     # cap (higher than the natural-translation cap) so we keep all the
                     # words. Only if even this can't fit does the hard-trim below fire.
@@ -1366,7 +1405,7 @@ class DubbingService:
                         )
                     adjusted = await asyncio.to_thread(
                         self._adjust_audio_duration,
-                        final_path, adjusted_audio_path, target_duration,
+                        final_path, adjusted_audio_path, _fit_target,
                         min_speed=MIN_SPEED_RATIO, max_speed=self._FIT_MAX_SPEED,
                     )
                     if adjusted and os.path.exists(adjusted_audio_path):
@@ -1374,36 +1413,43 @@ class DubbingService:
                         actual_duration = await asyncio.to_thread(self._get_audio_duration, final_path)
                     logger.info(
                         f"[FIT] seg={i} stretched {_speed_applied:.2f}x "
-                        f"word_start={start_time:.3f}s slot={target_duration:.2f}s "
+                        f"word_start={start_time:.3f}s slot={_fit_target:.2f}s "
                         f"after={actual_duration:.2f}s fish_pre={_fish_speed_was_applied}"
                     )
 
-                # Absolute guarantee — hard-trim to slot boundary (20ms tolerance).
-                if actual_duration > target_duration + 0.02:
+                # Absolute guarantee — hard-trim to slot boundary. Gated on the same
+                # tolerance as atempo above, so this can only fire on segments atempo
+                # already tried and failed to fit (capped at _FIT_MAX_SPEED).
+                if actual_duration > _fit_target + _atempo_tolerance:
                     trimmed_path = os.path.join(output_dir, f"segment_{i:04d}_trimmed.mp3")
-                    trimmed = await asyncio.to_thread(self._trim_audio_duration, final_path, trimmed_path, target_duration)
+                    trimmed = await asyncio.to_thread(self._trim_audio_duration, final_path, trimmed_path, _fit_target)
                     if trimmed and os.path.exists(trimmed_path):
                         final_path = trimmed_path
-                        actual_duration = target_duration
+                        actual_duration = _fit_target
                         segment["was_truncated"] = True
                         logger.warning(
-                            f"[FIT] seg={i} hard-trimmed to {target_duration:.2f}s "
+                            f"[FIT] seg={i} hard-trimmed to {_fit_target:.2f}s "
                             f"(needed {_speed_applied:.2f}x — tail may be cut)"
                         )
 
                 overlap_with_prev = ""
                 if audio_segments:
                     prev_end = audio_segments[-1]["end"]
-                    if start_time < prev_end:
-                        overlap_with_prev = f" OVERLAP={prev_end - start_time:.3f}s with seg {len(audio_segments)-1}"
+                    if _placed_start < prev_end:
+                        overlap_with_prev = f" OVERLAP={prev_end - _placed_start:.3f}s with seg {len(audio_segments)-1}"
 
                 logger.info(
                     f"[TIMING] seg={i} speaker={speaker} "
                     f"transcript=[{start_time:.3f}-{end_time:.3f}] "
-                    f"slot={target_duration:.3f}s "
+                    # slot/delta report the ENFORCED window (_fit_target), not the
+                    # comfortable target — those diverged once full_room took over
+                    # the fitting, and logging the unenforced one made this line
+                    # disagree with [FIT] above it.
+                    f"slot={_fit_target:.3f}s "
                     f"tts_dur={actual_duration:.3f}s "
-                    f"delta={actual_duration - target_duration:+.3f}s "
-                    f"placed_at=[{start_time:.3f}-{start_time + actual_duration:.3f}]"
+                    f"delta={actual_duration - _fit_target:+.3f}s "
+                    f"borrow={start_time - _placed_start:.3f}s "
+                    f"placed_at=[{_placed_start:.3f}-{_placed_start + actual_duration:.3f}]"
                     f"{overlap_with_prev}"
                 )
 
@@ -1438,8 +1484,8 @@ class DubbingService:
                     "voice_id": raw.get("voice_id", ""),
                     "speed": raw.get("speed", 1.0),
                     "path": final_path,
-                    "start": start_time,
-                    "end": start_time + actual_duration,
+                    "start": _placed_start,
+                    "end": _placed_start + actual_duration,
                     "duration": actual_duration,
                     "velma_emotion": segment.get("velma_emotion"),
                     "velma_accent": segment.get("velma_accent"),
