@@ -34,6 +34,7 @@ services:
       # with ${VAR} syntax — that pulls from the host system env and
       # silently overrides the .env values.
       - PYTHONUNBUFFERED=1
+      - REHYDRATE_JOBS=1
       - PROCESSING_MODE=gpu
       - RUNPOD_SUBMIT_TIMEOUT_SEC=120
       - RUNPOD_STATUS_TIMEOUT_SEC=30

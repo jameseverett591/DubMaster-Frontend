@@ -87,21 +87,33 @@ chunker = VideoChunker()
 
 
 def _find_uploaded_video(job_id: str) -> tuple[str, str] | None:
+    # First check upload directory
     upload_dir = Path(settings.UPLOAD_DIR) / job_id
-    if not upload_dir.exists():
-        return None
+    if upload_dir.exists():
+        files = [p for p in upload_dir.iterdir() if p.is_file()]
+        if files:
+            for file_path in files:
+                if file_path.suffix.lower() in settings.ALLOWED_VIDEO_FORMATS:
+                    return file_path.name, str(file_path)
+            # Fallback: pick the first file if no known extension matches.
+            fallback = files[0]
+            return fallback.name, str(fallback)
 
-    files = [p for p in upload_dir.iterdir() if p.is_file()]
-    if not files:
-        return None
+    # Second check project directory for video files
+    project_dir = Path(settings.PROJECTS_DIR) / job_id
+    if project_dir.exists():
+        video_dir = project_dir / "video"
+        if video_dir.exists():
+            files = [p for p in video_dir.iterdir() if p.is_file()]
+            if files:
+                for file_path in files:
+                    if file_path.suffix.lower() in settings.ALLOWED_VIDEO_FORMATS:
+                        return file_path.name, str(file_path)
+                # Fallback: pick the first file if no known extension matches.
+                fallback = files[0]
+                return fallback.name, str(fallback)
 
-    for file_path in files:
-        if file_path.suffix.lower() in settings.ALLOWED_VIDEO_FORMATS:
-            return file_path.name, str(file_path)
-
-    # Fallback: pick the first file if no known extension matches.
-    fallback = files[0]
-    return fallback.name, str(fallback)
+    return None
 
 
 def _seg_dict_to_model(seg: dict) -> TranscriptSegment:
@@ -128,9 +140,13 @@ def _seg_dict_to_model(seg: dict) -> TranscriptSegment:
 
 
 def _load_transcript_from_disk(job_id: str) -> Transcript | None:
+    # First check standard transcripts directory
     transcript_path = Path("data/transcripts") / f"{job_id}.json"
     if not transcript_path.exists():
-        return None
+        # Fallback to project directory
+        transcript_path = Path(settings.PROJECTS_DIR) / job_id / "transcript.json"
+        if not transcript_path.exists():
+            return None
 
     try:
         import json
@@ -170,13 +186,29 @@ def _owner_from_project(job_id: str) -> str:
     Returns "" when there is no readable project.json. A job with no provable
     owner keeps today's behaviour rather than being assigned a guessed one —
     inventing an owner would be a worse bug than having none.
+
+    Fallback: every job has an upload_reservations row written at presign
+    time (before any bytes move), so jobs that were never saved as projects
+    can still recover their owner from there. Without this, transcribed-only
+    jobs rehydrated with user_id="" fail every Supabase upsert with 23502
+    because jobs.user_id is NOT NULL.
     """
     try:
         meta = _projects_base_dir() / job_id / "project.json"
         with open(meta, "r", encoding="utf-8") as f:
-            return str(_json.load(f).get("user_id") or "")
+            _uid = str(_json.load(f).get("user_id") or "")
+            if _uid:
+                return _uid
     except Exception:
-        return ""
+        pass
+    try:
+        from app.services import upload_reservations as _ur
+        row = _ur._get(job_id)
+        if row and row.get("user_id"):
+            return str(row["user_id"])
+    except Exception:
+        pass
+    return ""
 
 
 async def _rehydrate_job(job_id: str):
@@ -192,10 +224,26 @@ async def _rehydrate_job(job_id: str):
 
     video_info = _find_uploaded_video(job_id)
     if not video_info:
-        return None
-
-    video_name, video_path = video_info
-    video_size = os.path.getsize(video_path)
+        # R2-uploaded jobs have no local video file. Recover what we can from
+        # upload_reservations (object_key → filename) so the editor can still
+        # load the transcript and dubbed audio. video_path stays empty — a
+        # re-dub will need to re-fetch from R2, but loading/editing existing
+        # work does not.
+        try:
+            from app.services import upload_reservations as _ur
+            _row = _ur._get(job_id)
+        except Exception:
+            _row = None
+        if not _row or not _row.get("object_key"):
+            return None
+        _obj_key = _row["object_key"]
+        # object_key is "{job_id}/{safe_filename}" — extract the filename part.
+        video_name = _obj_key.split("/", 1)[1] if "/" in _obj_key else _obj_key
+        video_path = ""
+        video_size = 0
+    else:
+        video_name, video_path = video_info
+        video_size = os.path.getsize(video_path)
 
     await job_manager.create_job(
         job_id=job_id,
@@ -241,17 +289,25 @@ async def _rehydrate_job(job_id: str):
                     logger.warning(f"Job {job_id}: failed to restore voice/traits mapping: {e}")
 
         # Restore dubbed video URL if a dubbed file exists on disk
+        # Check both standard dubbed directory and project directory
         dubbed_dir = os.path.join(settings.DUBBED_DIR, job_id)
+        project_dubbed_dir = os.path.join(settings.PROJECTS_DIR, job_id, "dubbed")
+
+        dubbed_files = []
         if os.path.isdir(dubbed_dir):
             import glob as _glob
             dubbed_files = _glob.glob(os.path.join(dubbed_dir, "dubbed_*.mp4"))
-            if dubbed_files:
-                # Extract language from filename: dubbed_en.mp4 -> en
-                fname = os.path.basename(dubbed_files[0])
-                lang = fname.replace("dubbed_", "").replace(".mp4", "")
-                dubbed_url = f"/api/download/{job_id}/{lang}"
-                await job_manager.update_job_dubbing_result(job_id, dubbed_url)
-                logger.info(f"Rehydrated dubbed video URL for {job_id}: {dubbed_url}")
+        if not dubbed_files and os.path.isdir(project_dubbed_dir):
+            import glob as _glob
+            dubbed_files = _glob.glob(os.path.join(project_dubbed_dir, "dubbed_*.mp4"))
+
+        if dubbed_files:
+            # Extract language from filename: dubbed_en.mp4 -> en
+            fname = os.path.basename(dubbed_files[0])
+            lang = fname.replace("dubbed_", "").replace(".mp4", "")
+            dubbed_url = f"/api/download/{job_id}/{lang}"
+            await job_manager.update_job_dubbing_result(job_id, dubbed_url)
+            logger.info(f"Rehydrated dubbed video URL for {job_id}: {dubbed_url}")
     else:
         await job_manager.update_job_status(
             job_id,
@@ -3861,7 +3917,10 @@ async def dub_video(request: DubRequest, http_request: Request, background_tasks
     if not job:
         raise HTTPException(status_code=404, detail="Job not found. Please upload the video first.")
 
-    req_speakers = set((seg.speaker or "speaker-1") for seg in (request.transcript or []))
+    if not request.transcript:
+        raise HTTPException(status_code=400, detail="Transcript is required to start dubbing.")
+
+    req_speakers = set((seg.speaker or "speaker-1") for seg in request.transcript)
     job_segments = (job.transcript.segments if job and job.transcript and job.transcript.segments else [])
     job_speakers = set((seg.speaker or "speaker-1") for seg in job_segments)
 
