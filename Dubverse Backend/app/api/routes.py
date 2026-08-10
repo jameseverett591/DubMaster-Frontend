@@ -2404,7 +2404,30 @@ async def _ensure_local_source(job_id: str, filename: str) -> Optional[str]:
     """Fetch the uploaded video from R2 to local disk for CPU pipeline processing.
 
     Returns the local path if successful, None on failure.
+
+    Falls back to the local copy when the R2 object is gone. Every job processed
+    while _delete_runpod_file was wired in lost its source object — the key the
+    reservation still points at now 404s — but the local copy written at fetch
+    time survives. Without this the job is unrecoverable despite its source
+    sitting on disk.
     """
+    def _local_fallback(object_key: str, reason: str) -> Optional[str]:
+        # Scan rather than rebuild the path: _find_uploaded_video already
+        # prefers a known video extension, and the R2 key is sanitised
+        # (safe_name) while the local file keeps its raw filename, so an
+        # exact-path match would miss anything with a space in its name.
+        try:
+            local = _find_uploaded_video(job_id)
+            if local and os.path.getsize(local[1]) > 0:
+                logger.warning(
+                    f"[UPLOAD] {job_id}: R2 object missing (key={object_key}) — "
+                    f"using local copy {local[1]}. Add to R2 restore pass. ({reason})"
+                )
+                return local[1]
+        except OSError as exc:
+            logger.warning(f"[UPLOAD] {job_id}: local fallback unusable: {exc}")
+        return None
+
     try:
         row = await asyncio.to_thread(upload_reservations._get, job_id)
         if not row or not row.get("object_key"):
@@ -2414,17 +2437,28 @@ async def _ensure_local_source(job_id: str, filename: str) -> Optional[str]:
         object_key = row["object_key"]
         url = await asyncio.to_thread(upload_reservations.presign_get, object_key)
         if not url:
+            fallback = _local_fallback(object_key, "presign_get failed")
+            if fallback:
+                return fallback
             logger.error(f"[UPLOAD] cannot fetch {job_id}: presign_get failed")
             return None
 
         local_path = storage.get_upload_path(job_id, filename)
         import requests
-        response = requests.get(url, stream=True, timeout=300)
-        response.raise_for_status()
+        try:
+            response = requests.get(url, stream=True, timeout=300)
+            response.raise_for_status()
 
-        with open(local_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+            with open(local_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        except Exception as fetch_err:
+            # A deleted object surfaces here as a 404 from raise_for_status, or
+            # at presign time above, depending on how R2 answers a missing key.
+            fallback = _local_fallback(object_key, f"fetch failed: {fetch_err}")
+            if fallback:
+                return fallback
+            raise
 
         logger.info(f"[UPLOAD] fetched {job_id} from R2 to {local_path}")
         return local_path
