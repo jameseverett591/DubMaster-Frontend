@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { MAX_UPLOAD_BYTES, MAX_UPLOAD_GB } from "@/lib/plan-features"
 import { 
   Youtube, 
   Search, 
@@ -220,16 +221,15 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
     return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`
   }
 
-  // Mirrors MAX_UPLOAD_SIZE in app/config.py. Without this the input accepted
-  // any size and the file only failed server-side, after the whole transfer.
-  const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024 // 5GB
+  // Shared with the main uploader so the two can't drift; mirrors
+  // MAX_UPLOAD_SIZE in the backend's app/config.py.
 
   const handleOwnVideoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
     if (file.size > MAX_UPLOAD_BYTES) {
       setOwnVideoError(
-        `That file is ${(file.size / 1024 ** 3).toFixed(1)}GB. The limit is 5GB — try a smaller export.`
+        `That file is ${(file.size / 1024 ** 3).toFixed(1)}GB. The limit is ${MAX_UPLOAD_GB}GB — try a smaller export.`
       )
       setOwnVideoFile(null)
       e.target.value = ''   // let the same file be re-picked after re-encoding

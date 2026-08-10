@@ -192,8 +192,6 @@ export default function EditorDemoPage() {
       segments={segmentsWithFindings}
       qcScore={DEMO_QC_SCORE}
       qcFindings={DEMO_QC_FINDINGS}
-      pointsLeft={6.88}
-      minutesAvailable={2.29}
       onExport={() => console.log('Export clicked')}
       onGenerateSpeech={() => console.log('Generate Speech clicked')}
     />
