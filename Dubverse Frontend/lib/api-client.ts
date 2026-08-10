@@ -541,61 +541,6 @@ class DubVerseAPIClient {
    * @param sourceLanguage - Optional ISO code (e.g. "yue") to override Whisper auto-detect
    * @returns UploadResponse with job_id
    */
-  async uploadVideo(
-    file: File,
-    onProgress?: (progress: number) => void,
-    sourceLanguage?: string,
-    numSpeakers?: number,
-    targetLanguage?: string,
-  ): Promise<UploadResponse> {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest()
-      const formData = new FormData()
-      formData.append('file', file)
-      if (sourceLanguage && sourceLanguage !== 'auto') {
-        formData.append('source_language', sourceLanguage)
-      }
-      if (numSpeakers && numSpeakers >= 1 && numSpeakers <= 10) {
-        formData.append('num_speakers', String(numSpeakers))
-      }
-      if (targetLanguage) {
-        formData.append('target_language', targetLanguage)
-      }
-
-      xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable && onProgress) {
-          const progress = Math.round((e.loaded / e.total) * 100)
-          onProgress(progress)
-        }
-      })
-
-      xhr.addEventListener('load', () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          try {
-            resolve(JSON.parse(xhr.responseText))
-          } catch {
-            reject(new Error('Invalid response format'))
-          }
-        } else {
-          try {
-            const error = JSON.parse(xhr.responseText)
-            reject(new Error(error.detail || `Upload failed: ${xhr.statusText}`))
-          } catch {
-            reject(new Error(`Upload failed: ${xhr.statusText}`))
-          }
-        }
-      })
-
-      xhr.addEventListener('error', () => reject(new Error('Network error during upload')))
-      xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')))
-
-      xhr.open('POST', `${this.baseURL}/api/upload`)
-      if (this._token) {
-        xhr.setRequestHeader('Authorization', `Bearer ${this._token}`)
-      }
-      xhr.send(formData)
-    })
-  }
 
   /**
    * Get the current status of a processing job

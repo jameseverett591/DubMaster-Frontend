@@ -19,7 +19,11 @@ export const RECORDING_LIMIT_DEFAULT = 360 // fallback for null / unauthenticate
 export const PLAN_MINUTES: Record<PlanType, number> = {
   basic:         60,
   premium:      120,
-  professional: 300,
+  // 589 min (~9.8h) is a deliberate professional allowance, not a round
+  // number: at the measured ~4.5c/min GPU+TTS it costs ~$26.51 against a
+  // $149 plan, so a subscriber who maxes it every month still leaves ~82%
+  // gross margin.
+  professional: 589,
 }
 export const PLAN_MINUTES_DEFAULT = 60
 
@@ -61,6 +65,12 @@ export function daysUntil(expiresAt?: string | null): number | null {
 /** Max length of an UPLOADED video, in seconds. Distinct from RECORDING_LIMITS
  *  above, which caps the in-browser recorder — you can upload far longer than
  *  you can sit and record. */
+/** Maximum upload size. Must match MAX_UPLOAD_SIZE in the backend's
+ *  app/config.py — they were out of step once before (client 10GB, server 5GB),
+ *  which let an oversized file upload in full before being rejected. */
+export const MAX_UPLOAD_GB = 5
+export const MAX_UPLOAD_BYTES = MAX_UPLOAD_GB * 1024 ** 3
+
 /** A single file may not exceed the whole monthly pool — otherwise one upload
  *  swallows the billing period in one go. Kept in seconds; derived from
  *  PLAN_MINUTES so the two can't drift. */

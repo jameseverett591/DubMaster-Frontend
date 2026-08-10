@@ -930,7 +930,17 @@ async def _get_runpod_file_url(job_id: str, video_path: str) -> str:
             return url
         except ClientError as head_err:
             if head_err.response["Error"]["Code"] != "404":
-                logger.warning(f"Job {job_id}: head_object failed unexpectedly: {head_err}")
+                # ERROR, not WARNING: a 404 means "not uploaded yet" and is
+                # normal. Anything else — a scoped-down token returning 403,
+                # say — means this check can never succeed, so every job
+                # silently re-uploads its entire source forever. The dubs all
+                # still work, so nothing else would ever surface it.
+                logger.error(
+                    f"Job {job_id}: head_object FAILED ({head_err}) — the "
+                    f"skip-reupload check is disabled, every job will "
+                    f"re-transfer its source",
+                    exc_info=True,
+                )
             # 404 = not in R2 yet, fall through to upload loop
 
         for attempt in range(1, 4):
@@ -2139,170 +2149,6 @@ async def process_video_pipeline(job_id: str, video_path: str):
             JobStatus.FAILED,
             error_message=str(e)
         )
-
-
-@router.post("/upload", response_model=UploadResponse)
-async def upload_video(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    source_language: Optional[str] = Form(None),
-    num_speakers: Optional[int] = Form(None),
-    target_language: Optional[str] = Form(None),
-):
-    auth_header = request.headers.get("Authorization", "")
-    token = auth_header.removeprefix("Bearer ").strip()
-    user_id = verify_jwt(token)
-
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
-
-    file_ext = Path(file.filename).suffix.lower()
-    if file_ext not in settings.ALLOWED_VIDEO_FORMATS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid file format. Allowed: {', '.join(settings.ALLOWED_VIDEO_FORMATS)}"
-        )
-
-    # Normalize source language. "auto"/empty → leave as None so detection runs.
-    src_lang: Optional[str] = None
-    if source_language:
-        normalized = normalize_language_code(source_language, allow_auto=True)
-        if normalized and normalized != "auto":
-            src_lang = normalized
-
-    # Heuristic default: if user didn't pick a source language, but the filename
-    # strongly suggests Cantonese, persist yue so the UI doesn't show "none".
-    if not src_lang:
-        try:
-            fn = (file.filename or "").lower()
-            if "canton" in fn or "cantonese" in fn or " yue" in fn or "_yue" in fn or "-yue" in fn:
-                src_lang = "yue"
-        except Exception:
-            pass
-
-    job_id = str(uuid.uuid4())
-
-    try:
-        video_path = storage.get_upload_path(job_id, file.filename)
-
-        await job_manager.create_job(
-            job_id=job_id,
-            video_filename=file.filename,
-            video_path=video_path,
-            video_size=0,
-            user_id=user_id,
-        )
-
-        # Persist source language and expected speaker count on the job so
-        # the transcription and diarization stages can use them.
-        tgt_lang: Optional[str] = None
-        if target_language:
-            _tgt_norm = normalize_language_code(target_language, allow_auto=False)
-            if _tgt_norm and _tgt_norm != "auto":
-                tgt_lang = _tgt_norm
-
-        if src_lang or tgt_lang or (num_speakers is not None and 1 <= num_speakers <= 10):
-            job_for_lang = await job_manager.get_job(job_id)
-            if job_for_lang:
-                if src_lang:
-                    job_for_lang.source_language = src_lang
-                    logger.info(f"Job {job_id}: source_language set to {src_lang!r} from upload request")
-                if tgt_lang:
-                    job_for_lang.target_language = tgt_lang
-                    logger.info(f"Job {job_id}: target_language set to {tgt_lang!r} from upload request")
-                if num_speakers is not None and 1 <= num_speakers <= 10:
-                    job_for_lang.expected_speakers = num_speakers
-                    logger.info(f"Job {job_id}: expected_speakers set to {num_speakers} from upload request")
-        
-        await job_manager.update_job_status(
-            job_id,
-            JobStatus.UPLOADING,
-            progress=5,
-            current_stage="Uploading file"
-        )
-        
-        file_size = 0
-        with open(video_path, "wb") as f:
-            while chunk := await file.read(1024 * 1024):
-                f.write(chunk)
-                file_size += len(chunk)
-                
-                if file_size > settings.MAX_UPLOAD_SIZE:
-                    os.remove(video_path)
-                    await job_manager.delete_job(job_id)
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"File too large. Max size: {settings.MAX_UPLOAD_SIZE / (1024**3):.1f}GB"
-                    )
-        
-        # Per-plan length cap. The uploader checks this before transferring, so
-        # this copy exists for callers that skip the UI — without it the limit
-        # is a UI courtesy, not an entitlement.
-        _plan = await asyncio.to_thread(_plan_for_user, user_id)
-        _dur = await asyncio.to_thread(_probe_video_duration, video_path)
-        if _plan != _PLAN_UNKNOWN:
-            # No subscription is treated as basic (most restrictive); a failed
-            # lookup is not, so an outage can't cap a paying customer.
-            _plan_key = _plan or "basic"
-            _cap = UPLOAD_DURATION_LIMITS.get(_plan_key)
-            if _cap and _dur and _dur > _cap:
-                os.remove(video_path)
-                await job_manager.delete_job(job_id)
-                _hours = _cap // 3600
-                raise HTTPException(
-                    status_code=413,
-                    detail=(
-                        f"Video is {_dur / 60:.0f} min. Your plan allows up to "
-                        f"{_hours} hour{'' if _hours == 1 else 's'}."
-                    ),
-                )
-
-            # Reserve the minutes before any work starts. Refunded in full by
-            # job_manager if the job ends FAILED or CANCELLED.
-            _pool = PLAN_MINUTES.get(_plan_key)
-            if _pool and _dur:
-                _need = usage_service.minutes_for(_dur)
-                _used = await asyncio.to_thread(usage_service.get_used_minutes, user_id)
-                _left = _pool - _used
-                if _need > _left:
-                    os.remove(video_path)
-                    await job_manager.delete_job(job_id)
-                    raise HTTPException(
-                        status_code=402,
-                        detail=(
-                            f"This video needs {_need} min but you have {max(0, _left)} "
-                            f"of your {_pool}-minute monthly allowance left."
-                        ),
-                    )
-                if await asyncio.to_thread(usage_service.adjust, user_id, _need):
-                    # Through job_manager, not a direct mutation: this has to
-                    # persist immediately, or a crash before the next status
-                    # change loses the record and the refund with it.
-                    await job_manager.set_minutes_charged(job_id, _need)
-
-        job = await job_manager.get_job(job_id)
-        if job:
-            job.video_size = file_size
-
-        logger.info(f"File uploaded: {file.filename} ({file_size} bytes) -> Job {job_id}")
-        
-        background_tasks.add_task(process_video_pipeline, job_id, video_path)
-        
-        return UploadResponse(
-            job_id=job_id,
-            status="accepted",
-            message="Video uploaded successfully, processing started",
-            video_filename=file.filename,
-            video_size=file_size
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Upload failed: {e}")
-        await job_manager.delete_job(job_id)
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
 # ---------------------------------------------------------------------------
@@ -4843,7 +4689,11 @@ def _save_custom_voices(voices: list) -> None:
 PLAN_MINUTES = {
     "basic":         60,
     "premium":      120,
-    "professional": 300,
+    # 589 min (~9.8h) is a deliberate professional allowance, not a round
+    # number: at the measured ~4.5c/min GPU+TTS it costs ~$26.51 against a
+    # $149 plan, so a subscriber who maxes it every month still leaves ~82%
+    # gross margin.
+    "professional": 589,
 }
 
 # A single file may not exceed the whole monthly pool, so one upload can't
