@@ -1262,15 +1262,27 @@ class DubVerseAPIClient {
     return (await res.json()).parts
   }
 
-  /** Assemble the parts and settle the reservation against the true duration. */
+  /** Assemble the parts and settle the reservation against the true duration.
+   *
+   *  job carries source/target language and speaker count: the retired POST
+   *  /upload sent them as form fields and this path must too, or the backend
+   *  falls back to auto-detect (which tags Cantonese as "zh") and to an
+   *  expected_speakers default that clamps diarization to two speakers.
+   */
   async completeUpload(
     jobId: string, filename: string, sizeBytes: number,
     parts: Array<{ part_number: number; etag: string }>,
+    job: { sourceLanguage?: string; targetLanguage?: string; numSpeakers?: number } = {},
   ): Promise<{ job_id: string; duration_seconds: number; minutes_charged: number; status: string }> {
     const res = await this._fetch(`${this.baseURL}/api/upload/complete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ job_id: jobId, filename, size_bytes: sizeBytes, parts }),
+      body: JSON.stringify({
+        job_id: jobId, filename, size_bytes: sizeBytes, parts,
+        source_language: job.sourceLanguage ?? null,
+        target_language: job.targetLanguage ?? null,
+        num_speakers: job.numSpeakers ?? null,
+      }),
     })
     if (!res.ok) throw new Error(await this._detail(res))
     return res.json()

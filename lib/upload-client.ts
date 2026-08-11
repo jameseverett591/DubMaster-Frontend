@@ -218,10 +218,26 @@ async function uploadParts(
 // Public API
 // ---------------------------------------------------------------------------
 
+/** Per-upload options.
+ *
+ *  The job fields are not decoration: the retired POST /upload carried source
+ *  language, target language and speaker count, and this path replaced it
+ *  without them. A job that arrives without a source language auto-detects,
+ *  and Cantonese auto-detects as "zh" — Standard Chinese script, Mandarin
+ *  grammar — which is wrong input before translation even runs.
+ */
+export interface UploadOptions {
+  onProgress?: (pct: number) => void
+  signal?: AbortSignal
+  sourceLanguage?: string
+  targetLanguage?: string
+  numSpeakers?: number
+}
+
 export async function startDirectUpload(
   file: File,
   claimedDurationSeconds: number,
-  opts: { onProgress?: (pct: number) => void; signal?: AbortSignal } = {},
+  opts: UploadOptions = {},
 ): Promise<UploadResult> {
   const pres = await apiClient.presignUpload(
     file.name, file.size, claimedDurationSeconds)
@@ -247,7 +263,7 @@ export async function startDirectUpload(
 export async function resumeDirectUpload(
   file: File,
   saved: SavedUpload,
-  opts: { onProgress?: (pct: number) => void; signal?: AbortSignal } = {},
+  opts: UploadOptions = {},
 ): Promise<UploadResult> {
   // Guard again even though findResumable matched: the caller may have passed
   // a different file, and uploading mismatched bytes into an existing
@@ -280,7 +296,7 @@ async function runToCompletion(
   file: File,
   state: SavedUpload,
   urls: Map<number, string>,
-  opts: { onProgress?: (pct: number) => void; signal?: AbortSignal },
+  opts: UploadOptions,
 ): Promise<UploadResult> {
   const done = new Set(state.completed.map(p => p.part_number))
   const wanted = Array.from({ length: state.totalParts }, (_, i) => i + 1)
@@ -292,6 +308,11 @@ async function runToCompletion(
     state.jobId, file.name, file.size,
     // Server sorts by part number, but send them ordered anyway.
     [...state.completed].sort((a, b) => a.part_number - b.part_number),
+    {
+      sourceLanguage: opts.sourceLanguage,
+      targetLanguage: opts.targetLanguage,
+      numSpeakers: opts.numSpeakers,
+    },
   )
 
   // Only clear once the server has settled. Clearing earlier would strand a
