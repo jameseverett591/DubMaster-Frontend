@@ -753,12 +753,36 @@ class TranslationService:
             if _spk and _gender and _spk not in _gender_map:
                 _gender_map[_spk] = _gender
         if _gender_map:
+            _has_female = any(_g in ("female", "f", "woman") for _g in _gender_map.values())
+            _src_is_cjk = (source_language or "").lower().startswith(("yue", "zh"))
+
             system_prompt_parts.append("")
-            system_prompt_parts.append("SPEAKER GENDERS — use correct pronouns when referring to each speaker:")
+            system_prompt_parts.append("CAST AND PRONOUNS:")
             for _spk, _g in _gender_map.items():
                 _pronoun = "he/him" if _g in ("male", "m", "man", "child") else "she/her" if _g in ("female", "f", "woman") else "he/him"
                 system_prompt_parts.append(f"- {_spk}: {_pronoun}")
             system_prompt_parts.append("NEVER use 'her' or 'she' for a male speaker, or 'him'/'he' for a female speaker.")
+
+            # Referent resolution, not just speaker gender. Observed failure:
+            # "葉太，唔使擔心，我唔會殺佢" → "Mrs. Yip, don't worry, I won't kill her".
+            # The model resolved the pronoun to the woman being ADDRESSED when the
+            # referent was the man being threatened. Stamping speaker genders cannot
+            # fix that alone — the model has to be told there is something to resolve.
+            if _src_is_cjk:
+                system_prompt_parts.append(
+                    "THIRD-PERSON PRONOUNS: the source pronoun (佢 / keoi5, 他, 她) is "
+                    "GENDER-NEUTRAL in speech. Work out WHO it refers to from the scene "
+                    "context above, then use that person's pronoun from the cast list."
+                )
+                system_prompt_parts.append(
+                    "Do NOT assume the pronoun refers to the person being ADDRESSED — "
+                    "a line often addresses one character while referring to another."
+                )
+                if not _has_female:
+                    system_prompt_parts.append(
+                        "Every identified character in this scene is male: do NOT write "
+                        "'she' or 'her' unless the source text explicitly names a female character."
+                    )
 
         system_prompt_parts.append("")
         system_prompt_parts.append("DOMAIN-SPECIFIC RULES:")
