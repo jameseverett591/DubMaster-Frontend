@@ -2361,6 +2361,15 @@ class CompleteUploadRequest(BaseModel):
     filename: str
     size_bytes: int
     parts: List[CompletedPart]
+    # The direct-to-R2 path replaced POST /upload, which carried these as form
+    # fields, and did not carry them forward. Without them every job ran with
+    # source_language unset (so Cantonese auto-detected as "zh" — Standard
+    # Chinese script with Mandarin grammar, wrong before translation starts)
+    # and expected_speakers at the model default of 2, which hard-clamps
+    # pyannote to exactly two speakers regardless of the scene.
+    source_language: Optional[str] = None
+    target_language: Optional[str] = None
+    num_speakers: Optional[int] = None
 
 
 class AbortUploadRequest(BaseModel):
@@ -2646,6 +2655,40 @@ async def upload_complete(body: CompleteUploadRequest, request: Request, backgro
     await job_manager.set_minutes_charged(body.job_id, value)
     if job:
         job.video_duration = real
+
+    # Persist source/target language and expected speaker count on the job, so
+    # transcription and diarization can use them. Ported from the retired
+    # POST /upload endpoint — the direct-to-R2 path dropped all three.
+    _src_lang: Optional[str] = None
+    if body.source_language:
+        _norm = normalize_language_code(body.source_language, allow_auto=True)
+        if _norm and _norm != "auto":
+            _src_lang = _norm
+
+    # Same heuristic the old endpoint used: if no source language was chosen but
+    # the filename says Cantonese, persist yue rather than leaving detection to
+    # guess (it guesses "zh", which is the wrong language for the same script).
+    if not _src_lang:
+        _fn = (body.filename or "").lower()
+        if any(t in _fn for t in ("canton", "cantonese", " yue", "_yue", "-yue")):
+            _src_lang = "yue"
+
+    _tgt_lang: Optional[str] = None
+    if body.target_language:
+        _tnorm = normalize_language_code(body.target_language, allow_auto=False)
+        if _tnorm and _tnorm != "auto":
+            _tgt_lang = _tnorm
+
+    if job:
+        if _src_lang:
+            job.source_language = _src_lang
+            logger.info(f"Job {body.job_id}: source_language set to {_src_lang!r} from upload request")
+        if _tgt_lang:
+            job.target_language = _tgt_lang
+            logger.info(f"Job {body.job_id}: target_language set to {_tgt_lang!r} from upload request")
+        if body.num_speakers is not None and 1 <= body.num_speakers <= 10:
+            job.expected_speakers = body.num_speakers
+            logger.info(f"Job {body.job_id}: expected_speakers set to {body.num_speakers} from upload request")
 
     logger.info(
         f"[UPLOAD] completed {body.job_id}: {real:.1f}s, {value} min charged"

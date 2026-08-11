@@ -94,7 +94,13 @@ export function VideoUpload({
   onBuyMore
 }: VideoUploadProps) {
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
-  const [sourceLanguage, setSourceLanguage] = useState<string>("auto")
+  // Defaults to Cantonese, not auto-detect. Whisper reliably tags Cantonese
+  // audio as "zh" because the SCRIPT is Chinese — which silently produces
+  // Standard-Written-Chinese text with Mandarin grammar, so the translator is
+  // working from the wrong source before it starts. Cantonese film is the
+  // primary use case here; anyone dubbing something else picks it once and the
+  // choice is remembered below.
+  const [sourceLanguage, setSourceLanguage] = useState<string>("yue")
   // Guarded: this runs during the SERVER render too, where localStorage does
   // not exist. Reading it unguarded threw and forced Next to abandon SSR and
   // fall back to client rendering for the whole page.
@@ -367,6 +373,12 @@ export function VideoUpload({
             )
           },
           signal: abortController.signal,
+          // lang/targetLang/numSpk were computed above and then dropped on the
+          // floor — the direct-to-R2 path never forwarded them, so every job
+          // ran auto-detect (Cantonese → "zh") with the default speaker count.
+          sourceLanguage: lang,
+          targetLanguage: targetLang,
+          numSpeakers: numSpk,
         })
       } else {
         response = await startDirectUpload(file, durationSeconds, {
@@ -376,6 +388,9 @@ export function VideoUpload({
             )
           },
           signal: abortController.signal,
+          sourceLanguage: lang,
+          targetLanguage: targetLang,
+          numSpeakers: numSpk,
         })
       }
 
