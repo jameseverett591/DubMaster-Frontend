@@ -530,6 +530,19 @@ class DubVerseAPIClient {
     return `${url}${sep}access_token=${encodeURIComponent(this._token)}`
   }
 
+  /** Public form of _mediaUrl: resolves the token first.
+   *
+   *  Callers outside this class (the voice library modal, for one) were building
+   *  media URLs by hand and getting 401 on every request, because the token is
+   *  in-memory on this singleton and may not be set yet on a fresh page load.
+   *  Awaiting _ensureToken here is the difference between a working URL and a
+   *  silent 401.
+   */
+  async mediaUrl(path: string): Promise<string> {
+    await this._ensureToken()
+    return this._mediaUrl(path)
+  }
+
   constructor(baseURL: string = API_BASE_URL) {
     this.baseURL = baseURL
   }
