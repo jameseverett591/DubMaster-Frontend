@@ -770,6 +770,105 @@ def _merge_close_transcript_segments(
 
     return merged
 
+# Velma rejects large uploads with HTTP 413. The exact server limit is not
+# documented; 24MB is comfortably under what a 119MB MP4 was refused at, and
+# leaves room for a feature-length film once compressed (see below).
+_VELMA_MAX_UPLOAD_BYTES = 24 * 1024 * 1024
+
+
+def _velma_source_audio(video_path: str, job_id: str, vocals_path: str | None = None) -> str:
+    """The file to hand Velma: vocals only, compressed if long.
+
+    Pass vocals_path when the caller already has one (the CPU path separates
+    earlier in the pipeline) to skip straight to the size guard.
+
+    Velma wants clean speech, not a video container. Passing video_path meant
+    every RunPod-path job uploaded the whole MP4 and got a 413, so Velma never
+    ran once on that path and diarization silently fell through to F0 pitch
+    clustering. The CPU path always passed vocals; this brings the two into line.
+
+    Separation is cached per job by separate_audio, and the RunPod path already
+    runs it for the F0 fallback and the final mix — so this adds no Demucs work,
+    it just consumes the result earlier.
+
+    Falls back to video_path on any failure: a degraded Velma attempt is still
+    better than skipping diarization entirely.
+    """
+    if vocals_path:
+        src = vocals_path
+        logger.info(f"[VELMA-SRC] Job {job_id}: using caller's vocals {src}")
+        return _velma_fit_upload(src, job_id)
+
+    src = video_path
+    try:
+        from app.pipeline.separate_audio import separate_audio
+        sep = separate_audio(video_path, job_id=job_id)
+        if sep.get("status") == "ok" and sep.get("vocals_path"):
+            src = sep["vocals_path"]
+            logger.info(f"[VELMA-SRC] Job {job_id}: using separated vocals {src}")
+        else:
+            logger.warning(
+                f"[VELMA-SRC] Job {job_id}: separation unavailable "
+                f"({sep.get('reason') or sep.get('status')}) — sending source file"
+            )
+    except Exception as exc:
+        logger.warning(f"[VELMA-SRC] Job {job_id}: separation failed ({exc}) — sending source file")
+
+    return _velma_fit_upload(src, job_id)
+
+
+def _velma_fit_upload(src: str, job_id: str) -> str:
+    """Compress src if it is too large for Velma to accept.
+
+    Vocals come back as uncompressed WAV. That is fine for a 99s clip (~17MB)
+    and fatal for a feature: two hours of WAV is ~1GB and 413s exactly like the
+    MP4 did. Mono 16kHz 24kbps MP3 is ~11MB/hour — a 2h film lands near 22MB —
+    and speech content survives it well enough for diarization and emotion.
+
+    Returns src unchanged when it already fits, so short jobs keep pristine WAV.
+    """
+    try:
+        size = os.path.getsize(src)
+        if size <= _VELMA_MAX_UPLOAD_BYTES:
+            return src
+
+        compressed = os.path.join(os.path.dirname(src), f"velma_source_{job_id}.mp3")
+        if not os.path.exists(compressed):
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", src,
+                "-vn",
+                "-ac", "1",              # mono: speaker identity survives the downmix
+                "-ar", "16000",
+                "-b:a", "24k",
+                compressed,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.error(
+                    f"[VELMA-SRC] Job {job_id}: compression failed, sending {size / 1024**2:.0f}MB "
+                    f"as-is (may 413):\n{result.stderr[-300:]}"
+                )
+                return src
+
+        new_size = os.path.getsize(compressed)
+        logger.info(
+            f"[VELMA-SRC] Job {job_id}: compressed {size / 1024**2:.0f}MB → "
+            f"{new_size / 1024**2:.1f}MB for upload"
+        )
+        if new_size > _VELMA_MAX_UPLOAD_BYTES:
+            # Longer than ~4 hours. Chunked upload is the real answer; log loudly
+            # rather than pretend, so a 413 here is explained rather than mysterious.
+            logger.warning(
+                f"[VELMA-SRC] Job {job_id}: still {new_size / 1024**2:.0f}MB after "
+                f"compression — Velma will likely 413. Needs chunked upload."
+            )
+        return compressed
+    except Exception as exc:
+        logger.warning(f"[VELMA-SRC] Job {job_id}: size check/compression failed ({exc})")
+        return src
+
+
 def _f0_split_speakers(segments, video_path: str, n_speakers: int, job_id: str):
     """
     Fallback when pyannote collapses all segments to 1 speaker:
@@ -1323,11 +1422,13 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
     _exp_spk_f0 = (_job_for_f0.expected_speakers if _job_for_f0 else 0) or 0
 
     # Try Velma diarization first (primary source)
-    velma_audio_path = video_path
     velma_result = None
-    if os.getenv("MODULATE_API_KEY") and velma_audio_path:
+    if os.getenv("MODULATE_API_KEY") and video_path:
         try:
             logger.info(f"Job {job_id}: RunPod path — attempting Velma diarization (primary)")
+            # Vocals, not the video container — see _velma_source_audio. Off the
+            # event loop: separation and compression are both blocking.
+            velma_audio_path = await asyncio.to_thread(_velma_source_audio, video_path, job_id)
             velma_result = await asyncio.to_thread(
                 velma_diarize, velma_audio_path, job_id, _exp_spk_f0
             )
@@ -2022,10 +2123,14 @@ async def process_video_pipeline(job_id: str, video_path: str):
 
                 # Try Velma diarization first if API key is configured
                 velma_result = None
-                velma_audio_path = vocals_path or video_path
-                if os.getenv("MODULATE_API_KEY") and velma_audio_path:
+                if os.getenv("MODULATE_API_KEY") and (vocals_path or video_path):
                     try:
                         logger.info(f"Job {job_id}: attempting Velma diarization")
+                        # Same size guard as the RunPod path: this path already
+                        # has clean vocals, but a feature-length WAV still 413s.
+                        velma_audio_path = await asyncio.to_thread(
+                            _velma_source_audio, video_path, job_id, vocals_path
+                        )
                         velma_result = await asyncio.to_thread(
                             velma_diarize, velma_audio_path, job_id, _exp_spk
                         )
