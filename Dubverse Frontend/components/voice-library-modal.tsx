@@ -200,9 +200,17 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
     if (previewingId === voiceId) { setPreviewingId(null); return }
 
-    const src = previewUrl
-      ? (previewUrl.startsWith('http') ? previewUrl : `${API_BASE_URL}${previewUrl.startsWith('/') ? previewUrl : `/${previewUrl}`}`)
-      : `${API_BASE_URL}/api/voice-preview/${encodeURIComponent(voiceId)}`
+    // Must go through apiClient.mediaUrl: /api/voice-preview requires auth, and
+    // an <audio> element cannot send an Authorization header — the backend takes
+    // access_token in the query string instead. Building this URL by hand is why
+    // preview 401'd on both the direct play and the blob fallback below.
+    // An absolute URL is a third-party preview (ElevenLabs et al) and needs no token.
+    const rawPath = previewUrl
+      ? (previewUrl.startsWith('/') ? previewUrl : `/${previewUrl}`)
+      : `/api/voice-preview/${encodeURIComponent(voiceId)}`
+    const src = previewUrl?.startsWith('http')
+      ? previewUrl
+      : await apiClient.mediaUrl(rawPath)
 
     // Try direct playback first. If it fails (CORS, range request, or other),
     // fall back to fetching the audio and creating a blob URL to play.
@@ -224,7 +232,9 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
 
     // Fallback: fetch the audio and play from a blob URL
     try {
-      const res = await fetch(src, { method: 'GET' })
+      // Belt and braces: src already carries access_token, but send the header
+      // too so this path works even if the query-string form is ever dropped.
+      const res = await fetch(src, { method: 'GET', headers: await apiClient.ensureAuthHeaders() })
       if (!res.ok) throw new Error(`Fetch failed: ${res.status}`)
       const buf = await res.arrayBuffer()
       const blob = new Blob([buf], { type: res.headers.get('Content-Type') || 'audio/mpeg' })
