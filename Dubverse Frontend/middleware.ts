@@ -125,7 +125,13 @@ export async function middleware(request: NextRequest) {
   }
 
   // Check subscription for protected routes (use service role to bypass RLS)
-  const skipSubscriptionCheck = process.env.NEXT_PUBLIC_SKIP_SUBSCRIPTION_CHECK === 'true'
+  // Development convenience only. Gated on NODE_ENV so that setting this
+  // variable in a production environment — by copy-pasted .env, a stale Vercel
+  // setting, or habit — cannot disable the paywall for every user. A flag that
+  // grants paid access must be impossible to enable by accident.
+  const skipSubscriptionCheck =
+    process.env.NODE_ENV !== 'production' &&
+    process.env.NEXT_PUBLIC_SKIP_SUBSCRIPTION_CHECK === 'true'
   if (!skipSubscriptionCheck && user && SUBSCRIPTION_ROUTES.some((route) => currentPath.startsWith(route))) {
     try {
       const serviceClient = createClient(
