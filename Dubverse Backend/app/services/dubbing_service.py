@@ -2042,8 +2042,8 @@ class DubbingService:
 
         # Fallback: ffmpeg arubberband (formant-preserving pitch shift)
         try:
-            # rubberband transpose=semitones
-            rb_filter = f"rubberband=pitch={n_steps:.1f}:formant=on"
+            # rubberband transpose=semitones (formant=preserved — see _adjust_audio_duration)
+            rb_filter = f"rubberband=pitch={n_steps:.1f}:formant=preserved"
             cmd = ["ffmpeg", "-y", "-i", input_path, "-filter:a", rb_filter, "-vn", output_path]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
@@ -2201,12 +2201,15 @@ class DubbingService:
             use_rubberband = self._check_rubberband()
 
             if use_rubberband:
-                # arubberband: formant=on preserves voice resonance during stretch.
+                # arubberband: formant=preserved keeps voice resonance during stretch.
                 # smoothing=on reduces phasing artefacts at >1.3×.
                 # transients=crisp keeps consonant clarity.
                 rb_filter = (
                     f"rubberband=tempo={speed_factor:.4f}"
-                    ":formant=on:smoothing=on:transients=crisp"
+                    # ffmpeg's rubberband wrapper takes formant=shifted|preserved,
+                    # not on/off — formant=on is rejected as an invalid argument and
+                    # silently dropped every stretch to the atempo fallback.
+                    ":formant=preserved:smoothing=on:transients=crisp"
                 )
                 cmd = ["ffmpeg", "-y", "-i", input_path, "-filter:a", rb_filter, "-vn", output_path]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)

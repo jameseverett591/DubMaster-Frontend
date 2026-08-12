@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -55,9 +56,16 @@ async def adapt_batch(
     scene_context: Optional[str] = None,
 ) -> List[AdaptedSegment]:
     """
-    Generate 3 adaptation variants for every segment in a single GPT-4 call.
+    Generate 3 adaptation variants for every segment via Claude.
     Falls back to synthetic variants derived from target_text if LLM unavailable.
     Returns one AdaptedSegment per input segment, in the same order.
+
+    Segments are adapted in chunks: one Claude call for a whole job's segments
+    needs ~650 output tokens per segment (3 variants + rationale + schema), so
+    a 30+ segment job blew past max_tokens and the truncated JSON failed parsing
+    wholesale — every segment silently lost its sync_fit variant, leaving the
+    fit loop to atempo+trim full-length lines into tight slots. A failed chunk
+    falls back on its own instead of taking the whole job down with it.
     """
     if not segments:
         return []
@@ -66,25 +74,29 @@ async def adapt_batch(
         logger.warning("[ADAPTATION] ANTHROPIC_API_KEY not set — using fallback variants")
         return _fallback_variants(segments)
 
-    source_language = segments[0].get("source_language", "zh")
+    chunk_size = int(os.getenv("ADAPTATION_BATCH_SIZE", "10"))
+    chunks = [segments[i : i + chunk_size] for i in range(0, len(segments), chunk_size)]
 
-    try:
-        user_prompt, entity_map = build_batch_adapt_prompt(
-            segments=segments,
-            source_language=source_language,
-            target_language=target_language,
-            scene_context=scene_context,
-        )
-        raw = await _call_llm(user_prompt)
-        if raw is None:
-            logger.warning("[ADAPTATION] LLM returned None — using fallback")
-            return _fallback_variants(segments)
+    async def _adapt_chunk(chunk: List[Dict]) -> List[AdaptedSegment]:
+        try:
+            source_language = chunk[0].get("source_language", "zh")
+            user_prompt, entity_map = build_batch_adapt_prompt(
+                segments=chunk,
+                source_language=source_language,
+                target_language=target_language,
+                scene_context=scene_context,
+            )
+            raw = await _call_llm(user_prompt)
+            if raw is None:
+                logger.warning("[ADAPTATION] LLM returned None — using fallback for this chunk")
+                return _fallback_variants(chunk)
+            return _parse_llm_response(raw, chunk, entity_map)
+        except Exception as e:
+            logger.error(f"[ADAPTATION] chunk failed: {e}", exc_info=True)
+            return _fallback_variants(chunk)
 
-        return _parse_llm_response(raw, segments, entity_map)
-
-    except Exception as e:
-        logger.error(f"[ADAPTATION] adapt_batch failed: {e}", exc_info=True)
-        return _fallback_variants(segments)
+    results = await asyncio.gather(*(_adapt_chunk(c) for c in chunks))
+    return [adapted for chunk_result in results for adapted in chunk_result]
 
 
 # Models from Opus 4.7 / Sonnet 5 onward reject `temperature` and `top_p`
@@ -149,6 +161,14 @@ async def _call_llm(user_prompt: str) -> Optional[str]:
             return None
 
         blocks = response.json().get("content") or []
+        # Truncated output can't parse as JSON and would silently drop the whole
+        # chunk to identical-text fallback variants — log it as what it is.
+        if response.json().get("stop_reason") == "max_tokens":
+            logger.warning(
+                "[ADAPTATION] response truncated at max_tokens — "
+                "chunk will fall back or partially parse; "
+                "lower ADAPTATION_BATCH_SIZE if this repeats"
+            )
         content = next(
             (b.get("text") for b in blocks if b.get("type") == "text"), None
         )
