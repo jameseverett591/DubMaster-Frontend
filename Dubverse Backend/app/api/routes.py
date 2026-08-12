@@ -776,6 +776,26 @@ def _merge_close_transcript_segments(
 _VELMA_MAX_UPLOAD_BYTES = 24 * 1024 * 1024
 
 
+def _vocals_or_video(video_path: str, job_id: str) -> str:
+    """Separated vocals for this job if available, else the original file.
+
+    F0 pitch analysis — both speaker splitting and gender classification — is
+    measurably better on isolated vocals than on a mix with score and effects.
+    separate_audio caches per job and every caller here has already triggered it
+    (the F0 split and the final mix both use it), so this is a cache read, not a
+    second Demucs pass. Falls back to video_path on any failure: mixed-audio
+    classification beats none.
+    """
+    try:
+        from app.pipeline.separate_audio import separate_audio
+        sep = separate_audio(video_path, job_id=job_id)
+        if sep.get("status") == "ok" and sep.get("vocals_path"):
+            return sep["vocals_path"]
+    except Exception as exc:
+        logger.warning(f"[VOCALS] Job {job_id}: separation unavailable ({exc}) — using source audio")
+    return video_path
+
+
 def _velma_source_audio(video_path: str, job_id: str, vocals_path: str | None = None) -> str:
     """The file to hand Velma: vocals only, compressed if long.
 
@@ -1264,6 +1284,27 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             # that removes all dialogue. large-v3 with no VAD is more reliable for mixed content.
             gpu_env_vars.setdefault("VAD_THRESHOLD", "0")
 
+    # Pin the transcription model for EVERY language, not just Cantonese.
+    # Anything not sent here is inherited from whatever the worker container was
+    # started with, which differs between cold and warm containers and across
+    # worker redeploys — the same file transcribed 31 segments one night and 21
+    # the next. Pinning makes a run reproducible.
+    #
+    # VAD_THRESHOLD is deliberately NOT given a blanket default: "0" is a
+    # Cantonese-specific decision made for fight-scene audio, and inventing a
+    # value for other languages would change untested behaviour. Where it is not
+    # configured we log that it is worker-inherited, so a future variance
+    # investigation starts with the answer instead of a mystery.
+    gpu_env_vars.setdefault("WHISPER_MODEL", os.environ.get("WHISPER_MODEL", "large-v3"))
+    _unpinned = [k for k in ("VAD_THRESHOLD",) if k not in gpu_env_vars]
+    logger.info(
+        f"Job {job_id}: ASR settings pinned — "
+        f"language={gpu_env_vars.get('WHISPER_LANGUAGE') or 'auto-detect'}, "
+        f"model={gpu_env_vars.get('WHISPER_MODEL')}, "
+        f"vad={gpu_env_vars.get('VAD_THRESHOLD', 'worker-inherited')}"
+        + (f" | UNPINNED (worker decides): {', '.join(_unpinned)}" if _unpinned else "")
+    )
+
     # Compatibility: the worker (and diarization pipeline) primarily reads HF_TOKEN.
     if not gpu_env_vars.get("HF_TOKEN"):
         alt_hf = (
@@ -1551,7 +1592,10 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             )
             if len(_post_split_spk) > 1:
                 try:
-                    _f0_extract = await asyncio.to_thread(extract_audio, video_path)
+                    # Vocals, not the mix: the F0 split above already ran
+                    # separation, so this reads the cached track.
+                    _f0_audio_src = await asyncio.to_thread(_vocals_or_video, video_path, job_id)
+                    _f0_extract = await asyncio.to_thread(extract_audio, _f0_audio_src)
                     if _f0_extract and _f0_extract.get("status") == "ok":
                         _f0_segs = [
                             {
@@ -1779,7 +1823,9 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             from app.pipeline.classify_speakers import classify_speakers as _classify
 
             logger.info(f"Job {job_id}: speaker_genders empty from GPU — running local F0 classification")
-            extract_result = extract_audio(video_path)
+            # Vocals rather than the mix — pitch analysis on score and effects
+            # skews the register floor that decides male/female.
+            extract_result = extract_audio(_vocals_or_video(video_path, job_id))
             if extract_result and extract_result.get("status") == "ok":
                 audio_tensor = extract_result["audio"]
                 sr = extract_result["sample_rate"]
@@ -2089,7 +2135,11 @@ async def process_video_pipeline(job_id: str, video_path: str):
                     transcript_data = json.load(f)
 
                 job = await job_manager.get_job(job_id)
-                expected_speakers = job.expected_speakers if job and hasattr(job, "expected_speakers") else 3
+                # 0 = not specified, consistent with the model default. This value
+                # is currently unused — it is reassigned from
+                # _estimate_speakers_from_segments below before any read — but a
+                # stray "3" here is a trap for the next person to consume it.
+                expected_speakers = job.expected_speakers if job and hasattr(job, "expected_speakers") else 0
 
                 raw_segments = transcript_data.get("segments", [])
 
@@ -3000,7 +3050,7 @@ async def get_job_status(job_id: str):
         dubbed_video_url=job.dubbed_video_url,
         tts_engine=job.tts_engine,
         segment_tts_engines=job.segment_tts_engines,
-        expected_speakers=getattr(job, "expected_speakers", 2),
+        expected_speakers=getattr(job, "expected_speakers", 0),   # 0 = not specified
         speaker_genders=job.speaker_genders,
         voice_mapping=job.voice_mapping,
         traits_mapping=job.traits_mapping,

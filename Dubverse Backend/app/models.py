@@ -84,7 +84,12 @@ class Job(BaseModel):
     # Cleared once refunded, so a job that fails twice — or a retried status
     # update — can't return the same minutes more than once.
     minutes_charged: Optional[int] = None
-    expected_speakers: int = 2
+    # 0 means "not specified — let diarization decide". It must NOT default to a
+    # real speaker count: the clamp in routes.py reads any value in 1..10 as an
+    # explicit user choice and forces pyannote to exactly that many speakers.
+    # With a default of 2, "auto-detect" was indistinguishable from "the user
+    # said 2", and every scene was capped at two speakers however many spoke.
+    expected_speakers: int = 0
     source_language: Optional[str] = None  # ISO code (e.g. "yue", "en") or None for auto-detect
     target_language: Optional[str] = None  # ISO code (e.g. "en", "es") set at upload time
     
@@ -132,7 +137,7 @@ class StatusResponse(BaseModel):
     dubbed_video_url: Optional[str] = None
     tts_engine: Optional[str] = None
     segment_tts_engines: Optional[List[Optional[str]]] = None
-    expected_speakers: int = 2
+    expected_speakers: int = 0   # 0 = not specified; see Job.expected_speakers
     speaker_genders: Optional[Dict[str, str]] = None
     voice_mapping: Optional[Dict[str, str]] = None
     traits_mapping: Optional[Dict[str, List[str]]] = None
