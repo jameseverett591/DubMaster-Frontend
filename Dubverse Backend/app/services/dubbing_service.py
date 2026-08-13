@@ -1375,21 +1375,26 @@ class DubbingService:
                 # so the window is tight and precise.
                 #
                 # Two-stage enforcement:
-                #   1. Time-stretch via ffmpeg atempo. Tolerance matches the regen
-                #      path (0.3s) so small overflows into a gap don't trigger a
-                #      speed-up — a 0.3s overflow is far less jarring than 1.5x
-                #      atempo. Fit target is full_room (bidirectional window), not
-                #      max_slot (forward-only), so split sub-segments with
-                #      contiguous windows can use surrounding gaps.
-                #   2. Hard-trim as an absolute guarantee — but only past the SAME
-                #      tolerance, never inside it. Trimming at 20ms while atempo
-                #      waited until 300ms left a dead band where a segment was too
-                #      long to pass untouched and too short to be sped up, so it
-                #      was silently tail-cut instead. Overflow within tolerance is
-                #      accepted as-is: a 0.3s run-on into a gap is far less jarring
-                #      than a clipped final syllable.
+                #   1. Time-stretch (rubberband, atempo fallback) for any overflow
+                #      past the window — see the tolerance note below. Fit target
+                #      is full_room (bidirectional window), not max_slot
+                #      (forward-only), so split sub-segments with contiguous
+                #      windows can use surrounding gaps.
+                #   2. Hard-trim as an absolute guarantee — but only past a wider
+                #      tolerance (the capped-stretch case), never inside it. When
+                #      even _FIT_MAX_SPEED can't fit the line, a short run-on is
+                #      the lesser evil next to cutting words off.
+                #
+                # The atempo tolerance is ~0 (just the 50ms buffer already inside
+                # _fit_target): full_room extends to the next segment's word start,
+                # so ANY accepted overrun lands on top of the next line's speech —
+                # audible double-voice overlap in back-to-back dialogue. The old
+                # 0.3s tolerance assumed the run-on lands in a gap; it doesn't.
+                # Overruns now take a mild stretch (the regen path already
+                # speed-fits within tolerance rather than accepting overlap).
                 _fish_speed_was_applied = raw.get("fish_speed_applied", False)
-                _atempo_tolerance = 0.3
+                _atempo_tolerance = 0.05
+                _trim_tolerance = 0.3
                 _speed_applied = 1.0
                 _fit_target = full_room
                 if actual_duration > _fit_target + _atempo_tolerance and _fit_target > 0.2:
@@ -1417,10 +1422,10 @@ class DubbingService:
                         f"after={actual_duration:.2f}s fish_pre={_fish_speed_was_applied}"
                     )
 
-                # Absolute guarantee — hard-trim to slot boundary. Gated on the same
-                # tolerance as atempo above, so this can only fire on segments atempo
+                # Absolute guarantee — hard-trim to slot boundary. Gated on the
+                # wider trim tolerance, so this can only fire on segments atempo
                 # already tried and failed to fit (capped at _FIT_MAX_SPEED).
-                if actual_duration > _fit_target + _atempo_tolerance:
+                if actual_duration > _fit_target + _trim_tolerance:
                     trimmed_path = os.path.join(output_dir, f"segment_{i:04d}_trimmed.mp3")
                     trimmed = await asyncio.to_thread(self._trim_audio_duration, final_path, trimmed_path, _fit_target)
                     if trimmed and os.path.exists(trimmed_path):
