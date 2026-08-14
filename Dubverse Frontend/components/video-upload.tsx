@@ -11,7 +11,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Upload, FileVideo, X, CheckCircle2, AlertCircle, Languages, Users, Mic, Square } from "lucide-react"
 import type { VideoSource } from "@/components/dashboard"
 import { apiClient, isTerminalStatus, JobNotFoundError, type JobStatusValue } from "@/lib/api-client"
-import { startDirectUpload, resumeDirectUpload, findResumable, cancelDirectUpload, UploadError } from "@/lib/upload-client"
+// Only the error type survives the return to the direct backend upload; the
+// presign/multipart client is no longer used by this component.
+import { UploadError } from "@/lib/upload-client"
 import PipelineMonitor from "@/components/pipeline-monitor"
 import { BasicVideoPanel } from "@/components/basic-video-panel"
 import { VideoRecorder } from "@/components/video-recorder"
@@ -358,54 +360,35 @@ export function VideoUpload({
       const spkRaw = speakersOverride ?? numSpeakersRef.current
       const numSpk = spkRaw && spkRaw !== 'auto' ? parseInt(spkRaw, 10) : undefined
 
-      // Probe duration for presign request
-      const durationSeconds = await probeDuration(file) || 0
-
-      // Check for resumable upload
-      const saved = findResumable(file)
-      let response
-
-      if (saved) {
-        response = await resumeDirectUpload(file, saved, {
-          onProgress: (progress) => {
-            setUploadedFiles((prev) =>
-              prev.map((f) => (f.id === tempId ? { ...f, progress } : f))
-            )
-          },
-          signal: abortController.signal,
-          // lang/targetLang/numSpk were computed above and then dropped on the
-          // floor — the direct-to-R2 path never forwarded them, so every job
-          // ran auto-detect (Cantonese → "zh") with the default speaker count.
-          sourceLanguage: lang,
-          targetLanguage: targetLang,
-          numSpeakers: numSpk,
-        })
-      } else {
-        response = await startDirectUpload(file, durationSeconds, {
-          onProgress: (progress) => {
-            setUploadedFiles((prev) =>
-              prev.map((f) => (f.id === tempId ? { ...f, progress } : f))
-            )
-          },
-          signal: abortController.signal,
-          sourceLanguage: lang,
-          targetLanguage: targetLang,
-          numSpeakers: numSpk,
-        })
-      }
+      // Single request: the bytes and the job settings travel together, so
+      // there is no second call for the language and speaker count to be lost
+      // between. Duration is probed server-side after the file lands, against
+      // the real file rather than a claimed value.
+      const response = await apiClient.uploadVideo(
+        file,
+        (progress) => {
+          setUploadedFiles((prev) =>
+            prev.map((f) => (f.id === tempId ? { ...f, progress } : f))
+          )
+        },
+        lang,
+        numSpk,
+        targetLang,
+        abortController.signal,
+      )
 
       // Upload received by backend — now it's processing
       setUploadedFiles((prev) => {
         const next = prev.map((f) =>
           f.id === tempId
-            ? { ...f, progress: 100, status: "processing" as const, jobId: response.jobId, name: f.file?.name, statusLabel: t('analysingVideo') }
+            ? { ...f, progress: 100, status: "processing" as const, jobId: response.job_id, name: f.file?.name, statusLabel: t('analysingVideo') }
             : f
         )
         persistFiles(next)
         return next
       })
 
-      pollJobStatus(tempId, response.jobId)
+      pollJobStatus(tempId, response.job_id)
       localStorage.setItem('dubverse.lastEditorJobId', response.job_id)
     } catch (err) {
       if (err instanceof UploadError) {

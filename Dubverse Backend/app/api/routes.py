@@ -2374,6 +2374,180 @@ async def process_video_pipeline(job_id: str, video_path: str):
 
 
 # ---------------------------------------------------------------------------
+@router.post("/upload", response_model=UploadResponse, dependencies=[Depends(_dep_auth)])
+async def upload_video(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    source_language: Optional[str] = Form(None),
+    num_speakers: Optional[int] = Form(None),
+    target_language: Optional[str] = Form(None),
+):
+    """Upload a video directly to this backend and start the pipeline.
+
+    Restored from the pre-direct-to-R2 design. The client posts the file here,
+    it lands on local disk, and processing starts — one transfer, no presign
+    round trips, and the job's language and speaker count arrive as form fields
+    on the same request that carries the bytes.
+
+    That last point is why this path is back: the direct-to-R2 client replaced
+    it without carrying those three fields, so every job silently ran with
+    source_language unset (Cantonese auto-detecting as "zh") and the default
+    speaker count. Parameters that travel with the upload cannot be dropped
+    between two calls, because there is only one call.
+
+    Billing is unchanged from the R2 path: the duration-scaled size cap is
+    enforced after probing, minutes are reserved before any processing starts,
+    and set_minutes_charged goes through job_manager so a crash cannot lose the
+    refund.
+    """
+    user_id = _caller(request)
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    file_ext = Path(file.filename).suffix.lower()
+    if file_ext not in settings.ALLOWED_VIDEO_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file format. Allowed: {', '.join(settings.ALLOWED_VIDEO_FORMATS)}",
+        )
+
+    # Normalize source language. "auto"/empty → leave as None so detection runs.
+    src_lang: Optional[str] = None
+    if source_language:
+        normalized = normalize_language_code(source_language, allow_auto=True)
+        if normalized and normalized != "auto":
+            src_lang = normalized
+
+    # If no source language was chosen but the filename says Cantonese, persist
+    # yue rather than leaving detection to guess — it guesses "zh", which is the
+    # wrong language for the same script.
+    if not src_lang:
+        _fn = (file.filename or "").lower()
+        if any(t in _fn for t in ("canton", "cantonese", " yue", "_yue", "-yue")):
+            src_lang = "yue"
+
+    tgt_lang: Optional[str] = None
+    if target_language:
+        _tgt_norm = normalize_language_code(target_language, allow_auto=False)
+        if _tgt_norm and _tgt_norm != "auto":
+            tgt_lang = _tgt_norm
+
+    job_id = str(uuid.uuid4())
+
+    try:
+        video_path = storage.get_upload_path(job_id, file.filename)
+
+        await job_manager.create_job(
+            job_id=job_id,
+            video_filename=file.filename,
+            video_path=video_path,
+            video_size=0,
+            user_id=user_id,
+        )
+
+        job_for_lang = await job_manager.get_job(job_id)
+        if job_for_lang:
+            if src_lang:
+                job_for_lang.source_language = src_lang
+                logger.info(f"Job {job_id}: source_language set to {src_lang!r} from upload request")
+            if tgt_lang:
+                job_for_lang.target_language = tgt_lang
+                logger.info(f"Job {job_id}: target_language set to {tgt_lang!r} from upload request")
+            if num_speakers is not None and 1 <= num_speakers <= 10:
+                job_for_lang.expected_speakers = num_speakers
+                logger.info(f"Job {job_id}: expected_speakers set to {num_speakers} from upload request")
+
+        await job_manager.update_job_status(
+            job_id, JobStatus.UPLOADING, progress=5, current_stage="Uploading file"
+        )
+
+        file_size = 0
+        with open(video_path, "wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                f.write(chunk)
+                file_size += len(chunk)
+                # Absolute ceiling while streaming, before the duration is known.
+                # The duration-scaled cap below is the real limit.
+                if file_size > settings.MAX_UPLOAD_SIZE:
+                    os.remove(video_path)
+                    await job_manager.delete_job(job_id)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large. Max size: {settings.MAX_UPLOAD_SIZE / (1024**3):.1f}GB",
+                    )
+
+        _dur = await asyncio.to_thread(_probe_video_duration, video_path)
+        if not _dur:
+            os.remove(video_path)
+            await job_manager.delete_job(job_id)
+            raise HTTPException(status_code=400, detail="Could not read that file as video")
+
+        # Duration-scaled size cap — the same rule the R2 path enforced at
+        # presign time, applied here against the true duration rather than a
+        # claimed one.
+        if file_size > upload_size_cap(_dur):
+            os.remove(video_path)
+            await job_manager.delete_job(job_id)
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"That file is {file_size / 1024**3:.1f}GB for {_dur / 60:.0f} min "
+                    f"of video — over the limit for its duration."
+                ),
+            )
+
+        # Reserve minutes before any work starts. Refunded in full by
+        # job_manager if the job ends FAILED or CANCELLED.
+        _plan = await asyncio.to_thread(_plan_for_user, user_id)
+        _plan_key = "basic" if _plan in (None, _PLAN_UNKNOWN) else _plan
+        _pool = PLAN_MINUTES.get(_plan_key)
+        if _pool:
+            _need = usage_service.minutes_for(_dur)
+            _used = await asyncio.to_thread(usage_service.get_used_minutes, user_id)
+            _left = _pool - _used
+            if _need > _left:
+                os.remove(video_path)
+                await job_manager.delete_job(job_id)
+                raise HTTPException(
+                    status_code=402,
+                    detail=(
+                        f"This video needs {_need} min but you have {max(0, _left)} "
+                        f"of your {_pool}-minute monthly allowance left."
+                    ),
+                )
+            if await asyncio.to_thread(usage_service.adjust, user_id, _need):
+                # Through job_manager, not a direct mutation: this has to persist
+                # immediately, or a crash before the next status change loses the
+                # record and the refund with it.
+                await job_manager.set_minutes_charged(job_id, _need)
+
+        job = await job_manager.get_job(job_id)
+        if job:
+            job.video_size = file_size
+            job.video_duration = _dur
+
+        logger.info(f"File uploaded: {file.filename} ({file_size} bytes, {_dur:.1f}s) -> Job {job_id}")
+
+        background_tasks.add_task(process_video_pipeline, job_id, video_path)
+
+        return UploadResponse(
+            job_id=job_id,
+            status="accepted",
+            message="Video uploaded successfully, processing started",
+            video_filename=file.filename,
+            video_size=file_size,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Upload failed: {e}")
+        await job_manager.delete_job(job_id)
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
 # Direct-to-R2 upload
 #
 # The client uploads parts straight to R2 and the bytes never cross this
