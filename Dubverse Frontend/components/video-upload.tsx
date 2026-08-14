@@ -11,9 +11,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Upload, FileVideo, X, CheckCircle2, AlertCircle, Languages, Users, Mic, Square } from "lucide-react"
 import type { VideoSource } from "@/components/dashboard"
 import { apiClient, isTerminalStatus, JobNotFoundError, type JobStatusValue } from "@/lib/api-client"
-// Only the error type survives the return to the direct backend upload; the
-// presign/multipart client is no longer used by this component.
-import { UploadError } from "@/lib/upload-client"
 import PipelineMonitor from "@/components/pipeline-monitor"
 import { BasicVideoPanel } from "@/components/basic-video-panel"
 import { VideoRecorder } from "@/components/video-recorder"
@@ -391,23 +388,10 @@ export function VideoUpload({
       pollJobStatus(tempId, response.job_id)
       localStorage.setItem('dubverse.lastEditorJobId', response.job_id)
     } catch (err) {
-      if (err instanceof UploadError) {
-        const errorMessages: Record<string, string> = {
-          cors_etag: 'CORS configuration error - ETag not exposed',
-          resign_loop: 'Upload URLs expired repeatedly - check system clock',
-          part_failed: 'Upload failed after multiple retries',
-          file_mismatch: 'File changed - cannot resume different file',
-          cancelled: 'Upload cancelled',
-        }
-        const msg = errorMessages[err.code] || err.message
-        setUploadedFiles((prev) =>
-          prev.map((f) =>
-            f.id === tempId ? { ...f, status: "error", statusLabel: msg } : f
-          )
-        )
-        return
-      }
-
+      // The multipart-specific branch that stood here (cors_etag, resign_loop,
+      // part_failed, file_mismatch) went with the direct-to-R2 client — those
+      // failures cannot occur on a single POST. The generic handler below
+      // covers what remains, cancellation included.
       const msg = err instanceof Error ? err.message : t('uploadFailed')
       if (msg === "Upload cancelled") {
         try {
