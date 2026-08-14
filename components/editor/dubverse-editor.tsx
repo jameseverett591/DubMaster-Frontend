@@ -2585,19 +2585,11 @@ export function DubVerseEditor({
         audioContextRef.current = new AudioContext()
       }
       const ctx = audioContextRef.current
-      const resolved = segments.map(seg => {
-        const resolveUrl = (url: string | undefined) => {
-          if (!url || !jobId) return url
-          if (url.startsWith('http')) return url
-          const filename = url.split('/').pop()
-          return filename ? apiClient.getAudioFileUrl(jobId, filename) : url
-        }
-        return {
-          ...seg,
-          audio_url: resolveUrl(seg.audio_url),
-          committed_audio_url: resolveUrl(seg.committed_audio_url),
-        }
-      })
+      const resolved = segments.map(seg => ({
+        ...seg,
+        audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
+        committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
+      }))
       requestRPTStitch(
         resolved,
         videoDuration,
@@ -2665,19 +2657,11 @@ export function DubVerseEditor({
     if (!segments.length || !videoDuration) return
     const ctx = audioContextRef.current
     if (!ctx) return
-    const resolved = segments.map(seg => {
-      const resolveUrl = (url: string | undefined) => {
-        if (!url || !jobId) return url
-        if (url.startsWith('http')) return url
-        const filename = url.split('/').pop()
-        return filename ? apiClient.getAudioFileUrl(jobId, filename) : url
-      }
-      return {
-        ...seg,
-        audio_url: resolveUrl(seg.audio_url),
-        committed_audio_url: resolveUrl(seg.committed_audio_url),
-      }
-    })
+    const resolved = segments.map(seg => ({
+      ...seg,
+      audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
+      committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
+    }))
     requestRPTStitch(
       resolved,
       videoDuration,
@@ -3396,12 +3380,6 @@ export function DubVerseEditor({
       applyFlagOutcome(activeIndex, 'voice')
       requestRPTStitch(
         displaySegments.map((seg, segArrayIdx) => {
-          const resolveAudioUrl = (url: string | undefined) => {
-            if (!url || !jobId) return url
-            if (url.startsWith('http')) return url
-            const filename = url.split('/').pop()
-            return filename ? apiClient.getAudioFileUrl(jobId, filename) : url
-          }
           // For the segment just generated, use the new audio_url directly
           // so the stitch reflects the edit without waiting for store update.
           // Compare by array position — activeIndex indexes into this same
@@ -3410,10 +3388,10 @@ export function DubVerseEditor({
           const isActiveSegment = segArrayIdx === activeIndex
           return {
             ...seg,
-            audio_url: isActiveSegment ? audio_url : resolveAudioUrl(seg.audio_url),
+            audio_url: isActiveSegment ? audio_url : apiClient.refreshAudioUrl(jobId, seg.audio_url),
             committed_audio_url: isActiveSegment
               ? audio_url
-              : resolveAudioUrl(seg.committed_audio_url),
+              : apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
             start_time: seg.start_time,
             end_time: seg.end_time,
           }
@@ -3546,20 +3524,14 @@ export function DubVerseEditor({
       if (audioContextRef.current == null) {
         audioContextRef.current = new AudioContext()
       }
-      const resolveUrl = (url?: string) => {
-        if (!url || !jobId) return url
-        if (url.startsWith('http')) return url
-        const fn = url.split('/').pop()
-        return fn ? apiClient.getAudioFileUrl(jobId, fn) : url
-      }
       const stitchSegs = displaySegmentsRef.current.map(seg => {
         const r = seg.transcript_index != null ? byTi.get(seg.transcript_index) : undefined
         if (r) {
           const fn = (r.path || '').split('/').pop()
-          const url = fn ? `${apiClient.getAudioFileUrl(jobId, fn)}?ts=${Date.now()}` : resolveUrl(seg.committed_audio_url)
+          const url = fn ? `${apiClient.getAudioFileUrl(jobId, fn)}?ts=${Date.now()}` : apiClient.refreshAudioUrl(jobId, seg.committed_audio_url)
           return { ...seg, audio_url: url, committed_audio_url: url }
         }
-        return { ...seg, audio_url: resolveUrl(seg.audio_url), committed_audio_url: resolveUrl(seg.committed_audio_url) }
+        return { ...seg, audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url), committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url) }
       })
       requestRPTStitch(stitchSegs, videoDuration, audioContextRef.current, () => {}, (result) => {
         if (result) rptBufferRef.current = result.buffer
@@ -7093,19 +7065,11 @@ export function DubVerseEditor({
                 if (playbackMode === 'preview' && !isPlaying && !rptBufferRef.current) {
                   lastStartPosRef.current = currentTime
                   const ctx = audioContextRef.current
-                  const resolved = segments.map(seg => {
-                    const resolveUrl = (url: string | undefined) => {
-                      if (!url || !jobId) return url
-                      if (url.startsWith('http')) return url
-                      const filename = url.split('/').pop()
-                      return filename ? apiClient.getAudioFileUrl(jobId, filename) : url
-                    }
-                    return {
-                      ...seg,
-                      audio_url: resolveUrl(seg.audio_url),
-                      committed_audio_url: resolveUrl(seg.committed_audio_url),
-                    }
-                  })
+                  const resolved = segments.map(seg => ({
+                    ...seg,
+                    audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
+                    committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
+                  }))
                   stitchRPT(resolved, videoDuration, ctx).then(result => {
                     if (result) {
                       rptBufferRef.current = result.buffer
@@ -8162,12 +8126,6 @@ export function DubVerseEditor({
                           if (audioContextRef.current) {
                             const newStart = Math.max(0, originalStart + deltaTime)
                             const newEnd = Math.max(0, originalEnd + deltaTime)
-                            const resolveUrl = (url: string | undefined) => {
-                              if (!url) return url
-                              if (url.startsWith('http')) return url
-                              const filename = url.split('/').pop()
-                              return filename ? apiClient.getAudioFileUrl(jobId, filename) : url
-                            }
                             requestRPTStitch(
                               displaySegments.map((seg, i) => ({
                                 ...seg,
@@ -8175,8 +8133,8 @@ export function DubVerseEditor({
                                 end_time: i === index ? newEnd : seg.end_time,
                                 committed_start_time: i === index ? newStart : seg.committed_start_time,
                                 committed_end_time: i === index ? newEnd : seg.committed_end_time,
-                                audio_url: resolveUrl(seg.audio_url),
-                                committed_audio_url: resolveUrl(seg.committed_audio_url),
+                                audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
+                                committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
                               })),
                               videoDuration,
                               audioContextRef.current,

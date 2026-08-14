@@ -1185,6 +1185,19 @@ class DubVerseAPIClient {
     return this._mediaUrl(`/api/media/${jobId}/audio/${filename}`)
   }
 
+  /** Rebuild a stored audio URL with the current token.
+   *
+   *  Stored segment URLs may carry an expired access_token baked in from a
+   *  previous call to getAudioFileUrl(). When Supabase refreshes the JWT,
+   *  this._token updates but the stored URL keeps the old token and 401s.
+   *  This strips the query string (removing the stale token) and rebuilds
+   *  via getAudioFileUrl so the URL always carries the current token. */
+  refreshAudioUrl(jobId: string, url: string | undefined): string | undefined {
+    if (!url) return url
+    const filename = url.split('?')[0].split('/').pop()
+    return filename ? this.getAudioFileUrl(jobId, filename) : url
+  }
+
   async exportVideo(
     jobId: string,
     resolution: '720p' | '1080p' | '4k',
