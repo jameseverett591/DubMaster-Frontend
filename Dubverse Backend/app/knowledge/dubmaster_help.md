@@ -418,9 +418,40 @@ when the audio is too long for even the full free space between its neighbors do
 show the "Rewrite Text — Timing Exclusion" dialog asking you to shorten the text. So the
 rewrite prompt means there is genuinely no room; otherwise the segment just grows to fit.
 
+## When a line sounds rushed or hurried
+
+If a dubbed line sounds sped-up, the cause is almost always that the English needs
+more time than the original line allows. DubMaster handles this in three stages,
+in order: it **shortens** the wording (using the sync_fit adaptation variant), then
+**speeds up** the audio if it still overruns, and only trims as a last resort.
+
+Things you can do, most effective first:
+
+1. **Try a different voice.** Voices differ in how fast they speak — the same line
+   can run noticeably longer in one voice than another. If a character consistently
+   sounds hurried, assigning a faster-speaking voice from the Voice Library often
+   fixes it on its own, with no text change. DubMaster learns each voice's actual
+   speaking rate as it dubs and uses that rate when deciding how much to shorten,
+   so this is a real lever rather than a workaround.
+2. **Shorten the text yourself** using the write-in on that segment. Fewer syllables
+   is the only change that reduces speed without side effects — this is the most
+   reliable fix for a specific line, such as an opening line where the original
+   packs a name and a statement into a very short window.
+3. **Give the segment more room** by dragging its boundary on the timeline, if
+   there is silence next to it. DubMaster already borrows nearby space
+   automatically, so this helps only where genuine slack remains.
+
+Some source lines are simply very dense — a few Cantonese syllables can carry more
+than English can say in the same time. In those cases a slight speed-up is normal
+and is what a human dub would also do; the goal is that it stays unobtrusive rather
+than disappearing entirely.
+
 ## Voice Library
 
 A panel for browsing available AI voices (search, filter by gender/tag, favorites).
+The panel shows voice names on the left — each with a play button to audition it,
+and a badge naming any speaker the voice is already assigned to — and the selected
+voice's description, tags and controls on the right.
 Selecting a voice shows a Preview button and an "Assign to…" control to assign it to
 a speaker. Assigning a voice to a speaker applies it to ALL of that speaker's segments
 consistently (locked segments are skipped), so the whole character switches voices in
