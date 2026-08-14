@@ -19,6 +19,7 @@ from app.services import tts_usage
 from app.services.translation_service import (
     translation_service,
     natural_duration,
+    update_voice_rate,
     MAX_SPEED_RATIO,
     MIN_SPEED_RATIO,
 )
@@ -934,6 +935,11 @@ class DubbingService:
             async def _synthesise_one(i: int, segment: Dict) -> Optional[Dict]:
                 # Resolve adapted variant text, falling back to raw translated text.
                 seg_id = segment.get("segment_id", str(i))
+                speaker = segment.get("speaker", "speaker-1")
+                # Resolve voice_key early so ADAPT-FIT can use a voice-calibrated
+                # natural_duration() — without this, slow voices under-trigger the
+                # shortener because the global 14 cps rate underestimates their time.
+                _voice_key = speaker_to_voice.get(speaker, "")
                 _adapted = adapted_map.get(seg_id)
                 if _adapted is not None:
                     _variant_type = (adaptation_selections or {}).get(seg_id, "performable")
@@ -941,25 +947,25 @@ class DubbingService:
                     # Anti-truncation (step 1 — shorten): when the user hasn't explicitly
                     # picked a variant and the default would overrun the on-screen slot,
                     # prefer the shorter sync_fit wording instead of hard-trimming audio
-                    # later. natural_duration() matches the fit path's timing model.
+                    # later. natural_duration() uses the voice's calibrated rate so slow
+                    # voices trigger the shortener at the right threshold.
                     if seg_id not in (adaptation_selections or {}):
                         _start = float(segment.get("start", 0) or 0)
                         _next = transcript[i + 1].get("start") if i + 1 < len(transcript) else None
                         _slot = (float(_next) - _start) if _next is not None else (float(segment.get("end", 0) or 0) - _start)
-                        if _slot > 0 and text and natural_duration(text) > _slot + 0.1:
+                        if _slot > 0 and text and natural_duration(text, _voice_key) > _slot + 0.1:
                             try:
                                 _sync = (_adapted.get_variant("sync_fit").text or "").strip()
                             except Exception:
                                 _sync = ""
-                            if _sync and natural_duration(_sync) < natural_duration(text):
+                            if _sync and natural_duration(_sync, _voice_key) < natural_duration(text, _voice_key):
                                 logger.info(
-                                    f"[ADAPT-FIT] seg {i}: '{_variant_type}' ~{natural_duration(text):.1f}s "
-                                    f"overruns {_slot:.1f}s slot — using sync_fit ~{natural_duration(_sync):.1f}s"
+                                    f"[ADAPT-FIT] seg {i}: '{_variant_type}' ~{natural_duration(text, _voice_key):.1f}s "
+                                    f"overruns {_slot:.1f}s slot — using sync_fit ~{natural_duration(_sync, _voice_key):.1f}s"
                                 )
                                 text = _sync
                 else:
                     text = segment.get("text", "")
-                speaker = segment.get("speaker", "speaker-1")
 
                 if not text.strip():
                     return {"index": i, "skipped": True, "reason": "empty"}
@@ -1281,6 +1287,11 @@ class DubbingService:
                 result = raw["result"]
                 text = raw["text"]
                 speaker = raw["speaker"]
+                # Voice key for the per-voice rate calibration below. _synthesise_one
+                # computes its own copy for the ADAPT-FIT threshold, but that is a
+                # nested function — its local does not reach this loop, which is why
+                # natural_duration()/update_voice_rate() here raised NameError.
+                _voice_key = speaker_to_voice.get(speaker, "")
                 start_time = segment.get("start", 0)
                 end_time = segment.get("end", 0)
                 next_start = transcript[i + 1].get("start", None) if i + 1 < len(transcript) else None
@@ -1300,9 +1311,9 @@ class DubbingService:
                     segment_duration = end_time - start_time
                     gap_to_next = next_start - end_time  # natural silence in original film
                     # Level 1 — expand toward natural speech duration for translated text.
-                    # Uses the shared _CHARS_PER_SECOND constant so this floor matches
-                    # the split function and editor regen path exactly.
-                    _nat_dur = natural_duration(text)
+                    # Uses the voice-calibrated rate so slow voices get more expansion room
+                    # — matching the ADAPT-FIT threshold that already uses the same rate.
+                    _nat_dur = natural_duration(text, _voice_key)
                     _needed  = max(0.0, _nat_dur - segment_duration)
                     expansion = min(_needed, gap_to_next * 0.8) if gap_to_next > 0 else 0.0
                     comfortable_duration = max(0.2, segment_duration + expansion)
@@ -1358,6 +1369,13 @@ class DubbingService:
 
                 adjusted_audio_path = os.path.join(output_dir, f"segment_{i:04d}_adjusted.mp3")
                 actual_duration = await asyncio.to_thread(self._get_audio_duration, final_path)
+
+                # Feed the raw (pre-stretch, pre-trim) TTS duration back into the
+                # per-voice rate calibration so subsequent segments for this voice
+                # get a more accurate natural_duration estimate.  Using the raw
+                # duration — not the stretched/trimmed one — is what makes the
+                # calibration reflect the voice's actual speaking rate.
+                update_voice_rate(_voice_key, text, actual_duration)
 
                 # Two-level slot expansion: if TTS overflows the comfortable slot
                 # but still fits within the hard ceiling, expand silently rather
@@ -3284,6 +3302,10 @@ class DubbingService:
                     final_path = trimmed_path
 
             actual_dur = await asyncio.to_thread(self._get_audio_duration, final_path)
+            # Feed back into per-voice rate calibration (same as the main dub loop).
+            # In the regen path we key by use_voice_id (the actual reference ID)
+            # rather than the canonical voice_key — still a valid per-voice signal.
+            update_voice_rate(use_voice_id, use_text, actual_dur)
             if actual_dur > slot_dur + 0.05:
                 # Room before the next segment starts. The segments array is NOT
                 # guaranteed to be in time order (splits insert out-of-order

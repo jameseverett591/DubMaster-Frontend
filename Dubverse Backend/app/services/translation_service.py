@@ -47,13 +47,67 @@ SLOW_SPEECH_RATE    = float(os.getenv("DUBMASTER_SLOW_SPEECH_RATE",    "2.5"))  
 MAX_SPEED_RATIO     = float(os.getenv("DUBMASTER_MAX_SPEED_RATIO",     "1.15")) # 15% above natural
 MIN_SPEED_RATIO     = float(os.getenv("DUBMASTER_MIN_SPEED_RATIO",     "0.85")) # 15% below natural
 _CHARS_PER_SECOND   = float(os.getenv("DUBMASTER_CHARS_PER_SECOND",   "14.0")) # chars/sec
+# Shortest window a split sentence may be given. Below this, TTS overhead —
+# articulation, the pause after a full stop — dominates the budget and no
+# rewording fits: "I'm Jin Shan Zhao." measures 1.29s and was being handed 0.68s.
+_MIN_CHILD_SLOT     = float(os.getenv("DUBMASTER_MIN_CHILD_SLOT",      "1.0"))  # seconds
 _MIN_SEGMENT_SECS   = float(os.getenv("DUBMASTER_MIN_SEGMENT_SECS",    "0.8"))  # absolute floor
 
+# Per-voice speaking-rate calibration.  The default _CHARS_PER_SECOND is a
+# global average; individual voices speak faster or slower.  After each TTS
+# generation we measure the actual duration and update the voice's rate via
+# an exponential moving average.  natural_duration() then uses the learned
+# rate so the shortener (ADAPT-FIT) triggers correctly for slow voices
+# instead of under-triggering and leaving the fit path to speed everything up.
+#
+# In-memory only — resets on container restart, but learns within a single
+# dubbing run (most speakers have multiple segments).  The EMA weight favours
+# stability: 0.3 new / 0.7 old, so a single outlier doesn't swing the estimate.
+_voice_rate_cache: Dict[str, float] = {}
 
-def natural_duration(text: str) -> float:
+
+def natural_duration(text: str, voice_key: str = "") -> float:
     """Minimum comfortable TTS duration for this text at natural speech rate.
-    'My name is Jin Shan Zhao.' = 26 chars → 1.86 s minimum at 14 chars/s."""
-    return max(_MIN_SEGMENT_SECS, len(text) / _CHARS_PER_SECOND)
+
+    When ``voice_key`` is provided and we have a calibrated rate for that
+    voice, the learned rate is used instead of the global default.  This
+    matters because a slow voice (e.g. 10 chars/s) needs more time than the
+    global 14 chars/s estimate predicts — without it, the shortener
+    under-triggers and the fit path compensates by speeding up the audio.
+    """
+    rate = _voice_rate_cache.get(voice_key, _CHARS_PER_SECOND) if voice_key else _CHARS_PER_SECOND
+    return max(_MIN_SEGMENT_SECS, len(text) / rate)
+
+
+def update_voice_rate(voice_key: str, text: str, actual_secs: float) -> None:
+    """Feed a measured TTS duration back into the per-voice rate calibration.
+
+    Called after each TTS generation with the text sent and the actual audio
+    duration measured.  Updates the voice's chars/sec estimate via EMA so
+    subsequent segments for the same voice get a more accurate natural_duration.
+    """
+    if not voice_key or actual_secs <= 0.1:
+        return
+    chars = len(text)
+    if chars < 5:  # too short to be a reliable sample
+        return
+    measured = chars / actual_secs
+    # Clamp to a sane range — 4 chars/s (very slow) to 25 chars/s (very fast)
+    measured = max(4.0, min(25.0, measured))
+    prev = _voice_rate_cache.get(voice_key)
+    if prev is None:
+        _voice_rate_cache[voice_key] = measured
+    else:
+        _voice_rate_cache[voice_key] = prev * 0.7 + measured * 0.3
+    logger.debug(
+        f"[VOICE-RATE] {voice_key}: measured={measured:.1f} cps, "
+        f"ema={_voice_rate_cache[voice_key]:.1f} cps (text={chars} chars, {actual_secs:.2f}s)"
+    )
+
+
+def get_voice_rate(voice_key: str) -> float:
+    """Return the calibrated chars/sec for a voice, or the global default."""
+    return _voice_rate_cache.get(voice_key, _CHARS_PER_SECOND) if voice_key else _CHARS_PER_SECOND
 
 
 def split_translated_sentences(segments: list) -> list:
@@ -103,17 +157,65 @@ def split_translated_sentences(segments: list) -> list:
         # which is the whole design of 3ac884e7. Split, each child looks small
         # against its own small slot, no swap fires, and speed does all the work.
         #
-        # So: split only where there is genuine slack — which is most of a film,
-        # and where splitting genuinely improves lip-sync — and keep the parent
-        # whole where splitting would manufacture an unspeakable slot.
-        if any(duration * f < nat for f, nat in zip(fracs, nat_durs)):
+        # The test is an ABSOLUTE floor, not "shorter than its natural
+        # duration". Whenever the whole line overruns its window — routine for a
+        # dense Cantonese source — every child is short of its own natural
+        # duration, so a relative test refuses every split and leaves four
+        # sentences stacked in one bubble next to a two-word line. That is worse
+        # than a tight split: it is unreadable in the editor and unfixable per
+        # line.
+        #
+        # What genuinely cannot work is a slot too short to hold any delivery of
+        # a sentence, where TTS overhead (articulation, the pause after a full
+        # stop) dominates the budget. Below _MIN_CHILD_SLOT seconds no rewording
+        # helps.
+        #
+        # But refusing the WHOLE split on that basis is worse: one four-word
+        # trailing sentence ("Give it a try.", 0.73s of an 11s window) vetoed
+        # three perfectly good splits and left four sentences stacked in one
+        # bubble beside a two-word line — unreadable in the editor and
+        # unfixable per line. So coalesce undersized sentences into their
+        # neighbour instead, and only keep the parent whole when everything
+        # collapses back into a single group.
+        groups: list[list[str]] = []
+        group_nats: list[float] = []
+        for sentence, nat in zip(sentences, nat_durs):
+            slot = duration * (nat / total_nat)
+            if groups and slot < _MIN_CHILD_SLOT:
+                # Too small to stand alone — attach to the group before it.
+                groups[-1].append(sentence)
+                group_nats[-1] += nat
+            else:
+                groups.append([sentence])
+                group_nats.append(nat)
+
+        # A leading sentence can also be undersized; it has no predecessor, so
+        # fold it forward into the group that follows.
+        while len(groups) > 1 and duration * (group_nats[0] / total_nat) < _MIN_CHILD_SLOT:
+            groups[1] = groups[0] + groups[1]
+            group_nats[1] += group_nats[0]
+            groups.pop(0)
+            group_nats.pop(0)
+
+        if len(groups) <= 1:
             logger.info(
                 f"[SPLIT] Kept segment whole ({duration:.2f}s window, "
-                f"{n} sentences needing {total_nat:.2f}s) — splitting would "
-                f"create a slot shorter than its line"
+                f"{n} sentences needing {total_nat:.2f}s) — every child slot "
+                f"falls below the {_MIN_CHILD_SLOT:.2f}s floor"
             )
             out.append(seg)
             continue
+
+        if len(groups) != n:
+            logger.info(
+                f"[SPLIT] {n} sentences → {len(groups)} segments "
+                f"({duration:.2f}s window) — short sentences coalesced to stay "
+                f"above the {_MIN_CHILD_SLOT:.2f}s floor"
+            )
+
+        sentences = [" ".join(g) for g in groups]
+        n         = len(sentences)
+        fracs     = [d / total_nat for d in group_nats]
 
         cursor = start
         for i, (sentence, frac) in enumerate(zip(sentences, fracs)):
