@@ -89,6 +89,32 @@ def split_translated_sentences(segments: list) -> list:
         total_nat  = sum(nat_durs)
         fracs      = [d / total_nat for d in nat_durs]
 
+        # Don't split a window too tight to hold its own sentences.
+        #
+        # Speech duration does not shrink in proportion to a sentence's share of
+        # the text: "I'm Jin Shan Zhao." takes ~1.29s to say whether or not
+        # another sentence follows it. Allocating proportionally out of a 2.4s
+        # parent hands it 0.68s — a slot no natural delivery can fill, forcing
+        # 1.88x on the opening line of the film.
+        #
+        # It also hides the overrun from the shorten step. ADAPT-FIT compares
+        # natural_duration(text) against the slot; unsplit, this line is 3.71s
+        # against 2.4s and gets rewritten shorter by sync_fit at a natural pace,
+        # which is the whole design of 3ac884e7. Split, each child looks small
+        # against its own small slot, no swap fires, and speed does all the work.
+        #
+        # So: split only where there is genuine slack — which is most of a film,
+        # and where splitting genuinely improves lip-sync — and keep the parent
+        # whole where splitting would manufacture an unspeakable slot.
+        if any(duration * f < nat for f, nat in zip(fracs, nat_durs)):
+            logger.info(
+                f"[SPLIT] Kept segment whole ({duration:.2f}s window, "
+                f"{n} sentences needing {total_nat:.2f}s) — splitting would "
+                f"create a slot shorter than its line"
+            )
+            out.append(seg)
+            continue
+
         cursor = start
         for i, (sentence, frac) in enumerate(zip(sentences, fracs)):
             seg_end = (cursor + duration * frac) if i < n - 1 else end
