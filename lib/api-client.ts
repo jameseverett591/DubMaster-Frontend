@@ -1251,44 +1251,6 @@ class DubVerseAPIClient {
     await this._fetch(`${this.baseURL}/api/dub/export/progress/${exportId}`, { method: 'DELETE' })
   }
 
-  // ── Direct-to-R2 upload ─────────────────────────────────────────────────
-  // The bytes go browser -> R2; these calls only arrange and settle it. All
-  // four go through _fetch, so the token is attached AND awaited — a presign
-  // firing before the session resolves would 401 and look like a quota error.
-
-  /** Reserve minutes and get presigned part URLs. Nothing is uploaded yet.
-   *  Throws with the server's detail on 402 (insufficient minutes) or 413
-   *  (file too large for its duration) so the caller can surface the reason. */
-  async presignUpload(filename: string, sizeBytes: number, claimedDurationSeconds: number): Promise<{
-    job_id: string; upload_id: string; object_key: string
-    part_size: number; minutes_reserved: number; expires_in: number
-    parts: Array<{ part_number: number; url: string }>
-  }> {
-    const res = await this._fetch(`${this.baseURL}/api/upload/presign`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        filename, size_bytes: sizeBytes,
-        claimed_duration_seconds: claimedDurationSeconds,
-      }),
-    })
-    if (!res.ok) throw new Error(await this._detail(res))
-    return res.json()
-  }
-
-  /** Fresh URLs for parts whose signatures expired. This is what makes a
-   *  resume the next day work: the multipart is still valid in R2 for 7 days,
-   *  only the signatures lapse at 24h. */
-  async presignParts(jobId: string, partNumbers: number[]): Promise<Array<{ part_number: number; url: string }>> {
-    const res = await this._fetch(`${this.baseURL}/api/upload/presign-parts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ job_id: jobId, part_numbers: partNumbers }),
-    })
-    if (!res.ok) throw new Error(await this._detail(res))
-    return (await res.json()).parts
-  }
-
   /** Upload a video straight to the backend and start processing.
    *
    *  Restored with the direct-to-R2 path's removal. One request carries the
@@ -1360,41 +1322,6 @@ class DubVerseAPIClient {
     })
   }
 
-  /** Assemble the parts and settle the reservation against the true duration.
-   *
-   *  job carries source/target language and speaker count: the retired POST
-   *  /upload sent them as form fields and this path must too, or the backend
-   *  falls back to auto-detect (which tags Cantonese as "zh") and to an
-   *  expected_speakers default that clamps diarization to two speakers.
-   */
-  async completeUpload(
-    jobId: string, filename: string, sizeBytes: number,
-    parts: Array<{ part_number: number; etag: string }>,
-    job: { sourceLanguage?: string; targetLanguage?: string; numSpeakers?: number } = {},
-  ): Promise<{ job_id: string; duration_seconds: number; minutes_charged: number; status: string }> {
-    const res = await this._fetch(`${this.baseURL}/api/upload/complete`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        job_id: jobId, filename, size_bytes: sizeBytes, parts,
-        source_language: job.sourceLanguage ?? null,
-        target_language: job.targetLanguage ?? null,
-        num_speakers: job.numSpeakers ?? null,
-      }),
-    })
-    if (!res.ok) throw new Error(await this._detail(res))
-    return res.json()
-  }
-
-  /** Cancel an in-flight upload and release the held minutes. */
-  async abortUpload(jobId: string): Promise<void> {
-    const res = await this._fetch(`${this.baseURL}/api/upload/abort`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ job_id: jobId }),
-    })
-    if (!res.ok) throw new Error(await this._detail(res))
-  }
 
   /** FastAPI puts the message in `detail`, which may be a string or an object. */
   private async _detail(res: Response): Promise<string> {
