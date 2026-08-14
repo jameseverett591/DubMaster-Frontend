@@ -1262,6 +1262,77 @@ class DubVerseAPIClient {
     return (await res.json()).parts
   }
 
+  /** Upload a video straight to the backend and start processing.
+   *
+   *  Restored with the direct-to-R2 path's removal. One request carries the
+   *  bytes AND the job's language/speaker settings as form fields, so those
+   *  cannot be lost between calls the way they were when this was replaced by
+   *  presign + complete.
+   *
+   *  Awaits _ensureToken first: the token lives in memory on this singleton and
+   *  is often unset on a fresh page load, which previously produced a silent
+   *  401 while the browser was perfectly signed in.
+   */
+  async uploadVideo(
+    file: File,
+    onProgress?: (progress: number) => void,
+    sourceLanguage?: string,
+    numSpeakers?: number,
+    targetLanguage?: string,
+    signal?: AbortSignal,
+  ): Promise<UploadResponse> {
+    await this._ensureToken()
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      const formData = new FormData()
+      formData.append('file', file)
+      if (sourceLanguage && sourceLanguage !== 'auto') {
+        formData.append('source_language', sourceLanguage)
+      }
+      if (numSpeakers && numSpeakers >= 1 && numSpeakers <= 10) {
+        formData.append('num_speakers', String(numSpeakers))
+      }
+      if (targetLanguage) {
+        formData.append('target_language', targetLanguage)
+      }
+
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable && onProgress) {
+          onProgress(Math.round((e.loaded / e.total) * 100))
+        }
+      })
+
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText))
+          } catch {
+            reject(new Error('Invalid response format'))
+          }
+        } else {
+          try {
+            const error = JSON.parse(xhr.responseText)
+            reject(new Error(error.detail || `Upload failed: ${xhr.statusText}`))
+          } catch {
+            reject(new Error(`Upload failed: ${xhr.statusText}`))
+          }
+        }
+      })
+
+      xhr.addEventListener('error', () => reject(new Error('Network error during upload')))
+      xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')))
+      if (signal) {
+        signal.addEventListener('abort', () => xhr.abort(), { once: true })
+      }
+
+      xhr.open('POST', `${this.baseURL}/api/upload`)
+      if (this._token) {
+        xhr.setRequestHeader('Authorization', `Bearer ${this._token}`)
+      }
+      xhr.send(formData)
+    })
+  }
+
   /** Assemble the parts and settle the reservation against the true duration.
    *
    *  job carries source/target language and speaker count: the retired POST
