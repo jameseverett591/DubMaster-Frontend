@@ -117,14 +117,14 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     })
   }, [])
 
-  // Reset cache when filters change
+  // Reset cache when filters change or custom voices are added/removed
   useEffect(() => {
     setPageCache({})
     setPageLoading({})
     setPageError({})
     setCurrentPage(1)
     setTotalFromServer(null)
-  }, [tag, gender, language, debouncedSearch, sortBy])
+  }, [tag, gender, language, debouncedSearch, sortBy, customVoicesVersion])
 
   // Derived total pages
   const totalPages = useMemo(() => {
