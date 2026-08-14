@@ -490,13 +490,27 @@ class DubVerseAPIClient {
   }
 
   private async _ensureToken(): Promise<void> {
-    if (this._token) return
+    // Always re-read the session; never trust the cached token.
+    //
+    // This used to return early whenever _token was set, which meant the very
+    // first token was kept for the life of the page. Supabase access tokens
+    // expire (~1h) and are rotated, so after an hour every authenticated
+    // request went out with a dead token: regenerated audio came back 401 and
+    // played as silence, and the editor threw "Failed to load job" and would
+    // not open at all — while the UI still showed the user as signed in.
+    //
+    // getSession() reads from local storage and refreshes only when the token
+    // is near expiry, so this is cheap to call per request.
     try {
       const { createClient } = await import('@/lib/supabase/client')
       const { data } = await createClient().auth.getSession()
-      if (data.session?.access_token) this._token = data.session.access_token
+      if (data.session?.access_token) {
+        this._token = data.session.access_token
+      }
     } catch {
-      // No session available — the request will 401 and the caller handles it.
+      // No session available — keep whatever we have and let the request 401;
+      // the caller handles it. Clearing here would break a working page just
+      // because one session read failed.
     }
   }
 

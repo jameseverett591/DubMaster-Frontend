@@ -360,6 +360,32 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
     }
   }, [video.jobId])
 
+  // ── Check if the job is already completed on mount ──────────────────────
+  // Without this, returning to a completed job shows "No Dubbed Video Yet"
+  // instead of the result with the real "Open in Editor" link, because
+  // dubbingComplete starts false and nothing sets it until a NEW dub is run.
+  useEffect(() => {
+    if (!video.jobId) return
+    let cancelled = false
+    apiClient.getJobStatus(video.jobId).then(async status => {
+      if (cancelled) return
+      if (status.status === "completed") {
+        setDubbingComplete(true)
+        setDubbingProgress(100)
+        if (status.dubbed_video_url) {
+          // Through mediaUrl, not string concatenation: media routes require
+          // auth and a <video> element cannot send a header, so a plain URL
+          // returns 401 and the player shows nothing.
+          const fullUrl = status.dubbed_video_url.startsWith("http")
+            ? status.dubbed_video_url
+            : await apiClient.mediaUrl(status.dubbed_video_url)
+          if (!cancelled) setDubbedVideoUrl(fullUrl)
+        }
+      }
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [video.jobId])
+
   // ── Video player handlers ─────────────────────────────────────────────────
   const handlePlayPause = () => {
     if (videoRef.current) {
@@ -479,10 +505,12 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
           setIsDubbing(false)
           setDubbingComplete(true)
           if (status.dubbed_video_url) {
+            // Same reason as the mount-time check above: media routes are
+            // authenticated, so the URL must carry the token.
             const fullUrl = status.dubbed_video_url.startsWith("http")
               ? status.dubbed_video_url
-              : `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}${status.dubbed_video_url}`
-            setDubbedVideoUrl(fullUrl)
+              : await apiClient.mediaUrl(status.dubbed_video_url)
+            if (!cancelled) setDubbedVideoUrl(fullUrl)
           }
           return
         }
@@ -704,19 +732,21 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
             className="gap-2 h-8 text-sm"
             variant={dubbingComplete ? "outline" : "default"}
           >
+            {/* Always reads "Generate Dub" when idle, including after a
+                completed run. The button stays clickable either way, so
+                labelling it "Dub Complete" only hid the action behind a status
+                the Pipeline Monitor already reports. The green tick and the
+                outline variant carry the "this job has been dubbed" signal. */}
             {isDubbing ? (
               <>
                 <RefreshCw className="h-3.5 w-3.5 animate-spin" />
                 Dubbing... {Math.round(dubbingProgress)}%
               </>
-            ) : dubbingComplete ? (
-              <>
-                <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
-                Dub Complete
-              </>
             ) : (
               <>
-                <Sparkles className="h-3.5 w-3.5" />
+                {dubbingComplete
+                  ? <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+                  : <Sparkles className="h-3.5 w-3.5" />}
                 Generate Dub
               </>
             )}
@@ -740,7 +770,9 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
           <div ref={videoContainerRef} className="relative flex-1 bg-black min-h-0">
             <video
               ref={videoRef}
-              src={mainVideoSrc}
+              // undefined, not "": an empty src makes the browser resolve it
+              // against the current page and re-download the whole document.
+              src={mainVideoSrc || undefined}
               className="absolute inset-0 h-full w-full object-contain"
               onTimeUpdate={handleTimeUpdate}
               onLoadedMetadata={handleLoadedMetadata}
@@ -965,7 +997,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                     </p>
                     <Button className="mt-4 gap-2 text-sm h-8" onClick={handleStartDubbing} disabled={isAnalyzing}>
                       <Sparkles className="h-3.5 w-3.5" />
-                      Open in Editor
+                      Generate Dub
                     </Button>
                   </div>
                 )}
