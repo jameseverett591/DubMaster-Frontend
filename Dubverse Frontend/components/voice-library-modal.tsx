@@ -69,8 +69,11 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   // Page sizing differs by layout:
   //   grid (modal):  50 per page × 3 pages cap = 150 total, dots indicator
   //   list (panel):  1 per page  × 150 pages cap = 150 total, hero card + Page X of N + Jump-to
-  const PAGE_SIZE = layout === 'list' ? 1 : 50
-  const MAX_PAGES = layout === 'list' ? 150 : 3
+  // The panel is a scrollable master list now, not one hero card per page, so a
+  // page holds a screenful rather than a single voice — 150 pages of one became
+  // 8 pages of 20.
+  const PAGE_SIZE = layout === 'list' ? 20 : 50
+  const MAX_PAGES = layout === 'list' ? 8 : 3
   const gapClass  = layout === 'list' ? 'gap-4' : 'gap-3'
 
   // Page cache (lazy paginated, in-memory)
@@ -192,6 +195,21 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     }
     return result
   }, [segments, speakerVoiceMap, isJobAware])
+
+  // Which voice the detail pane is showing (panel layout only).
+  const [selectedVoiceId, setSelectedVoiceId] = useState<string | null>(null)
+
+  // Reverse of speakerVoiceMap: voice_id → the speakers using it. Assignment
+  // state previously lived only in the speakers strip, so there was no way to
+  // tell from the library which voices were already in play.
+  const voiceAssignments = useMemo(() => {
+    const byVoice: Record<string, string[]> = {}
+    for (const [speakerId, voiceId] of Object.entries(speakerVoiceMap || {})) {
+      if (!voiceId) continue
+      ;(byVoice[voiceId] ||= []).push(getSpeakerDisplayName(speakerId))
+    }
+    return byVoice
+  }, [speakerVoiceMap, getSpeakerDisplayName])
 
   // Preview audio
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -542,8 +560,138 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     }
     // Surface the user's custom voices at the very top of page 1.
     const pageVoices = pageNum === 1 && customVoices.length > 0 ? [...customVoices, ...voices] : voices
+
+    // Panel layout: master list on the left, detail on the right. The hero card
+    // it replaced was sized for the modal (p-6, text-3xl, one voice per page),
+    // so in a short panel a single card filled the column and the description
+    // fell below the fold — you had to collapse the timeline to read it. Here
+    // the description gets its own pane and never displaces anything.
+    if (layout === 'list') {
+      const selected = pageVoices.find(v => v.voice_id === selectedVoiceId) ?? pageVoices[0]
+      return (
+        <div className="flex h-full min-h-0 gap-3">
+          {/* Master: names + preview */}
+          <div className="w-[45%] min-w-0 overflow-y-auto pr-1 space-y-1">
+            {pageVoices.map(v => {
+              const isSel = selected?.voice_id === v.voice_id
+              const assigned = voiceAssignments[v.voice_id] || []
+              return (
+                <button
+                  key={v.voice_id}
+                  onClick={() => setSelectedVoiceId(v.voice_id)}
+                  className={`w-full text-left px-2.5 py-2 rounded-lg border transition-colors ${
+                    isSel
+                      ? 'bg-amber-500/10 border-amber-400/50'
+                      : 'bg-[#08131D]/60 border-transparent hover:border-amber-500/25'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Preview ${v.name}`}
+                      onClick={(e) => { e.stopPropagation(); handlePreview(v.voice_id, v.preview_url) }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); handlePreview(v.voice_id, v.preview_url) } }}
+                      className="shrink-0 text-amber-300 hover:text-amber-200"
+                    >
+                      {previewingId === v.voice_id
+                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        : <Play className="h-3.5 w-3.5" />}
+                    </span>
+                    <span className="flex-1 min-w-0 truncate text-sm text-slate-200">{v.name}</span>
+                    {favorites.has(v.voice_id) && (
+                      <Star className="h-3 w-3 shrink-0 fill-amber-400 text-amber-400" />
+                    )}
+                  </div>
+                  {assigned.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {assigned.map(s => (
+                        <span key={s} className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-300">
+                          {s}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+
+          {/* Detail: description + assignment */}
+          <div className="flex-1 min-w-0 overflow-y-auto rounded-xl border border-amber-500/20 bg-[#08131D]/90 p-4">
+            {selected ? (
+              <div className="space-y-3">
+                <div className="flex items-start justify-between gap-2">
+                  <h3 className="text-lg font-semibold text-amber-300 leading-tight">{selected.name}</h3>
+                  <button
+                    onClick={() => toggleFavorite(selected.voice_id)}
+                    aria-label="Toggle favourite"
+                    className="shrink-0 text-slate-400 hover:text-amber-300"
+                  >
+                    <Star className={`h-4 w-4 ${favorites.has(selected.voice_id) ? 'fill-amber-400 text-amber-400' : ''}`} />
+                  </button>
+                </div>
+
+                <p className="text-xs text-slate-400">
+                  {[selected.labels?.gender, selected.task_count ? `${selected.task_count.toLocaleString()} uses` : null]
+                    .filter(Boolean).join(' · ')}
+                </p>
+
+                {(voiceAssignments[selected.voice_id] || []).length > 0 && (
+                  <p className="text-xs text-emerald-300">
+                    Assigned to {(voiceAssignments[selected.voice_id] || []).join(', ')}
+                  </p>
+                )}
+
+                {selected.tags && selected.tags.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {selected.tags.map(t => (
+                      <span key={t} className="rounded bg-slate-700/50 px-1.5 py-0.5 text-[10px] text-slate-300">{t}</span>
+                    ))}
+                  </div>
+                )}
+
+                {selected.description && (
+                  <p className="text-sm text-slate-300 leading-relaxed">{selected.description}</p>
+                )}
+
+                <div className="flex items-center gap-2 pt-1">
+                  <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs"
+                    onClick={() => handlePreview(selected.voice_id, selected.preview_url)}>
+                    <Play className="h-3.5 w-3.5" />
+                    {previewingId === selected.voice_id ? 'Playing…' : 'Preview'}
+                  </Button>
+                  {isJobAware && (
+                    <select
+                      aria-label="Assign to speaker"
+                      value=""
+                      onChange={(e) => { if (e.target.value) handleAssign(selected.voice_id, e.target.value) }}
+                      className="h-8 flex-1 min-w-0 rounded-md border border-amber-500/30 bg-[#0F172A] px-2 text-xs text-slate-200"
+                    >
+                      <option value="" style={{ backgroundColor: '#0F172A', color: '#F1F5F9' }}>Assign to…</option>
+                      {speakers.map(s => (
+                        <option key={s.speaker_id} value={s.speaker_id}
+                          style={{ backgroundColor: '#0F172A', color: '#F1F5F9' }}>
+                          {s.display_name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+                {assignFeedback[selected.voice_id] && (
+                  <p className="text-xs text-emerald-400">Assigned to {assignFeedback[selected.voice_id]}</p>
+                )}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-500">Select a voice to see its details.</p>
+            )}
+          </div>
+        </div>
+      )
+    }
+
     return (
-      <div className={`grid ${gapClass} ${gridColsClass} ${layout === 'list' ? 'h-full' : ''}`}>
+      <div className={`grid ${gapClass} ${gridColsClass}`}>
         {pageVoices.map(renderVoiceCard)}
       </div>
     )
