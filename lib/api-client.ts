@@ -128,6 +128,8 @@ export interface SegmentsData {
   accompaniment_path: string
   video_duration: number
   segments: Segment[]
+  // Chunk-lens editor state: {"<chunk_index>": "saved" | "dirty"}
+  chunk_status?: Record<string, string>
 }
 
 export interface Voice {
@@ -222,6 +224,10 @@ export interface RegenerateSegmentRequest {
   live_segment_start?: number
   live_segment_end?: number
   live_next_segment_start?: number
+  // Chunk-lens staged mode: render the take for audition only — the backend
+  // writes the file but does NOT commit it to segments.json/Supabase. The take
+  // is promoted via commitSegmentTiming's staged_path when the chunk is saved.
+  stage?: boolean
 }
 
 export interface RegenerateSegmentResponse {
@@ -254,6 +260,9 @@ export interface RegenerateSegmentResponse {
       params: Record<string, number> | null
       kept?: boolean
     }>
+    // True when the take was rendered in staged mode — path points at the
+    // uncommitted _staged file, and nothing in segments.json changed.
+    staged?: boolean
   }
 }
 
@@ -1403,6 +1412,9 @@ class DubVerseAPIClient {
       paired_with_next?: boolean
       text?: string
       text_locked?: boolean
+      // Promote a staged take: backend sets BOTH path and committed_audio_url
+      // so the next rebuild merges the auditioned audio.
+      staged_path?: string
     }
   ): Promise<void> {
     await this._fetch(`${this.baseURL}/api/segment/commit/${jobId}/${index}`, {
@@ -1410,6 +1422,24 @@ class DubVerseAPIClient {
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify(data),
     })
+  }
+
+  async setChunkStatus(
+    jobId: string,
+    chunkIndex: number,
+    status: 'saved' | 'dirty'
+  ): Promise<Record<string, string>> {
+    const response = await this._fetch(`${this.baseURL}/api/dub/chunk-status/${jobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ chunk_index: chunkIndex, status }),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Failed to set chunk status: ${response.statusText}`)
+    }
+    const data = await response.json()
+    return data.chunk_status ?? {}
   }
 
   // Apply one voice across every segment of a speaker, server-side (reliable +

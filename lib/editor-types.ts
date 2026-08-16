@@ -162,6 +162,30 @@ export interface Segment {
   perf_denoise?: boolean
 }
 
+/**
+ * Chunk-lens staged edit — work the user has auditioned but NOT saved.
+ * Keyed by transcript_index in the store's stagedEdits map. Nothing here
+ * exists server-side until Save commits it (staged_path promotion).
+ */
+export interface StagedEdit {
+  /** Staged text (spoken on next regen; becomes committed_adapted_text on Save) */
+  text?: string
+  /** Staged timing (becomes committed_start_time/committed_end_time on Save) */
+  start_time?: number
+  end_time?: number
+  /** Served URL of the staged take file — used for audition playback */
+  stagedAudioUrl?: string
+  /** Server disk path of the staged take — sent as staged_path on Save */
+  stagedPath?: string
+  /** Engine that rendered the staged take */
+  engine?: string
+  /** Staged take couldn't fit its window — needs user intervention */
+  timing_exclusion?: boolean
+}
+
+/** Per-chunk persisted status from segments.json chunk_status. */
+export type ChunkStatus = 'saved' | 'dirty'
+
 export interface QCScore {
   overall: number
   grade: 'A' | 'B' | 'C' | 'D' | 'F'

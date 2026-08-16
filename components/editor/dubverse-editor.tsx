@@ -61,8 +61,8 @@ import { VoiceLibraryPanel } from '@/components/voice-library-modal'
 import { CustomVoicesModal } from '@/components/editor/custom-voices-modal'
 import { EmotionLibraryPopup } from '@/components/editor/emotion-library-popup'
 import { CharacterProfilePopover } from '@/components/editor/character-profile-popover'
-import { useEditorStore, type SidebarTab } from '@/lib/editor-store'
-import type { Segment, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType } from '@/lib/editor-types'
+import { useEditorStore, type SidebarTab, CHUNK_SECONDS } from '@/lib/editor-store'
+import type { Segment, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType, StagedEdit } from '@/lib/editor-types'
 import { DEFAULT_NUANCES, NUANCE_MARKER_META, newSegmentId, getSegmentKey } from '@/lib/editor-types'
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
 import { applyQCFix } from '@/lib/qc-fixes'
@@ -83,7 +83,7 @@ import { HeatmapBar } from '@/components/timeline/HeatmapBar'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { ExportModal } from '@/components/editor/export-modal'
 import { ReviewQueuePanel } from '@/components/editor/review-queue-panel'
-import { requestRPTStitch, stitchRPT, invalidateCache, scheduleRPTPlayback, effStart, effEnd } from '@/lib/rpt-engine'
+import { requestRPTStitch, stitchRPT, stitchRPTWindow, overlayStagedEdits, invalidateCache, scheduleRPTPlayback, effStart, effEnd } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { createClient } from '@/lib/supabase/client'
 
@@ -123,7 +123,7 @@ import {
 } from '@/components/ui/context-menu'
 
 // Additional QC tab icons not in main import block
-import { LayoutList, AudioLines, Zap, GitBranch, Sliders, MessageCircle, ArrowUp } from 'lucide-react'
+import { LayoutList, AudioLines, Zap, GitBranch, Sliders, MessageCircle, ArrowUp, AlertCircle } from 'lucide-react'
 import { usePlan } from '@/lib/use-plan'
 import { useUsage } from '@/hooks/use-usage'
 
@@ -393,6 +393,8 @@ interface DubVerseEditorProps {
   onShare?: () => void
   onGenerateSpeech?: () => void
   onTranslateAndDub?: () => void
+  // Chunk-lens editor: persisted per-chunk status from segments.json
+  chunkStatus?: Record<string, string>
 }
 
 type AskAiMessage = { role: 'user' | 'assistant'; content: string; displayed?: string }
@@ -729,6 +731,7 @@ export function DubVerseEditor({
   onShare,
   onGenerateSpeech,
   onTranslateAndDub,
+  chunkStatus: initialChunkStatus,
 }: DubVerseEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
@@ -779,6 +782,19 @@ export function DubVerseEditor({
     initRPTFromSegments,
     commitSegmentChanges,
     resetEditor,
+    activeChunkIndex,
+    setActiveChunk,
+    stagedEdits,
+    stageEdit,
+    clearStagedEdits,
+    clearStagedEditsFor,
+    failedSegments,
+    setFailedSegments,
+    clearFailedSegment,
+    saveProgress,
+    setSaveProgress,
+    chunkStatusMap,
+    setChunkStatusMap,
   } = useEditorStore()
 
   const importedSegments = useEditorStore((state) => state.importedSegments)
@@ -1076,6 +1092,11 @@ export function DubVerseEditor({
   const [userInitials, setUserInitials] = useState("JA")
   const [showRevertAllConfirm, setShowRevertAllConfirm] = useState(false)
   const [showReviewQueue, setShowReviewQueue] = useState(false)
+  // Advanced ▸ "Release for render": lets MAKE MOVIE proceed with failed
+  // segments outstanding. Deliberately NOT persisted — releasing is a decision
+  // about one render, not a standing preference, and it should have to be made
+  // again if the user reloads and reconsiders.
+  const [releasedForRender, setReleasedForRender] = useState(false)
   const [contextSegmentIndex, setContextSegmentIndex] = useState<number | null>(null)
   const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
   const [waveformReady, setWaveformReady] = useState(false)
@@ -3462,6 +3483,88 @@ export function DubVerseEditor({
   const handleGenerateSpeechRef = useRef(handleGenerateSpeech)
   handleGenerateSpeechRef.current = handleGenerateSpeech
   const displaySegmentsRef = useRef(displaySegments)
+
+  // ── Chunk lens (long-video editing) ──────────────────────────────────────
+  // Active for videos longer than two chunks (>10 min). One 5-minute window is
+  // edited at a time; ALL edits stage locally (nothing auto-saves) until the
+  // user presses Save for that chunk. Short videos keep today's behavior
+  // (chunkMode false → every call site below falls through unchanged).
+  const chunkMode = videoDuration > CHUNK_SECONDS * 2
+  const chunkCount = chunkMode ? Math.max(1, Math.ceil(videoDuration / CHUNK_SECONDS)) : 1
+  const activeChunk = chunkMode ? (activeChunkIndex ?? 0) : null
+  const chunkStart = activeChunk !== null ? activeChunk * CHUNK_SECONDS : 0
+  const chunkEnd = activeChunk !== null ? Math.min(videoDuration, chunkStart + CHUNK_SECONDS) : videoDuration
+  // Refs for effects/handlers that must not capture stale window bounds.
+  const chunkModeRef = useRef(chunkMode)
+  const chunkStartRef = useRef(chunkStart)
+  const chunkEndRef = useRef(chunkEnd)
+  chunkModeRef.current = chunkMode
+  chunkStartRef.current = chunkStart
+  chunkEndRef.current = chunkEnd
+  const stagedEditCount = Object.keys(stagedEdits).length
+
+  // Seed the persisted per-chunk status (from segments.json) once per job.
+  useEffect(() => {
+    if (initialChunkStatus) setChunkStatusMap(initialChunkStatus as Record<string, 'saved' | 'dirty'>)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId])
+
+  // Build the segment list an RPT stitch should hear: committed audio with
+  // staged takes overlaid on top, URLs refreshed.
+  const buildRptSegments = useCallback(() => {
+    const base = overlayStagedEdits(displaySegmentsRef.current, stagedEdits)
+    return base.map(seg => ({
+      ...seg,
+      audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
+      committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
+    }))
+  }, [stagedEdits, jobId])
+
+  // Window-aware stitch: chunk mode stitches only the active window (local
+  // timebase, ~53 MB buffer) instead of the whole film (~2.5 GB at 2 hours).
+  const stitchEditorAudio = useCallback((ctx: AudioContext) => {
+    const segs = buildRptSegments()
+    if (chunkModeRef.current) {
+      return stitchRPTWindow(segs, chunkStartRef.current, chunkEndRef.current, ctx)
+    }
+    return stitchRPT(segs, videoDuration, ctx)
+  }, [buildRptSegments, videoDuration])
+
+  // Schedule offset for the RPT buffer: windowed buffers are local-timebase.
+  const rptOffsetFor = useCallback((absTime: number) => {
+    return chunkModeRef.current ? Math.max(0, absTime - chunkStartRef.current) : absTime
+  }, [])
+
+  // Route a server commit through the chunk-lens staging gate. In chunk mode,
+  // audio-affecting fields (text/timing) are recorded in stagedEdits and NOT
+  // sent; pure-metadata fields (locks, pairs, flag review) still commit
+  // immediately. Outside chunk mode this is a transparent passthrough.
+  const commitOrStage = useCallback((
+    ti: number,
+    data: {
+      committed_start_time?: number
+      committed_end_time?: number
+      committed_adapted_text?: string
+      [key: string]: unknown
+    },
+  ) => {
+    if (!chunkModeRef.current) {
+      return apiClient.commitSegmentTiming(jobId, ti, data)
+    }
+    const staged: { text?: string; start_time?: number; end_time?: number } = {}
+    if (typeof data.committed_adapted_text === 'string') staged.text = data.committed_adapted_text
+    if (typeof data.committed_start_time === 'number') staged.start_time = data.committed_start_time
+    if (typeof data.committed_end_time === 'number') staged.end_time = data.committed_end_time
+    if (Object.keys(staged).length > 0) stageEdit(ti, staged)
+    const rest = Object.fromEntries(
+      Object.entries(data).filter(([k]) =>
+        !['committed_start_time', 'committed_end_time', 'committed_adapted_text'].includes(k))
+    )
+    if (Object.keys(rest).length > 0) {
+      return apiClient.commitSegmentTiming(jobId, ti, rest)
+    }
+    return Promise.resolve()
+  }, [jobId, stageEdit])
   displaySegmentsRef.current = displaySegments
 
   // Manual "make room" for a segment whose audio won't fit even after the automatic
@@ -3608,11 +3711,56 @@ export function DubVerseEditor({
     setStagedEmotions(prev => { const next = { ...prev }; delete next[keyAt(selectedSegmentIndex)]; return next })
   }, [selectedSegmentIndex, initialSegments, jobId, updateSegment, setImportedSegments, keyAt])
 
+  // Commit every staged edit, one at a time, reporting progress as it goes.
+  //
+  // Deliberately sequential and commit-what-you-can: a batch Promise.all would
+  // give no "N of M" and no way to say WHICH segment failed. Segments that
+  // commit are durable immediately; segments that fail keep their staged work
+  // and are recorded in failedSegments so they can be surfaced before MAKE
+  // MOVIE and reloaded for re-editing.
+  const handleSaveStaged = useCallback(async (): Promise<{ succeeded: number[]; failed: Record<number, string> }> => {
+    const entries = Object.entries(stagedEdits)
+    if (!entries.length || !jobId) return { succeeded: [], failed: {} }
+
+    const succeeded: number[] = []
+    const failed: Record<number, string> = {}
+    setSaveProgress({ done: 0, total: entries.length })
+
+    for (let i = 0; i < entries.length; i++) {
+      const ti = Number(entries[i][0])
+      const edit = entries[i][1] as StagedEdit
+      try {
+        await apiClient.commitSegmentTiming(jobId, ti, {
+          // Promotes the audition take to committed audio; the backend sets
+          // both path and committed_audio_url so the rebuild merges it.
+          ...(edit.stagedPath ? { staged_path: edit.stagedPath } : {}),
+          ...(edit.text !== undefined ? { committed_adapted_text: edit.text, text: edit.text } : {}),
+          ...(edit.start_time !== undefined ? { committed_start_time: edit.start_time } : {}),
+          ...(edit.end_time !== undefined ? { committed_end_time: edit.end_time } : {}),
+        })
+        succeeded.push(ti)
+      } catch (err: any) {
+        failed[ti] = err?.message || 'Commit failed'
+        console.error(`[chunk-save] segment ${ti} failed:`, err)
+      }
+      setSaveProgress({ done: i + 1, total: entries.length })
+    }
+
+    clearStagedEditsFor(succeeded)
+    setFailedSegments({ ...failedSegments, ...failed })
+    setSaveProgress(null)
+    return { succeeded, failed }
+  }, [stagedEdits, jobId, failedSegments, clearStagedEditsFor, setFailedSegments, setSaveProgress])
+
   const handleSave = useCallback(async () => {
     if (isSaving) return
     const toSave = displaySegments
     if (!toSave.length) return
     setIsSaving(true)
+    // Staged takes first: they are the user's auditioned work, and promoting
+    // them before the bulk PATCH means the bulk pass writes over a segment that
+    // already points at the right audio.
+    await handleSaveStaged()
     const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
     // Resolved once, not per segment — a Save can fan out to dozens of PATCHes.
     const authHeaders = await apiClient.ensureAuthHeaders()
@@ -4087,6 +4235,58 @@ export function DubVerseEditor({
             </Button>
             <Button variant="ghost" size="sm" className="bg-slate-800 text-white">Editor</Button>
 
+            {/* Edit counters, in the top bar beside MAKE MOVIE — the place the
+                user looks before committing to a render.
+                  "N staged"      how many segments are entered for editing
+                  "3 of 12 done"  live progress while a Save runs
+                  "N failed"      commits that did not land, still staged */}
+            {Object.keys(stagedEdits).length > 0 && !saveProgress && (
+              <span
+                className="ml-6 flex items-center rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-300"
+                title="Segments edited but not yet saved"
+              >
+                {Object.keys(stagedEdits).length} staged
+              </span>
+            )}
+            {saveProgress && (
+              <span className="ml-6 flex items-center rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-300">
+                {saveProgress.done} of {saveProgress.total} done
+              </span>
+            )}
+            {Object.keys(failedSegments).length > 0 && (
+              <span
+                className="ml-2 flex items-center rounded-md border border-red-500/50 bg-red-500/15 px-2.5 py-1 text-xs font-semibold text-red-300"
+                title="Segments whose save failed — they remain staged for re-editing"
+              >
+                {Object.keys(failedSegments).length} failed
+              </span>
+            )}
+
+            {/* Failed-save warning, immediately before MAKE MOVIE.
+                A save is commit-what-you-can, so a failed segment is NOT in the
+                render — the user has to know that before spending a full render
+                on an incomplete film. Named explicitly ("Segment 7") because
+                "some segments failed" gives them nothing to act on. */}
+            {Object.keys(failedSegments).length > 0 && (
+              <div className={cn(
+                "ml-6 flex items-center gap-2 rounded-md border px-3 py-1.5",
+                releasedForRender
+                  ? "border-amber-500/60 bg-amber-500/15"
+                  : "border-red-500/60 bg-red-500/15"
+              )}>
+                <AlertCircle className={cn("h-4 w-4 shrink-0", releasedForRender ? "text-amber-400" : "text-red-400")} />
+                <span className={cn("text-xs font-semibold", releasedForRender ? "text-amber-200" : "text-red-200")}>
+                  {Object.keys(failedSegments).length === 1
+                    ? `Segment ${Object.keys(failedSegments)[0]} FAILED`
+                    : `Segments ${Object.keys(failedSegments).join(', ')} FAILED`}
+                  {' — '}
+                  {releasedForRender
+                    ? 'RELEASED: this render will not contain them.'
+                    : `${Object.keys(failedSegments).length === 1 ? 'segment' : 'segments'} will be re-loaded at the end for re-editing.`}
+                </span>
+              </div>
+            )}
+
             {/* Make Movie lives up here, well away from the transport controls:
                 it kicks off a full render, and sitting beside play/stop invited
                 mis-clicks on a button you don't want fired by accident.
@@ -4111,8 +4311,29 @@ export function DubVerseEditor({
                   "[text-shadow:0_0_6px_rgba(248,113,113,0.9)]",
               )}
               onClick={handleRebuildVideo}
-              disabled={isRebuilding}
-              title="Render the finished dubbed video from the current timeline"
+              // Blocked while any counted segment is still outstanding. A render
+              // is expensive and slow, and it assembles from COMMITTED segments
+              // only — so staged-but-unsaved edits and failed commits would both
+              // be silently missing from the finished film. Better to refuse the
+              // render than hand back a movie the user believes contains work it
+              // does not.
+              disabled={
+                isRebuilding ||
+                saveProgress !== null ||
+                Object.keys(stagedEdits).length > 0 ||
+                (Object.keys(failedSegments).length > 0 && !releasedForRender)
+              }
+              title={
+                saveProgress
+                  ? `Saving ${saveProgress.done} of ${saveProgress.total} — wait for the save to finish`
+                  : Object.keys(stagedEdits).length > 0
+                    ? `${Object.keys(stagedEdits).length} segment(s) staged but not saved — press Save first`
+                    : Object.keys(failedSegments).length > 0 && !releasedForRender
+                      ? `Segment(s) ${Object.keys(failedSegments).join(', ')} failed to save — fix them, or use Advanced ▸ Release for render`
+                      : Object.keys(failedSegments).length > 0 && releasedForRender
+                        ? `Released: rendering WITHOUT segment(s) ${Object.keys(failedSegments).join(', ')}`
+                        : "Render the finished dubbed video from the current timeline"
+              }
             >
               {rebuildStatus === 'complete'
                 ? <Check className="h-3.5 w-3.5 mr-1.5" />
@@ -4397,6 +4618,28 @@ export function DubVerseEditor({
                   </DropdownMenuItem>
                 )
               })()}
+              {/* Escape hatch: render despite failed segments.
+                  A failed commit normally blocks MAKE MOVIE, because the render
+                  assembles from committed segments and the film would silently
+                  omit that work. But a segment can prove genuinely impossible —
+                  a line that will not fit, a voice that will not render — and
+                  the user must not be trapped, unable to ship the other 400
+                  segments because of one. Releasing renders what IS committed;
+                  the failed segments keep their staged work for re-editing. */}
+              {Object.keys(failedSegments).length > 0 && (
+                <DropdownMenuItem
+                  onClick={() => setReleasedForRender(v => !v)}
+                  className="cursor-pointer hover:bg-slate-800"
+                >
+                  {releasedForRender
+                    ? <Check className="h-4 w-4 mr-2 text-emerald-400" />
+                    : <AlertCircle className="h-4 w-4 mr-2 text-red-400" />}
+                  <span className="flex-1">Release for render</span>
+                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-red-500/20 text-red-300">
+                    {Object.keys(failedSegments).length}
+                  </span>
+                </DropdownMenuItem>
+              )}
               <DropdownMenuItem
                 onClick={() => transcriptInputRef.current?.click()}
                 className="cursor-pointer hover:bg-slate-800"
@@ -4468,7 +4711,9 @@ export function DubVerseEditor({
             disabled={isSaving}
           >
             {isSaving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Save className="h-4 w-4 mr-1" />}
-            {isSaving ? 'Saving…' : 'Save'}
+            {isSaving
+              ? (saveProgress ? `Saving ${saveProgress.done}/${saveProgress.total}…` : 'Saving…')
+              : 'Save'}
           </Button>
           <Button
             size="sm"

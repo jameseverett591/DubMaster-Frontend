@@ -1,7 +1,10 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import type { Segment, QCFinding, QCScore, QCSeverity, QCFindingType, SidebarTab, EmotionalCurve, EmotionalCurvePoint, PlaybackMode, RebuildStatus } from './editor-types'
+import type { Segment, QCFinding, QCScore, QCSeverity, QCFindingType, SidebarTab, EmotionalCurve, EmotionalCurvePoint, PlaybackMode, RebuildStatus, StagedEdit, ChunkStatus } from './editor-types'
 import type { AdaptedSegment, VariantType } from './adaptation-types'
+
+/** Chunk-lens window size in seconds — mirrors backend CHUNK_DURATION_SECONDS. */
+export const CHUNK_SECONDS = 300
 
 export type { SidebarTab }
 
@@ -98,6 +101,20 @@ interface EditorState {
   rebuildStatus: RebuildStatus
   rptStitching: boolean
 
+  // Chunk lens (long-video editing). activeChunkIndex null = whole-video mode.
+  // stagedEdits is session-local by design: unsaved work does not survive a
+  // reload — Save is what makes it durable.
+  activeChunkIndex: number | null
+  stagedEdits: Record<number, StagedEdit>
+  chunkStatusMap: Record<string, ChunkStatus>
+  // Segments whose commit failed during a chunk Save. A save is
+  // commit-what-you-can: the segments that succeed are durable, the ones that
+  // fail stay staged and land here so they can be surfaced before MAKE MOVIE
+  // and reloaded for re-editing. transcript_index -> reason.
+  failedSegments: Record<number, string>
+  // Live progress while a Save is running: "3 of 12 done". null when idle.
+  saveProgress: { done: number; total: number } | null
+
   // Actions
   setJobData: (data: {
     jobId: string
@@ -119,6 +136,16 @@ interface EditorState {
   setPlaybackMode: (mode: PlaybackMode) => void
   setRebuildStatus: (status: RebuildStatus) => void
   setRptStitching: (stitching: boolean) => void
+  // Chunk lens actions
+  setActiveChunk: (index: number | null) => void
+  stageEdit: (transcriptIndex: number, edit: StagedEdit) => void
+  clearStagedEdits: () => void
+  /** Drop specific staged entries (the ones that committed successfully). */
+  clearStagedEditsFor: (transcriptIndices: number[]) => void
+  setFailedSegments: (failed: Record<number, string>) => void
+  clearFailedSegment: (transcriptIndex: number) => void
+  setSaveProgress: (progress: { done: number; total: number } | null) => void
+  setChunkStatusMap: (map: Record<string, ChunkStatus>) => void
   commitSegmentChanges: (index: number, changes: Partial<Segment>) => void
   markSegmentDirty: (index: number) => void
   clearAllDirty: () => void
@@ -219,6 +246,11 @@ export const useEditorStore = create<EditorState>(
   playbackMode: 'preview',
   rebuildStatus: 'idle',
   rptStitching: false,
+  activeChunkIndex: null,
+  failedSegments: {},
+  saveProgress: null,
+  stagedEdits: {},
+  chunkStatusMap: {},
   zoomLevel: 1,
   scrollPosition: 0,
   selectedSegmentIndex: null,
@@ -256,6 +288,31 @@ export const useEditorStore = create<EditorState>(
   setPlaybackMode: (mode) => set({ playbackMode: mode }),
   setRebuildStatus: (status) => set({ rebuildStatus: status }),
   setRptStitching: (stitching) => set({ rptStitching: stitching }),
+  // Chunk lens actions. stageEdit MERGES — a text edit followed by a regen of
+  // the same segment must keep both halves.
+  setActiveChunk: (index) => set({ activeChunkIndex: index }),
+  stageEdit: (transcriptIndex, edit) => set((state) => ({
+    stagedEdits: {
+      ...state.stagedEdits,
+      [transcriptIndex]: { ...state.stagedEdits[transcriptIndex], ...edit },
+    },
+  })),
+  clearStagedEdits: () => set({ stagedEdits: {} }),
+  // Used after a partial save: the successes are dropped, the failures stay
+  // staged so the user still has their work and can retry or re-edit.
+  clearStagedEditsFor: (transcriptIndices) => set((state) => {
+    const next = { ...state.stagedEdits }
+    for (const ti of transcriptIndices) delete next[ti]
+    return { stagedEdits: next }
+  }),
+  setFailedSegments: (failed) => set({ failedSegments: failed }),
+  clearFailedSegment: (transcriptIndex) => set((state) => {
+    const next = { ...state.failedSegments }
+    delete next[transcriptIndex]
+    return { failedSegments: next }
+  }),
+  setSaveProgress: (progress) => set({ saveProgress: progress }),
+  setChunkStatusMap: (map) => set({ chunkStatusMap: map }),
   commitSegmentChanges: (index, changes) => set((state) => ({
     segments: state.segments.map((seg, i) =>
       i === index
@@ -288,6 +345,11 @@ export const useEditorStore = create<EditorState>(
     speakerPitchMap: {},
     rebuildStatus: 'idle',
     rptStitching: false,
+    activeChunkIndex: null,
+    failedSegments: {},
+    saveProgress: null,
+    stagedEdits: {},
+    chunkStatusMap: {},
     selectedSegmentIndex: null,
     selectedFindingId: null,
     currentTime: 0,

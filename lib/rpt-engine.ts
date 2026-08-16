@@ -6,7 +6,7 @@
  * Frontend-only — no backend calls required.
  */
 
-import type { Segment } from './editor-types'
+import type { Segment, StagedEdit } from './editor-types'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -139,6 +139,116 @@ export async function stitchRPT(
     duration,
     segmentCount: stitchedCount,
   }
+}
+
+// ─── Chunk-lens staged overlay ────────────────────────────────────────────────
+
+/**
+ * Return copies of `segments` with staged (unsaved) edits applied over the
+ * committed fields: a staged take becomes the segment's committed_audio_url,
+ * staged timing becomes its committed_* window. Only used for audition
+ * playback — never written back to the store or server.
+ */
+export function overlayStagedEdits(
+  segments: Segment[],
+  stagedEdits: Record<number, StagedEdit>
+): Segment[] {
+  const keys = Object.keys(stagedEdits)
+  if (keys.length === 0) return segments
+  return segments.map((seg) => {
+    const edit = stagedEdits[seg.transcript_index ?? -1]
+    if (!edit) return seg
+    return {
+      ...seg,
+      committed_audio_url: edit.stagedAudioUrl ?? seg.committed_audio_url,
+      committed_start_time: edit.start_time ?? seg.committed_start_time,
+      committed_end_time: edit.end_time ?? seg.committed_end_time,
+    }
+  })
+}
+
+/**
+ * Stitch one chunk window into a LOCAL-timebase AudioBuffer (0 = window.start).
+ * Feature-length dubs can't afford a full-length Float32 stitch (a 2-hour
+ * stereo buffer is ~2.5 GB), so chunk mode stitches only the window being
+ * edited. Segments outside the window are skipped; audio is clipped at the
+ * window edges.
+ */
+export async function stitchRPTWindow(
+  segments: Segment[],
+  windowStart: number,
+  windowEnd: number,
+  audioContext: AudioContext
+): Promise<RPTStitchResult | null> {
+  const duration = windowEnd - windowStart
+  if (!segments.length || duration <= 0) return null
+
+  const sampleRate = audioContext.sampleRate
+  const totalSamples = Math.ceil(duration * sampleRate)
+  const outputBuffer = audioContext.createBuffer(2, totalSamples, sampleRate)
+  const leftChannel = outputBuffer.getChannelData(0)
+  const rightChannel = outputChannelData(outputBuffer)
+
+  let stitchedCount = 0
+
+  await Promise.all(
+    segments.map(async (seg) => {
+      const audioUrl = seg.committed_audio_url ?? seg.audio_url
+      if (!audioUrl) return
+
+      const absStart = effStart(seg)
+      const absEnd = effEnd(seg)
+      // Skip segments fully outside the window
+      if (absEnd <= windowStart || absStart >= windowEnd) return
+
+      const segBuffer = await fetchAndDecode(audioUrl, audioContext)
+      if (!segBuffer) return
+
+      const srcLeft = segBuffer.numberOfChannels > 0 ? segBuffer.getChannelData(0) : null
+      const srcRight = segBuffer.numberOfChannels > 1 ? segBuffer.getChannelData(1) : srcLeft
+      if (!srcLeft) return
+
+      // Source offset when the segment starts before the window (clip left edge)
+      const srcOffsetSamples = absStart < windowStart
+        ? Math.floor((windowStart - absStart) * segBuffer.sampleRate)
+        : 0
+      const dstStartSample = Math.max(0, Math.floor((absStart - windowStart) * sampleRate))
+      const maxSlotSamples = Math.ceil((absEnd - windowStart) * sampleRate) - dstStartSample
+
+      const copyLength = Math.max(0, Math.min(
+        segBuffer.length - srcOffsetSamples,
+        maxSlotSamples,
+        totalSamples - dstStartSample
+      ))
+      if (copyLength <= 0) return
+
+      // Resample-by-nearest only if rates differ (segment files are 44.1k mp3,
+      // decoded at ctx rate — decodeAudioData already normalizes, so rates match
+      // in practice; guard anyway by scaling through the ratio).
+      const ratio = segBuffer.sampleRate / sampleRate
+      if (Math.abs(ratio - 1) < 0.001) {
+        for (let i = 0; i < copyLength; i++) {
+          leftChannel[dstStartSample + i] = srcLeft[srcOffsetSamples + i]
+          rightChannel[dstStartSample + i] = (srcRight ?? srcLeft)[srcOffsetSamples + i]
+        }
+      } else {
+        for (let i = 0; i < copyLength; i++) {
+          const si = srcOffsetSamples + Math.floor(i * ratio)
+          if (si >= segBuffer.length) break
+          leftChannel[dstStartSample + i] = srcLeft[si]
+          rightChannel[dstStartSample + i] = (srcRight ?? srcLeft)[si]
+        }
+      }
+
+      stitchedCount++
+    })
+  )
+
+  return { buffer: outputBuffer, duration, segmentCount: stitchedCount }
+}
+
+function outputChannelData(buffer: AudioBuffer): Float32Array {
+  return buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : buffer.getChannelData(0)
 }
 
 // ─── Playback ─────────────────────────────────────────────────────────────────
