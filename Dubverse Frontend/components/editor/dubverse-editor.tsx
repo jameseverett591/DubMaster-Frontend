@@ -56,7 +56,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import { apiClient } from '@/lib/api-client'
-import type { RegenerateSegmentRequest } from '@/lib/api-client'
+import type { RegenerateSegmentRequest, RetentionState } from '@/lib/api-client'
 import { VoiceLibraryPanel } from '@/components/voice-library-modal'
 import { CustomVoicesModal } from '@/components/editor/custom-voices-modal'
 import { EmotionLibraryPopup } from '@/components/editor/emotion-library-popup'
@@ -395,6 +395,8 @@ interface DubVerseEditorProps {
   onTranslateAndDub?: () => void
   // Chunk-lens editor: persisted per-chunk status from segments.json
   chunkStatus?: Record<string, string>
+  /** Deletion countdown from segments.json, surfaced by the editor page. */
+  retention?: RetentionState
 }
 
 type AskAiMessage = { role: 'user' | 'assistant'; content: string; displayed?: string }
@@ -732,6 +734,7 @@ export function DubVerseEditor({
   onGenerateSpeech,
   onTranslateAndDub,
   chunkStatus: initialChunkStatus,
+  retention: initialRetention,
 }: DubVerseEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
@@ -1097,6 +1100,29 @@ export function DubVerseEditor({
   // about one render, not a standing preference, and it should have to be made
   // again if the user reloads and reconsiders.
   const [releasedForRender, setReleasedForRender] = useState(false)
+  // Deletion countdown. Loaded with the segments; the card only appears inside
+  // the warning window so it is a warning, not permanent furniture.
+  const [retention, setRetention] = useState<RetentionState | null>(null)
+  const [retentionDismissed, setRetentionDismissed] = useState(false)
+  const [isResubmitting, setIsResubmitting] = useState(false)
+  const [resubmitError, setResubmitError] = useState<string | null>(null)
+
+  const handleResubmitRetention = useCallback(async () => {
+    if (!jobId || isResubmitting) return
+    setIsResubmitting(true)
+    try {
+      const next = await apiClient.resubmitRetention(jobId)
+      // Updating retention is the feedback: the countdown card's condition is
+      // days_left <= warn_days, so a successful resubmit makes it disappear.
+      setRetention(next)
+      setRetentionDismissed(false)
+      setResubmitError(null)
+    } catch (err: any) {
+      setResubmitError(err?.message || 'Could not postpone deletion')
+    } finally {
+      setIsResubmitting(false)
+    }
+  }, [jobId, isResubmitting])
   const [contextSegmentIndex, setContextSegmentIndex] = useState<number | null>(null)
   const [dragSpeedPreview, setDragSpeedPreview] = useState<{ index: number; speed: number } | null>(null)
   const [waveformReady, setWaveformReady] = useState(false)
@@ -3506,6 +3532,7 @@ export function DubVerseEditor({
   // Seed the persisted per-chunk status (from segments.json) once per job.
   useEffect(() => {
     if (initialChunkStatus) setChunkStatusMap(initialChunkStatus as Record<string, 'saved' | 'dirty'>)
+    if (initialRetention) setRetention(initialRetention)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId])
 
@@ -4162,6 +4189,81 @@ export function DubVerseEditor({
       tabIndex={0}
       className="h-screen flex flex-col bg-black text-white outline-none"
     >
+      {/* Deletion countdown — centred, modal-weight, and deliberately hard to
+          miss. Unrendered work is deleted after its window closes, and losing a
+          part-finished feature because a notice sat quietly in a corner would be
+          indefensible. Dismissible for this session so it does not block work,
+          but it returns on reload until the user resubmits or renders. */}
+      {retention?.warn && !retention.expired && !retentionDismissed && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-[440px] rounded-2xl border-2 border-red-500/70 bg-[#0B1220] p-6 shadow-[0_0_40px_rgba(239,68,68,0.35)]">
+            <div className="flex items-center gap-3">
+              <AlertCircle className="h-7 w-7 shrink-0 text-red-400" />
+              <h2 className="text-lg font-bold text-red-200">
+                Work due for deletion in {Math.max(0, Math.ceil(retention.days_left))} day
+                {Math.ceil(retention.days_left) === 1 ? '' : 's'}
+              </h2>
+            </div>
+
+            <p className="mt-4 text-sm leading-relaxed text-slate-300">
+              {retention.kind === 'abandoned' ? (
+                <>
+                  This job has not been rendered. Unrendered work is permanently deleted
+                  after four months — the source video,
+                  audio, transcript and every edit.
+                </>
+              ) : (
+                <>
+                  This film was rendered and its retention window is closing. All source
+                  material, audio and edits are permanently deleted on the date below.
+                </>
+              )}
+            </p>
+
+            <p className="mt-3 text-xs font-medium text-slate-400">
+              Deletion date: {new Date(retention.deadline).toLocaleDateString(undefined, {
+                year: 'numeric', month: 'long', day: 'numeric',
+              })}
+            </p>
+
+            <div className="mt-6 flex items-center gap-3">
+              {retention.kind === 'abandoned' ? (
+                <Button
+                  className="flex-1 bg-sky-600 hover:bg-sky-700 text-white font-semibold"
+                  onClick={handleResubmitRetention}
+                  disabled={isResubmitting}
+                >
+                  {isResubmitting
+                    ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    : <RefreshCw className="h-4 w-4 mr-2" />}
+                  Resubmit — keep this work
+                </Button>
+              ) : (
+                <span className="flex-1 text-xs text-slate-400">
+                  Download or export the film before this date to keep it.
+                </span>
+              )}
+              <Button
+                variant="outline"
+                className="border-slate-700 hover:bg-slate-800"
+                onClick={() => setRetentionDismissed(true)}
+              >
+                Dismiss
+              </Button>
+            </div>
+
+            {resubmitError && (
+              <p className="mt-3 text-xs font-medium text-red-300">{resubmitError}</p>
+            )}
+
+            <p className="mt-3 text-[11px] text-slate-500">
+              Dismissing hides this for now — it returns next time you open the editor.
+              {retention.kind === 'abandoned' && ' Resubmit also lives in Advanced ▸ Resubmit.'}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Rebuild status banner */}
       {(rebuildStatus === 'processing' || rebuildStatus === 'complete' || rebuildStatus === 'error') && (
         <div
@@ -4626,6 +4728,26 @@ export function DubVerseEditor({
                   the user must not be trapped, unable to ship the other 400
                   segments because of one. Releasing renders what IS committed;
                   the failed segments keep their staged work for re-editing. */}
+              {/* Resubmit: "I am still working on this." Resets the 4-month
+                  abandoned-work countdown without forcing the user to render
+                  something they are not ready to render. Always available so
+                  they can postpone before the warning appears, not only once
+                  the card is already shouting at them. */}
+              {retention?.kind === 'abandoned' && (
+                <DropdownMenuItem
+                  onClick={handleResubmitRetention}
+                  disabled={isResubmitting}
+                  className="cursor-pointer hover:bg-slate-800"
+                >
+                  <RefreshCw className={cn("h-4 w-4 mr-2 text-sky-400", isResubmitting && "animate-spin")} />
+                  <span className="flex-1">Resubmit (keep this work)</span>
+                  {retention.warn && (
+                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">
+                      {Math.max(0, Math.ceil(retention.days_left))}d
+                    </span>
+                  )}
+                </DropdownMenuItem>
+              )}
               {Object.keys(failedSegments).length > 0 && (
                 <DropdownMenuItem
                   onClick={() => setReleasedForRender(v => !v)}

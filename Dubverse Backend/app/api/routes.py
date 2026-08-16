@@ -3223,6 +3223,62 @@ async def delete_job(job_id: str, request: Request):
 # Deletion and expiry MUST use the same list — the retention gap existed
 # precisely because two code paths each cleaned up a different subset.
 PURGE_RETENTION_DAYS = int(os.getenv("DUBMASTER_PURGE_RETENTION_DAYS", "30"))
+# Work that was started in the editor but never rendered. A user may be part
+# way through a feature over several weeks, so this window is much longer than
+# the post-render one — but it is still finite: abandoned work cannot sit on
+# our disks forever.
+ABANDON_RETENTION_DAYS = int(os.getenv("DUBMASTER_ABANDON_RETENTION_DAYS", "120"))
+# How close to the deadline the editor starts warning the user.
+RETENTION_WARN_DAYS = int(os.getenv("DUBMASTER_RETENTION_WARN_DAYS", "10"))
+
+
+def _retention_state(job_id: str) -> dict:
+    """When this job's work will be deleted, and why.
+
+    Two clocks, and the rendered one wins:
+      purge_after    stamped at MAKE MOVIE — 30 days, the customer has the film
+      abandon_after  stamped for editor work never rendered — 4 months
+
+    A job with neither stamp is back-filled from its segments.json mtime, so
+    work that predates this policy still gets a deadline rather than living
+    forever by accident.
+    """
+    seg_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.isfile(seg_path):
+        return {}
+    try:
+        with open(seg_path, "r", encoding="utf-8") as f:
+            data = _json.load(f) or {}
+    except Exception:
+        return {}
+
+    now = datetime.utcnow()
+    stamp, kind = data.get("purge_after"), "rendered"
+    if not stamp:
+        stamp, kind = data.get("abandon_after"), "abandoned"
+    if not stamp:
+        # Never stamped: date it from when the work last changed on disk.
+        try:
+            mtime = datetime.utcfromtimestamp(os.path.getmtime(seg_path))
+        except OSError:
+            return {}
+        stamp = (mtime + timedelta(days=ABANDON_RETENTION_DAYS)).isoformat()
+        kind = "abandoned"
+
+    try:
+        deadline = datetime.fromisoformat(str(stamp).replace("Z", ""))
+    except Exception:
+        return {}
+
+    days_left = (deadline - now).total_seconds() / 86400.0
+    return {
+        "deadline": deadline.isoformat(),
+        "kind": kind,
+        "days_left": round(days_left, 2),
+        "expired": days_left <= 0,
+        "warn": days_left <= RETENTION_WARN_DAYS,
+        "warn_days": RETENTION_WARN_DAYS,
+    }
 
 
 def _purge_job_artifacts(job_id: str) -> list:
@@ -3300,24 +3356,41 @@ def _sweep_purgeable_jobs() -> int:
     base = settings.DUBBED_DIR
     if not os.path.isdir(base):
         return 0
-    now = datetime.utcnow()
     for job_id in os.listdir(base):
-        seg_path = os.path.join(base, job_id, "segments.json")
-        if not os.path.isfile(seg_path):
-            continue
-        try:
-            with open(seg_path, "r", encoding="utf-8") as f:
-                stamp = (_json.load(f) or {}).get("purge_after")
-            if not stamp:
-                continue
-            if datetime.fromisoformat(str(stamp).replace("Z", "")) > now:
-                continue
-        except Exception:
+        state = _retention_state(job_id)
+        if not state or not state.get("expired"):
             continue
         removed = _purge_job_artifacts(job_id)
         purged += 1
-        logger.info(f"[RETENTION] purged {job_id} — {len(removed)} artifact(s) removed")
+        logger.info(
+            f"[RETENTION] purged {job_id} ({state.get('kind')}, deadline "
+            f"{state.get('deadline')}) — {len(removed)} artifact(s) removed"
+        )
     return purged
+
+
+@router.post("/jobs/{job_id}/retention/resubmit", dependencies=[Depends(_dep_job_access)])
+async def resubmit_retention(job_id: str):
+    """Reset the retention clock on unrendered work.
+
+    The escape hatch for the deletion countdown: a user part way through a
+    feature must be able to say "I am still working on this" without being
+    forced to render something they are not ready to render. Only meaningful
+    for abandoned-state work — once rendered, the 30-day post-render window
+    applies and is not extendable this way.
+    """
+    state = _retention_state(job_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="No work found for this job")
+    if state.get("kind") == "rendered":
+        raise HTTPException(
+            status_code=400,
+            detail="This job has been rendered; its 30-day window cannot be extended.",
+        )
+    deadline = (datetime.utcnow() + timedelta(days=ABANDON_RETENTION_DAYS)).isoformat()
+    _persist_job_metadata_field(job_id, "abandon_after", deadline)
+    logger.info(f"[RETENTION] {job_id}: resubmitted — abandon_after now {deadline}")
+    return {"status": "ok", "job_id": job_id, **_retention_state(job_id)}
 
 
 def _persist_job_metadata_field(job_id: str, field: str, value) -> None:
@@ -6248,6 +6321,9 @@ async def get_segments(job_id: str):
         raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
     with open(segments_path, "r", encoding="utf-8") as f:
         data = _json.load(f)
+    # Retention state travels with the segments the editor already loads, so the
+    # countdown card needs no extra request and cannot show a stale deadline.
+    data["retention"] = _retention_state(job_id)
     return data
 
 
