@@ -29,6 +29,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   const [editorProps, setEditorProps] = useState<any>(null)
   const [segments, setSegments] = useState<Segment[]>([])
   const [snapshotSegments, setSnapshotSegments] = useState<Segment[]>([])
+  // Chunk-lens state and the deletion countdown both ride along on the segments
+  // response. Without forwarding them the countdown card can never appear.
+  const [chunkStatus, setChunkStatus] = useState<Record<string, string> | undefined>(undefined)
+  const [retention, setRetention] = useState<any>(undefined)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -253,6 +257,8 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
           traitsMapping: persistedTraitsMapping,
         })
         setSegments(editorSegments)
+        setChunkStatus(segmentsData?.chunk_status)
+        setRetention(segmentsData?.retention)
         setSnapshotSegments(mappedSnapshotSegments)
       } catch (e: any) {
         setError(e.message)
@@ -416,6 +422,8 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         videoDuration={editorProps.videoDuration}
         segments={segments}
         snapshotSegments={snapshotSegments}
+        chunkStatus={chunkStatus}
+        retention={retention}
         qcScore={null}
         qcFindings={NO_FINDINGS}
         qcAnalysis={qcAnalysis}
