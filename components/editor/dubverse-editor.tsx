@@ -69,7 +69,6 @@ import { applyQCFix } from '@/lib/qc-fixes'
 import { VideoRecorder } from '@/components/video-recorder'
 import { QCQualityPanel } from '@/components/editor/qc-quality-panel'
 import { SegmentQCPanel } from '@/components/editor/segment-qc-panel'
-import { QCTicker } from '@/components/editor/qc-ticker'
 import { EmotionLedTrack } from '@/components/editor/emotion-led-track'
 import { FloatingEmotionChart } from '@/components/editor/floating-emotion-chart'
 import { AdvancedChordBrowser } from '@/components/editor/advanced-chord-browser'
@@ -4454,27 +4453,8 @@ export function DubVerseEditor({
                   "N staged"      how many segments are entered for editing
                   "3 of 12 done"  live progress while a Save runs
                   "N failed"      commits that did not land, still staged */}
-            {Object.keys(stagedEdits).length > 0 && !saveProgress && (
-              <span
-                className="ml-6 flex items-center rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-300"
-                title="Segments edited but not yet saved"
-              >
-                {Object.keys(stagedEdits).length} staged
-              </span>
-            )}
-            {saveProgress && (
-              <span className="ml-6 flex items-center rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-300">
-                {saveProgress.done} of {saveProgress.total} done
-              </span>
-            )}
-            {Object.keys(failedSegments).length > 0 && (
-              <span
-                className="ml-2 flex items-center rounded-md border border-red-500/50 bg-red-500/15 px-2.5 py-1 text-xs font-semibold text-red-300"
-                title="Segments whose save failed — they remain staged for re-editing"
-              >
-                {Object.keys(failedSegments).length} failed
-              </span>
-            )}
+            {/* Segment counter now lives in the segment header row, where the
+                user is actually working — it collided with MAKE MOVIE here. */}
 
             {/* Failed-save warning, immediately before MAKE MOVIE.
                 A save is commit-what-you-can, so a failed segment is NOT in the
@@ -4860,20 +4840,45 @@ export function DubVerseEditor({
                   )}
                 </DropdownMenuItem>
               )}
-              {Object.keys(failedSegments).length > 0 && (
-                <DropdownMenuItem
-                  onClick={() => setReleasedForRender(v => !v)}
-                  className="cursor-pointer hover:bg-slate-800"
-                >
-                  {releasedForRender
+              {/* Always listed, disabled when there is nothing to release. A
+                  control that materialises only mid-crisis is one the user
+                  meets for the first time under pressure; listing it greyed
+                  means they have already seen it and know where it lives. */}
+              <DropdownMenuItem
+                onClick={() => {
+                  if (Object.keys(failedSegments).length > 0) setReleasedForRender(v => !v)
+                }}
+                disabled={Object.keys(failedSegments).length === 0}
+                className={cn(
+                  Object.keys(failedSegments).length === 0
+                    ? "opacity-50 cursor-default"
+                    : "cursor-pointer hover:bg-slate-800",
+                )}
+                title={
+                  Object.keys(failedSegments).length === 0
+                    ? "Available when a segment fails to save — lets you render without it"
+                    : releasedForRender
+                      ? "Released: MAKE MOVIE will render without the failed segment(s)"
+                      : "Render without the failed segment(s)"
+                }
+              >
+                {Object.keys(failedSegments).length === 0
+                  ? <AlertCircle className="h-4 w-4 mr-2 text-slate-500" />
+                  : releasedForRender
                     ? <Check className="h-4 w-4 mr-2 text-emerald-400" />
                     : <AlertCircle className="h-4 w-4 mr-2 text-red-400" />}
-                  <span className="flex-1">Release for render</span>
-                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-red-500/20 text-red-300">
-                    {Object.keys(failedSegments).length}
-                  </span>
-                </DropdownMenuItem>
-              )}
+                <span className="flex-1">Release for render</span>
+                <span
+                  className={cn(
+                    "text-[10px] font-medium px-1.5 py-0.5 rounded tabular-nums",
+                    Object.keys(failedSegments).length > 0
+                      ? "bg-red-500/20 text-red-300"
+                      : "bg-slate-700/40 text-slate-500",
+                  )}
+                >
+                  {String(Object.keys(failedSegments).length).padStart(2, '0')}
+                </span>
+              </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => transcriptInputRef.current?.click()}
                 className="cursor-pointer hover:bg-slate-800"
@@ -5006,29 +5011,56 @@ export function DubVerseEditor({
                 ))}
               </SelectContent>
             </Select>
+            {/* Segment counter, in the centre of the segment header row.
+                It lived in the top nav and collided with MAKE MOVIE; this row
+                is where the user's attention already is while editing, and the
+                counter is about the segments in front of them. Always visible,
+                reading 00/00 at rest — a gauge that only appears when something
+                is wrong is one nobody can find when they need it. */}
             <div className="flex-1 flex items-center justify-center min-w-0">
-              <QCTicker
-                segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
-                onApplyFix={() => {
-                  if (selectedSegmentIndex === null) return
-                  const seg = displaySegments[selectedSegmentIndex]
-                  if (!seg?.qc_findings?.length) return
-                  const worst = [...seg.qc_findings].sort((a, b) => {
-                    const rank: Record<string, number> = { error: 0, warning: 1, info: 2 }
-                    return (rank[a.severity] ?? 2) - (rank[b.severity] ?? 2)
-                  })[0]
-                  if (!worst) return
-                  const retranscriptionText = worst.type === 'pronunciation'
-                    ? qcReport?.retranscription.items.find(
-                        item => Math.abs(item.start - worst.timestamp_start) < 1
-                      )?.text
-                    : undefined
-                  const fixResult = applyQCFix(worst, seg, { retranscriptionText })
-                  if (fixResult) updateSegment(selectedSegmentIndex, fixResult.patch)
-                  setCurrentTime(worst.timestamp_start)
-                  setRightPanelTab('quality')
-                }}
-              />
+              <span className="flex items-center gap-2 rounded-md border border-neutral-700 bg-neutral-900/80 px-3 py-1">
+                {/* The live light, inherited from the QC ticker it replaced:
+                    emerald when idle and healthy, amber while a save runs, red
+                    when a commit has failed. It reads at a glance from across
+                    the room, which is the point of an always-on indicator. */}
+                <span
+                  className={cn(
+                    "h-2 w-2 rounded-full shrink-0",
+                    Object.keys(failedSegments).length > 0
+                      ? "bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.9)]"
+                      : saveProgress
+                        ? "bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.9)] animate-pulse"
+                        : "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)]",
+                  )}
+                />
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                  Segment Counter
+                </span>
+                {saveProgress ? (
+                  <span className="text-xs font-semibold text-amber-300 tabular-nums">
+                    {saveProgress.done} of {saveProgress.total} done
+                  </span>
+                ) : (
+                  <>
+                    <span
+                      className="text-xs font-semibold tabular-nums text-amber-300"
+                      title="Segments edited but not yet saved"
+                    >
+                      {String(stagedEditCount).padStart(2, '0')} staged
+                    </span>
+                    <span className="text-slate-700">|</span>
+                    <span
+                      className={cn(
+                        "text-xs font-semibold tabular-nums",
+                        Object.keys(failedSegments).length > 0 ? "text-red-300" : "text-amber-300",
+                      )}
+                      title="Segments whose save failed — they remain staged for re-editing"
+                    >
+                      {String(Object.keys(failedSegments).length).padStart(2, '0')} failed
+                    </span>
+                  </>
+                )}
+              </span>
             </div>
             {/* Target language selector */}
             <Select
