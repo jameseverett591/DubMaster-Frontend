@@ -498,8 +498,20 @@ def _detect_speed_anomalies(timing_data: Optional[List[Dict]]) -> Dict[str, Any]
         tts_duration = entry.get("tts_duration", 0)
         slot_duration = placed_end - placed_start
 
+        # Prefer the stretch the fit loop actually applied. Deriving it from
+        # tts_duration / slot_duration cannot work: tts_duration is recorded
+        # AFTER fitting and equals the slot, so the ratio is 1.0 by
+        # construction and a segment sped to 1.6x reads as normal. Older jobs
+        # have no speed_applied field, so they still fall back to the derived
+        # value — and will still report 1.0, which is a limitation of the data,
+        # not of this check.
+        speed_applied = entry.get("speed_applied")
         if slot_duration > 0 and tts_duration > 0:
-            speed_ratio = tts_duration / slot_duration
+            speed_ratio = (
+                float(speed_applied)
+                if speed_applied is not None
+                else tts_duration / slot_duration
+            )
             speeds.append(speed_ratio)
 
             if speed_ratio > 1.3:
@@ -526,7 +538,8 @@ def _detect_speed_anomalies(timing_data: Optional[List[Dict]]) -> Dict[str, Any]
             tts_duration = entry.get("tts_duration", 0)
             slot_duration = placed_end - placed_start
             if slot_duration > 0 and tts_duration > 0:
-                speed_ratio = tts_duration / slot_duration
+                _sa = entry.get("speed_applied")
+                speed_ratio = float(_sa) if _sa is not None else tts_duration / slot_duration
                 if abs(speed_ratio - mean_speed) > 0.3:
                     # Avoid duplicate entries
                     seg_idx = entry.get("index", 0)

@@ -1510,6 +1510,17 @@ class DubbingService:
                     "start": _placed_start,
                     "end": _placed_start + actual_duration,
                     "duration": actual_duration,
+                    # The ORIGINAL transcript window, before any borrow or fit.
+                    # timing_diagnostics used to write the placed position as
+                    # "original_start", so QC's offset check compared a value
+                    # with itself and could never fire — drift was invisible.
+                    "transcript_start": start_time,
+                    "transcript_end": end_time,
+                    # The stretch the fit loop actually applied. Without it the
+                    # diagnostics recorded tts_duration as the FITTED duration,
+                    # making speed_ratio 1.0 by construction: a segment sped to
+                    # 1.6x read as perfectly normal.
+                    "speed_applied": round(_speed_applied, 3),
                     "velma_emotion": segment.get("velma_emotion"),
                     "velma_accent": segment.get("velma_accent"),
                     "velma_deepfake_score": segment.get("velma_deepfake_score"),
@@ -1543,9 +1554,16 @@ class DubbingService:
                     "text": seg["text"][:80],
                     "placed_start": round(seg["start"], 3),
                     "placed_end": round(seg["end"], 3),
-                    "original_start": round(seg["start"], 3),
-                    "original_end": round(seg.get("original_end", seg["end"]), 3),
+                    # The true transcript window, not the placed one. Falling
+                    # back to the placed value keeps older jobs parseable, but
+                    # any job dubbed after this change reports real drift.
+                    "original_start": round(seg.get("transcript_start", seg["start"]), 3),
+                    "original_end": round(seg.get("transcript_end", seg.get("original_end", seg["end"])), 3),
                     "tts_duration": round(seg["duration"], 3),
+                    # What the fit loop actually did. tts_duration above is the
+                    # duration AFTER fitting, so QC cannot derive this from the
+                    # other fields — it has to be recorded at the source.
+                    "speed_applied": round(seg.get("speed_applied", 1.0), 3),
                 }
                 if idx > 0:
                     prev = audio_segments[idx - 1]
