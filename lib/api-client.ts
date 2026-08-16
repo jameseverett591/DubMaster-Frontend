@@ -130,6 +130,21 @@ export interface SegmentsData {
   segments: Segment[]
   // Chunk-lens editor state: {"<chunk_index>": "saved" | "dirty"}
   chunk_status?: Record<string, string>
+  /** When this job's work is deleted, and why. Travels with the segments the
+   *  editor already loads so the countdown card needs no extra request. */
+  retention?: RetentionState
+}
+
+export interface RetentionState {
+  deadline: string
+  /** "rendered" = 30 days from MAKE MOVIE. "abandoned" = 4 months of editor
+   *  work never rendered, extendable via Advanced ▸ Resubmit. */
+  kind: 'rendered' | 'abandoned'
+  days_left: number
+  expired: boolean
+  /** True once inside the warning window — the editor shows the countdown. */
+  warn: boolean
+  warn_days: number
 }
 
 export interface Voice {
@@ -1422,6 +1437,18 @@ class DubVerseAPIClient {
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify(data),
     })
+  }
+
+  /** Reset the deletion countdown on unrendered work — "I'm still working on
+   *  this". Rejected once a job has been rendered: that 30-day window is not
+   *  extendable this way. */
+  async resubmitRetention(jobId: string): Promise<RetentionState> {
+    const res = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/retention/resubmit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    if (!res.ok) throw new Error(await this._detail(res))
+    return res.json()
   }
 
   async setChunkStatus(
