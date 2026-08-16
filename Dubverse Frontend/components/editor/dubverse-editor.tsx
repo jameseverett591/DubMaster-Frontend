@@ -5033,30 +5033,44 @@ export function DubVerseEditor({
                         : "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)]",
                   )}
                 />
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                {/* Labels emerald, numbers amber: the words are chrome, the
+                    digits are the reading. Only the count changes, so only the
+                    count needs to catch the eye. */}
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400">
                   Segment Counter
                 </span>
                 {saveProgress ? (
-                  <span className="text-xs font-semibold text-amber-300 tabular-nums">
-                    {saveProgress.done} of {saveProgress.total} done
+                  <span className="text-xs font-semibold text-emerald-400">
+                    <span className="text-amber-300 tabular-nums">{saveProgress.done}</span>
+                    {' of '}
+                    <span className="text-amber-300 tabular-nums">{saveProgress.total}</span>
+                    {' done'}
                   </span>
                 ) : (
                   <>
                     <span
-                      className="text-xs font-semibold tabular-nums text-amber-300"
+                      className="text-xs font-semibold text-emerald-400"
                       title="Segments edited but not yet saved"
                     >
-                      {String(stagedEditCount).padStart(2, '0')} staged
+                      <span className="text-amber-300 tabular-nums">
+                        {String(stagedEditCount).padStart(2, '0')}
+                      </span>
+                      {' staged'}
                     </span>
                     <span className="text-slate-700">|</span>
                     <span
-                      className={cn(
-                        "text-xs font-semibold tabular-nums",
-                        Object.keys(failedSegments).length > 0 ? "text-red-300" : "text-amber-300",
-                      )}
+                      className="text-xs font-semibold text-emerald-400"
                       title="Segments whose save failed — they remain staged for re-editing"
                     >
-                      {String(Object.keys(failedSegments).length).padStart(2, '0')} failed
+                      <span
+                        className={cn(
+                          "tabular-nums",
+                          Object.keys(failedSegments).length > 0 ? "text-red-300" : "text-amber-300",
+                        )}
+                      >
+                        {String(Object.keys(failedSegments).length).padStart(2, '0')}
+                      </span>
+                      {' failed'}
                     </span>
                   </>
                 )}
