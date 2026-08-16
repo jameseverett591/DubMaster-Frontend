@@ -538,7 +538,10 @@ function mapAnalysisToQCReport(jobId: string, analysis: any): QCReport {
   const findings: QCFinding[] = []
 
   const silences = analysis.silences ?? {}
-  ;(silences.gaps ?? []).forEach((gap: any, i: number) => {
+  // The backend emits silences.silences (analyze_dub.py:459), not .gaps. Reading
+  // the wrong key meant the panel showed "N unexpected" in the header with an
+  // empty list beneath it, and no silence findings were ever generated.
+  ;(silences.silences ?? []).forEach((gap: any, i: number) => {
     findings.push({
       id: `qc-silence-${i}`,
       segment_index: -1,
@@ -581,7 +584,9 @@ function mapAnalysisToQCReport(jobId: string, analysis: any): QCReport {
 
   return {
     job_id: jobId,
-    generated_at: new Date().toISOString(),
+    // When the analysis was actually produced, not when this mapping ran —
+    // stamping "now" made a cached result from an earlier dub look current.
+    generated_at: analysis.generated_at ?? new Date().toISOString(),
     grade: (summary.grade ?? 'C') as QCReport['grade'],
     overall: summary.score ?? 50,
     components: {
@@ -597,12 +602,15 @@ function mapAnalysisToQCReport(jobId: string, analysis: any): QCReport {
     timing: { status: (analysis.timing?.status ?? 'ok') as 'ok' | 'warn' | 'fail' },
     speed: {
       status: (speedData.status ?? 'ok') as 'ok' | 'warn' | 'fail',
-      mean: speedData.speed_mean ?? 1.0,
+      // Backend key is mean_speed_ratio (analyze_dub.py:527). Reading speed_mean
+      // always fell through to the 1.0 default, so the panel reported "Mean 1x"
+      // regardless of what the audio did.
+      mean: speedData.mean_speed_ratio ?? 1.0,
       std_dev: speedData.speed_std_dev ?? 0.1,
     },
     silence_gaps: {
       unexpected_count: silences.unexpected_silences ?? 0,
-      gaps: (silences.gaps ?? []).map((g: any) => ({
+      gaps: (silences.silences ?? []).map((g: any) => ({
         start: g.start ?? 0,
         end: g.end ?? 0,
         duration: g.duration ?? 0,
@@ -610,9 +618,14 @@ function mapAnalysisToQCReport(jobId: string, analysis: any): QCReport {
     },
     loudness: {
       within_spec: analysis.loudness?.within_spec ?? true,
-      lufs: analysis.loudness?.integrated_lufs ?? -23,
-      peak_db: analysis.loudness?.peak_db ?? -1,
-      range_lu: analysis.loudness?.range_lu ?? 7,
+      // These three were reading keys the backend does not emit
+      // (analyze_dub.py:572-574), so the panel displayed its own fallback
+      // literals — -23 LUFS / -1.0 peak / 7.0 range — as if they were measured.
+      // -23 LUFS is outside the -14±3 spec the backend scores against, so the
+      // "within spec" badge and the numbers beside it contradicted each other.
+      lufs: analysis.loudness?.integrated_loudness_lufs ?? -23,
+      peak_db: analysis.loudness?.true_peak_dbfs ?? -1,
+      range_lu: analysis.loudness?.loudness_range_lu ?? 7,
     },
     emotion: {
       label: analysis.emotion?.label ?? 'Calm',
