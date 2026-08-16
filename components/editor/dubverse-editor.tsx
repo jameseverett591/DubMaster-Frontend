@@ -1107,6 +1107,23 @@ export function DubVerseEditor({
   const [isResubmitting, setIsResubmitting] = useState(false)
   const [resubmitError, setResubmitError] = useState<string | null>(null)
 
+  // Switch-chunk guard. stagedEdits is session-local, so leaving a chunk with
+  // unsaved takes would discard the user's work silently — the one failure mode
+  // that loses effort with no warning and no way back.
+  const [pendingChunkSwitch, setPendingChunkSwitch] = useState<number | null>(null)
+  const [chunkSwitchBusy, setChunkSwitchBusy] = useState<'save' | 'discard' | null>(null)
+
+  /** Chunk navigation goes through here: it asks first when work is staged. */
+  const requestChunkSwitch = useCallback((target: number) => {
+    if (Object.keys(stagedEdits).length === 0) {
+      setActiveChunk(target)
+      return
+    }
+    setPendingChunkSwitch(target)
+  }, [stagedEdits, setActiveChunk])
+
+  // resolveChunkSwitch is defined after handleSaveStaged (it calls it).
+
   const handleResubmitRetention = useCallback(async () => {
     if (!jobId || isResubmitting) return
     setIsResubmitting(true)
@@ -3779,6 +3796,44 @@ export function DubVerseEditor({
     return { succeeded, failed }
   }, [stagedEdits, jobId, failedSegments, clearStagedEditsFor, setFailedSegments, setSaveProgress])
 
+  /** Resolve the switch-chunk guard. Defined here because it calls
+   *  handleSaveStaged above. */
+  const resolveChunkSwitch = useCallback(async (action: 'save' | 'discard' | 'stay') => {
+    const target = pendingChunkSwitch
+    if (action === 'stay' || target === null) {
+      setPendingChunkSwitch(null)
+      return
+    }
+    setChunkSwitchBusy(action)
+    try {
+      if (action === 'save') {
+        const { failed } = await handleSaveStaged()
+        // A failed commit must not be swept away by the navigation: stay put so
+        // the user sees which segment did not land.
+        if (Object.keys(failed).length > 0) {
+          setPendingChunkSwitch(null)
+          return
+        }
+      } else {
+        // Discard removes the staged FILES too, not just the browser state —
+        // otherwise "discard" would leave the takes on disk forever.
+        const indices = Object.keys(stagedEdits).map(Number)
+        if (jobId && indices.length) {
+          try {
+            await apiClient.discardStagedTakes(jobId, indices)
+          } catch (err) {
+            console.error('[chunk-switch] staged cleanup failed:', err)
+          }
+        }
+        clearStagedEdits()
+      }
+      setActiveChunk(target)
+    } finally {
+      setChunkSwitchBusy(null)
+      setPendingChunkSwitch(null)
+    }
+  }, [pendingChunkSwitch, stagedEdits, jobId, handleSaveStaged, clearStagedEdits, setActiveChunk])
+
   const handleSave = useCallback(async () => {
     if (isSaving) return
     const toSave = displaySegments
@@ -4260,6 +4315,63 @@ export function DubVerseEditor({
               Dismissing hides this for now — it returns next time you open the editor.
               {retention.kind === 'abandoned' && ' Resubmit also lives in Advanced ▸ Resubmit.'}
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Switch-chunk guard. Staged edits live in the browser only, so leaving
+          a chunk without deciding would lose them silently. Three explicit
+          outcomes — no "are you sure?" that hides what happens to the work. */}
+      {pendingChunkSwitch !== null && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-[460px] rounded-2xl border border-amber-500/60 bg-[#0B1220] p-6 shadow-[0_0_40px_rgba(245,158,11,0.25)]">
+            <div className="flex items-center gap-3">
+              <AlertCircle className="h-6 w-6 shrink-0 text-amber-400" />
+              <h2 className="text-lg font-bold text-amber-200">
+                {Object.keys(stagedEdits).length} unsaved edit
+                {Object.keys(stagedEdits).length === 1 ? '' : 's'} in this chunk
+              </h2>
+            </div>
+
+            <p className="mt-4 text-sm leading-relaxed text-slate-300">
+              Staged takes are not committed yet. Saving commits them to the film;
+              discarding deletes the takes and returns these segments to their
+              previous audio.
+            </p>
+
+            <div className="mt-6 flex items-center gap-2">
+              <Button
+                className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
+                onClick={() => resolveChunkSwitch('save')}
+                disabled={chunkSwitchBusy !== null}
+              >
+                {chunkSwitchBusy === 'save'
+                  ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  : <Save className="h-4 w-4 mr-2" />}
+                {chunkSwitchBusy === 'save' && saveProgress
+                  ? `Saving ${saveProgress.done}/${saveProgress.total}…`
+                  : 'Save and continue'}
+              </Button>
+              <Button
+                variant="outline"
+                className="border-red-500/50 text-red-300 hover:bg-red-500/10"
+                onClick={() => resolveChunkSwitch('discard')}
+                disabled={chunkSwitchBusy !== null}
+              >
+                {chunkSwitchBusy === 'discard'
+                  ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  : null}
+                Discard
+              </Button>
+              <Button
+                variant="outline"
+                className="border-slate-700 hover:bg-slate-800"
+                onClick={() => resolveChunkSwitch('stay')}
+                disabled={chunkSwitchBusy !== null}
+              >
+                Stay
+              </Button>
+            </div>
           </div>
         </div>
       )}

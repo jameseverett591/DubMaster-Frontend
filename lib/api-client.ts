@@ -1451,6 +1451,19 @@ class DubVerseAPIClient {
     return res.json()
   }
 
+  /** Delete staged take files the user discarded. Omit indices to clear every
+   *  staged take for the job. Without this, "discard" would only mean "forget
+   *  in the browser" — the audition files would stay on disk. */
+  async discardStagedTakes(jobId: string, transcriptIndices?: number[]): Promise<{ removed: number }> {
+    const res = await this._fetch(`${this.baseURL}/api/dub/discard-staged/${jobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(transcriptIndices ? { transcript_indices: transcriptIndices } : {}),
+    })
+    if (!res.ok) throw new Error(await this._detail(res))
+    return res.json()
+  }
+
   async setChunkStatus(
     jobId: string,
     chunkIndex: number,
