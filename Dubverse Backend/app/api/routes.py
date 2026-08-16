@@ -3209,7 +3209,67 @@ async def delete_job(job_id: str, request: Request):
         except OSError:
             pass
 
-    return {"message": f"Job {job_id} deleted successfully"}
+    # --- Everything else the customer's work leaves behind -------------------
+    #
+    # Deleting uploads/chunks/processed/output/dubbed/separated is not deletion:
+    # data/projects/<job_id>/ holds a FULL COPY of the source video (a
+    # feature-length film is gigabytes), and transcripts, scene context and
+    # diarization all carry the dialogue. Leaving them meant "delete" removed
+    # the job from the user's view while their film stayed on our disks
+    # indefinitely — the retention gap documented in
+    # docs/security/03-data-retention-and-deletion.md.
+    #
+    # Each target is removed independently and best-effort: one missing or
+    # locked path must never abort the rest, or a partial failure would leave
+    # the customer's content behind while reporting success.
+    _removed: list[str] = []
+
+    for _dir in (
+        os.path.join(settings.PROJECTS_DIR, job_id),      # source video + dubbed + transcript
+        os.path.join("data", "diarization", job_id),
+        os.path.join("data", "audio", job_id),
+    ):
+        if os.path.isdir(_dir):
+            shutil.rmtree(_dir, ignore_errors=True)
+            _removed.append(_dir)
+
+    for _pattern in (
+        os.path.join("data", "transcripts", f"{job_id}*.json"),
+        os.path.join("data", "velma", f"{job_id}*.json"),
+        os.path.join("data", "jobs", f"{job_id}*"),
+        os.path.join("data", "diarization", f"{job_id}*"),
+        os.path.join("data", "audio", f"{job_id}*"),
+    ):
+        for _path in _glob.glob(_pattern):
+            try:
+                if os.path.isdir(_path):
+                    shutil.rmtree(_path, ignore_errors=True)
+                else:
+                    os.remove(_path)
+                _removed.append(_path)
+            except OSError as _exc:
+                logger.warning(f"Job {job_id}: could not delete {_path}: {_exc}")
+
+    # The R2 copy of the source. Deleting our local copies while the object
+    # stays in cloud storage is not deletion either — and this is the one the
+    # customer cannot see or reach themselves.
+    try:
+        from app.services import upload_reservations as _ur
+        _row = await asyncio.to_thread(_ur._get, job_id)
+        if _row and _row.get("object_key"):
+            if await asyncio.to_thread(_ur.delete_object, _row["object_key"]):
+                _removed.append(f"r2:{_row['object_key']}")
+            # Drop the reservation row too, so nothing points at a deleted
+            # object and no minutes stay reserved against a job that is gone.
+            await asyncio.to_thread(_ur.release, job_id, "job deleted")
+    except Exception as _exc:
+        logger.warning(f"Job {job_id}: R2/reservation cleanup failed: {_exc}")
+
+    logger.info(f"Job {job_id}: deleted {len(_removed)} artifact(s): {_removed}")
+    return {
+        "message": f"Job {job_id} deleted successfully",
+        "artifacts_removed": len(_removed),
+    }
 
 
 def _persist_job_metadata_field(job_id: str, field: str, value) -> None:
