@@ -3209,33 +3209,51 @@ async def delete_job(job_id: str, request: Request):
         except OSError:
             pass
 
-    # --- Everything else the customer's work leaves behind -------------------
-    #
-    # Deleting uploads/chunks/processed/output/dubbed/separated is not deletion:
-    # data/projects/<job_id>/ holds a FULL COPY of the source video (a
-    # feature-length film is gigabytes), and transcripts, scene context and
-    # diarization all carry the dialogue. Leaving them meant "delete" removed
-    # the job from the user's view while their film stayed on our disks
-    # indefinitely — the retention gap documented in
-    # docs/security/03-data-retention-and-deletion.md.
-    #
-    # Each target is removed independently and best-effort: one missing or
-    # locked path must never abort the rest, or a partial failure would leave
-    # the customer's content behind while reporting success.
-    _removed: list[str] = []
+    # Same purge the retention sweep uses — one list, so the two paths cannot
+    # drift into cleaning different subsets (which is how the gap arose).
+    _purged = _purge_job_artifacts(job_id)
+    logger.info(f"Job {job_id}: purge removed {len(_purged)} artifact(s)")
+    return {
+        "message": f"Job {job_id} deleted successfully",
+        "artifacts_removed": len(_purged),
+    }
+
+
+# Everything a job leaves on disk or in the bucket, for a total purge.
+# Deletion and expiry MUST use the same list — the retention gap existed
+# precisely because two code paths each cleaned up a different subset.
+PURGE_RETENTION_DAYS = int(os.getenv("DUBMASTER_PURGE_RETENTION_DAYS", "30"))
+
+
+def _purge_job_artifacts(job_id: str) -> list:
+    """Remove every artifact belonging to a job. Best-effort per target.
+
+    Each path is removed independently: one missing or locked file must never
+    abort the rest, because a partial failure that reported success is what
+    leaves a customer's film on our disks.
+    """
+    import shutil
+    import glob as _glob
+    removed: list = []
 
     for _dir in (
         os.path.join(settings.PROJECTS_DIR, job_id),      # source video + dubbed + transcript
+        os.path.join(settings.DUBBED_DIR, job_id),
+        os.path.join(settings.UPLOAD_DIR, job_id),
+        os.path.join(settings.CHUNKS_DIR, job_id),
+        os.path.join(settings.PROCESSED_DIR, job_id),
+        os.path.join(settings.OUTPUT_DIR, job_id),
         os.path.join("data", "diarization", job_id),
         os.path.join("data", "audio", job_id),
     ):
         if os.path.isdir(_dir):
             shutil.rmtree(_dir, ignore_errors=True)
-            _removed.append(_dir)
+            removed.append(_dir)
 
     for _pattern in (
         os.path.join("data", "transcripts", f"{job_id}*.json"),
         os.path.join("data", "velma", f"{job_id}*.json"),
+        os.path.join("data", "separated", f"{job_id}_*"),
         os.path.join("data", "jobs", f"{job_id}*"),
         os.path.join("data", "diarization", f"{job_id}*"),
         os.path.join("data", "audio", f"{job_id}*"),
@@ -3246,30 +3264,60 @@ async def delete_job(job_id: str, request: Request):
                     shutil.rmtree(_path, ignore_errors=True)
                 else:
                     os.remove(_path)
-                _removed.append(_path)
+                removed.append(_path)
             except OSError as _exc:
-                logger.warning(f"Job {job_id}: could not delete {_path}: {_exc}")
+                logger.warning(f"[PURGE] {job_id}: could not delete {_path}: {_exc}")
 
-    # The R2 copy of the source. Deleting our local copies while the object
-    # stays in cloud storage is not deletion either — and this is the one the
-    # customer cannot see or reach themselves.
+    # The R2 copy — the one the customer can neither see nor reach.
     try:
         from app.services import upload_reservations as _ur
-        _row = await asyncio.to_thread(_ur._get, job_id)
+        _row = _ur._get(job_id)
         if _row and _row.get("object_key"):
-            if await asyncio.to_thread(_ur.delete_object, _row["object_key"]):
-                _removed.append(f"r2:{_row['object_key']}")
-            # Drop the reservation row too, so nothing points at a deleted
-            # object and no minutes stay reserved against a job that is gone.
-            await asyncio.to_thread(_ur.release, job_id, "job deleted")
+            if _ur.delete_object(_row["object_key"]):
+                removed.append(f"r2:{_row['object_key']}")
+            _ur.release(job_id, "job purged")
     except Exception as _exc:
-        logger.warning(f"Job {job_id}: R2/reservation cleanup failed: {_exc}")
+        logger.warning(f"[PURGE] {job_id}: R2/reservation cleanup failed: {_exc}")
 
-    logger.info(f"Job {job_id}: deleted {len(_removed)} artifact(s): {_removed}")
-    return {
-        "message": f"Job {job_id} deleted successfully",
-        "artifacts_removed": len(_removed),
-    }
+    return removed
+
+
+def _stamp_purge_deadline(job_id: str) -> None:
+    """Start the retention countdown for a job, at render completion."""
+    deadline = (datetime.utcnow() + timedelta(days=PURGE_RETENTION_DAYS)).isoformat()
+    _persist_job_metadata_field(job_id, "purge_after", deadline)
+    logger.info(f"[RETENTION] {job_id}: purge_after set to {deadline} ({PURGE_RETENTION_DAYS}d)")
+
+
+def _sweep_purgeable_jobs() -> int:
+    """Purge every job whose retention window has closed.
+
+    Reads purge_after from each job's segments.json. A job with no stamp has
+    never been rendered, so its clock has not started — those are left alone
+    rather than deleted on a guess.
+    """
+    purged = 0
+    base = settings.DUBBED_DIR
+    if not os.path.isdir(base):
+        return 0
+    now = datetime.utcnow()
+    for job_id in os.listdir(base):
+        seg_path = os.path.join(base, job_id, "segments.json")
+        if not os.path.isfile(seg_path):
+            continue
+        try:
+            with open(seg_path, "r", encoding="utf-8") as f:
+                stamp = (_json.load(f) or {}).get("purge_after")
+            if not stamp:
+                continue
+            if datetime.fromisoformat(str(stamp).replace("Z", "")) > now:
+                continue
+        except Exception:
+            continue
+        removed = _purge_job_artifacts(job_id)
+        purged += 1
+        logger.info(f"[RETENTION] purged {job_id} — {len(removed)} artifact(s) removed")
+    return purged
 
 
 def _persist_job_metadata_field(job_id: str, field: str, value) -> None:
@@ -5684,6 +5732,14 @@ async def remix_dub(job_id: str, request: Request):
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    # The retention clock starts HERE — at render completion, not at upload and
+    # not at save. Once the film exists, the customer has what they came for and
+    # we hold their source material, dialogue and audio for a bounded window and
+    # no longer. Nothing is exempt: no plan tier, no "saved project" status.
+    # Re-rendering restamps it, so a film the user is still working on does not
+    # expire underneath them.
+    _stamp_purge_deadline(job_id)
     return result
 
 

@@ -142,8 +142,30 @@ async def lifespan(app: FastAPI):
     await _load_jobs_from_db()
     logger.info("Persisted jobs loaded from Supabase")
 
+    # Retention sweep. Runs once at startup and then daily, so expiry does not
+    # depend on a user happening to visit a page — a customer who never returns
+    # is exactly the case where their film must not sit on our disks forever.
+    async def _retention_loop():
+        from app.api.routes import _sweep_purgeable_jobs, PURGE_RETENTION_DAYS
+        while True:
+            try:
+                purged = await asyncio.to_thread(_sweep_purgeable_jobs)
+                if purged:
+                    logger.info(
+                        f"[RETENTION] swept {purged} job(s) past the "
+                        f"{PURGE_RETENTION_DAYS}-day window"
+                    )
+            except Exception as exc:
+                # Never let a sweep failure take down the app — it retries
+                # tomorrow, and a crash loop here would stop the API entirely.
+                logger.error(f"[RETENTION] sweep failed: {exc}", exc_info=True)
+            await asyncio.sleep(24 * 60 * 60)
+
+    _retention_task = asyncio.create_task(_retention_loop())
+
     yield
-    
+
+    _retention_task.cancel()
     logger.info("Shutting down application")
 
 
