@@ -7667,6 +7667,60 @@ export function DubVerseEditor({
           </div>
         </div>
         
+        {/* Chunk bar — the lens over a long film. One 5-minute window is shown
+            at a time, so a 2-hour job edits as 24 windows instead of a single
+            timeline nobody can navigate. Only appears when the film is long
+            enough to need it; short jobs behave exactly as before. */}
+        {chunkMode && (
+          <div className="shrink-0 flex items-center gap-2 border-t border-neutral-800 bg-neutral-950 px-3 py-2 overflow-x-auto">
+            <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+              Chunks
+            </span>
+            {Array.from({ length: chunkCount }, (_, i) => {
+              const isActive = activeChunk === i
+              // saved = committed to the film. staged = edits waiting in this
+              // browser. Anything else has not been touched.
+              const persisted = chunkStatusMap[String(i)]
+              const isStagedHere = isActive && stagedEditCount > 0
+              const state: 'staged' | 'saved' | 'unedited' =
+                isStagedHere ? 'staged' : persisted === 'saved' ? 'saved' : 'unedited'
+              const from = i * CHUNK_SECONDS
+              const to = Math.min(videoDuration, from + CHUNK_SECONDS)
+              const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
+              return (
+                <button
+                  key={i}
+                  onClick={() => requestChunkSwitch(i)}
+                  title={`${mmss(from)} – ${mmss(to)}${
+                    state === 'staged' ? ' · unsaved edits' : state === 'saved' ? ' · saved' : ''
+                  }`}
+                  className={cn(
+                    "shrink-0 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
+                    isActive
+                      ? "border-amber-400 bg-amber-500/15 text-amber-200"
+                      : "border-neutral-700 text-slate-400 hover:border-amber-500/40 hover:text-slate-200",
+                  )}
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span
+                      className={cn(
+                        "h-1.5 w-1.5 rounded-full",
+                        state === 'staged' ? "bg-amber-400"
+                          : state === 'saved' ? "bg-emerald-400"
+                          : "bg-neutral-600",
+                      )}
+                    />
+                    {mmss(from)}
+                  </span>
+                </button>
+              )
+            })}
+            <span className="ml-auto shrink-0 text-[11px] text-slate-500">
+              {activeChunk !== null && `Window ${activeChunk + 1} of ${chunkCount}`}
+            </span>
+          </div>
+        )}
+
         {/* Timeline tracks */}
         <div className="flex-1 flex overflow-hidden">
           {/* QC Monitor - permanent fixture left of timeline tracks */}
