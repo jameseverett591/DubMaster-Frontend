@@ -6460,6 +6460,47 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     return {"status": "ok", "job_id": job_id, "index": index}
 
 
+@router.post("/dub/discard-staged/{job_id}", dependencies=[Depends(_dep_job_access)])
+async def discard_staged_takes(job_id: str, body: Dict[str, Any] = Body(default={})):
+    """Delete staged take files the user chose not to keep.
+
+    Staged renders are real files on disk (segment_XXXX_staged*.mp3) and they
+    are the ONE artifact with no other cleanup path: committed audio is replaced
+    on the next regen, but an abandoned audition take would otherwise sit there
+    until the whole job is purged. Discarding a chunk has to remove them, or
+    "discard" would only mean "forget in the browser".
+
+    Body: {"transcript_indices": [3, 7]} — omit to discard every staged take
+    for the job.
+    """
+    import glob as _glob
+    output_dir = os.path.join(settings.DUBBED_DIR, job_id)
+    if not os.path.isdir(output_dir):
+        raise HTTPException(status_code=404, detail=f"No output directory for job {job_id}")
+
+    indices = body.get("transcript_indices")
+    if indices:
+        patterns = [
+            os.path.join(output_dir, f"segment_{int(i):04d}_staged*")
+            for i in indices
+        ]
+    else:
+        patterns = [os.path.join(output_dir, "segment_*_staged*")]
+
+    removed = []
+    for pattern in patterns:
+        for path in _glob.glob(pattern):
+            try:
+                os.remove(path)
+                removed.append(os.path.basename(path))
+            except OSError as exc:
+                # Best-effort per file: one locked take must not strand the rest.
+                logger.warning(f"[STAGED] {job_id}: could not delete {path}: {exc}")
+
+    logger.info(f"[STAGED] {job_id}: discarded {len(removed)} staged file(s)")
+    return {"status": "ok", "job_id": job_id, "removed": len(removed), "files": removed}
+
+
 @router.post("/dub/chunk-status/{job_id}", dependencies=[Depends(_dep_job_access)])
 async def set_chunk_status(job_id: str, body: dict):
     """Record per-chunk editor state for the chunk-lens UI (long videos).
