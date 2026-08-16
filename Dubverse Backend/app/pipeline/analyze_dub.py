@@ -186,9 +186,30 @@ def analyze_dub(
         # existing audio-only fallback (no video frames -> "method":
         # "audio-only") rather than erroring, exactly the same as if OpenCV/
         # face-detection were unavailable today.
-        analysis["lip_sync"] = _analyze_lip_sync(
-            str(audio_source), timing_data
-        )
+        # DISABLED by default — the metric cannot mean what the panel implies.
+        #
+        # DubMaster replaces audio and leaves the video untouched: the mouth on
+        # screen is performing the ORIGINAL language while the audio is the
+        # translation. Envelope correlation between the two is therefore near
+        # zero by construction, and a perfectly paced dub scores the same as a
+        # broken one. Observed correlations sit at ~0.04 with the offset pinned
+        # at the edge of the search window — the signature of noise, not sync.
+        # The 30/100 it reported was a null reading presented as a judgement.
+        #
+        # This is not a bug in syncnet_service: measuring lip-sync only becomes
+        # meaningful once the stack actually MODIFIES the video to match the
+        # dub. Re-enable with DUBMASTER_ENABLE_LIP_SYNC=1 when a lip-sync model
+        # is in the pipeline and there is something real to score.
+        if os.getenv("DUBMASTER_ENABLE_LIP_SYNC", "").strip() == "1":
+            analysis["lip_sync"] = _analyze_lip_sync(
+                str(audio_source), timing_data
+            )
+        else:
+            analysis["lip_sync"] = {
+                "status": "skipped",
+                "reason": "video is not lip-synced by this pipeline; "
+                          "audio/video correlation carries no signal",
+            }
         # emotion2vec emotion preservation (local, free) -- needs real video
         # frames for its dubbed-side extraction as currently implemented;
         # skipped until export exists, same as pronunciation/screenapp above.
@@ -830,8 +851,15 @@ def _compute_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
     else:
         lip_weight = weights.pop("lip_sync", 0)
         if lip_weight:
-            weights["timing"] += lip_weight // 2
-            weights["speed"] += lip_weight - lip_weight // 2
+            # NOT to timing/speed. Both are currently tautological: the
+            # diagnostics record placed positions as the "original" ones and
+            # tts_duration as the fitted duration, so timing's offset check can
+            # never fire and speed_ratio is 1.0 by construction — verified
+            # across every segment of a real job. Redistributing here would put
+            # 12 points onto components incapable of reporting a fault and
+            # inflate every score. Send it to metrics that genuinely measure.
+            weights["loudness"] = weights.get("loudness", 0) + lip_weight // 2
+            weights["silences"] = weights.get("silences", 0) + (lip_weight - lip_weight // 2)
 
     emotion_pres = analysis.get("emotion_preservation", {})
     if emotion_pres.get("status") == "ok":
