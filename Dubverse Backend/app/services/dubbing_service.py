@@ -2917,6 +2917,8 @@ class DubbingService:
         live_segment_start: Optional[float] = None,
         live_segment_end: Optional[float] = None,
         live_next_segment_start: Optional[float] = None,
+        stage: bool = False,
+        text: Optional[str] = None,
     ) -> Dict:
         output_dir = os.path.join(self.dubbed_dir, job_id)
         segments_path = os.path.join(output_dir, "segments.json")
@@ -2937,6 +2939,16 @@ class DubbingService:
         # so nothing but a manual unlock in the editor can overwrite it.
         if seg.get("locked"):
             raise PermissionError(f"Segment {segment_index} is locked — unlock it to regenerate")
+
+        if stage:
+            # Staged mode (chunk-lens editor): render and fit against a COPY of
+            # the segment so the take is auditionable without touching committed
+            # state. Every inline mutation below (path, committed_*, fit timing,
+            # edit_history) lands on this copy, and the final segments.json /
+            # Supabase write is skipped. Promotion happens via
+            # commit_segment_timing's staged_path when the user saves the chunk.
+            import copy as _copy
+            seg = _copy.deepcopy(seg)
 
         use_voice_id = voice_id or seg.get("voice_id", "")
         use_speed = speed if speed is not None else seg.get("speed", 1.0)
@@ -2984,13 +2996,23 @@ class DubbingService:
 
         use_speed = max(0.5, min(2.0, use_speed))
         use_text = seg.get("committed_adapted_text") or seg.get("text", "")
+        # Explicit text override — the frontend has always sent this field but
+        # the model silently dropped it, so a regen after an uncommitted text
+        # edit spoke the OLD line. Staged chunk editing makes that flow normal,
+        # so honor it: a non-empty override is what gets synthesized.
+        if text and text.strip():
+            use_text = text.strip()
 
         previous_text = seg.get("text", "")
         previous_path = seg.get("path", "")
 
         # Regen always writes to segment_NNNN_regen.mp3, overwriting any prior
         # regen for this segment. edit_history preserves the change record.
-        audio_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen.mp3")
+        # Staged mode uses a separate _staged stem so auditioning a take never
+        # clobbers the segment's currently committed audio or intermediates.
+        _take_suffix = "_staged" if stage else "_regen"
+        _staged_infix = "_staged" if stage else ""
+        audio_path = os.path.join(output_dir, f"segment_{segment_index:04d}{_take_suffix}.mp3")
 
         # Nuance sliders → delivery directives + speed modifier + pause/marker text edits.
         nuance_directives: List[str] = []
@@ -3269,7 +3291,7 @@ class DubbingService:
         # Neither Respeecher nor ElevenLabs STS has a speed parameter, so the
         # speed chip has to be applied to the finished audio on both.
         if use_engine in ("respeecher", "elevenlabs-sts") and use_speed and abs(use_speed - 1.0) > 0.01:
-            sped_path = os.path.join(output_dir, f"segment_{segment_index:04d}_speed.mp3")
+            sped_path = os.path.join(output_dir, f"segment_{segment_index:04d}{_staged_infix}_speed.mp3")
             if await self._apply_atempo(final_path, sped_path, use_speed):
                 final_path = sped_path
                 logger.info(f"[SPEED] seg {segment_index}: atempo {use_speed:.2f}x (respeecher)")
@@ -3282,7 +3304,7 @@ class DubbingService:
         # below so the fit measures the audio we actually ship.
         if pitch:
             pitched_path = os.path.join(
-                output_dir, f"segment_{segment_index:04d}_pitched.mp3"
+                output_dir, f"segment_{segment_index:04d}{_staged_infix}_pitched.mp3"
             )
             ok = await asyncio.to_thread(
                 self._apply_pitch_shift, final_path, pitched_path, float(pitch)
@@ -3307,7 +3329,7 @@ class DubbingService:
         # over segments.json), so Respeecher's take selection and this fit pass
         # measure against the same number.
         if slot_dur > 0.2:
-            trimmed_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen_notrim.mp3")
+            trimmed_path = os.path.join(output_dir, f"segment_{segment_index:04d}{_take_suffix}_notrim.mp3")
             trimmed_ok = await asyncio.to_thread(
                 self._trim_leading_silence, final_path, trimmed_path
             )
@@ -3391,7 +3413,7 @@ class DubbingService:
                 elif overlap <= TOLERANCE or force_timing:
                     # Marginal overrun even vs the full window, or user-forced — speed-fit into it.
                     target = full_room - 0.05
-                    stretched_path = os.path.join(output_dir, f"segment_{segment_index:04d}_regen_fit.mp3")
+                    stretched_path = os.path.join(output_dir, f"segment_{segment_index:04d}{_take_suffix}_fit.mp3")
                     stretched = await asyncio.to_thread(
                         self._adjust_audio_duration,
                         final_path, stretched_path, target,
@@ -3571,23 +3593,30 @@ class DubbingService:
         if seg.get("committed_end_time") is not None:
             seg["end"] = seg["committed_end_time"]
 
-        data["regenerated_at"] = datetime.utcnow().isoformat() + "Z"
-        with open(segments_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        if not stage:
+            data["regenerated_at"] = datetime.utcnow().isoformat() + "Z"
+            with open(segments_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
 
-        try:
-            from app.services.supabase_client import upsert_segments
-            from app.services.job_manager import _spawn
-            # _spawn, not a bare create_task: asyncio keeps only a weak
-            # reference to a task, so a fire-and-forget write nobody holds can
-            # be collected before it reaches Supabase.
-            _spawn(upsert_segments(job_id, data["segments"]))
-        except Exception as exc:
-            logger.warning(
-                f"Job {job_id}: segment {segment_index} upsert failed: {exc}"
-            )
+            try:
+                from app.services.supabase_client import upsert_segments
+                from app.services.job_manager import _spawn
+                # _spawn, not a bare create_task: asyncio keeps only a weak
+                # reference to a task, so a fire-and-forget write nobody holds can
+                # be collected before it reaches Supabase.
+                _spawn(upsert_segments(job_id, data["segments"]))
+            except Exception as exc:
+                logger.warning(
+                    f"Job {job_id}: segment {segment_index} upsert failed: {exc}"
+                )
 
-        logger.info(f"[SEGMENTS] Regenerated segment {segment_index} for job {job_id}")
+        if stage:
+            # Marker so the caller can tell this audition copy apart from a
+            # committed segment — none of its mutations were persisted.
+            seg["staged"] = True
+            logger.info(f"[SEGMENTS] Staged take for segment {segment_index} (job {job_id}) — not committed")
+        else:
+            logger.info(f"[SEGMENTS] Regenerated segment {segment_index} for job {job_id}")
         return seg
 
     async def remix_dub(self, job_id: str) -> Dict:

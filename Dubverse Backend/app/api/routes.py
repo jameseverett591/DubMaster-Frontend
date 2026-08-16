@@ -6173,6 +6173,17 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     text = body.get("text")
     text_locked = body.get("text_locked")
     paired_with_next = body.get("paired_with_next")
+    # Chunk-lens staged-take promotion: the path of an auditioned-but-uncommitted
+    # take (segment_NNNN_staged*.mp3) the user has chosen to keep. Sets BOTH
+    # `path` (which remix_dub merges from) and `committed_audio_url` — a staged
+    # take written only to committed_audio_url would be silently absent from
+    # the next rebuild.
+    staged_path = body.get("staged_path")
+    if staged_path is not None:
+        dubbed_dir_abs = os.path.abspath(settings.DUBBED_DIR)
+        staged_abs = os.path.abspath(staged_path)
+        if not staged_abs.startswith(dubbed_dir_abs + os.sep) or not os.path.exists(staged_abs):
+            raise HTTPException(status_code=400, detail=f"Invalid staged_path: {staged_path}")
     # Update Supabase — sequence stores transcript_index (see upsert_segments docstring)
     update_data = {"sequence": index}
     if locked is not None:
@@ -6189,6 +6200,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         update_data["committed_end_time"] = committed_end_time
     if committed_audio_url is not None:
         update_data["committed_audio_url"] = committed_audio_url
+    if staged_path is not None:
+        # Supabase stores the served URL form elsewhere; here the disk path is
+        # what the rebuild merge consumes, same as segments.json below.
+        update_data["committed_audio_url"] = staged_path
     if committed_adapted_text is not None:
         update_data["committed_adapted_text"] = committed_adapted_text
     if committed_voice_id is not None:
@@ -6224,6 +6239,9 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         seg["committed_end_time"] = committed_end_time
     if committed_audio_url is not None:
         seg["committed_audio_url"] = committed_audio_url
+    if staged_path is not None:
+        seg["path"] = staged_path
+        seg["committed_audio_url"] = staged_path
     if committed_adapted_text is not None:
         seg["committed_adapted_text"] = committed_adapted_text
     if committed_voice_id is not None:
@@ -6248,6 +6266,34 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     with open(segments_path, "w", encoding="utf-8") as f:
         _json.dump(data, f, indent=2, ensure_ascii=False)
     return {"status": "ok", "job_id": job_id, "index": index}
+
+
+@router.post("/dub/chunk-status/{job_id}", dependencies=[Depends(_dep_job_access)])
+async def set_chunk_status(job_id: str, body: dict):
+    """Record per-chunk editor state for the chunk-lens UI (long videos).
+
+    Stored as a top-level `chunk_status` map in segments.json —
+    {"<chunk_index>": "saved"} — so it survives reloads and rides along with
+    the existing GET segments payload. Chunk indexes are display windows
+    (300s), not the analysis-stage chunk files.
+    """
+    chunk_index = body.get("chunk_index")
+    status = body.get("status")
+    if not isinstance(chunk_index, int) or chunk_index < 0:
+        raise HTTPException(status_code=400, detail="chunk_index must be a non-negative int")
+    if status not in ("saved", "dirty"):
+        raise HTTPException(status_code=400, detail="status must be 'saved' or 'dirty'")
+
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    chunk_status = data.setdefault("chunk_status", {})
+    chunk_status[str(chunk_index)] = status
+    with open(segments_path, "w", encoding="utf-8") as f:
+        _json.dump(data, f, indent=2, ensure_ascii=False)
+    return {"status": "ok", "job_id": job_id, "chunk_status": chunk_status}
 
 
 class SyncSegmentsRequest(BaseModel):
@@ -6536,6 +6582,8 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest, r
             live_segment_start=body.live_segment_start,
             live_segment_end=body.live_segment_end,
             live_next_segment_start=body.live_next_segment_start,
+            stage=body.stage,
+            text=body.text,
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

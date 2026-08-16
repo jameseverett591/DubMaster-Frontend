@@ -246,3 +246,13 @@ class RegenerateRequest(BaseModel):
     live_segment_start: Optional[float] = None
     live_segment_end: Optional[float] = None
     live_next_segment_start: Optional[float] = None
+    # Staged mode (chunk-lens editor): render the take and return it for
+    # audition, but do NOT mutate segments.json or Supabase. The take is
+    # promoted to committed audio only when the user saves the chunk (see
+    # commit_segment_timing's staged_path).
+    stage: bool = False
+    # Explicit text override for what gets synthesized. The frontend has always
+    # sent this; it was silently dropped before, so a regen after an
+    # uncommitted text edit spoke the old line. Staged editing makes that flow
+    # normal, so it is now honored.
+    text: Optional[str] = None
