@@ -1394,14 +1394,21 @@ export function DubVerseEditor({
     const url = apiClient.toAbsoluteUrl(`/api/media/${jobId}/separated/accompaniment`)
     fetch(url)
       .then(res => {
+        // 404 is expected, not a failure: the accompaniment stem only exists
+        // when separation ran, and long-form sources skip it (see the backend's
+        // ACCOMPANIMENT_MAX_DURATION_S guard). No stem simply means no
+        // background waveform to draw.
+        if (res.status === 404) return null
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         return res.arrayBuffer()
       })
       .then(arrayBuffer => {
+        if (!arrayBuffer) return null
         const audioCtx = new AudioContext()
         return audioCtx.decodeAudioData(arrayBuffer)
       })
       .then(audioBuffer => {
+        if (!audioBuffer) return
         decodedBufferRef.current = audioBuffer
         setWaveformReady(true)
       })
@@ -4236,10 +4243,11 @@ export function DubVerseEditor({
   // the "Window N of M" label updates while the timeline stays put, so on a
   // feature-length film the click reads as doing nothing — the blocks for that
   // window are thousands of pixels off-screen.
+  // The video is deliberately NOT seeked here. Forcing a seek on a 105-minute
+  // source blanked the preview while the browser re-buffered, and navigation
+  // does not require playback to move.
   useEffect(() => {
     if (!chunkMode || activeChunk === null) return
-    setCurrentTime(chunkStart)
-    if (videoRef.current) videoRef.current.currentTime = chunkStart
     const container = timelineRef.current
     if (container) container.scrollLeft = Math.max(0, chunkStart * PIXELS_PER_SECOND)
     // PIXELS_PER_SECOND deliberately out of deps: re-running on zoom would yank
@@ -4257,6 +4265,61 @@ export function DubVerseEditor({
       return start >= chunkStart && start < chunkEnd
     }).length
   }, [displaySegments, chunkMode, activeChunk, chunkStart, chunkEnd])
+
+  /** Start time a segment is actually drawn at (a dragged take moves). */
+  const segStartOf = useCallback((s: Segment | undefined) =>
+    s ? (s.committed_start_time ?? s.start_time ?? 0) : 0, [])
+
+  // Timeline blocks are rendered only for the active window. A feature-length
+  // film is ~839 segments across four tracks inside a ~585,000px container,
+  // which is what makes the editor feel stiff; a window is ~30. Callers bail
+  // inside .map() with `return null` rather than filtering, so the array index
+  // every drag/save/staged-key handler relies on stays the real one.
+  const inActiveWindow = useCallback((s: Segment | undefined) => {
+    if (!chunkMode || activeChunk === null || !s) return true
+    const start = segStartOf(s)
+    const end = s.committed_end_time ?? s.end_time ?? start
+    // Overlap test, not containment: a segment that starts before the window
+    // but runs into it must still render in the later window.
+    return start < chunkEnd && end > chunkStart
+  }, [chunkMode, activeChunk, chunkStart, chunkEnd, segStartOf])
+
+  // A chunk is "finished" once you edited something in it and moved on to work
+  // elsewhere — that is the moment the user calls it done, not the save.
+  const [completedChunks, setCompletedChunks] = useState<Set<number>>(new Set())
+  const prevSelectionRef = useRef<{ index: number; chunk: number } | null>(null)
+
+  // Selecting a segment takes the video and the timeline to it, and retires the
+  // segment you just left.
+  useEffect(() => {
+    if (selectedSegmentIndex === null) return
+    const seg = displaySegments[selectedSegmentIndex]
+    if (!seg) return
+    const start = segStartOf(seg)
+
+    const prev = prevSelectionRef.current
+    if (prev && prev.index !== selectedSegmentIndex) {
+      // Only an edited segment marks its window done; simply clicking through
+      // segments to read them should not turn the film green.
+      if (displaySegments[prev.index]?.isUserEdited) {
+        setCompletedChunks(s => new Set(s).add(prev.chunk))
+      }
+    }
+    prevSelectionRef.current = {
+      index: selectedSegmentIndex,
+      chunk: Math.floor(start / CHUNK_SECONDS),
+    }
+
+    setCurrentTime(start)
+    if (videoRef.current) videoRef.current.currentTime = start
+    const container = timelineRef.current
+    if (container) {
+      // 30% in from the left, so the block lands in view rather than pinned to
+      // the edge with its neighbours cut off.
+      container.scrollLeft = Math.max(0, start * PIXELS_PER_SECOND - container.clientWidth * 0.3)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSegmentIndex])
 
   // Find pending segment count
   const pendingCount = displaySegments.filter(s =>
@@ -7766,8 +7829,19 @@ export function DubVerseEditor({
               // browser. Anything else has not been touched.
               const persisted = chunkStatusMap[String(i)]
               const isStagedHere = isActive && stagedEditCount > 0
+              // Amber while you are changing a segment in this window, green
+              // once you have moved on from it. Unsaved staged work outranks
+              // both — it is the one state that can still be lost.
+              // Amber the moment you land on a segment here, not only once you
+              // change it — the point is knowing which window you are working
+              // in the instant you click.
+              const editingHere = selectedSegmentIndex !== null
+                && Math.floor(segStartOf(displaySegments[selectedSegmentIndex]) / CHUNK_SECONDS) === i
               const state: 'staged' | 'saved' | 'unedited' =
-                isStagedHere ? 'staged' : persisted === 'saved' ? 'saved' : 'unedited'
+                isStagedHere ? 'staged'
+                  : persisted === 'saved' || completedChunks.has(i) ? 'saved'
+                    : editingHere ? 'staged'
+                      : 'unedited'
               const from = i * CHUNK_SECONDS
               const to = Math.min(videoDuration, from + CHUNK_SECONDS)
               const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
@@ -8282,6 +8356,7 @@ export function DubVerseEditor({
               {/* Original audio track */}
               <div className="h-14 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative" data-timeline-track>
                 {displaySegments.map((segment, index) => {
+                  if (!inActiveWindow(segment)) return null
                   const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'original'
                   // Any drag of this segment (on any track) moves every track's block
                   // for it, since they all share the one committed position; a paired
@@ -8565,6 +8640,7 @@ export function DubVerseEditor({
                 onDrop={handleDubbedTrackDrop}
               >
                 {displaySegments.map((segment, index) => {
+                  if (!inActiveWindow(segment)) return null
                   const droppedTranslation = droppedTranslations.find(t => t.segmentIndex === index)
                   const hasDroppedTranslation = !!droppedTranslation
 
@@ -8906,6 +8982,7 @@ export function DubVerseEditor({
               {/* RPT Audio track */}
               <div className="h-20 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
                 {displaySegments.map((seg, i) => {
+                  if (!inActiveWindow(seg)) return null
                   const hasAudio = !!(seg.committed_audio_url ?? seg.audio_url)
                   const startT = effStart(seg)
                   const endT = effEnd(seg)
@@ -8928,7 +9005,7 @@ export function DubVerseEditor({
                           ? 'bg-cyan-500/40 border border-cyan-400/70 border-dashed animate-pulse'
                           : confirmingSegmentIndex === i
                           ? 'bg-amber-400/80 border border-amber-300 animate-[pulse_0.3s_ease-in-out_2]'
-                          : seg.rpt_dirty
+                          : (seg.rpt_dirty || seg.isUserEdited)
                           ? 'bg-amber-400/50 border border-amber-400/70'
                           : seg.committed_audio_url
                           ? 'bg-amber-400/60 border border-amber-400/80'
@@ -9022,6 +9099,7 @@ export function DubVerseEditor({
               {/* Emotional curve track */}
               {hasFeature('emotionalCurveEditor') && <div className="h-24 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
                 {displaySegments.map((segment, index) => {
+                  if (!inActiveWindow(segment)) return null
                   const segWidth = (effEnd(segment) - effStart(segment)) * PIXELS_PER_SECOND
                   return (
                     <div
