@@ -777,22 +777,31 @@ _VELMA_MAX_UPLOAD_BYTES = 24 * 1024 * 1024
 
 
 def _vocals_or_video(video_path: str, job_id: str) -> str:
-    """Separated vocals for this job if available, else the original file.
+    """Already-separated vocals for this job, if they happen to exist.
 
-    F0 pitch analysis — both speaker splitting and gender classification — is
-    measurably better on isolated vocals than on a mix with score and effects.
-    separate_audio caches per job and every caller here has already triggered it
-    (the F0 split and the final mix both use it), so this is a cache read, not a
-    second Demucs pass. Falls back to video_path on any failure: mixed-audio
-    classification beats none.
+    NEVER starts a separation. The earlier version called separate_audio on the
+    assumption it would be a cache read — true on the CPU path, false on the
+    RunPod path, where the GPU worker does its own separation and never returns
+    it. There the call started a SECOND, local, CPU-bound Demucs pass: about six
+    seconds on a 99-second clip, and well over an hour on a 105-minute feature,
+    blocking the pipeline before any segments were written.
+
+    So: use a separated track only if one is already on disk, and otherwise use
+    the source. Mixed-audio pitch analysis is slightly worse than isolated
+    vocals; an hour of dead time is a great deal worse.
     """
+    import glob as _glob
     try:
-        from app.pipeline.separate_audio import separate_audio
-        sep = separate_audio(video_path, job_id=job_id)
-        if sep.get("status") == "ok" and sep.get("vocals_path"):
-            return sep["vocals_path"]
+        for pattern in (
+            os.path.join("data", "separated", f"{job_id}_vocals.wav"),
+            os.path.join("data", "separated", f"{job_id}_*vocals*"),
+        ):
+            for path in _glob.glob(pattern):
+                if os.path.isfile(path) and os.path.getsize(path) > 0:
+                    logger.info(f"[VOCALS] Job {job_id}: using existing vocals {path}")
+                    return path
     except Exception as exc:
-        logger.warning(f"[VOCALS] Job {job_id}: separation unavailable ({exc}) — using source audio")
+        logger.warning(f"[VOCALS] Job {job_id}: vocals lookup failed ({exc})")
     return video_path
 
 
@@ -802,37 +811,58 @@ def _velma_source_audio(video_path: str, job_id: str, vocals_path: str | None = 
     Pass vocals_path when the caller already has one (the CPU path separates
     earlier in the pipeline) to skip straight to the size guard.
 
-    Velma wants clean speech, not a video container. Passing video_path meant
-    every RunPod-path job uploaded the whole MP4 and got a 413, so Velma never
-    ran once on that path and diarization silently fell through to F0 pitch
-    clustering. The CPU path always passed vocals; this brings the two into line.
+    Velma wants speech, not a video container. Passing video_path meant every
+    RunPod-path job uploaded the whole MP4 and got a 413, so Velma never ran on
+    that path and diarization silently fell through to F0 pitch clustering.
 
-    Separation is cached per job by separate_audio, and the RunPod path already
-    runs it for the F0 fallback and the final mix — so this adds no Demucs work,
-    it just consumes the result earlier.
+    This function does NOT separate. An earlier version called separate_audio
+    here, reasoning that it would be a cache read because the pipeline already
+    separates — true on the CPU path, false on the RunPod path, where the GPU
+    worker separates remotely and never returns the result. There it started a
+    second, local, CPU-bound Demucs pass: ~6 seconds on a 99-second clip, and
+    over an hour on a 105-minute feature, stalling the pipeline before any
+    segments were written. That pass did not exist before and does not belong
+    here.
 
-    Falls back to video_path on any failure: a degraded Velma attempt is still
-    better than skipping diarization entirely.
+    Instead: use vocals if the caller already has them (the CPU path does), else
+    extract the audio track with ffmpeg — a stream copy-and-encode, seconds even
+    on a feature — and let the size guard compress it. Velma then gets mixed
+    audio rather than isolated vocals on the RunPod path, which is exactly what
+    it received before this function existed, only small enough to accept.
     """
-    if vocals_path:
-        src = vocals_path
-        logger.info(f"[VELMA-SRC] Job {job_id}: using caller's vocals {src}")
-        return _velma_fit_upload(src, job_id)
+    if vocals_path and os.path.isfile(vocals_path):
+        logger.info(f"[VELMA-SRC] Job {job_id}: using caller's vocals {vocals_path}")
+        return _velma_fit_upload(vocals_path, job_id)
 
-    src = video_path
-    try:
-        from app.pipeline.separate_audio import separate_audio
-        sep = separate_audio(video_path, job_id=job_id)
-        if sep.get("status") == "ok" and sep.get("vocals_path"):
-            src = sep["vocals_path"]
-            logger.info(f"[VELMA-SRC] Job {job_id}: using separated vocals {src}")
-        else:
-            logger.warning(
-                f"[VELMA-SRC] Job {job_id}: separation unavailable "
-                f"({sep.get('reason') or sep.get('status')}) — sending source file"
+    # An already-separated track costs nothing to reuse; absent one, take the
+    # audio track straight off the source. No separation is started either way.
+    src = _vocals_or_video(video_path, job_id)
+    if src == video_path:
+        try:
+            audio_only = os.path.join(
+                settings.DUBBED_DIR, job_id, f"velma_audio_{job_id}.m4a"
             )
-    except Exception as exc:
-        logger.warning(f"[VELMA-SRC] Job {job_id}: separation failed ({exc}) — sending source file")
+            os.makedirs(os.path.dirname(audio_only), exist_ok=True)
+            if not os.path.exists(audio_only):
+                result = subprocess.run(
+                    ["ffmpeg", "-y", "-i", video_path, "-vn", "-ac", "1",
+                     "-ar", "16000", "-c:a", "aac", "-b:a", "48k", audio_only],
+                    capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    logger.warning(
+                        f"[VELMA-SRC] Job {job_id}: audio extract failed, sending source: "
+                        f"{result.stderr[-200:]}"
+                    )
+                    return _velma_fit_upload(video_path, job_id)
+            src = audio_only
+            logger.info(
+                f"[VELMA-SRC] Job {job_id}: extracted audio track "
+                f"({os.path.getsize(src) / 1024**2:.1f}MB) — no separation run"
+            )
+        except Exception as exc:
+            logger.warning(f"[VELMA-SRC] Job {job_id}: audio extract error ({exc})")
+            return _velma_fit_upload(video_path, job_id)
 
     return _velma_fit_upload(src, job_id)
 
