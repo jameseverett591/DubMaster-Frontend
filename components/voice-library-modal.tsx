@@ -397,6 +397,37 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   // Layout-aware grid class
   const gridColsClass = layout === 'list' ? 'grid-cols-1' : 'md:grid-cols-2 lg:grid-cols-3'
 
+  /** Drag props for anything that represents a voice. Shared so the card and
+   *  the detail pane carry an identical payload — the editor's drop handlers
+   *  read 'application/x-voice-payload' and nothing else. */
+  const voiceDragProps = (v: Voice) => ({
+    draggable: true,
+    title: `${v.name} — drag onto a segment`,
+    onPointerDown: (e: React.PointerEvent) => e.stopPropagation(),
+    onDragStart: (e: React.DragEvent) => {
+      e.dataTransfer.effectAllowed = 'copy'
+      e.dataTransfer.setData('application/x-voice-payload', JSON.stringify({ voice_id: v.voice_id, name: v.name }))
+      e.dataTransfer.setData('text/plain', v.voice_id)
+      const ghost = document.createElement('div')
+      ghost.textContent = `${v.name} ▸`
+      ghost.style.cssText = [
+        'position:absolute', 'top:-1000px', 'left:-1000px',
+        'padding:8px 12px',
+        'background:rgba(251,191,36,0.95)',
+        'color:#111827',
+        'border:1px solid rgba(245,158,11,0.95)',
+        'border-radius:8px',
+        'font:700 13px system-ui,sans-serif',
+        'box-shadow:0 6px 18px rgba(0,0,0,0.35)',
+        'pointer-events:none', 'z-index:9999',
+      ].join(';')
+      document.body.appendChild(ghost)
+      e.dataTransfer.setDragImage(ghost, 0, 0)
+      setTimeout(() => ghost.remove(), 0)
+      console.log('[VOICE-DRAG] dragstart', { voice_id: v.voice_id, name: v.name })
+    },
+  })
+
   // Render helpers
   const renderVoiceCard = (v: Voice) => {
     const isFav = favorites.has(v.voice_id)
@@ -412,32 +443,8 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
         <div className={`flex items-start justify-between gap-3 ${isHero ? 'shrink-0' : ''}`}>
           <div className="flex-1 min-w-0">
             <div
-              className={`font-semibold text-amber-300 ${isHero ? 'text-2xl sm:text-3xl cursor-grab active:cursor-grabbing select-none inline-block' : 'text-sm'}`}
-              title={isHero ? `${v.name} — drag onto a segment` : v.name}
-              draggable={isHero ? true : false}
-              onPointerDown={isHero ? (e) => e.stopPropagation() : undefined}
-              onDragStart={isHero ? (e) => {
-                e.dataTransfer.effectAllowed = 'copy'
-                e.dataTransfer.setData('application/x-voice-payload', JSON.stringify({ voice_id: v.voice_id, name: v.name }))
-                e.dataTransfer.setData('text/plain', v.voice_id)
-                const ghost = document.createElement('div')
-                ghost.textContent = `${v.name} ▸`
-                ghost.style.cssText = [
-                  'position:absolute', 'top:-1000px', 'left:-1000px',
-                  'padding:8px 12px',
-                  'background:rgba(251,191,36,0.95)',
-                  'color:#111827',
-                  'border:1px solid rgba(245,158,11,0.95)',
-                  'border-radius:8px',
-                  'font:700 13px system-ui,sans-serif',
-                  'box-shadow:0 6px 18px rgba(0,0,0,0.35)',
-                  'pointer-events:none', 'z-index:9999',
-                ].join(';')
-                document.body.appendChild(ghost)
-                e.dataTransfer.setDragImage(ghost, 0, 0)
-                setTimeout(() => ghost.remove(), 0)
-                console.log('[VOICE-DRAG] dragstart', { voice_id: v.voice_id, name: v.name })
-              } : undefined}
+              className={`font-semibold text-amber-300 cursor-grab active:cursor-grabbing select-none inline-block ${isHero ? 'text-2xl sm:text-3xl' : 'text-sm'}`}
+              {...voiceDragProps(v)}
             >
               {v.name}
             </div>
@@ -622,7 +629,12 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
             {selected ? (
               <div className="space-y-3">
                 <div className="flex items-start justify-between gap-2">
-                  <h3 className="text-lg font-semibold text-amber-300 leading-tight">{selected.name}</h3>
+                  <h3
+                    className="text-lg font-semibold text-amber-300 leading-tight cursor-grab active:cursor-grabbing select-none"
+                    {...voiceDragProps(selected)}
+                  >
+                    {selected.name}
+                  </h3>
                   <button
                     onClick={() => toggleFavorite(selected.voice_id)}
                     aria-label="Toggle favourite"
@@ -714,8 +726,10 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
 
   return (
     <div className="flex flex-col h-full min-h-0 gap-3 overflow-hidden">
-      {/* Speakers strip — modal (grid) layout only */}
-      {layout === 'grid' && isJobAware && speakers.length > 0 && (
+      {/* Speakers strip. Was grid-only, which meant the list layout — the only
+          one where voices could be dragged — had no way to assign a voice to a
+          speaker at all. Both layouts get both routes. */}
+      {isJobAware && speakers.length > 0 && (
         <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-3">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             <span className="text-[11px] text-slate-400 shrink-0 whitespace-nowrap font-medium">
