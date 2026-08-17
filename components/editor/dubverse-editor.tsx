@@ -4232,6 +4232,32 @@ export function DubVerseEditor({
   const PIXELS_PER_SECOND = 40 * zoomLevel
   const timelineWidth = videoDuration * PIXELS_PER_SECOND
 
+  // Chunk selection moves the viewport. Without this the chip highlights and
+  // the "Window N of M" label updates while the timeline stays put, so on a
+  // feature-length film the click reads as doing nothing — the blocks for that
+  // window are thousands of pixels off-screen.
+  useEffect(() => {
+    if (!chunkMode || activeChunk === null) return
+    setCurrentTime(chunkStart)
+    if (videoRef.current) videoRef.current.currentTime = chunkStart
+    const container = timelineRef.current
+    if (container) container.scrollLeft = Math.max(0, chunkStart * PIXELS_PER_SECOND)
+    // PIXELS_PER_SECOND deliberately out of deps: re-running on zoom would yank
+    // the viewport back to the chunk start while the user is mid-edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChunk, chunkMode, chunkStart])
+
+  // Segments belonging to the active window. This is the "how many are entered
+  // in for editing" number — it has to track navigation, or the counter reads
+  // as frozen while the window changes underneath it.
+  const segmentsInWindow = useMemo(() => {
+    if (!chunkMode || activeChunk === null) return displaySegments.length
+    return displaySegments.filter(s => {
+      const start = s.committed_start_time ?? s.start_time ?? 0
+      return start >= chunkStart && start < chunkEnd
+    }).length
+  }, [displaySegments, chunkMode, activeChunk, chunkStart, chunkEnd])
+
   // Find pending segment count
   const pendingCount = displaySegments.filter(s =>
     s.qc_findings?.some(f => f.severity === 'error' || f.severity === 'warning')
@@ -5048,6 +5074,18 @@ export function DubVerseEditor({
                   </span>
                 ) : (
                   <>
+                    <span
+                      className="text-xs font-semibold text-emerald-400"
+                      title={chunkMode
+                        ? "Segments in the window you are editing"
+                        : "Segments in this film"}
+                    >
+                      <span className="text-amber-300 tabular-nums">
+                        {String(segmentsInWindow).padStart(2, '0')}
+                      </span>
+                      {chunkMode ? ' in window' : ' total'}
+                    </span>
+                    <span className="text-slate-700">|</span>
                     <span
                       className="text-xs font-semibold text-emerald-400"
                       title="Segments edited but not yet saved"
