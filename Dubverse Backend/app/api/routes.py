@@ -2913,7 +2913,12 @@ async def export_transcript_srt(job_id: str):
 async def get_transcript(job_id: str):
     job = await _get_or_rehydrate_job(job_id)
     
-    if job and job.transcript:
+    # The segments check is load-bearing. A job rehydrated from Supabase on
+    # startup gets a Transcript with segments=[] (main.py does not restore
+    # them), so `if job and job.transcript` alone returns 200 with an empty
+    # list and never reaches the file on disk that does have them — the source
+    # column silently empties after every backend restart.
+    if job and job.transcript and job.transcript.segments:
         return {
             "job_id": job_id,
             "language": job.transcript.language,
