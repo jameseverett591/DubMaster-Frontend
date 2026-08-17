@@ -3685,19 +3685,29 @@ export function DubVerseEditor({
   const chunkMode = videoDuration > CHUNK_SECONDS * 2
   const chunkBoundaries = useMemo(() => {
     if (!chunkMode || videoDuration <= 0) return [0, videoDuration]
-    const ends = displaySegments.map((seg) => effEnd(seg)).sort((a, b) => a - b)
+    const segments = displaySegments
+      .map((seg) => ({ start: effStart(seg), end: effEnd(seg) }))
+      .sort((a, b) => a.start - b.start)
     const idealCount = Math.max(1, Math.ceil(videoDuration / CHUNK_SECONDS))
     const boundaries = [0]
-    const SNAP_TOLERANCE = 3
+    const SNAP_TOLERANCE = 5
     for (let i = 1; i < idealCount; i++) {
       const ideal = i * CHUNK_SECONDS
+      // If a segment spans the ideal boundary, end the chunk at its end so the
+      // boundary never lands in the middle of a sentence.
+      const spanning = segments.find((s) => s.start <= ideal && ideal < s.end)
+      if (spanning) {
+        boundaries.push(Math.max(boundaries[boundaries.length - 1], Math.min(videoDuration, spanning.end)))
+        continue
+      }
+      // Otherwise snap to the nearest segment end within 5s.
       let nearest = ideal
       let bestDist = Infinity
-      for (const end of ends) {
-        const dist = Math.abs(end - ideal)
+      for (const seg of segments) {
+        const dist = Math.abs(seg.end - ideal)
         if (dist <= SNAP_TOLERANCE && dist < bestDist) {
           bestDist = dist
-          nearest = end
+          nearest = seg.end
         }
       }
       boundaries.push(Math.max(boundaries[boundaries.length - 1], Math.min(videoDuration, nearest)))
