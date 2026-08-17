@@ -82,7 +82,7 @@ import { HeatmapBar } from '@/components/timeline/HeatmapBar'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { ExportModal } from '@/components/editor/export-modal'
 import { ReviewQueuePanel } from '@/components/editor/review-queue-panel'
-import { requestRPTStitch, stitchRPT, stitchRPTWindow, overlayStagedEdits, invalidateCache, scheduleRPTPlayback, effStart, effEnd } from '@/lib/rpt-engine'
+import { stitchRPT, stitchRPTWindow, overlayStagedEdits, invalidateCache, scheduleRPTPlayback, effStart, effEnd } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { createClient } from '@/lib/supabase/client'
 
@@ -2673,15 +2673,9 @@ export function DubVerseEditor({
         audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
         committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
       }))
-      requestRPTStitch(
-        resolved,
-        videoDuration,
-        ctx,
-        () => {},
-        (result) => {
-          if (result) rptBufferRef.current = result.buffer
-        },
-      )
+      stitchWith(resolved, ctx).then(result => {
+        if (result) rptBufferRef.current = result.buffer
+      })
     }
 
     if (!rptBufferRef.current || !audioContextRef.current) return
@@ -2702,7 +2696,7 @@ export function DubVerseEditor({
         rptGainRef.current!.gain.value = isMutedRPT ? 0 : rptVolume / 100
         registerRptSource(scheduleRPTPlayback(
           rptBufferRef.current!,
-          video?.currentTime ?? 0,
+          rptOffsetFor(video?.currentTime ?? 0),
           ctx,
           rptGainRef.current!,
           rptPlaybackRate
@@ -2745,15 +2739,9 @@ export function DubVerseEditor({
       audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
       committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
     }))
-    requestRPTStitch(
-      resolved,
-      videoDuration,
-      ctx,
-      () => {},
-      (result) => {
-        if (result) rptBufferRef.current = result.buffer
-      },
-    )
+    stitchWith(resolved, ctx).then(result => {
+      if (result) rptBufferRef.current = result.buffer
+    })
   }, [segments.length, videoDuration, jobId])
 
   // RPT seek sync — restart RPT audio from new position when user scrubs
@@ -2779,10 +2767,19 @@ export function DubVerseEditor({
         rptGainRef.current = ctx.createGain()
         rptGainRef.current.connect(ctx.destination)
       }
+      // In chunk mode the buffer only covers the active window: a scrub
+      // outside it has nothing to play, so stop rather than scheduling
+      // window-start audio at the wrong absolute position.
+      if (chunkModeRef.current) {
+        const t = video.currentTime
+        if (t < chunkStartRef.current || t >= chunkEndRef.current) {
+          return
+        }
+      }
       rptGainRef.current.gain.value = isMutedRPT ? 0 : rptVolume / 100
       registerRptSource(scheduleRPTPlayback(
         rptBufferRef.current,
-        video.currentTime,
+        rptOffsetFor(video.currentTime),
         ctx,
         rptGainRef.current,
         rptPlaybackRate
@@ -2838,6 +2835,15 @@ export function DubVerseEditor({
 
   const handleVideoTimeUpdate = useCallback(() => {
     if (videoRef.current) {
+      // Chunk lens: playback stops at the window boundary — the user is
+      // auditioning one window, not the whole film.
+      if (chunkModeRef.current && videoRef.current.currentTime >= chunkEndRef.current - 0.05) {
+        stopAllRptAudio()
+        videoRef.current.pause()
+        setIsPlaying(false)
+        setCurrentTime(chunkEndRef.current)
+        return
+      }
       setCurrentTime(videoRef.current.currentTime)
       if (timelineRef.current) {
         const container = timelineRef.current
@@ -3461,7 +3467,7 @@ export function DubVerseEditor({
         committed_emotion: stagedEmotions[keyAt(activeIndex)],
       })
       applyFlagOutcome(activeIndex, 'voice')
-      requestRPTStitch(
+      requestStitchWith(
         displaySegments.map((seg, segArrayIdx) => {
           // For the segment just generated, use the new audio_url directly
           // so the stitch reflects the edit without waiting for store update.
@@ -3479,19 +3485,12 @@ export function DubVerseEditor({
             end_time: seg.end_time,
           }
         }),
-        videoDuration,
         (() => {
           if (!audioContextRef.current) {
             audioContextRef.current = new AudioContext()
           }
           return audioContextRef.current
         })(),
-        () => {},
-        (result) => {
-          if (result) {
-            rptBufferRef.current = result.buffer
-          }
-        },
       )
       if (!droppedTranslations.some(t => t.segmentIndex === activeIndex)) {
         setDroppedTranslations(prev => [
@@ -3559,28 +3558,40 @@ export function DubVerseEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId])
 
-  // Build the segment list an RPT stitch should hear: committed audio with
-  // staged takes overlaid on top, URLs refreshed.
-  const buildRptSegments = useCallback(() => {
-    const base = overlayStagedEdits(displaySegmentsRef.current, stagedEdits)
-    return base.map(seg => ({
-      ...seg,
-      audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
-      committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
-    }))
-  }, [stagedEdits, jobId])
+  // Refs so the stitch wrappers never capture stale stagedEdits/videoDuration.
+  const stagedEditsRef = useRef(stagedEdits)
+  const videoDurationRef = useRef(videoDuration)
+  stagedEditsRef.current = stagedEdits
+  videoDurationRef.current = videoDuration
 
-  // Window-aware stitch: chunk mode stitches only the active window (local
-  // timebase, ~53 MB buffer) instead of the whole film (~2.5 GB at 2 hours).
-  const stitchEditorAudio = useCallback((ctx: AudioContext) => {
-    const segs = buildRptSegments()
+  // THE stitch entry point. Every RPT stitch in this component goes through
+  // here — chunk mode stitches only the active window (local timebase, ~53 MB
+  // buffer) instead of the whole film (~2.5 GB at 2 hours), and staged takes
+  // are overlaid so Preview always plays what the user is actually working on.
+  // Callers pass their own segment array when they need a just-edited value
+  // inlined ahead of the store update; the overlay still applies on top.
+  const stitchWith = useCallback((segs: Segment[], ctx: AudioContext) => {
+    const overlaid = overlayStagedEdits(segs, stagedEditsRef.current)
     if (chunkModeRef.current) {
-      return stitchRPTWindow(segs, chunkStartRef.current, chunkEndRef.current, ctx)
+      return stitchRPTWindow(overlaid, chunkStartRef.current, chunkEndRef.current, ctx)
     }
-    return stitchRPT(segs, videoDuration, ctx)
-  }, [buildRptSegments, videoDuration])
+    return stitchRPT(overlaid, videoDurationRef.current, ctx)
+  }, [])
 
-  // Schedule offset for the RPT buffer: windowed buffers are local-timebase.
+  // Debounced variant for edit-driven re-stitches (mirrors requestRPTStitch).
+  const editorStitchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const requestStitchWith = useCallback((segs: Segment[], ctx: AudioContext) => {
+    if (editorStitchTimerRef.current) clearTimeout(editorStitchTimerRef.current)
+    editorStitchTimerRef.current = setTimeout(async () => {
+      const result = await stitchWith(segs, ctx)
+      if (result) rptBufferRef.current = result.buffer
+      editorStitchTimerRef.current = null
+    }, 500)
+  }, [stitchWith])
+
+  // Schedule offset for the RPT buffer: windowed buffers are local-timebase,
+  // so an absolute playhead of 5:00 into window 2's buffer is offset 0 — not
+  // 300s past the end of a 300s buffer (which played silence).
   const rptOffsetFor = useCallback((absTime: number) => {
     return chunkModeRef.current ? Math.max(0, absTime - chunkStartRef.current) : absTime
   }, [])
@@ -3699,9 +3710,7 @@ export function DubVerseEditor({
         }
         return { ...seg, audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url), committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url) }
       })
-      requestRPTStitch(stitchSegs, videoDuration, audioContextRef.current, () => {}, (result) => {
-        if (result) rptBufferRef.current = result.buffer
-      })
+      requestStitchWith(stitchSegs, audioContextRef.current)
       setPlaybackMode('preview')
       if (res.failed.length > 0) {
         setRegenError(`Voice applied, but ${res.failed.length} segment(s) failed — try applying again.`)
@@ -4248,6 +4257,13 @@ export function DubVerseEditor({
   // does not require playback to move.
   useEffect(() => {
     if (!chunkMode || activeChunk === null) return
+    // The RPT buffer is window-scoped — switching windows invalidates it so
+    // the next Play re-stitches the NEW window instead of replaying the old
+    // one, and any in-flight windowed audio stops rather than drifting.
+    rptBufferRef.current = null
+    stopAllRptAudio()
+    if (videoRef.current) videoRef.current.pause()
+    setIsPlaying(false)
     const container = timelineRef.current
     if (container) container.scrollLeft = Math.max(0, chunkStart * PIXELS_PER_SECOND)
     // PIXELS_PER_SECOND deliberately out of deps: re-running on zoom would yank
@@ -7709,7 +7725,7 @@ export function DubVerseEditor({
                     audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
                     committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
                   }))
-                  stitchRPT(resolved, videoDuration, ctx).then(result => {
+                  stitchWith(resolved, ctx).then(result => {
                     if (result) {
                       rptBufferRef.current = result.buffer
                       setIsPlaying(true)
@@ -8832,7 +8848,7 @@ export function DubVerseEditor({
                           if (audioContextRef.current) {
                             const newStart = Math.max(0, originalStart + deltaTime)
                             const newEnd = Math.max(0, originalEnd + deltaTime)
-                            requestRPTStitch(
+                            requestStitchWith(
                               displaySegments.map((seg, i) => ({
                                 ...seg,
                                 start_time: i === index ? newStart : seg.start_time,
@@ -8842,10 +8858,7 @@ export function DubVerseEditor({
                                 audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
                                 committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
                               })),
-                              videoDuration,
                               audioContextRef.current,
-                              () => {},
-                              (result) => { if (result) rptBufferRef.current = result.buffer },
                             )
                           }
                           setDraggingSegment(null)
