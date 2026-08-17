@@ -4,6 +4,7 @@ import re
 import math
 import shutil
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 import logging
@@ -151,6 +152,38 @@ MEANING_DIVERGENCE_THRESHOLD = 0.7
 # keep their full music-and-effects bed. Remove this once the RunPod worker
 # returns the stems it already produces on GPU.
 ACCOMPANIMENT_MAX_DURATION_S = 600
+
+
+def atomic_write_json(path: str, data, indent: int = 2) -> None:
+    """Write JSON so a reader can never see a half-written file.
+
+    segments.json is rewritten in full by every regenerate and commit call while
+    the editor polls it. A plain open(path, "w") truncates first, so a write that
+    is interrupted — or that overlaps another writer — leaves invalid JSON on
+    disk. That is exactly how an 839-segment file was found cut off partway
+    through segment 634, taking 206 segments with it and 500ing the editor.
+
+    Writing a sibling temp file and os.replace() makes the swap atomic: a reader
+    gets either the whole old file or the whole new one.
+
+    This guarantees VALIDITY, not serialisation — two overlapping
+    read-modify-write cycles can still lose an update. Preventing that needs a
+    lock, which is a larger change.
+    """
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".segments-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=indent, ensure_ascii=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 class DubbingService:
@@ -1267,10 +1300,19 @@ class DubbingService:
                     logger.warning(f"[MEANING-DIVERGENCE] check failed: {e}")
                     return (None, None)
 
+            # Stage clock. Wall-clock per phase, so "the dub is slow" can be
+            # answered with a number instead of a guess. Cheap enough to leave in.
+            _stage_t = {"start": time.monotonic()}
+
             logger.info(f"[TTS] Launching {len(transcript)} TTS calls in parallel...")
             tts_results = await asyncio.gather(
                 *[_synthesise_one(i, seg) for i, seg in enumerate(transcript)],
                 return_exceptions=False,
+            )
+            _stage_t["tts"] = time.monotonic()
+            logger.info(
+                f"[STAGE] tts: {_stage_t['tts'] - _stage_t['start']:.1f}s "
+                f"({len(transcript)} segments, parallel)"
             )
             logger.info("[TTS] All parallel TTS calls complete — running fit/trim pass")
 
@@ -1623,13 +1665,25 @@ class DubbingService:
             merged_audio = os.path.join(output_dir, "dubbed_audio.wav")
             # video_duration already computed above (before gap recovery)
 
+            # Everything between the TTS gather and here is the sequential
+            # per-segment fit/trim/loudness pass — the one stage that does not
+            # use the box's other cores.
+            _stage_t["fit"] = time.monotonic()
+            logger.info(
+                f"[STAGE] fit/trim (sequential): {_stage_t['fit'] - _stage_t['tts']:.1f}s"
+            )
+
             success = await asyncio.to_thread(
                 self._merge_audio_segments,
                 audio_segments,
                 merged_audio,
                 video_duration,
             )
-            
+            _stage_t["merge"] = time.monotonic()
+            logger.info(
+                f"[STAGE] merge: {_stage_t['merge'] - _stage_t['fit']:.1f}s"
+            )
+
             if not success:
                 raise RuntimeError("Failed to merge audio segments (ffmpeg error).")
 
@@ -1639,7 +1693,19 @@ class DubbingService:
                 self._replace_audio_in_video, video_path, merged_audio, output_video,
                 accompaniment_path,
             )
-            
+            _stage_t["mux"] = time.monotonic()
+            logger.info(
+                f"[STAGE] mux: {_stage_t['mux'] - _stage_t['merge']:.1f}s"
+            )
+            logger.info(
+                f"[STAGE-SUMMARY] tts={_stage_t['tts'] - _stage_t['start']:.1f}s "
+                f"fit={_stage_t['fit'] - _stage_t['tts']:.1f}s "
+                f"merge={_stage_t['merge'] - _stage_t['fit']:.1f}s "
+                f"mux={_stage_t['mux'] - _stage_t['merge']:.1f}s "
+                f"total={_stage_t['mux'] - _stage_t['start']:.1f}s "
+                f"segments={len(transcript)}"
+            )
+
             if success:
                 logger.info(f"Dubbed video created: {output_video}")
                 engine_summary = "unknown"
@@ -3732,8 +3798,7 @@ class DubbingService:
 
         if not stage:
             data["regenerated_at"] = datetime.utcnow().isoformat() + "Z"
-            with open(segments_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            atomic_write_json(segments_path, data)
 
             try:
                 from app.services.supabase_client import upsert_segments
@@ -3820,8 +3885,7 @@ class DubbingService:
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         data["last_remixed_at"] = datetime.utcnow().isoformat() + "Z"
-        with open(segments_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        atomic_write_json(segments_path, data)
 
         logger.info(f"[REMIX] job={job_id} segments={len(merge_segments)} elapsed={elapsed_ms}ms")
         return {

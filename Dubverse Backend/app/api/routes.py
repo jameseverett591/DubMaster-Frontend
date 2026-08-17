@@ -45,7 +45,7 @@ from app.pipeline.diarize_audio import diarize_audio
 from app.pipeline.transcribe_audio import transcribe_audio
 from app.pipeline.velma_diarize import velma_diarize
 from app.pipeline.classify_speakers import classify_speakers
-from app.services.dubbing_service import dubbing_service
+from app.services.dubbing_service import dubbing_service, atomic_write_json
 from app.services.lipsync_service import lipsync_service
 from app.services.transcription_service import transcription_service
 from app.services.elevenlabs_tts import elevenlabs_tts
@@ -3445,8 +3445,7 @@ def _persist_job_metadata_field(job_id: str, field: str, value) -> None:
         with open(segments_path, "r", encoding="utf-8") as f:
             data = _json.load(f)
         data[field] = value
-        with open(segments_path, "w", encoding="utf-8") as f:
-            _json.dump(data, f, indent=2, ensure_ascii=False)
+        atomic_write_json(segments_path, data)
     except Exception as e:
         logger.warning(f"Job {job_id}: failed to persist {field} to segments.json: {e}")
 
@@ -4390,8 +4389,7 @@ async def translate_only(request: DubRequest, http_request: Request):
             for seg in transcript_dicts
         ],
     }
-    with open(segments_path, "w", encoding="utf-8") as f:
-        _json_to.dump(payload, f, indent=2, ensure_ascii=False)
+    atomic_write_json(segments_path, payload)
 
     await job_manager.update_job_status(
         request.job_id,
@@ -5461,8 +5459,7 @@ async def rediarize_with_velma(job_id: str, request: Request):
         write_data = segments_doc
     else:
         write_data = disk_segs
-    with open(segments_path, "w", encoding="utf-8") as f:
-        _json.dump(write_data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(segments_path, write_data)
 
     # Update in-memory job transcript segments too
     if job.transcript and job.transcript.segments:
@@ -6079,8 +6076,7 @@ async def retranslate_job(job_id: str, request: Request):
                             "auto_split": True,
                         })
             _seg_data["segments"] = new_disk_segs
-            with open(_segments_path, "w", encoding="utf-8") as sf:
-                _json.dump(_seg_data, sf, indent=2, ensure_ascii=False)
+            atomic_write_json(_segments_path, _seg_data)
             logger.info(f"[RETRANSLATE] Rebuilt segments.json: {len(_disk_segs)} → {len(new_disk_segs)} entries")
     except Exception as exc:
         logger.warning(f"[RETRANSLATE] Could not update segments.json: {exc}")
@@ -6490,8 +6486,7 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     if paired_with_next is not None:
         seg["paired_with_next"] = paired_with_next
     data["segments"] = segs
-    with open(segments_path, "w", encoding="utf-8") as f:
-        _json.dump(data, f, indent=2, ensure_ascii=False)
+    atomic_write_json(segments_path, data)
     return {"status": "ok", "job_id": job_id, "index": index}
 
 
@@ -6559,8 +6554,7 @@ async def set_chunk_status(job_id: str, body: dict):
         data = _json.load(f)
     chunk_status = data.setdefault("chunk_status", {})
     chunk_status[str(chunk_index)] = status
-    with open(segments_path, "w", encoding="utf-8") as f:
-        _json.dump(data, f, indent=2, ensure_ascii=False)
+    atomic_write_json(segments_path, data)
     return {"status": "ok", "job_id": job_id, "chunk_status": chunk_status}
 
 
@@ -6703,8 +6697,7 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest):
     data["segments"] = result
     data["synced_at"] = _dt.utcnow().isoformat() + "Z"
 
-    with open(segments_path, "w", encoding="utf-8") as f:
-        _json.dump(data, f, indent=2, ensure_ascii=False)
+    atomic_write_json(segments_path, data)
 
     from app.services.segment_validation import validate_segments
     validate_segments(job_id, result)
@@ -6758,8 +6751,7 @@ async def reset_segment(job_id: str, index: int):
     ):
         seg.pop(key, None)
     data["segments"] = segs
-    with open(segments_path, "w", encoding="utf-8") as f:
-        _json.dump(data, f, indent=2, ensure_ascii=False)
+    atomic_write_json(segments_path, data)
     try:
         supabase_writer.table("segments").update({
             "emotion_tag": None,
@@ -6972,8 +6964,7 @@ async def perform_segment(
                "respeecher_fits", "respeecher_duration"):
         seg.pop(_k, None)
 
-    with open(segments_path, "w", encoding="utf-8") as f:
-        _json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(segments_path, data)
 
     logger.info(
         f"[PERFORM] job {job_id} seg {index}: {os.path.basename(perf_path)} "
@@ -7053,8 +7044,7 @@ async def delete_seed_history_entry(job_id: str, index: int, seed: int):
         raise HTTPException(status_code=404, detail=f"Seed {seed} not in this segment's history")
 
     seg["respeecher_seed_history"] = remaining
-    with open(segments_path, "w", encoding="utf-8") as f:
-        _json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(segments_path, data)
 
     logger.info(f"[SEEDS] job {job_id} seg {index}: removed seed {seed} ({len(remaining)} left)")
     return {"status": "ok", "respeecher_seed_history": remaining}
@@ -7090,11 +7080,22 @@ async def set_seed_kept(job_id: str, index: int, seed: int, body: dict):
         raise HTTPException(status_code=404, detail=f"Seed {seed} not in this segment's history")
 
     entry["kept"] = kept
-    with open(segments_path, "w", encoding="utf-8") as f:
-        _json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(segments_path, data)
 
     logger.info(f"[SEEDS] job {job_id} seg {index}: seed {seed} kept={kept}")
     return {"status": "ok", "respeecher_seed_history": history}
+
+
+def _in_window(seg: dict, start: Optional[float], end: Optional[float]) -> bool:
+    """True when a segment belongs to the chunk window, or when no window is
+    given. Ownership is by start time — the same rule the editor's chunk bar
+    uses — so a line straddling the boundary belongs to one window only."""
+    if start is None or end is None:
+        return True
+    s = seg.get("committed_start_time")
+    if s is None:
+        s = seg.get("start", 0) or 0
+    return start <= s < end
 
 
 class ApplyVoiceRequest(BaseModel):
@@ -7105,6 +7106,12 @@ class ApplyVoiceRequest(BaseModel):
     # so existing 3-field callers are unchanged.
     traits: Optional[List[str]] = None
     pitch: Optional[int] = None
+    # Chunk lens: confine the change to the window being edited. Omitted -> the
+    # whole film, so existing callers behave exactly as before. A voice chosen
+    # while reviewing one 5-minute window should not silently rewrite the
+    # speaker's lines across the other two hours.
+    window_start: Optional[float] = None
+    window_end: Optional[float] = None
 
 
 @router.post("/segments/apply-voice/{job_id}", dependencies=[Depends(_dep_job_access)])
@@ -7143,8 +7150,16 @@ async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
             "nuance_markers": s.get("nuance_markers"),
         }
         for s in data.get("segments", [])
-        if s.get("speaker") == body.speaker_id and s.get("transcript_index") is not None
+        if s.get("speaker") == body.speaker_id
+        and s.get("transcript_index") is not None
+        and _in_window(s, body.window_start, body.window_end)
     ]
+    logger.info(
+        "apply-voice: job %s speaker %s -> %d segment(s)%s",
+        job_id, body.speaker_id, len(targets),
+        f" in window {body.window_start:.0f}-{body.window_end:.0f}s"
+        if body.window_start is not None and body.window_end is not None else " (whole film)",
+    )
 
     regenerated, skipped_locked, failed = [], [], []
     for t in targets:
