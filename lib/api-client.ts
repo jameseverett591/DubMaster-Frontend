@@ -1432,11 +1432,27 @@ class DubVerseAPIClient {
       staged_path?: string
     }
   ): Promise<void> {
-    await this._fetch(`${this.baseURL}/api/segment/commit/${jobId}/${index}`, {
+    // Edits commit as they are made, so this call IS the save — a failure here
+    // loses the user's work. _fetch resolves on 4xx/5xx like fetch does, so
+    // without this check a rejected write looked identical to a successful one
+    // and every caller's .catch stayed silent.
+    const res = await this._fetch(`${this.baseURL}/api/segment/commit/${jobId}/${index}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify(data),
     })
+    if (!res.ok) {
+      const detail = await this._detail(res).catch(() => res.statusText)
+      // Announced globally as well as thrown: most call sites are
+      // fire-and-forget, so throwing alone would leave the user with no signal
+      // that their edit did not persist.
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('segment-commit-failed', {
+          detail: { jobId, index, error: detail },
+        }))
+      }
+      throw new Error(detail)
+    }
   }
 
   /** Reset the deletion countdown on unrendered work — "I'm still working on
@@ -1488,6 +1504,8 @@ class DubVerseAPIClient {
     jobId: string,
     speakerId: string,
     voiceId: string,
+    /** Chunk lens: confine the change to this window. Omitted -> whole film. */
+    window?: { start: number; end: number },
   ): Promise<{
     status: string
     voice_id: string
@@ -1498,7 +1516,11 @@ class DubVerseAPIClient {
     const res = await this._fetch(`${this.baseURL}/api/segments/apply-voice/${jobId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
-      body: JSON.stringify({ speaker_id: speakerId, voice_id: voiceId }),
+      body: JSON.stringify({
+        speaker_id: speakerId,
+        voice_id: voiceId,
+        ...(window ? { window_start: window.start, window_end: window.end } : {}),
+      }),
     })
     if (!res.ok) throw new Error(`apply-voice failed: ${res.status}`)
     return res.json()
