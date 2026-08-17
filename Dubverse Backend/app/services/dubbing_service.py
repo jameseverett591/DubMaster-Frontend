@@ -2391,12 +2391,107 @@ class DubbingService:
             logger.error(f"Audio trim error: {e}")
             return False
     
+    def _merge_audio_segments_mixdown(
+        self,
+        segments: List[Dict],
+        output_path: str,
+        total_duration: float,
+    ) -> bool:
+        """Linear-time mixdown: decode each segment to PCM and sum it into a
+        preallocated buffer at its placed offset, then one loudnorm pass.
+
+        Replaces the N-input ffmpeg amix for large segment counts — the
+        filter-graph cost of that path grows superlinearly (840 inputs took
+        ~40 minutes of single-core CPU on a 105-minute film). Segments are
+        non-overlapping by construction (the fit loop guarantees it), so
+        summing is exact — same as amix normalize=0.
+
+        Memory: duration * 44.1k * 2ch * 4B (~2.3 GB at 2 hours) — fine on
+        the 24 GB container, and this path is what makes feature-length
+        merges complete in minutes instead of most of an hour.
+        """
+        import numpy as np
+        import soundfile as sf
+        from concurrent.futures import ThreadPoolExecutor
+
+        segments_sorted = sorted(segments, key=lambda x: x["start"])
+        if not segments_sorted:
+            return False
+
+        sr = 44100
+        total_samples = int(total_duration * sr) + sr  # 1s headroom
+        mix = np.zeros((total_samples, 2), dtype=np.float32)
+
+        def _decode(path: str) -> Optional["np.ndarray"]:
+            cmd = [
+                "ffmpeg", "-v", "error", "-i", path,
+                "-f", "f32le", "-acodec", "pcm_f32le",
+                "-ar", str(sr), "-ac", "2", "-",
+            ]
+            proc = subprocess.run(cmd, capture_output=True)
+            if proc.returncode != 0 or not proc.stdout:
+                logger.warning(f"[MERGE] decode failed for {path}")
+                return None
+            data = np.frombuffer(proc.stdout, dtype=np.float32)
+            if data.size % 2:
+                data = data[:-1]
+            return data.reshape(-1, 2)
+
+        # Decodes are subprocess-bound — run a bounded pool so 839 files cost
+        # seconds, not a minute each in series.
+        paths = [seg["path"] for seg in segments_sorted]
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            decoded = list(pool.map(_decode, paths))
+
+        for seg, data in zip(segments_sorted, decoded):
+            if data is None or not len(data):
+                continue
+            offset = int(round(float(seg["start"]) * sr))
+            end = min(offset + len(data), total_samples)
+            if end <= offset:
+                continue
+            mix[offset:end] += data[: end - offset]
+
+        # Match the amix path's output treatment: loudnorm to the same target.
+        tmp_raw = output_path + ".raw.wav"
+        sf.write(tmp_raw, mix, sr, subtype="PCM_16")
+        norm = subprocess.run(
+            [
+                "ffmpeg", "-y", "-v", "error", "-i", tmp_raw,
+                "-af", "loudnorm=I=-16:TP=-1:LRA=11",
+                # Truncate to the video duration exactly, as the amix path's
+                # `-t` did — the mixdown buffer carries 1s of headroom.
+                "-t", str(total_duration),
+                "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le",
+                output_path,
+            ],
+            capture_output=True,
+        )
+        try:
+            os.remove(tmp_raw)
+        except OSError:
+            pass
+        if norm.returncode != 0:
+            logger.error(f"[MERGE] loudnorm pass failed: {norm.stderr}")
+            return False
+        logger.info(f"[MERGE] numpy mixdown: {len(segments_sorted)} segments -> {output_path}")
+        return os.path.exists(output_path)
+
     def _merge_audio_segments(
         self,
         segments: List[Dict],
         output_path: str,
         total_duration: float,
     ) -> bool:
+        # Fast path first: linear-time numpy mixdown. The ffmpeg amix graph
+        # below is superlinear in input count — 840 segments took ~40 minutes
+        # on a 105-minute film. The mixdown is linear in total audio size.
+        try:
+            if self._merge_audio_segments_mixdown(segments, output_path, total_duration):
+                return True
+            logger.warning("[MERGE] numpy mixdown unavailable/failed — falling back to ffmpeg amix")
+        except Exception as e:
+            logger.warning(f"[MERGE] mixdown failed ({e}) — falling back to ffmpeg amix")
         try:
             segments_sorted = sorted(segments, key=lambda x: x["start"])
             if not segments_sorted:
