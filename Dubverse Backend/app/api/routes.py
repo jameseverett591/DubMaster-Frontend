@@ -919,6 +919,31 @@ def _velma_fit_upload(src: str, job_id: str) -> str:
         return src
 
 
+# Longest source we will run local CPU separation on inside the speaker-split
+# fallback. Mirrors dubbing_service.ACCOMPANIMENT_MAX_DURATION_S in intent:
+# beyond this, separation costs more than the accuracy it buys.
+SPLIT_SEPARATION_MAX_DURATION_S = 600
+
+
+def _probe_duration(path: str) -> float:
+    """Source duration in seconds; infinity if it cannot be read.
+
+    Callers gate hours-long CPU work on this. An unreadable duration therefore
+    returns inf, not 0.0 — failing toward the guard, so a broken probe can never
+    be what starts a feature-length Demucs run.
+    """
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True,
+        )
+        parsed = float((out.stdout or "").strip() or 0)
+        return parsed if parsed > 0 else float("inf")
+    except Exception:
+        return float("inf")
+
+
 def _f0_split_speakers(segments, video_path: str, n_speakers: int, job_id: str):
     """
     Fallback when pyannote collapses all segments to 1 speaker:
@@ -934,12 +959,27 @@ def _f0_split_speakers(segments, video_path: str, n_speakers: int, job_id: str):
         return segments
 
     vocals_path = None
-    try:
-        sep = separate_audio(video_path, job_id=job_id)
-        if sep.get("status") == "ok":
-            vocals_path = sep.get("vocals_path")
-    except Exception:
-        pass
+    # Same long-form hazard as the mix guard: Demucs has no GPU in this
+    # container, so separating a feature-length film here would block speaker
+    # splitting for over an hour. Separation only sharpens the F0 estimate —
+    # extract_audio falls back to the raw track below — so on long sources we
+    # take the slightly noisier pitch reading instead of the stall. Cached
+    # stems, if some earlier stage produced them, are still used.
+    _cached_vocals = os.path.join("data", "separated", f"{job_id}_vocals.wav")
+    if os.path.isfile(_cached_vocals) and os.path.getsize(_cached_vocals) > 1000:
+        vocals_path = _cached_vocals
+    elif _probe_duration(video_path) > SPLIT_SEPARATION_MAX_DURATION_S:
+        logger.warning(
+            f"[F0-SPLIT] Job {job_id}: skipping separation on long-form source "
+            f"— clustering pitch from the raw track"
+        )
+    else:
+        try:
+            sep = separate_audio(video_path, job_id=job_id)
+            if sep.get("status") == "ok":
+                vocals_path = sep.get("vocals_path")
+        except Exception:
+            pass
 
     try:
         src = extract_audio(vocals_path or video_path)
