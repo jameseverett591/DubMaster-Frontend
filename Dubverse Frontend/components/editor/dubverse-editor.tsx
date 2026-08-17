@@ -1140,7 +1140,22 @@ export function DubVerseEditor({
     }
   }, [setActiveChunk, setCurrentTime, setIsPlaying, zoomLevel])
 
-  /** Chunk navigation goes through here: it asks first when work is staged. */
+  // commitOrStage is declared further down (it needs chunkMode and jobId), but
+  // four edit handlers above it must reach it. A ref keeps them on the current
+  // version instead of one closed over from an earlier render.
+  const commitOrStageRef = useRef<
+    ((ti: number, data: Record<string, unknown>) => Promise<unknown>) | null
+  >(null)
+
+  // Same reason: the timeline's native drop listener is installed above
+  // applyVoiceToSpeaker's declaration but must call it.
+  const applyVoiceToSpeakerRef = useRef<
+    ((speakerId: string, voiceId: string) => Promise<unknown>) | null
+  >(null)
+
+  /** Chunk navigation goes through here: it asks first when work is staged.
+   *  Auditioned voices, speeds and emotions live only in staged state, so
+   *  leaving a window without asking would throw them away. */
   const requestChunkSwitch = useCallback((target: number) => {
     if (Object.keys(stagedEdits).length === 0) {
       goToChunk(target)
@@ -1231,7 +1246,7 @@ export function DubVerseEditor({
           committed_end_time: newEnd,
         })
         applyFlagOutcome(drag.index, 'timing')
-        apiClient.commitSegmentTiming(jobId, displaySegmentsRef.current[drag.index]?.transcript_index ?? drag.index, {
+        commitOrStageRef.current!(displaySegmentsRef.current[drag.index]?.transcript_index ?? drag.index, {
           committed_start_time: newStart,
           committed_end_time: newEnd,
         }).catch(err => console.warn('[COMMIT-TIMING]', err))
@@ -1352,15 +1367,24 @@ export function DubVerseEditor({
             // handled by this native listener rather than that one, so dropping
             // onto the Dubbed track fell through to the backend's unknown-voice
             // backstop instead of saying what it meant.
-            handleGenerateSpeechRef.current(hit.index, parsed.voice_id, undefined, undefined, 'fish-audio').then(ok => {
-              if (ok) {
-                console.log('[VOICE-DROP] regen succeeded — showing applied chip (native)', { index: hit.index, voiceName: parsed.name })
-                setVoiceAppliedFeedback({ segmentIndex: hit.index, voiceName: parsed.name })
-                setTimeout(() => setVoiceAppliedFeedback(null), 2200)
-              } else {
-                console.warn('[VOICE-DROP] regen failed — no confirmation chip (native)')
-              }
-            })
+            if (speakerId) {
+              // Same outcome as the transcript-row drop and the Assign to…
+              // dropdown: the voice belongs to the SPEAKER across this window,
+              // not just to the one line it was dropped on.
+              setVoiceAppliedFeedback({ segmentIndex: hit.index, voiceName: parsed.name })
+              setTimeout(() => setVoiceAppliedFeedback(null), 2200)
+              applyVoiceToSpeakerRef.current?.(speakerId, parsed.voice_id)
+            } else {
+              handleGenerateSpeechRef.current(hit.index, parsed.voice_id, undefined, undefined, 'fish-audio').then(ok => {
+                if (ok) {
+                  console.log('[VOICE-DROP] regen succeeded — showing applied chip (native)', { index: hit.index, voiceName: parsed.name })
+                  setVoiceAppliedFeedback({ segmentIndex: hit.index, voiceName: parsed.name })
+                  setTimeout(() => setVoiceAppliedFeedback(null), 2200)
+                } else {
+                  console.warn('[VOICE-DROP] regen failed — no confirmation chip (native)')
+                }
+              })
+            }
           }
         } catch (err) {
           console.error('[VOICE-DROP] payload parse failed (native)', err)
@@ -2962,8 +2986,12 @@ export function DubVerseEditor({
         stopAllRptAudioRef.current()
         video.pause()
         setIsPlaying(false)
-        setCurrentTime(chunkEndRef.current)
-        setActiveChunk((useEditorStore.getState().activeChunkIndex ?? 0) + 1)
+        // Land just inside the window that was playing, not on its boundary.
+        // chunkEnd is the NEXT window's start, so stopping exactly there made
+        // the derived auto-follow advance the window — and windowed rendering
+        // then hid the five minutes the user had just watched. Stop here and
+        // the segments stay on screen, ready to work on.
+        setCurrentTime(chunkEndRef.current - 0.05)
       } else {
         // Scroll the timeline no more than every 500ms, and only when the playhead
         // leaves the middle third. Setting scrollLeft on a timeline with hundreds
@@ -3280,7 +3308,7 @@ export function DubVerseEditor({
             committed_start_time: newStartTime,
             committed_end_time: newEndTime,
           })
-          apiClient.commitSegmentTiming(jobId, segment.transcript_index ?? index, {
+          commitOrStageRef.current!(segment.transcript_index ?? index, {
             committed_start_time: newStartTime,
             committed_end_time: newEndTime,
           }).catch(err => console.warn('[GROUP-MOVE]', err))
@@ -3513,6 +3541,10 @@ export function DubVerseEditor({
         // Engine-specific extras (Respeecher sampling_params / seed). Last so an
         // explicit caller value wins over the defaults assembled above.
         ...(extraPayload ?? {}),
+        // Audition mode. In chunk mode the take is written as a *_staged file
+        // and segments.json is left alone, so trying a voice, speed or emotion
+        // costs nothing until the user presses Save.
+        stage: chunkModeRef.current,
       }
       console.log('[REGEN] payload', { activeIndex, regenPayload })
       const response = await apiClient.regenerateSegment(jobId, segment.transcript_index ?? activeIndex, regenPayload)
@@ -3530,6 +3562,15 @@ export function DubVerseEditor({
       const audio_url = filename
         ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}`
         : segment.audio_url
+      // Record where the audition landed. Save reads stagedPath to promote the
+      // take (the backend then sets both path and committed_audio_url); without
+      // this the file would sit on disk and Save would promote nothing.
+      if (chunkModeRef.current) {
+        stageEdit(segment.transcript_index ?? activeIndex, {
+          stagedPath: response.segment.path,
+          stagedAudioUrl: audio_url,
+        })
+      }
       // If the backend GREW the segment into neighboring gaps to fit the audio,
       // adopt its new committed timing so the timeline shows the bigger slot (and we
       // don't then shrink it back). Otherwise keep the frontend's timing as the source
@@ -3540,7 +3581,7 @@ export function DubVerseEditor({
       if (expanded) {
         updateSegment(activeIndex, { start_time: bStart, end_time: bEnd })
         commitSegmentChanges(activeIndex, { committed_start_time: bStart, committed_end_time: bEnd })
-        apiClient.commitSegmentTiming(jobId, segment.transcript_index ?? activeIndex, {
+        commitOrStageRef.current!(segment.transcript_index ?? activeIndex, {
           committed_start_time: bStart, committed_end_time: bEnd,
         }).catch(err => console.warn('[REGEN-EXPAND]', err))
         setImportedSegments(prev => prev ? prev.map((seg, i) => i === activeIndex
@@ -3567,7 +3608,7 @@ export function DubVerseEditor({
         shrunkEnd = Math.max(shrunkEnd, segment.start_time + 0.1)
         updateSegment(activeIndex, { end_time: shrunkEnd })
         commitSegmentChanges(activeIndex, { committed_end_time: shrunkEnd })
-        apiClient.commitSegmentTiming(jobId, segment.transcript_index ?? activeIndex, {
+        commitOrStageRef.current!(segment.transcript_index ?? activeIndex, {
           committed_end_time: shrunkEnd,
         }).catch(err => console.warn('[AUTO-SHRINK]', err))
       }
@@ -3735,6 +3776,45 @@ export function DubVerseEditor({
   chunkBoundariesRef.current = chunkBoundaries
   const stagedEditCount = Object.keys(stagedEdits).length
 
+  // Staged edits are keyed by transcript_index, which is meaningless across
+  // jobs: index 42 is a different line in a different film. Persisting them
+  // through a reload is what makes this reachable, so discard any that belong
+  // to another job before they can be promoted onto this one's segments.
+  useEffect(() => {
+    if (!jobId) return
+    const owner = useEditorStore.getState().stagedEditsJobId
+    if (owner && owner !== jobId) {
+      console.warn(`[staged] discarding staged edits from job ${owner} — now on ${jobId}`)
+      clearStagedEdits()
+    }
+    useEditorStore.setState({ stagedEditsJobId: jobId })
+  }, [jobId, clearStagedEdits])
+
+  // A commit that fails is lost work, and almost every call site is
+  // fire-and-forget. api-client announces failures globally; catching them here
+  // routes them into the same failedSegments banner and MAKE MOVIE gate that
+  // already exist, so a silent loss becomes a visible one.
+  const failedSegmentsRef = useRef(failedSegments)
+  failedSegmentsRef.current = failedSegments
+  useEffect(() => {
+    const onCommitFailed = (e: Event) => {
+      const { index, error } = (e as CustomEvent).detail ?? {}
+      if (typeof index !== 'number') return
+      setFailedSegments({
+        ...failedSegmentsRef.current,
+        [index]: error || 'Edit failed to save',
+      })
+    }
+    window.addEventListener('segment-commit-failed', onCommitFailed)
+    return () => window.removeEventListener('segment-commit-failed', onCommitFailed)
+  }, [setFailedSegments])
+
+  // Edits commit as they are made, so "reviewed" — not "saved" — is what gates
+  // the render: Save marks a window as one the user has been through. Short
+  // films have no windows, so there is nothing to gate on.
+  const savedWindowCount = Object.values(chunkStatusMap).filter(s => s === 'saved').length
+  const allWindowsReviewed = !chunkMode || savedWindowCount >= chunkCount
+
   // Seed the persisted per-chunk status (from segments.json) once per job.
   useEffect(() => {
     if (initialChunkStatus) setChunkStatusMap(initialChunkStatus as Record<string, 'saved' | 'dirty'>)
@@ -3810,6 +3890,7 @@ export function DubVerseEditor({
     }
     return Promise.resolve()
   }, [jobId, stageEdit])
+  commitOrStageRef.current = commitOrStage
   displaySegmentsRef.current = displaySegments
 
   // Manual "make room" for a segment whose audio won't fit even after the automatic
@@ -3866,7 +3947,15 @@ export function DubVerseEditor({
     if (indices.length === 0) return
     setSpeakerRegenQueue(new Set(indices))
     try {
-      const res = await apiClient.applyVoiceToSpeaker(jobId, speakerId, voiceId)
+      // Confine the change to the window under review. Assigning a voice while
+      // working on one 5-minute block should not rewrite that speaker across
+      // the rest of the film.
+      const res = await apiClient.applyVoiceToSpeaker(
+        jobId, speakerId, voiceId,
+        chunkModeRef.current
+          ? { start: chunkStartRef.current, end: chunkEndRef.current }
+          : undefined,
+      )
       const byTi = new Map(res.regenerated.map(r => [r.transcript_index, r]))
       setImportedSegments(prev => {
         const base = prev ?? displaySegmentsRef.current
@@ -3908,6 +3997,7 @@ export function DubVerseEditor({
       setSpeakerRegenQueue(new Set())
     }
   }, [jobId, videoDuration])
+  applyVoiceToSpeakerRef.current = applyVoiceToSpeaker
 
   useEffect(() => {
     if (pendingAutoRegenRef.current === null) return
@@ -3990,7 +4080,12 @@ export function DubVerseEditor({
     }
 
     clearStagedEditsFor(succeeded)
-    setFailedSegments({ ...failedSegments, ...failed })
+    // Drop segments that have now committed. Merging failures alone meant one
+    // transient error marked a segment failed forever — the red banner stayed
+    // up and MAKE MOVIE stayed blocked even after a successful retry.
+    const nextFailed = { ...failedSegments }
+    succeeded.forEach(ti => { delete nextFailed[ti] })
+    setFailedSegments({ ...nextFailed, ...failed })
     setSaveProgress(null)
     return { succeeded, failed }
   }, [stagedEdits, jobId, failedSegments, clearStagedEditsFor, setFailedSegments, setSaveProgress])
@@ -4038,16 +4133,33 @@ export function DubVerseEditor({
     const toSave = displaySegments
     if (!toSave.length) return
     setIsSaving(true)
-    // Staged takes first: they are the user's auditioned work, and promoting
-    // them before the bulk PATCH means the bulk pass writes over a segment that
-    // already points at the right audio.
-    await handleSaveStaged()
+    // Staged takes first: they are the user's auditioned work.
+    // Whatever it promotes is then EXCLUDED from the bulk pass below. The bulk
+    // PATCH sends the client's committed_audio_url, which for a staged segment
+    // still points at the pre-audition take — sending it would overwrite the
+    // take that was just promoted and silently discard the audition.
+    const { succeeded: promotedIndices } = await handleSaveStaged()
+    const promoted = new Set(promotedIndices)
     const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
     // Resolved once, not per segment — a Save can fan out to dozens of PATCHes.
     const authHeaders = await apiClient.ensureAuthHeaders()
     try {
       await Promise.all(
-        toSave.map((seg, i) =>
+        toSave.map((seg, i) => {
+          // Chunk mode saves the window you are working in, not the whole film.
+          // Un-scoped this fired one PATCH per segment — 839 on a feature — which
+          // looked like a hang and wrote back values that had not changed.
+          // Bail inside .map() rather than filtering: `i` feeds keyAt(i) for lock
+          // state, so a filtered index would write the wrong segment's locks.
+          // Same straddle-aware test as inActiveWindow, inlined because that
+          // callback is declared further down the component than this one.
+          const _segStart = seg.committed_start_time ?? seg.start_time ?? 0
+          const _segEnd = seg.committed_end_time ?? seg.end_time ?? _segStart
+          if (chunkMode && !(_segStart < chunkEnd && _segEnd > chunkStart)) return null
+          // Just promoted from a staged take — the server already holds the
+          // authoritative state for it.
+          if (promoted.has(seg.transcript_index ?? seg.index)) return null
+          return (
           // Address by transcript_index (the stable id the commit endpoint matches
           // on) — seg.index is array position and drifts after splits/inserts.
           // `locked` is written for every segment so Save is the authoritative
@@ -4069,8 +4181,23 @@ export function DubVerseEditor({
               text: seg.active_text ?? seg.target_text,
             }),
           })
-        )
+          )
+        })
       )
+      // Mark the window saved so its chip turns green and survives a reload.
+      // The bulk Save wrote committed_* for every segment but never recorded
+      // chunk_status, so nothing in the chunk bar ever went green.
+      if (chunkMode && activeChunk !== null && jobId) {
+        try {
+          await apiClient.setChunkStatus(jobId, activeChunk, 'saved')
+          // Reflect it locally too. chunkStatusMap is only filled at page load,
+          // so without this the chip stays amber until the user reloads — the
+          // save worked but looked like it hadn't.
+          setChunkStatusMap({ ...chunkStatusMap, [String(activeChunk)]: 'saved' })
+        } catch (err) {
+          console.error('[save] chunk-status write failed:', err)
+        }
+      }
       // Save project metadata so it appears in My Projects
       await apiClient.saveProject(jobId, {
         title,
@@ -4079,7 +4206,8 @@ export function DubVerseEditor({
     } finally {
       setIsSaving(false)
     }
-  }, [isSaving, displaySegments, jobId, title, targetLanguage, lockedSegments, lockedPairs, keyAt])
+  }, [isSaving, displaySegments, jobId, title, targetLanguage, lockedSegments, lockedPairs, keyAt,
+      chunkMode, chunkStart, chunkEnd, activeChunk, chunkStatusMap, setChunkStatusMap])
 
   // Flag outcome helpers — set both flag_status and correction_type together,
   // only on segments that are currently unreviewed and have flags.
@@ -4253,7 +4381,7 @@ export function DubVerseEditor({
       setEditingSegmentIndex(null)
       // Persist edited text to disk so regenerate_segment reads it from committed_adapted_text
       applyFlagOutcome(idx, 'text')
-      apiClient.commitSegmentTiming(jobId, displaySegments[idx]?.transcript_index ?? idx, { committed_adapted_text: text, text_locked: true }).catch(err =>
+      commitOrStage(displaySegments[idx]?.transcript_index ?? idx, { committed_adapted_text: text, text_locked: true }).catch(err =>
         console.warn('[saveEditing] failed to persist text to disk:', err)
       )
       // Auto-regen in Preview mode — 2 second debounce.
@@ -4309,7 +4437,7 @@ export function DubVerseEditor({
     })
     applyFlagOutcome(index, 'text')
     const ti = segs[index]?.transcript_index ?? index
-    apiClient.commitSegmentTiming(jobId, ti, { committed_adapted_text: text, text_locked: true }).catch(err =>
+    commitOrStage(ti, { committed_adapted_text: text, text_locked: true }).catch(err =>
       console.warn('[PASTE] failed to persist text:', err)
     )
     if (playbackMode === 'preview') {
@@ -4808,6 +4936,7 @@ export function DubVerseEditor({
                 isRebuilding ||
                 saveProgress !== null ||
                 Object.keys(stagedEdits).length > 0 ||
+                (!allWindowsReviewed && !releasedForRender) ||
                 (Object.keys(failedSegments).length > 0 && !releasedForRender)
               }
               title={
@@ -4815,7 +4944,9 @@ export function DubVerseEditor({
                   ? `Saving ${saveProgress.done} of ${saveProgress.total} — wait for the save to finish`
                   : Object.keys(stagedEdits).length > 0
                     ? `${Object.keys(stagedEdits).length} segment(s) staged but not saved — press Save first`
-                    : Object.keys(failedSegments).length > 0 && !releasedForRender
+                    : !allWindowsReviewed && !releasedForRender
+                      ? `${savedWindowCount} of ${chunkCount} windows reviewed — Save each window, or use Advanced ▸ Release for render`
+                      : Object.keys(failedSegments).length > 0 && !releasedForRender
                       ? `Segment(s) ${Object.keys(failedSegments).join(', ')} failed to save — fix them, or use Advanced ▸ Release for render`
                       : Object.keys(failedSegments).length > 0 && releasedForRender
                         ? `Released: rendering WITHOUT segment(s) ${Object.keys(failedSegments).join(', ')}`
@@ -5352,10 +5483,33 @@ export function DubVerseEditor({
                       </span>
                       {chunkMode ? ' in window' : ' total'}
                     </span>
+                    {chunkMode && (
+                      <>
+                        <span className="text-slate-700">|</span>
+                        {/* Progress across the whole film: how many windows are
+                            committed. Reads the same chunkStatusMap the chunk
+                            bar's green dots come from, so the two can't disagree. */}
+                        <span
+                          className="text-xs font-semibold text-emerald-400"
+                          title="Windows saved out of the whole film"
+                        >
+                          <span className="text-amber-300 tabular-nums">
+                            {String(
+                              Object.values(chunkStatusMap).filter(s => s === 'saved').length
+                            ).padStart(2, '0')}
+                          </span>
+                          {' of '}
+                          <span className="text-amber-300 tabular-nums">
+                            {String(chunkCount).padStart(2, '0')}
+                          </span>
+                          {' reviewed'}
+                        </span>
+                      </>
+                    )}
                     <span className="text-slate-700">|</span>
                     <span
                       className="text-xs font-semibold text-emerald-400"
-                      title="Segments edited but not yet saved"
+                      title="Auditioned edits not yet committed — press Save to keep them"
                     >
                       <span className="text-amber-300 tabular-nums">
                         {String(stagedEditCount).padStart(2, '0')}
@@ -6102,7 +6256,7 @@ export function DubVerseEditor({
                             (function persistCommittedText(idx) {
                               const ti = displaySegments[idx]?.transcript_index ?? idx
                               const text = displaySegments[idx]?.preview_text ?? undefined
-                              apiClient.commitSegmentTiming(jobId, ti, { committed_adapted_text: text, text_locked: true })
+                              commitOrStage(ti, { committed_adapted_text: text, text_locked: true })
                                 .catch(err => console.warn('[COMMIT] persist failed', err))
                             })(index)
                             setImportedSegments(prev => {
@@ -8671,7 +8825,7 @@ export function DubVerseEditor({
                             committed_start_time: Math.max(0, originalStart + deltaTime),
                             committed_end_time: Math.max(0, originalEnd + deltaTime),
                           })
-                          apiClient.commitSegmentTiming(jobId, segment.transcript_index ?? index, {
+                          commitOrStage(segment.transcript_index ?? index, {
                             committed_start_time: Math.max(0, originalStart + deltaTime),
                             committed_end_time: Math.max(0, originalEnd + deltaTime),
                           }).catch(err => console.warn('[COMMIT-TIMING]', err))
@@ -8685,7 +8839,7 @@ export function DubVerseEditor({
                               const pEnd = Math.max(0, effEnd(p) + deltaTime)
                               updateSegment(partnerIdx, { start_time: pStart, end_time: pEnd })
                               commitSegmentChanges(partnerIdx, { committed_start_time: pStart, committed_end_time: pEnd })
-                              apiClient.commitSegmentTiming(jobId, p.transcript_index ?? partnerIdx, {
+                              commitOrStage(p.transcript_index ?? partnerIdx, {
                                 committed_start_time: pStart, committed_end_time: pEnd,
                               }).catch(err => console.warn('[PAIR-MOVE]', err))
                               setImportedSegments(prev => {
@@ -8745,7 +8899,7 @@ export function DubVerseEditor({
                             const newStart = Math.max(0, Math.min(originalEnd - 0.1, originalStart + dx / PIXELS_PER_SECOND))
                             updateSegment(index, { start_time: newStart })
                             commitSegmentChanges(index, { committed_start_time: newStart })
-                            apiClient.commitSegmentTiming(jobId, segment.transcript_index ?? index, {
+                            commitOrStage(segment.transcript_index ?? index, {
                               committed_start_time: newStart,
                             }).catch(err => console.warn('[RESIZE-LEFT]', err))
                             setImportedSegments(prev => {
@@ -8792,7 +8946,7 @@ export function DubVerseEditor({
                             const newEnd = Math.max(originalStart + 0.1, originalEnd + dx / PIXELS_PER_SECOND)
                             updateSegment(index, { end_time: newEnd })
                             commitSegmentChanges(index, { committed_end_time: newEnd })
-                            apiClient.commitSegmentTiming(jobId, segment.transcript_index ?? index, {
+                            commitOrStage(segment.transcript_index ?? index, {
                               committed_end_time: newEnd,
                             }).catch(err => console.warn('[RESIZE-RIGHT]', err))
                             setImportedSegments(prev => {
@@ -9006,7 +9160,7 @@ export function DubVerseEditor({
                             committed_start_time: Math.max(0, originalStart + deltaTime),
                             committed_end_time: Math.max(0, originalEnd + deltaTime),
                           })
-                          apiClient.commitSegmentTiming(jobId, segment.transcript_index ?? index, {
+                          commitOrStage(segment.transcript_index ?? index, {
                             committed_start_time: Math.max(0, originalStart + deltaTime),
                             committed_end_time: Math.max(0, originalEnd + deltaTime),
                           }).catch(err => console.warn('[COMMIT-TIMING]', err))
@@ -9020,7 +9174,7 @@ export function DubVerseEditor({
                               const pEnd = Math.max(0, effEnd(p) + deltaTime)
                               updateSegment(partnerIdx, { start_time: pStart, end_time: pEnd })
                               commitSegmentChanges(partnerIdx, { committed_start_time: pStart, committed_end_time: pEnd })
-                              apiClient.commitSegmentTiming(jobId, p.transcript_index ?? partnerIdx, {
+                              commitOrStage(p.transcript_index ?? partnerIdx, {
                                 committed_start_time: pStart, committed_end_time: pEnd,
                               }).catch(err => console.warn('[PAIR-MOVE]', err))
                               setImportedSegments(prev => {
@@ -9096,7 +9250,7 @@ export function DubVerseEditor({
                             const newStart = Math.max(0, Math.min(originalEnd - 0.1, originalStart + dx / PIXELS_PER_SECOND))
                             updateSegment(index, { start_time: newStart })
                             commitSegmentChanges(index, { committed_start_time: newStart })
-                            apiClient.commitSegmentTiming(jobId, segment.transcript_index ?? index, {
+                            commitOrStage(segment.transcript_index ?? index, {
                               committed_start_time: newStart,
                             }).catch(err => console.warn('[DUBBED-RESIZE-LEFT]', err))
                             setImportedSegments(prev => {
@@ -9169,7 +9323,7 @@ export function DubVerseEditor({
                             const newEnd = Math.max(originalStart + 0.1, originalEnd + dx / PIXELS_PER_SECOND)
                             updateSegment(index, { end_time: newEnd })
                             commitSegmentChanges(index, { committed_end_time: newEnd })
-                            apiClient.commitSegmentTiming(jobId, segment.transcript_index ?? index, {
+                            commitOrStage(segment.transcript_index ?? index, {
                               committed_end_time: newEnd,
                             }).catch(err => console.warn('[DUBBED-RESIZE-RIGHT]', err))
                             setImportedSegments(prev => {
@@ -9607,7 +9761,7 @@ export function DubVerseEditor({
                       shrunkEnd = Math.max(shrunkEnd, seg.start_time + 0.1)
                       updateSegment(idx, { end_time: shrunkEnd })
                       commitSegmentChanges(idx, { committed_end_time: shrunkEnd })
-                      apiClient.commitSegmentTiming(jobId, seg.transcript_index ?? idx, {
+                      commitOrStage(seg.transcript_index ?? idx, {
                         committed_end_time: shrunkEnd,
                       }).catch(err => console.warn('[AUTO-SHRINK]', err))
                     }

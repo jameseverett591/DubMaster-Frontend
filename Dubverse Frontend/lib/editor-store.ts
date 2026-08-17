@@ -106,6 +106,10 @@ interface EditorState {
   // reload — Save is what makes it durable.
   activeChunkIndex: number | null
   stagedEdits: Record<number, StagedEdit>
+  /** Job the persisted stagedEdits belong to. Staged edits are keyed by
+   *  transcript_index, which means nothing across jobs — without this stamp a
+   *  reload could rehydrate one film's auditions onto another film's segments. */
+  stagedEditsJobId: string | null
   chunkStatusMap: Record<string, ChunkStatus>
   // Segments whose commit failed during a chunk Save. A save is
   // commit-what-you-can: the segments that succeed are durable, the ones that
@@ -194,7 +198,13 @@ interface EditorState {
   setAdaptationLoading: (loading: boolean) => void
 
   // Speaker voice actions
-  setSpeakerVoiceMap: (map: Record<string, string>) => void
+  /** Accepts a functional update as well as a plain map. Three call sites pass
+   *  `prev => ({...prev, [id]: voice})`; with an object-only setter that
+   *  FUNCTION was stored as the map itself, so every lookup returned undefined
+   *  and the speakers strip read "(no voice yet)" for everyone. */
+  setSpeakerVoiceMap: (
+    map: Record<string, string> | ((prev: Record<string, string>) => Record<string, string>)
+  ) => void
   updateSpeakerVoice: (speakerId: string, voiceKey: string) => void
   setSpeakerTraitsMap: (map: Record<string, string[]>) => void
   setSpeakerTraits: (speakerId: string, traits: string[]) => void
@@ -250,6 +260,7 @@ export const useEditorStore = create<EditorState>(
   failedSegments: {},
   saveProgress: null,
   stagedEdits: {},
+  stagedEditsJobId: null,
   chunkStatusMap: {},
   zoomLevel: 1,
   scrollPosition: 0,
@@ -297,7 +308,7 @@ export const useEditorStore = create<EditorState>(
       [transcriptIndex]: { ...state.stagedEdits[transcriptIndex], ...edit },
     },
   })),
-  clearStagedEdits: () => set({ stagedEdits: {} }),
+  clearStagedEdits: () => set({ stagedEdits: {}, stagedEditsJobId: null }),
   // Used after a partial save: the successes are dropped, the failures stay
   // staged so the user still has their work and can retry or re-edit.
   clearStagedEditsFor: (transcriptIndices) => set((state) => {
@@ -567,7 +578,9 @@ export const useEditorStore = create<EditorState>(
 
   setAdaptationLoading: (loading) => set({ isAdaptationLoading: loading }),
 
-  setSpeakerVoiceMap: (map) => set({ speakerVoiceMap: map }),
+  setSpeakerVoiceMap: (map) => set((state) => ({
+    speakerVoiceMap: typeof map === 'function' ? map(state.speakerVoiceMap) : map,
+  })),
   updateSpeakerVoice: (speakerId, voiceKey) => set((state) => ({
     speakerVoiceMap: { ...state.speakerVoiceMap, [speakerId]: voiceKey },
   })),
@@ -749,6 +762,12 @@ export const useEditorStore = create<EditorState>(
         currentTime: state.currentTime,
         zoomLevel: state.zoomLevel,
         scrollPosition: state.scrollPosition,
+        // Staged edits are auditions the user has not committed — the only
+        // state in the editor that exists nowhere else. Without persisting it,
+        // a refresh silently destroys unsaved work. Kept alongside its job id
+        // so one job's auditions can never be rehydrated onto another.
+        stagedEdits: state.stagedEdits,
+        stagedEditsJobId: state.importedSegmentsJobId,
       }),
     }
   )
