@@ -145,6 +145,13 @@ CONFIDENCE_FLAG_THRESHOLD = 0.65
 # score distributions from the first batch of review sessions.
 MEANING_DIVERGENCE_THRESHOLD = 0.7
 
+# Longest source we will separate locally before falling back to a
+# dialogue-only mix. Demucs has no GPU in this container, so beyond roughly ten
+# minutes it blocks the whole dub for hours. Short films stay under the cap and
+# keep their full music-and-effects bed. Remove this once the RunPod worker
+# returns the stems it already produces on GPU.
+ACCOMPANIMENT_MAX_DURATION_S = 600
+
 
 class DubbingService:
     def __init__(self):
@@ -704,18 +711,53 @@ class DubbingService:
             _acc_candidate = str(_sep_dir / f"{job_id}_accompaniment.wav")
             _voc_candidate = str(_sep_dir / f"{job_id}_vocals.wav")
 
-            if (
+            _cached_separation = (
                 os.path.exists(_acc_candidate)
                 and os.path.getsize(_acc_candidate) > 1000
                 and os.path.exists(_voc_candidate)
                 and os.path.getsize(_voc_candidate) > 1000
-            ):
+            )
+
+            # Long-form guard. Demucs runs on CPU here (no CUDA in this
+            # container) at well under real time, so a feature-length film spends
+            # hours separating before a single line is synthesised. The RunPod
+            # worker ALREADY separates on GPU during transcription but does not
+            # return its stems, so we would be paying for the same work twice —
+            # once fast and discarded, once slow and blocking.
+            #
+            # Above the threshold we skip it and mix dialogue-only. That loses
+            # the original music and effects bed, which is a real quality cost
+            # and the reason this is capped rather than removed: short films
+            # still get the full mix. The proper fix is the worker returning its
+            # stems, which is a change to an image outside this repo.
+            _src_duration = 0.0
+            if not _cached_separation:
+                try:
+                    _probe = subprocess.run(
+                        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                         "-of", "csv=p=0", video_path],
+                        capture_output=True, text=True,
+                    )
+                    _src_duration = float((_probe.stdout or "0").strip() or 0)
+                except Exception:
+                    # Unknown duration falls back to the transcript's own span
+                    # rather than assuming "short" and starting an hours-long run.
+                    _src_duration = max((s.get("end", 0) or 0) for s in transcript) if transcript else 0.0
+
+            if _cached_separation:
                 accompaniment_path = _acc_candidate
                 vocals_path = _voc_candidate
                 logger.info(
                     f"[SEPARATE] Reusing cached separation — skipping Demucs re-run "
                     f"(accompaniment={os.path.getsize(_acc_candidate)//1024}KB, "
                     f"vocals={os.path.getsize(_voc_candidate)//1024}KB)"
+                )
+            elif _src_duration > ACCOMPANIMENT_MAX_DURATION_S:
+                accompaniment_path = None
+                vocals_path = None
+                logger.warning(
+                    f"[MIX] Skipping accompaniment for long-form content "
+                    f"(duration={_src_duration:.0f}s) — GPU stems not available"
                 )
             else:
                 logger.info("[SEPARATE] Cached separation not found — running Demucs now")
