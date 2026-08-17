@@ -737,6 +737,10 @@ export function DubVerseEditor({
 }: DubVerseEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
+  const playheadRef = useRef<HTMLDivElement>(null)
+  const timeDisplayRef = useRef<HTMLSpanElement>(null)
+  const chunkBarRef = useRef<HTMLDivElement>(null)
+  const dragLastStateUpdateRef = useRef(0)
   const router = useRouter()
   const editorContainerRef = useRef<HTMLDivElement>(null)
   const waveformCanvasLRef = useRef<HTMLCanvasElement>(null)
@@ -1111,15 +1115,39 @@ export function DubVerseEditor({
   // that loses effort with no warning and no way back.
   const [pendingChunkSwitch, setPendingChunkSwitch] = useState<number | null>(null)
   const [chunkSwitchBusy, setChunkSwitchBusy] = useState<'save' | 'discard' | null>(null)
+  const isDraggingNeedleRef = useRef(false)
+  // Ref bridge to the RPT stop helper, which is declared later in the component.
+  const stopAllRptAudioRef = useRef<() => void>(() => {})
+  // Ref bridge to dynamic chunk boundaries, computed later in the component.
+  const chunkBoundariesRef = useRef<number[]>([0])
+
+  /** Jump the viewport and the playhead to a specific chunk. */
+  const goToChunk = useCallback((target: number) => {
+    if (videoRef.current) {
+      videoRef.current.pause()
+    }
+    stopAllRptAudioRef.current()
+    setIsPlaying(false)
+    const newStart = chunkBoundariesRef.current[target] ?? target * CHUNK_SECONDS
+    setActiveChunk(target)
+    setCurrentTime(newStart)
+    if (videoRef.current) {
+      videoRef.current.currentTime = newStart
+    }
+    const container = timelineRef.current
+    if (container) {
+      container.scrollLeft = Math.max(0, newStart * 40 * zoomLevel)
+    }
+  }, [setActiveChunk, setCurrentTime, setIsPlaying, zoomLevel])
 
   /** Chunk navigation goes through here: it asks first when work is staged. */
   const requestChunkSwitch = useCallback((target: number) => {
     if (Object.keys(stagedEdits).length === 0) {
-      setActiveChunk(target)
+      goToChunk(target)
       return
     }
     setPendingChunkSwitch(target)
-  }, [stagedEdits, setActiveChunk])
+  }, [stagedEdits, goToChunk])
 
   // resolveChunkSwitch is defined after handleSaveStaged (it calls it).
 
@@ -1479,8 +1507,13 @@ export function DubVerseEditor({
   const isRegeneratingRef = useRef(false)
   const isPlayingRef = useRef(isPlaying)
   isPlayingRef.current = isPlaying
+  const currentTimeRef = useRef(currentTime)
+  currentTimeRef.current = currentTime
   // Tracks where playback started so Stop returns to that position (not 0)
   const lastStartPosRef = useRef(0)
+  // AudioContext.currentTime when the latest RPT playback started, so the
+  // playhead can follow the audio even if the video element stalls.
+  const audioStartTimeRef = useRef<number | null>(null)
   // Pending regen while one is in flight (depth 1, last-write-wins).
   // engineOverride and extraPayload ride along: a deferred regen replayed without
   // them silently falls back to the segment's stored engine and loses any pinned
@@ -1918,6 +1951,7 @@ export function DubVerseEditor({
     rptSourcesRef.current.clear()
     rptSourceRef.current = null
   }, [])
+  stopAllRptAudioRef.current = stopAllRptAudio
 
   // Register a freshly-scheduled source so stopAllRptAudio can reach it.
   const registerRptSource = useCallback((src: AudioBufferSourceNode) => {
@@ -2628,20 +2662,17 @@ export function DubVerseEditor({
     }
   }, [importedVideoUrl, regenerateWaveform])
   
-  // Handle play/pause state changes
+  // Handle pause state changes. Play is driven synchronously from the play button
+  // so it stays inside the user gesture; a separate effect re-playing here can
+  // fail and then flip isPlaying back off, leaving RPT audio running while the
+  // video (and therefore the timeline) freezes.
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
-
-    if (isPlaying) {
-      video.play().catch((err) => {
-        console.log('[v0] Video play failed:', err)
-        setIsPlaying(false)
-      })
-    } else {
+    if (!isPlaying) {
       video.pause()
     }
-  }, [isPlaying, setIsPlaying])
+  }, [isPlaying])
 
   // RPT audio playback — separate effect to avoid hook rules violation
   useEffect(() => {
@@ -2683,6 +2714,11 @@ export function DubVerseEditor({
     if (isPlaying) {
       const ctx = audioContextRef.current
       rptCancelRef.current = false
+      // Pin the start time to the editor playhead, not the video element, so a
+      // stalled video does not cause the RPT audio to start from the wrong place.
+      const startTime = useEditorStore.getState().currentTime
+      lastStartPosRef.current = startTime
+      audioStartTimeRef.current = ctx.currentTime
       const doSchedule = () => {
         if (rptCancelRef.current) return
         // Kill any existing sources first so we never layer stitch playback.
@@ -2696,7 +2732,7 @@ export function DubVerseEditor({
         rptGainRef.current!.gain.value = isMutedRPT ? 0 : rptVolume / 100
         registerRptSource(scheduleRPTPlayback(
           rptBufferRef.current!,
-          rptOffsetFor(video?.currentTime ?? 0),
+          rptOffsetFor(startTime),
           ctx,
           rptGainRef.current!,
           rptPlaybackRate
@@ -2851,14 +2887,104 @@ export function DubVerseEditor({
         const playheadPx = videoRef.current.currentTime * pps
         const visibleLeft = container.scrollLeft
         const visibleRight = container.scrollLeft + container.clientWidth
-        if (playheadPx > visibleRight - container.clientWidth * 0.15) {
-          container.scrollLeft = playheadPx - container.clientWidth * 0.3
-        } else if (playheadPx < visibleLeft) {
-          container.scrollLeft = Math.max(0, playheadPx - container.clientWidth * 0.1)
+        // Keep the playhead in the middle third of the timeline viewport.
+        // Direct scrollLeft avoids browsers where smooth scrollTo stalls.
+        const margin = container.clientWidth * 0.3
+        if (playheadPx < visibleLeft + margin || playheadPx > visibleRight - margin) {
+          container.scrollLeft = Math.max(0, playheadPx - container.clientWidth * 0.5)
         }
       }
     }
   }, [setCurrentTime, zoomLevel])
+
+  // requestAnimationFrame loop drives the playhead and timeline scroll directly
+  // via DOM refs so the UI is smooth even when the browser throttles the native
+  // timeupdate event. React state is only written every 200ms, which keeps the
+  // component re-render count low while the needle, clock, and chunk fill stay fluid.
+  const rafLastTimeRef = useRef(0)
+  const rafLastStateUpdateRef = useRef(0)
+  const rafLastScrollRef = useRef(0)
+  const rafLastLogRef = useRef(0)
+  useEffect(() => {
+    let raf: number
+    const loop = () => {
+      const video = videoRef.current
+      const container = timelineRef.current
+      if (!video) {
+        raf = requestAnimationFrame(loop)
+        return
+      }
+      const now = performance.now()
+      if (now - rafLastTimeRef.current < 50) {
+        raf = requestAnimationFrame(loop)
+        return
+      }
+      rafLastTimeRef.current = now
+
+      // Don't override the state when paused or dragging; otherwise the playhead snaps
+      // back to the video element's stale time and causes the chunk to flicker.
+      const isAdvancing = (isPlayingRef.current || !video.paused) && !isDraggingNeedleRef.current
+      if (!isAdvancing) {
+        raf = requestAnimationFrame(loop)
+        return
+      }
+
+      let t = video.currentTime
+      // If the video element is paused but RPT audio is supposed to be playing,
+      // derive the playhead from the AudioContext clock so the timeline keeps moving.
+      if (isPlayingRef.current && video.paused && audioStartTimeRef.current !== null) {
+        const ctx = audioContextRef.current
+        if (ctx) {
+          t = lastStartPosRef.current + (ctx.currentTime - audioStartTimeRef.current)
+        }
+      }
+      if (now - rafLastLogRef.current > 500) {
+        rafLastLogRef.current = now
+        console.log('[RAF]', { t, videoTime: video.currentTime, videoPaused: video.paused, isPlaying: isPlayingRef.current, isDragging: isDraggingNeedleRef.current, scrollLeft: container?.scrollLeft, clientWidth: container?.clientWidth, chunkStart: chunkStartRef.current, chunkEnd: chunkEndRef.current })
+      }
+      const pps = 40 * zoomLevel
+      // Update the needle, time display, and active chunk fill directly in the DOM.
+      if (playheadRef.current) playheadRef.current.style.left = `${t * pps}px`
+      if (timeDisplayRef.current) timeDisplayRef.current.textContent = `${formatTime(t)} / ${formatTime(videoDuration)}`
+      const activeFill = chunkBarRef.current?.querySelector('[data-active-chunk-fill]') as HTMLElement | null
+      if (activeFill && chunkBoundariesRef.current.length > 1) {
+        const b = chunkBoundariesRef.current
+        let cur = 0
+        for (let i = 0; i < b.length - 1; i++) {
+          if (t >= b[i] && t < b[i + 1]) { cur = i; break }
+        }
+        const progress = Math.min(1, Math.max(0, (t - b[cur]) / (b[cur + 1] - b[cur])))
+        activeFill.style.width = `${progress * 100}%`
+      }
+      currentTimeRef.current = t
+      // Chunk lens: stop at the window boundary.
+      if (chunkModeRef.current && t >= chunkEndRef.current - 0.05) {
+        stopAllRptAudioRef.current()
+        video.pause()
+        setIsPlaying(false)
+        setCurrentTime(chunkEndRef.current)
+        setActiveChunk((useEditorStore.getState().activeChunkIndex ?? 0) + 1)
+      } else {
+        // Scroll the timeline no more than every 500ms, and only when the playhead
+        // leaves the middle third. Setting scrollLeft on a timeline with hundreds
+        // of thumbnails forces a layout each time — doing it every frame was
+        // making the rAF handler take ~5 seconds.
+        if (container && now - rafLastScrollRef.current > 500) {
+          const playheadPx = t * pps
+          const visibleLeft = container.scrollLeft
+          const visibleRight = visibleLeft + container.clientWidth
+          const margin = container.clientWidth * 0.3
+          if (playheadPx < visibleLeft + margin || playheadPx > visibleRight - margin) {
+            rafLastScrollRef.current = now
+            container.scrollLeft = Math.max(0, playheadPx - container.clientWidth * 0.5)
+          }
+        }
+      }
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [setCurrentTime, setIsPlaying, zoomLevel, videoDuration])
   
   // Segment click — always just select; QC is shown in the docked right panel
   // Ctrl+click a first then last segment to select that contiguous run. First
@@ -3004,9 +3130,17 @@ export function DubVerseEditor({
   const handleNeedleDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
+    isDraggingNeedleRef.current = true
+    if (playheadRef.current) {
+      playheadRef.current.style.transition = 'none'
+    }
 
     const timelineElement = timelineRef.current
-    if (!timelineElement) return
+    if (!timelineElement) {
+      isDraggingNeedleRef.current = false
+      if (playheadRef.current) playheadRef.current.style.transition = ''
+      return
+    }
 
     const pps = 40 * zoomLevel
 
@@ -3015,16 +3149,24 @@ export function DubVerseEditor({
       const scrollLeft = timelineElement.scrollLeft
       const x = clientX - rect.left + scrollLeft
       const newTime = Math.max(0, Math.min(x / pps, videoDuration))
-      setCurrentTime(newTime)
+      // Don't write React state on every mousemove — the 5-second render was
+      // making the needle feel 3 seconds behind. DOM + video are updated here;
+      // the store is written once on mouseup.
+      currentTimeRef.current = newTime
       if (videoRef.current) videoRef.current.currentTime = newTime
+      // Update the needle directly so it tracks the cursor exactly.
+      if (playheadRef.current) {
+        playheadRef.current.style.left = `${newTime * pps}px`
+      }
 
-      // Auto-scroll when dragging near edges
+      // Auto-scroll when dragging near edges (gentle so it doesn't fight the needle).
       const relX = clientX - rect.left
-      const scrollZone = 60
+      const scrollZone = 80
+      const speed = 0.15
       if (relX < scrollZone) {
-        timelineElement.scrollLeft -= (scrollZone - relX) * 0.4
+        timelineElement.scrollLeft -= (scrollZone - relX) * speed
       } else if (relX > rect.width - scrollZone) {
-        timelineElement.scrollLeft += (relX - (rect.width - scrollZone)) * 0.4
+        timelineElement.scrollLeft += (relX - (rect.width - scrollZone)) * speed
       }
     }
 
@@ -3037,6 +3179,9 @@ export function DubVerseEditor({
     const handleMouseUp = () => {
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
+      isDraggingNeedleRef.current = false
+      if (playheadRef.current) playheadRef.current.style.transition = ''
+      setCurrentTime(currentTimeRef.current)
     }
 
     document.addEventListener('mousemove', handleMouseMove)
@@ -3533,15 +3678,43 @@ export function DubVerseEditor({
   const displaySegmentsRef = useRef(displaySegments)
 
   // ── Chunk lens (long-video editing) ──────────────────────────────────────
-  // Active for videos longer than two chunks (>10 min). One 5-minute window is
-  // edited at a time; ALL edits stage locally (nothing auto-saves) until the
-  // user presses Save for that chunk. Short videos keep today's behavior
+  // Active for videos longer than two chunks (>10 min). One ~5-minute window is
+  // edited at a time; boundaries snap to the nearest segment end within 3s so
+  // playback never stops mid-sentence. Short videos keep today's behavior
   // (chunkMode false → every call site below falls through unchanged).
   const chunkMode = videoDuration > CHUNK_SECONDS * 2
-  const chunkCount = chunkMode ? Math.max(1, Math.ceil(videoDuration / CHUNK_SECONDS)) : 1
+  const chunkBoundaries = useMemo(() => {
+    if (!chunkMode || videoDuration <= 0) return [0, videoDuration]
+    const ends = displaySegments.map((seg) => effEnd(seg)).sort((a, b) => a - b)
+    const idealCount = Math.max(1, Math.ceil(videoDuration / CHUNK_SECONDS))
+    const boundaries = [0]
+    const SNAP_TOLERANCE = 3
+    for (let i = 1; i < idealCount; i++) {
+      const ideal = i * CHUNK_SECONDS
+      let nearest = ideal
+      let bestDist = Infinity
+      for (const end of ends) {
+        const dist = Math.abs(end - ideal)
+        if (dist <= SNAP_TOLERANCE && dist < bestDist) {
+          bestDist = dist
+          nearest = end
+        }
+      }
+      boundaries.push(Math.max(boundaries[boundaries.length - 1], Math.min(videoDuration, nearest)))
+    }
+    boundaries.push(videoDuration)
+    return boundaries
+  }, [chunkMode, videoDuration, displaySegments])
+  const chunkCount = chunkBoundaries.length - 1
   const activeChunk = chunkMode ? (activeChunkIndex ?? 0) : null
-  const chunkStart = activeChunk !== null ? activeChunk * CHUNK_SECONDS : 0
-  const chunkEnd = activeChunk !== null ? Math.min(videoDuration, chunkStart + CHUNK_SECONDS) : videoDuration
+  const chunkStart = activeChunk !== null ? chunkBoundaries[activeChunk] : 0
+  const chunkEnd = activeChunk !== null ? chunkBoundaries[activeChunk + 1] : videoDuration
+  const findChunkForTime = useCallback((t: number) => {
+    for (let i = 0; i < chunkBoundaries.length - 1; i++) {
+      if (t >= chunkBoundaries[i] && t < chunkBoundaries[i + 1]) return i
+    }
+    return Math.max(0, chunkBoundaries.length - 2)
+  }, [chunkBoundaries])
   // Refs for effects/handlers that must not capture stale window bounds.
   const chunkModeRef = useRef(chunkMode)
   const chunkStartRef = useRef(chunkStart)
@@ -3549,6 +3722,7 @@ export function DubVerseEditor({
   chunkModeRef.current = chunkMode
   chunkStartRef.current = chunkStart
   chunkEndRef.current = chunkEnd
+  chunkBoundariesRef.current = chunkBoundaries
   const stagedEditCount = Object.keys(stagedEdits).length
 
   // Seed the persisted per-chunk status (from segments.json) once per job.
@@ -3842,12 +4016,12 @@ export function DubVerseEditor({
         }
         clearStagedEdits()
       }
-      setActiveChunk(target)
+      goToChunk(target)
     } finally {
       setChunkSwitchBusy(null)
       setPendingChunkSwitch(null)
     }
-  }, [pendingChunkSwitch, stagedEdits, jobId, handleSaveStaged, clearStagedEdits, setActiveChunk])
+  }, [pendingChunkSwitch, stagedEdits, jobId, handleSaveStaged, clearStagedEdits, goToChunk])
 
   const handleSave = useCallback(async () => {
     if (isSaving) return
@@ -4248,26 +4422,16 @@ export function DubVerseEditor({
   const PIXELS_PER_SECOND = 40 * zoomLevel
   const timelineWidth = videoDuration * PIXELS_PER_SECOND
 
-  // Chunk selection moves the viewport. Without this the chip highlights and
-  // the "Window N of M" label updates while the timeline stays put, so on a
-  // feature-length film the click reads as doing nothing — the blocks for that
-  // window are thousands of pixels off-screen.
-  // The video is deliberately NOT seeked here. Forcing a seek on a 105-minute
-  // source blanked the preview while the browser re-buffered, and navigation
-  // does not require playback to move.
+  // Pause and invalidate the RPT buffer when the active chunk changes so the
+  // next Play stitches the new window instead of replaying the old one.
+  // Scrolling is handled by goToChunk (manual navigation) and by the
+  // timeupdate handler during playback, so this effect only stops audio.
   useEffect(() => {
     if (!chunkMode || activeChunk === null) return
-    // The RPT buffer is window-scoped — switching windows invalidates it so
-    // the next Play re-stitches the NEW window instead of replaying the old
-    // one, and any in-flight windowed audio stops rather than drifting.
     rptBufferRef.current = null
     stopAllRptAudio()
     if (videoRef.current) videoRef.current.pause()
     setIsPlaying(false)
-    const container = timelineRef.current
-    if (container) container.scrollLeft = Math.max(0, chunkStart * PIXELS_PER_SECOND)
-    // PIXELS_PER_SECOND deliberately out of deps: re-running on zoom would yank
-    // the viewport back to the chunk start while the user is mid-edit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeChunk, chunkMode, chunkStart])
 
@@ -4300,6 +4464,20 @@ export function DubVerseEditor({
     return start < chunkEnd && end > chunkStart
   }, [chunkMode, activeChunk, chunkStart, chunkEnd, segStartOf])
 
+  // The chunk that actually contains the current playhead. The active chunk is
+  // kept in sync with this so the window boundary, the viewport, and the chunk
+  // bar never drift apart — the root cause of the "bar stuck at 00" / freeze.
+  const currentChunk = chunkMode
+    ? Math.min(chunkCount - 1, Math.max(0, findChunkForTime(currentTime)))
+    : null
+
+  useEffect(() => {
+    if (!chunkMode || currentChunk === null) return
+    if (currentChunk !== activeChunk) {
+      setActiveChunk(currentChunk)
+    }
+  }, [chunkMode, currentChunk, activeChunk, setActiveChunk])
+
   // A chunk is "finished" once you edited something in it and moved on to work
   // elsewhere — that is the moment the user calls it done, not the save.
   const [completedChunks, setCompletedChunks] = useState<Set<number>>(new Set())
@@ -4323,7 +4501,7 @@ export function DubVerseEditor({
     }
     prevSelectionRef.current = {
       index: selectedSegmentIndex,
-      chunk: Math.floor(start / CHUNK_SECONDS),
+      chunk: findChunkForTime(start),
     }
 
     setCurrentTime(start)
@@ -6403,7 +6581,6 @@ export function DubVerseEditor({
                 ref={videoRef}
                 src={activeVideoUrl}
                 className="absolute top-0 left-0 w-full h-full object-cover"
-                onTimeUpdate={handleVideoTimeUpdate}
                 controls={false}
               />
               {captionSegment && (
@@ -7678,7 +7855,7 @@ export function DubVerseEditor({
               </Button>
               {/* Timecode lives here rather than in the centred group: it is ~90px
                   of left-side weight that pushed everything after it off-centre. */}
-              <span className="ml-2 text-sm font-mono text-slate-400 tabular-nums">
+              <span ref={timeDisplayRef} className="ml-2 text-sm font-mono text-slate-400 tabular-nums">
                 {formatTime(currentTime)} / {formatTime(videoDuration)}
               </span>
             </div>
@@ -7702,9 +7879,13 @@ export function DubVerseEditor({
                     // seek/effect races can't leave audio running under a paused video.
                     stopAllRptAudio()
                     videoRef.current.pause()
+                    // Persist the playhead so UI that reads currentTime state sees the
+                    // pause position, not the last 1s snapshot.
+                    setCurrentTime(currentTimeRef.current)
                   } else {
                     lastStartPosRef.current = currentTime  // save start pos for Stop
                     rptCancelRef.current = false           // allow the stitch to (re)schedule
+                    videoRef.current.currentTime = currentTime
                     videoRef.current.play().catch(() => {})
                   }
                 }
@@ -7716,6 +7897,7 @@ export function DubVerseEditor({
                 if (audioContextRef.current.state === 'suspended') {
                   await audioContextRef.current.resume()
                 }
+                audioStartTimeRef.current = audioContextRef.current?.currentTime ?? null
                 // If in Preview and buffer not ready, stitch first
                 if (playbackMode === 'preview' && !isPlaying && !rptBufferRef.current) {
                   lastStartPosRef.current = currentTime
@@ -7835,12 +8017,12 @@ export function DubVerseEditor({
             timeline nobody can navigate. Only appears when the film is long
             enough to need it; short jobs behave exactly as before. */}
         {chunkMode && (
-          <div className="shrink-0 flex items-center gap-2 border-t border-neutral-800 bg-neutral-950 px-3 py-2 overflow-x-auto">
+          <div ref={chunkBarRef} className="shrink-0 flex items-center gap-2 border-t border-neutral-800 bg-neutral-950 px-3 py-2 overflow-x-auto">
             <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
               Chunks
             </span>
             {Array.from({ length: chunkCount }, (_, i) => {
-              const isActive = activeChunk === i
+              const isActive = currentChunk === i
               // saved = committed to the film. staged = edits waiting in this
               // browser. Anything else has not been touched.
               const persisted = chunkStatusMap[String(i)]
@@ -7852,14 +8034,17 @@ export function DubVerseEditor({
               // change it — the point is knowing which window you are working
               // in the instant you click.
               const editingHere = selectedSegmentIndex !== null
-                && Math.floor(segStartOf(displaySegments[selectedSegmentIndex]) / CHUNK_SECONDS) === i
+                && findChunkForTime(segStartOf(displaySegments[selectedSegmentIndex])) === i
               const state: 'staged' | 'saved' | 'unedited' =
                 isStagedHere ? 'staged'
                   : persisted === 'saved' || completedChunks.has(i) ? 'saved'
                     : editingHere ? 'staged'
                       : 'unedited'
-              const from = i * CHUNK_SECONDS
-              const to = Math.min(videoDuration, from + CHUNK_SECONDS)
+              const from = chunkBoundaries[i]
+              const to = chunkBoundaries[i + 1]
+              const progress = isActive
+                ? Math.min(1, Math.max(0, (currentTime - from) / (to - from)))
+                : 0
               const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
               return (
                 <button
@@ -7869,13 +8054,18 @@ export function DubVerseEditor({
                     state === 'staged' ? ' · unsaved edits' : state === 'saved' ? ' · saved' : ''
                   }`}
                   className={cn(
-                    "shrink-0 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
+                    "relative shrink-0 overflow-hidden rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
                     isActive
                       ? "border-amber-400 bg-amber-500/15 text-amber-200"
                       : "border-neutral-700 text-slate-400 hover:border-amber-500/40 hover:text-slate-200",
                   )}
                 >
-                  <span className="flex items-center gap-1.5">
+                  <span
+                    className="absolute inset-y-0 left-0 bg-amber-500/25"
+                    style={{ width: `${progress * 100}%` }}
+                    {...(isActive ? { 'data-active-chunk-fill': '' } : {})}
+                  />
+                  <span className="relative flex items-center gap-1.5">
                     <span
                       className={cn(
                         "h-1.5 w-1.5 rounded-full",
@@ -9205,17 +9395,25 @@ export function DubVerseEditor({
 
               {/* Player needle - yellow triangle head + silver line - DRAGGABLE */}
               <div
+                ref={playheadRef}
                 className="absolute top-0 bottom-0 z-30 pointer-events-none"
-                style={{ left: `${currentTime * PIXELS_PER_SECOND}px` }}
+                style={{
+                  left: `${currentTime * PIXELS_PER_SECOND}px`,
+                  transition: 'left 0.08s linear',
+                }}
               >
-                {/* Yellow triangle head - positioned below combined seek+ruler (24px+40px=64px) */}
+                {/* Wide invisible drag handle so the needle is easy to grab */}
                 <div
-                  className="absolute top-16 -left-[6px] cursor-ew-resize pointer-events-auto"
+                  className="absolute top-0 bottom-0 -left-3 w-6 cursor-ew-resize pointer-events-auto"
                   onMouseDown={(e) => {
                     e.preventDefault()
                     e.stopPropagation()
                     handleNeedleDragStart(e)
                   }}
+                />
+                {/* Yellow triangle head - positioned below combined seek+ruler (24px+40px=64px) */}
+                <div
+                  className="absolute top-16 -left-[6px] pointer-events-none"
                   style={{
                     width: 0,
                     height: 0,
