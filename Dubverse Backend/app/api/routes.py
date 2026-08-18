@@ -957,17 +957,33 @@ def _fetch_gpu_stems(job_id: str, stems: dict) -> None:
     it did before, dialogue-only.
     """
     if not stems:
+        # A pre-V52 worker returns no stem keys at all. Not an error — the job
+        # proceeds exactly as before — but it must be visible, or "old worker"
+        # and "V52 with a broken export" look identical in the logs.
+        logger.warning(
+            f"[STEMS] Job {job_id}: worker returned no stems "
+            f"(pre-V52 image, or export failed on the worker) - "
+            f"backend will separate locally or mix dialogue-only"
+        )
         return
     try:
         from app.services.upload_reservations import _r2_client
         client, bucket = _r2_client()
         if client is None:
+            logger.warning(
+                f"[STEMS] Job {job_id}: R2 not configured on the backend - "
+                f"cannot fetch the stems the worker uploaded"
+            )
             return
         out_dir = os.path.join("data", "separated")
         os.makedirs(out_dir, exist_ok=True)
         for name in ("vocals", "accompaniment"):
             key = stems.get(name)
             if not key:
+                logger.warning(
+                    f"[STEMS] Job {job_id}: worker returned no {name} key - "
+                    f"{'cloning stays preset-only' if name == 'vocals' else 'no music bed'}"
+                )
                 continue
             # Transcoded to real WAV rather than saved as .mp3-named-.wav:
             # the vocals stem is read by soundfile for cloning, which cannot be
