@@ -1286,10 +1286,15 @@ class TranslationService:
                 )
                 result: List[Dict] = []
                 for i, seg in enumerate(segments):
-                    single = await self._translate_segments_gpt(
-                        [seg], target_language, source_language, character_profiles,
-                        allow_recursive=False,
-                    )
+                    if allow_recursive:
+                        single = await self._translate_segments_gpt(
+                            [seg], target_language, source_language, character_profiles,
+                            allow_recursive=False,
+                        )
+                    else:
+                        # Base case: the single-segment GPT call already failed;
+                        # do not recurse again, just keep the original text.
+                        single = None
                     if single is None:
                         logger.error(
                             f"[TRANSLATE-ZIP-FALLBACK] seg {i} individual GPT-4 call "
