@@ -42,13 +42,16 @@ def _upload_stems(job_id: str, sep_result: dict) -> dict:
     transcription. When a key is absent the backend behaves exactly as before.
     """
     keys = {}
+    # One try around BOTH the import and the client build: _r2_client imports
+    # boto3 lazily, so a missing dependency raises HERE, not at import time.
+    # Anything escaping this function would fail an otherwise good transcription.
     try:
         from app.services.upload_reservations import _r2_client
+        client, bucket = _r2_client()
     except Exception as exc:
         logger.warning(f"[STEMS] R2 client unavailable ({exc}) - not exporting")
         return keys
 
-    client, bucket = _r2_client()
     if client is None:
         logger.warning("[STEMS] R2 not configured - not exporting stems")
         return keys
@@ -171,7 +174,12 @@ def handler(event):
             logger.info(f"Separation complete in {timings['separate']}s → vocals: {vocals_audio_path}")
             # Hand the stems back so the backend never re-separates on CPU.
             _t_up = time.time()
-            stem_keys = _upload_stems(job_id, sep_result)
+            try:
+                stem_keys = _upload_stems(job_id, sep_result)
+            except Exception as _stem_exc:
+                # Belt and braces. Transcription is the job; stems are a bonus.
+                logger.warning(f"[STEMS] export raised, continuing: {_stem_exc}")
+                stem_keys = {}
             if stem_keys:
                 timings["stem_upload"] = round(time.time() - _t_up, 2)
         else:

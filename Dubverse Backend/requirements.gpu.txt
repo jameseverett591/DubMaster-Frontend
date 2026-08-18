@@ -81,3 +81,7 @@ tqdm>=4.66.0
 azure-cognitiveservices-speech>=1.37.0
 openai>=1.12.0
 opencv-python-headless>=4.8.0
+
+# R2 stem export from the worker (handler.py _upload_stems). Present in
+# requirements.txt but the GPU image installs only this file.
+boto3>=1.34.0
