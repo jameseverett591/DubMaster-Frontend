@@ -944,6 +944,51 @@ def _probe_duration(path: str) -> float:
         return float("inf")
 
 
+def _fetch_gpu_stems(job_id: str, stems: dict) -> None:
+    """Pull the worker's GPU-produced stems into data/separated/.
+
+    The worker already separates on GPU to get a clean transcription signal.
+    Landing those files here is what lets dub_video find a cached separation, so
+    the long-form guard never fires: the music bed survives and vocals_path stays
+    non-None, which is what re-enables voice cloning.
+
+    The filenames are the ones dub_video already probes for, so nothing
+    downstream changes. Best-effort: on any failure the job proceeds exactly as
+    it did before, dialogue-only.
+    """
+    if not stems:
+        return
+    try:
+        from app.services.upload_reservations import _r2_client
+        client, bucket = _r2_client()
+        if client is None:
+            return
+        out_dir = os.path.join("data", "separated")
+        os.makedirs(out_dir, exist_ok=True)
+        for name in ("vocals", "accompaniment"):
+            key = stems.get(name)
+            if not key:
+                continue
+            # Transcoded to real WAV rather than saved as .mp3-named-.wav:
+            # the vocals stem is read by soundfile for cloning, which cannot be
+            # relied on to decode MP3, and a mislabelled file is a trap for
+            # whoever debugs this next.
+            tmp = os.path.join(out_dir, f"{job_id}_{name}.dl.mp3")
+            dest = os.path.join(out_dir, f"{job_id}_{name}.wav")
+            client.download_file(bucket, key, tmp)
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", tmp, "-c:a", "pcm_s16le", dest],
+                capture_output=True, check=True,
+            )
+            os.remove(tmp)
+            logger.info(
+                f"[STEMS] Job {job_id}: fetched {name} "
+                f"({os.path.getsize(dest) // (1024 * 1024)}MB) from {key}"
+            )
+    except Exception as exc:
+        logger.warning(f"[STEMS] Job {job_id}: stem fetch failed ({exc}) — dialogue-only mix")
+
+
 def _f0_split_speakers(segments, video_path: str, n_speakers: int, job_id: str):
     """
     Fallback when pyannote collapses all segments to 1 speaker:
@@ -1913,6 +1958,9 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         except Exception as classify_err:
             logger.warning(f"Job {job_id}: local F0 classification failed: {classify_err}")
 
+    # Stems the GPU already produced — landing them locally is what keeps the
+    # long-form mix guard from firing, restoring the music bed and voice cloning.
+    await asyncio.to_thread(_fetch_gpu_stems, job_id, result.get("stems") or {})
     timings = result.get("timings", {})
     gpu_info = result.get("gpu", {})
     logger.info(

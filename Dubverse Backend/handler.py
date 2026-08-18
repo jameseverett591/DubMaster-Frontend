@@ -25,6 +25,62 @@ except Exception as _e:
     print(f"handler.py FATAL (pipeline import): {_e}", file=sys.stderr, flush=True)
     sys.exit(1)
 
+# ── GPU stem export ──────────────────────────────────────────────────────────
+# The worker separates on GPU in seconds and then discards the stems, so the
+# backend had to re-run Demucs on CPU (over an hour on a feature) or give up the
+# music bed AND voice cloning. Handing the stems back means that work is paid
+# for once. Compressed deliberately: a 105-minute stereo WAV is ~1.1 GB per
+# stem, and both uses here — a bed mixed under dialogue at 85%, and a
+# cloning/pitch reference — are transparent at MP3 bitrates.
+STEM_UPLOAD_BITRATE = os.getenv("STEM_UPLOAD_BITRATE", "192k")
+
+
+def _upload_stems(job_id: str, sep_result: dict) -> dict:
+    """Compress and upload vocals + accompaniment to R2. Returns {name: key}.
+
+    Best-effort by design: a failure here must never fail an otherwise good
+    transcription. When a key is absent the backend behaves exactly as before.
+    """
+    keys = {}
+    try:
+        from app.services.upload_reservations import _r2_client
+    except Exception as exc:
+        logger.warning(f"[STEMS] R2 client unavailable ({exc}) - not exporting")
+        return keys
+
+    client, bucket = _r2_client()
+    if client is None:
+        logger.warning("[STEMS] R2 not configured - not exporting stems")
+        return keys
+
+    import subprocess as _sp
+    for name in ("vocals", "accompaniment"):
+        src_path = sep_result.get(f"{name}_path")
+        if not src_path or not os.path.exists(src_path):
+            logger.warning(f"[STEMS] {name} missing from separation result")
+            continue
+        mp3_path = f"/tmp/{job_id}_{name}.mp3"
+        try:
+            _sp.run(
+                ["ffmpeg", "-y", "-i", src_path, "-c:a", "libmp3lame",
+                 "-b:a", STEM_UPLOAD_BITRATE, mp3_path],
+                capture_output=True, check=True,
+            )
+            key = f"stems/{job_id}/{name}.mp3"
+            client.upload_file(mp3_path, bucket, key)
+            keys[name] = key
+            logger.info(
+                f"[STEMS] uploaded {name} "
+                f"({os.path.getsize(mp3_path) // (1024 * 1024)}MB) -> {key}"
+            )
+        except Exception as exc:
+            logger.warning(f"[STEMS] {name} export failed: {exc}")
+        finally:
+            if os.path.exists(mp3_path):
+                os.remove(mp3_path)
+    return keys
+
+
 # Languages that use the multi-engine Cantonese ASR pipeline
 _CJK_LANGS = {"zh", "yue", "cmn", "zho", "ja", "ko",
                "zh-cn", "zh-tw", "zh-hk", "yue-hk", "zh-yue"}
@@ -103,6 +159,7 @@ def handler(event):
 
     # ── Step 3: Demucs Source Separation (vocals only) ───────────────────
     vocals_audio_path = None
+    stem_keys: dict = {}
     if "separate" in steps:
         logger.info("[3a/4] Running Demucs source separation")
         t_sep = time.time()
@@ -112,6 +169,11 @@ def handler(event):
         if sep_result.get("status") == "ok":
             vocals_audio_path = sep_result.get("vocals_path")
             logger.info(f"Separation complete in {timings['separate']}s → vocals: {vocals_audio_path}")
+            # Hand the stems back so the backend never re-separates on CPU.
+            _t_up = time.time()
+            stem_keys = _upload_stems(job_id, sep_result)
+            if stem_keys:
+                timings["stem_upload"] = round(time.time() - _t_up, 2)
         else:
             logger.warning(f"Separation skipped ({sep_result.get('reason')}) — transcribing raw audio")
 
@@ -248,6 +310,9 @@ def handler(event):
         "transcript": transcript_data,
         "diarization": {"segments": diarization_segments},
         "speaker_genders": {},
+        # R2 keys for the GPU-produced stems when the export succeeded. Absent
+        # means the backend falls back to exactly its previous behaviour.
+        "stems": stem_keys,
         "timings": timings,
         "gpu": gpu_info,
         "job_id": job_id,
