@@ -1092,6 +1092,7 @@ class TranslationService:
         target_language: str,
         source_language: str = "yue",
         character_profiles: Optional[List[Dict]] = None,
+        allow_recursive: bool = True,
     ) -> Optional[List[Dict]]:
         """
         Translate segments using GPT-4 via Azure OpenAI or OpenAI API.
@@ -1286,7 +1287,8 @@ class TranslationService:
                 result: List[Dict] = []
                 for i, seg in enumerate(segments):
                     single = await self._translate_segments_gpt(
-                        [seg], target_language, source_language, character_profiles
+                        [seg], target_language, source_language, character_profiles,
+                        allow_recursive=False,
                     )
                     if single is None:
                         logger.error(
