@@ -114,6 +114,12 @@ interface EditorState {
    *  stagedEditsJobId: one film's cast must never rehydrate onto another's
    *  speakers. segments.json is authoritative; this is only a fast path. */
   speakerVoiceMapJobId: string | null
+  /** Who chose each speaker's voice. 'user' = a deliberate assignment (green in
+   *  the strip); 'auto' = the dub picked it from gender defaults or it was
+   *  derived from what was rendered (purple). Absent = no voice (amber). The
+   *  distinction is what lets a pass through a feature show which speakers have
+   *  actually been reviewed. */
+  speakerVoiceSource: Record<string, 'user' | 'auto'>
   chunkStatusMap: Record<string, ChunkStatus>
   // Segments whose commit failed during a chunk Save. A save is
   // commit-what-you-can: the segments that succeed are durable, the ones that
@@ -206,6 +212,7 @@ interface EditorState {
    *  `prev => ({...prev, [id]: voice})`; with an object-only setter that
    *  FUNCTION was stored as the map itself, so every lookup returned undefined
    *  and the speakers strip read "(no voice yet)" for everyone. */
+  setSpeakerVoiceSource: (source: Record<string, 'user' | 'auto'>) => void
   setSpeakerVoiceMap: (
     map: Record<string, string> | ((prev: Record<string, string>) => Record<string, string>)
   ) => void
@@ -266,6 +273,7 @@ export const useEditorStore = create<EditorState>(
   stagedEdits: {},
   stagedEditsJobId: null,
   speakerVoiceMapJobId: null,
+  speakerVoiceSource: {},
   chunkStatusMap: {},
   zoomLevel: 1,
   scrollPosition: 0,
@@ -357,6 +365,7 @@ export const useEditorStore = create<EditorState>(
     importedSegmentsJobId: null,
     speakerVoiceMap: {},
     speakerVoiceMapJobId: null,
+    speakerVoiceSource: {},
     speakerTraitsMap: {},
     speakerCustomTraits: {},
     speakerPitchMap: {},
@@ -584,11 +593,17 @@ export const useEditorStore = create<EditorState>(
 
   setAdaptationLoading: (loading) => set({ isAdaptationLoading: loading }),
 
+  setSpeakerVoiceSource: (source) => set((state) => ({
+    speakerVoiceSource: { ...state.speakerVoiceSource, ...source },
+  })),
   setSpeakerVoiceMap: (map) => set((state) => ({
     speakerVoiceMap: typeof map === 'function' ? map(state.speakerVoiceMap) : map,
   })),
+  // Only ever called from a deliberate user action (Assign to…, drag-drop), so
+  // it stamps 'user' — that is what turns the speaker chip green.
   updateSpeakerVoice: (speakerId, voiceKey) => set((state) => ({
     speakerVoiceMap: { ...state.speakerVoiceMap, [speakerId]: voiceKey },
+    speakerVoiceSource: { ...state.speakerVoiceSource, [speakerId]: 'user' as const },
   })),
   pulseSpeaker: (speakerId) => {
     set({ speakerPulseId: speakerId })
@@ -778,6 +793,7 @@ export const useEditorStore = create<EditorState>(
         // authoritative source; this only avoids re-deriving on every load.
         speakerVoiceMap: state.speakerVoiceMap,
         speakerVoiceMapJobId: state.importedSegmentsJobId,
+        speakerVoiceSource: state.speakerVoiceSource,
       }),
     }
   )

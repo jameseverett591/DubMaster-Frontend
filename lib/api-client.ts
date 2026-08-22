@@ -761,6 +761,23 @@ class DubVerseAPIClient {
   /**
    * Get available voices from the active TTS provider
    */
+  /** voice_id -> friendly label for the configured FISH_VOICE_* presets.
+   *  The public catalog has no lookup-by-id, and preset voices are assigned at
+   *  dub time without the client ever seeing their names — so the speakers
+   *  strip could only say "(voice set)". The backend knows them from env. */
+  async getPresetVoiceLabels(): Promise<Record<string, string>> {
+    try {
+      const res = await this._fetch(`${this.baseURL}/api/voices/presets`, {
+        headers: this._authHeaders(),
+      })
+      if (!res.ok) return {}
+      const data = await res.json()
+      return (data?.presets ?? {}) as Record<string, string>
+    } catch {
+      return {}
+    }
+  }
+
   async getVoices(opts?: {
     page?: number
     pageSize?: number
