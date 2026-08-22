@@ -1219,8 +1219,17 @@ class DubVerseAPIClient {
     return data.voices ?? []
   }
 
-  getAudioFileUrl(jobId: string, filename: string): string {
-    return this._mediaUrl(`/api/media/${jobId}/audio/${filename}`)
+  /** Build a media URL for a segment audio file.
+   *
+   *  Pass cacheBust when the file was just rewritten on disk under a name it
+   *  has held before (regens, staged takes) and the browser would otherwise
+   *  serve the previous body. The buster is appended INSIDE _mediaUrl's path
+   *  so it goes through the same `?`/`&` separator logic as access_token —
+   *  callers that concatenated `?ts=` onto the returned string produced a
+   *  second `?`, which folded the buster into the token value and 401'd. */
+  getAudioFileUrl(jobId: string, filename: string, cacheBust = false): string {
+    const bust = cacheBust ? `?ts=${Date.now()}` : ''
+    return this._mediaUrl(`/api/media/${jobId}/audio/${filename}${bust}`)
   }
 
   /** Rebuild a stored audio URL with the current token.

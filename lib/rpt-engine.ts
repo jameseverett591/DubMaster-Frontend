@@ -14,6 +14,8 @@ export interface RPTStitchResult {
   buffer: AudioBuffer
   duration: number
   segmentCount: number
+  /** Segments that had audio but failed to load — these play as SILENCE. */
+  skipped: { index: number; url: string }[]
 }
 
 // ─── Effective timing ────────────────────────────────────────────────────────
@@ -50,8 +52,29 @@ export function clearCache(): void {
   audioCache.clear()
 }
 
+/** Surface segments that dropped out of a stitch. A skipped segment is a line
+ *  the viewer will not hear, so it is an error, not a debug note. */
+function reportSkipped(
+  skipped: { index: number; url: string }[],
+  stitchedCount: number
+): void {
+  if (skipped.length === 0) return
+  console.error(
+    `[RPT] ${skipped.length} segment(s) FAILED to load and will play as silence ` +
+    `(${stitchedCount} stitched OK):`,
+    skipped
+  )
+}
+
 // ─── Audio fetch + decode ─────────────────────────────────────────────────────
 
+/** Fetch + decode one segment's audio.
+ *
+ *  Returns null on any failure, but NEVER silently: a segment that fails to
+ *  load is dropped from the stitch and plays as silence, which is
+ *  indistinguishable by ear from a line that was never dubbed. On a
+ *  feature-length dub that means lines can vanish from a delivered render with
+ *  nothing to point at. Every failure path here logs the URL and the reason. */
 async function fetchAndDecode(
   url: string,
   audioContext: AudioContext
@@ -61,12 +84,20 @@ async function fetchAndDecode(
 
   try {
     const response = await fetch(url)
-    if (!response.ok) return null
+    if (!response.ok) {
+      console.error(`[RPT] segment audio fetch failed — HTTP ${response.status} ${response.statusText}`, url)
+      return null
+    }
     const arrayBuffer = await response.arrayBuffer()
+    if (arrayBuffer.byteLength === 0) {
+      console.error('[RPT] segment audio is empty (0 bytes)', url)
+      return null
+    }
     const decoded = await audioContext.decodeAudioData(arrayBuffer)
     setCache(url, decoded)
     return decoded
-  } catch {
+  } catch (err) {
+    console.error('[RPT] segment audio decode failed', url, err)
     return null
   }
 }
@@ -96,6 +127,7 @@ export async function stitchRPT(
   const rightChannel = outputBuffer.getChannelData(1)
 
   let stitchedCount = 0
+  const skipped: { index: number; url: string }[] = []
 
   await Promise.all(
     segments.map(async (seg) => {
@@ -108,7 +140,10 @@ export async function stitchRPT(
       const maxSlotSamples = Math.ceil(endTime * sampleRate) - startSample
 
       const segBuffer = await fetchAndDecode(audioUrl, audioContext)
-      if (!segBuffer) return
+      if (!segBuffer) {
+        skipped.push({ index: seg.transcript_index ?? seg.index ?? -1, url: audioUrl })
+        return
+      }
 
       const srcLeft = segBuffer.numberOfChannels > 0
         ? segBuffer.getChannelData(0)
@@ -134,10 +169,13 @@ export async function stitchRPT(
     })
   )
 
+  reportSkipped(skipped, stitchedCount)
+
   return {
     buffer: outputBuffer,
     duration,
     segmentCount: stitchedCount,
+    skipped,
   }
 }
 
@@ -190,6 +228,7 @@ export async function stitchRPTWindow(
   const rightChannel = outputChannelData(outputBuffer)
 
   let stitchedCount = 0
+  const skipped: { index: number; url: string }[] = []
 
   await Promise.all(
     segments.map(async (seg) => {
@@ -202,7 +241,10 @@ export async function stitchRPTWindow(
       if (absEnd <= windowStart || absStart >= windowEnd) return
 
       const segBuffer = await fetchAndDecode(audioUrl, audioContext)
-      if (!segBuffer) return
+      if (!segBuffer) {
+        skipped.push({ index: seg.transcript_index ?? seg.index ?? -1, url: audioUrl })
+        return
+      }
 
       const srcLeft = segBuffer.numberOfChannels > 0 ? segBuffer.getChannelData(0) : null
       const srcRight = segBuffer.numberOfChannels > 1 ? segBuffer.getChannelData(1) : srcLeft
@@ -244,7 +286,9 @@ export async function stitchRPTWindow(
     })
   )
 
-  return { buffer: outputBuffer, duration, segmentCount: stitchedCount }
+  reportSkipped(skipped, stitchedCount)
+
+  return { buffer: outputBuffer, duration, segmentCount: stitchedCount, skipped }
 }
 
 function outputChannelData(buffer: AudioBuffer): Float32Array {
