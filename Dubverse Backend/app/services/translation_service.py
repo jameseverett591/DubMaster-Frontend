@@ -749,8 +749,37 @@ class TranslationService:
                 chunk_result = await self._translate_segments_claude(
                     chunk, target_language, source_language, character_profiles
                 )
+                # A failed chunk must never discard the chunks that already
+                # succeeded. This used to `return None` on the first failure: a
+                # single read timeout on the LAST chunk of a feature threw away
+                # ~360 correctly translated segments, fell through to GPT-4, hit an
+                # exhausted quota, and left the film untranslated — which TTS then
+                # skipped as "untranslated", silencing 222 lines of dialogue.
+                # Degrade per chunk instead: retry, then GPT for this chunk only,
+                # then keep the original text. Worst case loses one chunk, not all.
                 if chunk_result is None:
-                    return None
+                    logger.warning(
+                        f"[TRANSLATE] Claude chunk {start}-{start + len(chunk)} failed "
+                        f"— retrying once before falling back"
+                    )
+                    chunk_result = await self._translate_segments_claude(
+                        chunk, target_language, source_language, character_profiles
+                    )
+                if chunk_result is None:
+                    logger.warning(
+                        f"[TRANSLATE] Claude chunk {start}-{start + len(chunk)} failed "
+                        f"twice — falling back to GPT-4 for THIS CHUNK ONLY"
+                    )
+                    chunk_result = await self._translate_segments_gpt(
+                        chunk, target_language, source_language, character_profiles
+                    )
+                if chunk_result is None:
+                    logger.error(
+                        f"[TRANSLATE] Chunk {start}-{start + len(chunk)} could not be "
+                        f"translated by any provider — keeping original text. These "
+                        f"{len(chunk)} segment(s) will be skipped by TTS as untranslated."
+                    )
+                    chunk_result = chunk
                 results.extend(chunk_result)
             return results
 
@@ -962,7 +991,11 @@ class TranslationService:
             response = await asyncio.to_thread(
                 lambda: httpx.post(
                     "https://api.anthropic.com/v1/messages",
-                    json=payload, headers=headers, timeout=60.0,
+                    # 60s was too tight: a 20-segment Cantonese batch regularly ran
+                    # close to it, and ONE read timeout used to discard the entire
+                    # film's translation (see the chunk loop below).
+                    json=payload, headers=headers,
+                    timeout=float(os.getenv("CLAUDE_TRANSLATE_TIMEOUT_SEC", "180")),
                 )
             )
             if response.status_code != 200:
