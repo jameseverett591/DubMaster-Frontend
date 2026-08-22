@@ -110,6 +110,10 @@ interface EditorState {
    *  transcript_index, which means nothing across jobs — without this stamp a
    *  reload could rehydrate one film's auditions onto another film's segments. */
   stagedEditsJobId: string | null
+  /** Job the persisted speakerVoiceMap belongs to. Same reasoning as
+   *  stagedEditsJobId: one film's cast must never rehydrate onto another's
+   *  speakers. segments.json is authoritative; this is only a fast path. */
+  speakerVoiceMapJobId: string | null
   chunkStatusMap: Record<string, ChunkStatus>
   // Segments whose commit failed during a chunk Save. A save is
   // commit-what-you-can: the segments that succeed are durable, the ones that
@@ -261,6 +265,7 @@ export const useEditorStore = create<EditorState>(
   saveProgress: null,
   stagedEdits: {},
   stagedEditsJobId: null,
+  speakerVoiceMapJobId: null,
   chunkStatusMap: {},
   zoomLevel: 1,
   scrollPosition: 0,
@@ -351,6 +356,7 @@ export const useEditorStore = create<EditorState>(
     importedSegments: null,
     importedSegmentsJobId: null,
     speakerVoiceMap: {},
+    speakerVoiceMapJobId: null,
     speakerTraitsMap: {},
     speakerCustomTraits: {},
     speakerPitchMap: {},
@@ -768,6 +774,10 @@ export const useEditorStore = create<EditorState>(
         // so one job's auditions can never be rehydrated onto another.
         stagedEdits: state.stagedEdits,
         stagedEditsJobId: state.importedSegmentsJobId,
+        // Fast path for the speaker->voice map. segments.json remains the
+        // authoritative source; this only avoids re-deriving on every load.
+        speakerVoiceMap: state.speakerVoiceMap,
+        speakerVoiceMapJobId: state.importedSegmentsJobId,
       }),
     }
   )

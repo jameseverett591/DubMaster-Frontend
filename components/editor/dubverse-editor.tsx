@@ -2277,15 +2277,46 @@ export function DubVerseEditor({
     // setSpeakerVoiceMap(initialVoiceMapping) would clobber the user's
     // just-assigned voices from the Library panel.
     if (isNewJob) {
-      // Initialise speaker voice map from persisted mapping or compute gender defaults
-      if (initialVoiceMapping && Object.keys(initialVoiceMapping).length > 0) {
+      // Ground truth for who sounds like whom is what was actually synthesised:
+      // every segment carries the voice_id it was rendered with. Deriving from
+      // that survives a browser wipe and cannot drift from the audio on disk.
+      // A speaker may hold more than one voice_id (a mid-film reassignment), so
+      // take the dominant one rather than the first seen.
+      const _voiceTally: Record<string, Record<string, number>> = {}
+      for (const seg of segmentsWithFindings) {
+        const _vid = (seg as any).voice_id
+        if (!seg.speaker_id || !_vid) continue
+        _voiceTally[seg.speaker_id] ??= {}
+        _voiceTally[seg.speaker_id][_vid] = (_voiceTally[seg.speaker_id][_vid] ?? 0) + 1
+      }
+      const _derived: Record<string, string> = {}
+      for (const [_spk, _counts] of Object.entries(_voiceTally)) {
+        _derived[_spk] = Object.entries(_counts).sort((a, b) => b[1] - a[1])[0][0]
+      }
+
+      // A deliberate human assignment outranks machine inference. A stale
+      // persisted entry is recoverable (you hear the wrong voice and reassign);
+      // derived silently overwriting a cast decision is invisible and wrong.
+      const _st = useEditorStore.getState()
+      const _persisted = _st.speakerVoiceMapJobId === jobId ? _st.speakerVoiceMap : {}
+
+      if (Object.keys(_persisted).length > 0) {
+        setSpeakerVoiceMap({ ..._derived, ..._persisted })
+      } else if (Object.keys(_derived).length > 0) {
+        setSpeakerVoiceMap(_derived)
+      } else if (initialVoiceMapping && Object.keys(initialVoiceMapping).length > 0) {
         setSpeakerVoiceMap(initialVoiceMapping)
       } else {
         const genders = speakerGenders ?? {}
         const voicesByGender: Record<string, string[]> = {
-          male:   ['male-1',   'male-2',   'male-3',   'male-4'],
-          female: ['female-1', 'female-2', 'female-3', 'female-4'],
-          child:  ['child-1',  'child-2',  'child-3'],
+          // ONLY voices that actually exist in FISH_VOICE_*. An unconfigured key
+          // silently resolves to the first voice in the map (male-1), which is how
+          // several speakers ended up sharing one voice. Honest defaults that admit
+          // "two males share a voice" beat fake variety. Extend these as the env
+          // gains FISH_VOICE_MALE_3 / _4 entries.
+          male:   ['male-1', 'male-2'],
+          female: ['female-1'],
+          child:  ['child-1'],
         }
         const seen = new Set<string>()
         const usage: Record<string, number> = {}
