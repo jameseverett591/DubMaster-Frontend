@@ -12,6 +12,10 @@ import { apiClient, API_BASE_URL, type Voice } from '@/lib/api-client'
 import { useEditorStore } from '@/lib/editor-store'
 
 const FAVORITES_KEY = 'dubmaster.voiceLibrary.favorites'
+// voice_id -> name, remembered across sessions. The speakers strip resolves names
+// from pageCache, which only holds the page you are browsing — so a voice from
+// page 4 rendered as "(voice set)" until you happened to navigate back to it.
+const VOICE_NAME_KEY = 'dubmaster.voiceLibrary.voiceNames'
 const SWIPE_THRESHOLD_FRAC = 0.25 // drag past 25% of viewport width to advance
 const DIRECTION_LOCK_PX = 8       // px movement before we lock horizontal-vs-vertical intent
 
@@ -101,6 +105,35 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     return () => clearTimeout(t)
   }, [search])
 
+  // Every voice name we have ever seen, so the speakers strip can label an
+  // assignment whose voice is not in the current page cache.
+  const [voiceNames, setVoiceNames] = useState<Record<string, string>>({})
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(VOICE_NAME_KEY)
+      if (raw) setVoiceNames(JSON.parse(raw) as Record<string, string>)
+    } catch {}
+  }, [])
+  const rememberVoiceNames = useCallback((vs: Voice[]) => {
+    if (!vs.length) return
+    setVoiceNames(prev => {
+      let changed = false
+      const next = { ...prev }
+      for (const v of vs) {
+        if (v.voice_id && v.name && next[v.voice_id] !== v.name) {
+          next[v.voice_id] = v.name
+          changed = true
+        }
+      }
+      if (!changed) return prev
+      try { localStorage.setItem(VOICE_NAME_KEY, JSON.stringify(next)) } catch {}
+      return next
+    })
+  }, [])
+
+  // Custom voices are assignable too, so their names belong in the cache.
+  useEffect(() => { rememberVoiceNames(customVoices) }, [customVoices, rememberVoiceNames])
+
   // Favorites (localStorage)
   const [favorites, setFavorites] = useState<Set<string>>(new Set())
   const [showOnlyFavorites, setShowOnlyFavorites] = useState(false)
@@ -152,6 +185,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
         sortBy,
       })
       setPageCache(prev => ({ ...prev, [page]: r.voices }))
+      rememberVoiceNames(r.voices)
       if (r.total != null) setTotalFromServer(r.total)
       else if (r.voices.length < PAGE_SIZE) {
         setTotalFromServer((page - 1) * PAGE_SIZE + r.voices.length)
@@ -181,8 +215,12 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
         current_voice_id: speakerVoiceMap[seg.speaker_id] || null,
       })
     }
-    // Ensure at least 7 speaker slots are available for assignment
-    for (let i = 1; result.length < 7; i++) {
+    // Ensure 15 speaker slots are available for assignment. Velma tops out at
+    // ~5 speakers per pass, but a feature has far more speaking parts than that:
+    // the extra slots let a voice be pinned to a numbered speaker as new
+    // characters appear, so the mapping stays legible across a long edit.
+    const _SPEAKER_SLOTS = 15
+    for (let i = 1; result.length < _SPEAKER_SLOTS; i++) {
       const spkId = `speaker-${i}`
       if (!seen.has(spkId)) {
         seen.add(spkId)
@@ -737,7 +775,8 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
             </span>
             {speakers.map(sp => {
               const voiceName = sp.current_voice_id
-                ? (Object.values(pageCache).flat().find(v => v.voice_id === sp.current_voice_id)?.name
+                ? (voiceNames[sp.current_voice_id]
+                    ?? Object.values(pageCache).flat().find(v => v.voice_id === sp.current_voice_id)?.name
                     ?? '(voice set)')
                 : null
               return (
