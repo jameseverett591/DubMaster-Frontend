@@ -1045,6 +1045,11 @@ class DubbingService:
                 if not text.strip():
                     return {"index": i, "skipped": True, "reason": "empty"}
 
+                # Skip subtitle/credit/narration lines — preserve original audio.
+                if segment.get("is_credit"):
+                    logger.info(f"[TTS] seg {i}: skipping subtitle/credit segment")
+                    return {"index": i, "skipped": True, "reason": "credit"}
+
                 text = self._sanitize_text(text)
 
                 # Safety net: skip repetitive-character hallucinations

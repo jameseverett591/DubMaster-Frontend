@@ -52,6 +52,8 @@ class TranscriptSegment(BaseModel):
     velma_emotion: Optional[str] = None
     velma_accent: Optional[str] = None
     velma_deepfake_score: Optional[float] = None
+    # True for subtitle/credit/narration segments that should not be dubbed.
+    is_credit: bool = False
 
 
 class Transcript(BaseModel):

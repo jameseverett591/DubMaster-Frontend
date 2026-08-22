@@ -134,6 +134,15 @@ def handler(event):
     job_id         = job_input.get("job_id", event.get("id", "local"))
     steps          = job_input.get("steps", ["separate", "transcribe", "diarize"])
 
+    # RunPod template env vars are static. Apply per-job env vars sent by the
+    # backend so ASR/diarization settings can be pinned per job.
+    env_vars = job_input.get("env_vars", {})
+    if env_vars:
+        for k, v in env_vars.items():
+            if isinstance(v, str):
+                os.environ[k] = v
+        logger.info(f"[ENV] Applied per-job env vars: {sorted(env_vars.keys())}")
+
     if not video_path:
         return {"error": "No video_path or file_url provided"}
 

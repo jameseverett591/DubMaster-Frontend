@@ -674,6 +674,30 @@ def _normalize_speaker_labels(segments):
     return segments
 
 
+# Subtitle/credit/narration patterns that should not be dubbed. The original
+# audio/accompaniment is preserved for these time ranges.
+_CREDIT_PATTERNS = [
+    r"字幕",                 # Chinese "subtitle"
+    r"字幕組",               # subtitle group
+    r"中文字幕",             # Chinese subtitles
+    r"英文字幕",             # English subtitles
+    r"subtitles?\s+by",
+    r"subtitled\s+by",
+    r"translation\s+by",
+    r"translated\s+by",
+    r"譯者", r"译者",       # translator
+]
+_CREDIT_RE = re.compile(r"|".join(_CREDIT_PATTERNS), re.IGNORECASE)
+
+
+def _mark_credit_segments(segments):
+    for seg in segments:
+        text = (seg.text or "").strip()
+        if _CREDIT_RE.search(text):
+            seg.is_credit = True
+    return segments
+
+
 _CJK_RE = re.compile(r"[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]")
 
 
@@ -1411,9 +1435,9 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         if whisper_language.lower() == "yue":
             gpu_env_vars.setdefault("WHISPER_MODEL", os.environ.get("WHISPER_MODEL", "large-v3"))
             gpu_env_vars.setdefault("CANTONESE_ASR_ENGINES", os.environ.get("CANTONESE_ASR_ENGINES", "whisper"))
-            # Disable VAD for Cantonese — fight-scene audio triggers aggressive speech filtering
-            # that removes all dialogue. large-v3 with no VAD is more reliable for mixed content.
-            gpu_env_vars.setdefault("VAD_THRESHOLD", "0")
+            # Let the worker pick its VAD threshold (default 0.15 for Cantonese).
+            # Explicitly setting VAD_THRESHOLD=0 disabled VAD and caused the worker
+            # to return empty transcripts on long-form mixed-content films.
 
     # Pin the transcription model for EVERY language, not just Cantonese.
     # Anything not sent here is inherited from whatever the worker container was
@@ -1427,6 +1451,9 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
     # configured we log that it is worker-inherited, so a future variance
     # investigation starts with the answer instead of a mystery.
     gpu_env_vars.setdefault("WHISPER_MODEL", os.environ.get("WHISPER_MODEL", "large-v3"))
+    # pyannote on the worker's CUDA path collapses to one speaker; force CPU
+    # diarization while keeping GPU transcription/separation.
+    gpu_env_vars["DIARIZATION_DEVICE"] = "cpu"
     _unpinned = [k for k in ("VAD_THRESHOLD",) if k not in gpu_env_vars]
     logger.info(
         f"Job {job_id}: ASR settings pinned — "
@@ -1593,6 +1620,12 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
     _job_for_f0 = await job_manager.get_job(job_id)
     _exp_spk_f0 = (_job_for_f0.expected_speakers if _job_for_f0 else 0) or 0
 
+    # Fetch the GPU stems BEFORE Velma. Velma is the primary transcript AND
+    # diarization source, so handing it the full mix means music, effects and
+    # crowd noise degrade both. The stems also land where dub_video looks for a
+    # cached separation, which is what keeps the long-form mix guard from firing.
+    await asyncio.to_thread(_fetch_gpu_stems, job_id, result.get("stems") or {})
+
     # Try Velma diarization first (primary source)
     velma_result = None
     if os.getenv("MODULATE_API_KEY") and video_path:
@@ -1600,7 +1633,17 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             logger.info(f"Job {job_id}: RunPod path — attempting Velma diarization (primary)")
             # Vocals, not the video container — see _velma_source_audio. Off the
             # event loop: separation and compression are both blocking.
-            velma_audio_path = await asyncio.to_thread(_velma_source_audio, video_path, job_id)
+            _vocals_stem = os.path.join("data", "separated", f"{job_id}_vocals.wav")
+            _have_vocals = os.path.isfile(_vocals_stem) and os.path.getsize(_vocals_stem) > 1000
+            if not _have_vocals:
+                logger.warning(
+                    f"Job {job_id}: no vocals stem — Velma gets the full mix, so music "
+                    f"and effects will degrade its speakers and transcript"
+                )
+            velma_audio_path = await asyncio.to_thread(
+                _velma_source_audio, video_path, job_id,
+                _vocals_stem if _have_vocals else None,
+            )
             velma_result = await asyncio.to_thread(
                 velma_diarize, velma_audio_path, job_id, _exp_spk_f0
             )
@@ -1679,9 +1722,18 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             for seg in transcript_data["segments"]
         ]
 
-    # Re-assign speakers from diarization only when Velma was NOT the
-    # primary transcript source (Velma segments already have correct speakers).
-    if not _velma_is_primary and diarization_segments and segments:
+    # Normalize RunPod/Velma speaker labels (e.g. SPEAKER_00 -> speaker-1) so
+    # the editor and downstream voice assignment see consistent, 1-indexed IDs.
+    if segments:
+        segments = _normalize_speaker_labels(segments)
+
+    # Re-assign speakers from diarization when the transcript collapsed to a
+    # single speaker. This used to be skipped whenever Velma was primary, on the
+    # assumption that Velma always carries correct speakers — but when Velma
+    # returns ONE speaker and pyannote found several, Velma is the wrong source
+    # and its labels dub the whole film in one voice. The inner check below only
+    # fires on an already-collapsed transcript, so a healthy Velma is untouched.
+    if diarization_segments and segments:
         unique_speakers = set((s.speaker or "speaker-1") for s in segments)
         diar_speakers = set((d.get("speaker") or "").strip() for d in diarization_segments if d.get("speaker"))
         if len(unique_speakers) <= 1 and len(diar_speakers) > 1:
@@ -1753,129 +1805,69 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
                         f"Job {job_id}: gender re-classification after F0 split failed: {_rcls_err}"
                     )
 
-    # Quality gate: some worker versions can return an empty transcript (0
-    # segments) even though the job ran. For Cantonese jobs, fall back to local
-    # transcription so the user can still dub.
-    if (not segments) and whisper_language and whisper_language.lower() in ("yue", "zh-yue", "yue-hk", "zh-hk"):
+    # Quality gate: if the GPU worker returns an empty transcript, retry
+    # transcription on RunPod using the original mixed audio instead of falling
+    # back to the local CPU. This applies to every language DubMaster supports.
+    if not segments:
         logger.warning(
             f"Job {job_id}: GPU transcript is empty for lang={whisper_language!r}. "
-            "Falling back to local transcription."
+            "Retrying transcription on RunPod (GPU)."
         )
         try:
-            from app.pipeline.transcribe_cantonese import transcribe_cantonese
-
-            prev_lang = os.environ.get("WHISPER_LANGUAGE")
-            os.environ["WHISPER_LANGUAGE"] = whisper_language or "yue"
-            extract_result = extract_audio(video_path)
-            local_result = transcribe_cantonese(extract_result, job_id=job_id)
-            if prev_lang is None:
-                os.environ.pop("WHISPER_LANGUAGE", None)
-            else:
-                os.environ["WHISPER_LANGUAGE"] = prev_lang
-
-            local_segments_raw = (local_result or {}).get("segments") or []
-            if local_segments_raw:
+            fb_segments, fb_diarization = await _runpod_transcribe_fallback(
+                job_id, video_path, whisper_language, min_speakers, max_speakers, gpu_env_vars
+            )
+            if fb_segments:
                 segments = [
                     _seg_dict_to_model(s)
-                    for s in local_segments_raw
+                    for s in fb_segments
                     if (s.get("text") or "").strip()
                 ]
-
-                # RunPod handler doesn't return diarization data — run it locally now
-                # so speaker labels are assigned before the transcript is saved.
-                if not diarization_segments and extract_result:
-                    try:
-                        local_diarize = diarize_audio(extract_result, job_id=job_id)
-                        if local_diarize.get("status") == "ok":
-                            diarization_segments = local_diarize.get("segments", [])
-                            logger.info(
-                                f"Job {job_id}: local diarization (empty-transcript fallback) "
-                                f"found {len(diarization_segments)} speaker turns"
-                            )
-                    except Exception as diar_err:
-                        logger.warning(f"Job {job_id}: local diarization failed in empty-transcript fallback: {diar_err}")
-
-                if diarization_segments and segments:
-                    raw_segments = [
-                        {"text": s.text, "start": s.start, "end": s.end, "speaker": s.speaker}
-                        for s in segments
-                    ]
-                    reassigned = _assign_speakers_from_diarization(raw_segments, diarization_segments)
-                    reassigned = _smooth_speaker_assignments(reassigned)
-                    reassigned = _normalize_speaker_labels(reassigned)
-                    if reassigned:
-                        segments = reassigned
-
+                diarization_segments = fb_diarization
                 logger.info(
-                    f"Job {job_id}: local transcription fallback (empty transcript) succeeded "
+                    f"Job {job_id}: RunPod transcription fallback (empty transcript) succeeded "
                     f"(segments={len(segments)})."
                 )
             else:
-                logger.warning(f"Job {job_id}: local transcription fallback returned no segments")
+                raise RuntimeError("RunPod transcription fallback returned no segments")
         except Exception as e:
-            logger.error(f"Job {job_id}: local transcription fallback failed: {e}")
+            logger.error(f"Job {job_id}: RunPod transcription fallback failed: {e}")
+            raise RuntimeError(
+                f"GPU transcription failed for {whisper_language}: RunPod returned an empty transcript "
+                "and the fallback also failed. Check RunPod worker configuration or Velma credits."
+            ) from e
 
-    # Quality gate: if GPU transcript is CJK character-soup (tons of 1–2 char
-    # segments), fall back to local transcription which previously produced
-    # sentence-level output.
+    # Quality gate: if the GPU transcript is low-quality CJK character soup,
+    # retry transcription on RunPod using the original mixed audio instead of
+    # falling back to the local CPU.
     if _is_low_quality_cjk_transcript(segments, whisper_language):
         logger.warning(
             f"Job {job_id}: GPU transcript is low-quality CJK character soup for lang={whisper_language!r}. "
-            "Falling back to local transcription."
+            "Retrying transcription on RunPod (GPU)."
         )
         try:
-            from app.pipeline.transcribe_cantonese import transcribe_cantonese
-
-            prev_lang = os.environ.get("WHISPER_LANGUAGE")
-            os.environ["WHISPER_LANGUAGE"] = whisper_language or "yue"
-            extract_result = extract_audio(video_path)
-            local_result = transcribe_cantonese(extract_result, job_id=job_id)
-            if prev_lang is None:
-                os.environ.pop("WHISPER_LANGUAGE", None)
-            else:
-                os.environ["WHISPER_LANGUAGE"] = prev_lang
-
-            local_segments_raw = (local_result or {}).get("segments") or []
-            if local_segments_raw:
+            fb_segments, fb_diarization = await _runpod_transcribe_fallback(
+                job_id, video_path, whisper_language, min_speakers, max_speakers, gpu_env_vars
+            )
+            if fb_segments:
                 segments = [
                     _seg_dict_to_model(s)
-                    for s in local_segments_raw
+                    for s in fb_segments
                     if (s.get("text") or "").strip()
                 ]
-
-                # RunPod handler doesn't return diarization data — run it locally now
-                # so speaker labels are assigned before the transcript is saved.
-                if not diarization_segments and extract_result:
-                    try:
-                        local_diarize = diarize_audio(extract_result, job_id=job_id)
-                        if local_diarize.get("status") == "ok":
-                            diarization_segments = local_diarize.get("segments", [])
-                            logger.info(
-                                f"Job {job_id}: local diarization (CJK-quality fallback) "
-                                f"found {len(diarization_segments)} speaker turns"
-                            )
-                    except Exception as diar_err:
-                        logger.warning(f"Job {job_id}: local diarization failed in CJK-quality fallback: {diar_err}")
-
-                if diarization_segments and segments:
-                    raw_segments = [
-                        {"text": s.text, "start": s.start, "end": s.end, "speaker": s.speaker}
-                        for s in segments
-                    ]
-                    reassigned = _assign_speakers_from_diarization(raw_segments, diarization_segments)
-                    reassigned = _smooth_speaker_assignments(reassigned)
-                    reassigned = _normalize_speaker_labels(reassigned)
-                    if reassigned:
-                        segments = reassigned
-
+                diarization_segments = fb_diarization
                 logger.info(
-                    f"Job {job_id}: local transcription fallback (low-quality CJK) succeeded "
+                    f"Job {job_id}: RunPod transcription fallback (low-quality CJK) succeeded "
                     f"(segments={len(segments)})."
                 )
             else:
-                logger.warning(f"Job {job_id}: local transcription fallback returned no segments")
+                raise RuntimeError("RunPod transcription fallback returned no segments")
         except Exception as e:
-            logger.error(f"Job {job_id}: local transcription fallback failed: {e}")
+            logger.error(f"Job {job_id}: RunPod transcription fallback failed: {e}")
+            raise RuntimeError(
+                f"GPU transcription failed for {whisper_language}: low-quality transcript and the "
+                "RunPod fallback also failed. Check RunPod worker configuration or Velma credits."
+            ) from e
 
     # Cantonese cleanup: GPU workers often return CJK characters spaced like tokens.
     # Fix at ingestion time so downstream translation/TTS sees real sentences.
@@ -1893,6 +1885,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
                 velma_emotion=s.velma_emotion,
                 velma_accent=s.velma_accent,
                 velma_deepfake_score=s.velma_deepfake_score,
+                is_credit=s.is_credit,
             )
             for s in segments
             if (s.text or "").strip()
@@ -1901,6 +1894,15 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         after = len(segments)
         if after != before:
             logger.info(f"Job {job_id}: merged micro-fragments after CJK cleanup: {before} -> {after}")
+
+    # Mark subtitle/credit/narration lines so they are excluded from dubbing.
+    # The original accompaniment audio is preserved for these time ranges.
+    if segments:
+        before_credits = len([s for s in segments if s.is_credit])
+        segments = _mark_credit_segments(segments)
+        after_credits = len([s for s in segments if s.is_credit])
+        if after_credits != before_credits:
+            logger.info(f"Job {job_id}: marked {after_credits - before_credits} credit/subtitle segment(s)")
 
     # Apply Velma enrichment to final segments after all speaker reassignment is complete
     if velma_result and velma_result.get("status") == "ok" and segments:
@@ -1974,9 +1976,6 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         except Exception as classify_err:
             logger.warning(f"Job {job_id}: local F0 classification failed: {classify_err}")
 
-    # Stems the GPU already produced — landing them locally is what keeps the
-    # long-form mix guard from firing, restoring the music bed and voice cloning.
-    await asyncio.to_thread(_fetch_gpu_stems, job_id, result.get("stems") or {})
     timings = result.get("timings", {})
     gpu_info = result.get("gpu", {})
     logger.info(
@@ -1986,6 +1985,193 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
     )
 
     return True
+
+
+async def _get_existing_stem_url(job_id: str, stem_name: str = "vocals.mp3") -> Optional[str]:
+    """Return a presigned R2 URL for a GPU-produced stem if it exists."""
+    r2_bucket = os.getenv("R2_BUCKET_NAME", "")
+    r2_key_id = os.getenv("R2_ACCESS_KEY_ID", "")
+    r2_secret = os.getenv("R2_SECRET_ACCESS_KEY", "")
+    r2_account = os.getenv("R2_ACCOUNT_ID", "")
+    if not (r2_bucket and r2_key_id and r2_secret and r2_account):
+        return None
+
+    import boto3
+    from botocore.config import Config
+    from botocore.exceptions import ClientError
+
+    endpoint = f"https://{r2_account}.r2.cloudflarestorage.com"
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=r2_key_id,
+        aws_secret_access_key=r2_secret,
+        config=Config(signature_version="s3v4"),
+        region_name="auto",
+    )
+    object_key = f"stems/{job_id}/{stem_name}"
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: s3.head_object(Bucket=r2_bucket, Key=object_key),
+        )
+        url = s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": r2_bucket, "Key": object_key},
+            ExpiresIn=7200,
+        )
+        logger.info(f"Job {job_id}: using existing R2 stem at {object_key}")
+        return url
+    except ClientError as head_err:
+        if head_err.response["Error"]["Code"] != "404":
+            logger.warning(f"Job {job_id}: could not check R2 stem {object_key}: {head_err}")
+        return None
+
+
+async def _runpod_diarize_fallback(
+    job_id: str,
+    video_path: str,
+    min_speakers: int,
+    max_speakers: int,
+) -> list:
+    """Retry speaker diarization on RunPod using the separated vocals stem.
+
+    The transcription fallback uses the original mixed audio so Whisper can
+    produce a transcript. pyannote on that same mixed track often fails to
+    identify speakers. The GPU worker already produced a clean vocals stem, so
+    we send that back to RunPod for a diarization-only pass.
+    """
+    from app.services.runpod_service import runpod_service
+
+    logger.warning(
+        f"Job {job_id}: GPU diarization empty — retrying diarization on RunPod "
+        "using separated vocals."
+    )
+
+    # Prefer the existing R2 vocals stem; fall back to uploading the local WAV.
+    file_url = await _get_existing_stem_url(job_id, "vocals.mp3")
+    if not file_url:
+        source_path = _vocals_or_video(video_path, job_id)
+        file_url = await _get_runpod_file_url(job_id, source_path)
+
+    env_vars = {
+        "DIARIZATION_MIN_SPEAKERS": str(min_speakers),
+        "DIARIZATION_MAX_SPEAKERS": str(max_speakers),
+        # Force CPU diarization on the worker to avoid CUDA collapsing speakers.
+        "DIARIZATION_DEVICE": "cpu",
+    }
+    # The diarization-only job still needs the Hugging Face token to load
+    # pyannote/speaker-diarization-3.1 on the worker.
+    for hf_key in ("HF_TOKEN", "HUGGING_FACE_TOKEN", "HUGGINGFACE_TOKEN", "HUGGINGFACE_HUB_TOKEN"):
+        v = os.getenv(hf_key, "").strip()
+        if v:
+            env_vars["HF_TOKEN"] = v
+            break
+    if not env_vars.get("HF_TOKEN"):
+        logger.warning(f"Job {job_id}: HF token not available — RunPod diarization fallback may fail")
+
+    submit_result = await runpod_service.submit_job(
+        file_url=file_url,
+        job_id=f"{job_id}-diarize-fallback",
+        language="",
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+        steps=["diarize"],
+        env_vars=env_vars,
+    )
+    runpod_job_id = submit_result.get("id")
+    if not runpod_job_id:
+        raise RuntimeError("RunPod diarization fallback did not return a job ID")
+
+    timeout = int(os.getenv("RUNPOD_POLL_TIMEOUT_SEC", "7200"))
+    output = await runpod_service.poll_until_complete(
+        runpod_job_id,
+        timeout=timeout,
+        interval=5,
+    )
+    if output.get("error"):
+        raise RuntimeError(f"RunPod diarization fallback failed: {output['error']}")
+
+    diarization = (output.get("diarization") or {}).get("segments", []) or []
+    logger.info(
+        f"Job {job_id}: RunPod diarization fallback returned "
+        f"{len(diarization)} turn(s)."
+    )
+    return diarization
+
+
+async def _runpod_transcribe_fallback(
+    job_id: str,
+    video_path: str,
+    whisper_language: str,
+    min_speakers: int,
+    max_speakers: int,
+    gpu_env_vars: dict,
+) -> tuple[list, list]:
+    """Retry transcription on RunPod using the original mixed audio.
+
+    The primary GPU pipeline separates vocals before transcribing. Some
+    Cantonese sources lose dialogue when the separated vocals are over-filtered
+    or when VAD is disabled. This fallback submits a transcription-only job
+    against the original mixed audio, keeping the work on GPU instead of the
+    local CPU fallback.
+    """
+    from app.services.runpod_service import runpod_service
+
+    logger.warning(
+        f"Job {job_id}: GPU transcript empty/low-quality — retrying transcription on RunPod "
+        "using original mixed audio (no Demucs)."
+    )
+    file_url = await _get_runpod_file_url(job_id, video_path)
+    env_vars = dict(gpu_env_vars)
+    # Remove any VAD override so the worker uses its default (0.15 for yue).
+    env_vars.pop("VAD_THRESHOLD", None)
+    # Pin Whisper-only to avoid Tencent 413 / Paraformer unsupported-language issues.
+    env_vars["CANTONESE_ASR_ENGINES"] = "whisper"
+    env_vars.setdefault("WHISPER_MODEL", "large-v3")
+
+    submit_result = await runpod_service.submit_job(
+        file_url=file_url,
+        job_id=f"{job_id}-tx-fallback",
+        language=whisper_language,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+        steps=["transcribe"],
+        env_vars=env_vars,
+    )
+    runpod_job_id = submit_result.get("id")
+    if not runpod_job_id:
+        raise RuntimeError("RunPod transcription fallback did not return a job ID")
+
+    timeout = int(os.getenv("RUNPOD_POLL_TIMEOUT_SEC", "7200"))
+    output = await runpod_service.poll_until_complete(
+        runpod_job_id,
+        timeout=timeout,
+        interval=5,
+    )
+    if output.get("error"):
+        raise RuntimeError(f"RunPod transcription fallback failed: {output['error']}")
+
+    segments = output.get("segments", []) or []
+    diarization = (output.get("diarization") or {}).get("segments", []) or []
+
+    # The mixed-audio transcription path can leave pyannote without a clean
+    # enough signal to separate speakers. Run a diarization-only pass on the
+    # already-separated vocals stem so downstream voice cloning still gets
+    # per-speaker audio.
+    if segments and not diarization:
+        try:
+            diarization = await _runpod_diarize_fallback(
+                job_id, video_path, min_speakers, max_speakers
+            )
+        except Exception as dia_err:
+            logger.error(f"Job {job_id}: RunPod diarization fallback failed: {dia_err}")
+
+    logger.info(
+        f"Job {job_id}: RunPod transcription fallback returned "
+        f"{len(segments)} segment(s), {len(diarization)} diarization turn(s)."
+    )
+    return segments, diarization
 
 
 def _should_use_gpu() -> bool:
@@ -6135,6 +6321,19 @@ async def retranslate_job(job_id: str, request: Request):
             for disk_seg in _disk_segs:
                 _groups.setdefault(disk_seg.get("transcript_index"), []).append(disk_seg)
 
+            # Re-translated text invalidates whatever audio a segment carries: that
+            # clip was synthesised for the OLD text, at the OLD index. Leaving it
+            # attached makes the editor PLAY and MAKE MOVIE RENDER a line whose
+            # audio says something else — observed as "go go" (TTS reading the
+            # untranslated Cantonese) and lines borrowed from elsewhere in the film.
+            # Clearing it turns a silent corruption into a visible regenerate-me state.
+            def _invalidate_audio(_d: dict) -> dict:
+                _d["path"] = ""
+                _d["committed_audio_url"] = None
+                _d["audio_url"] = None
+                _d["rpt_dirty"] = True
+                return _d
+
             new_disk_segs: list = []
             for _ti, _group in _groups.items():
                 sub_segs = _orig_to_new.get(_ti)
@@ -6151,6 +6350,7 @@ async def retranslate_job(job_id: str, request: Request):
                     new_disk_segs.extend(_group)
                     continue
                 base = _group[0]
+                _old_text = base.get("text", "")
                 if len(sub_segs) == 1 and not sub_segs[0].get("auto_split"):
                     # No split — update text AND timing in place, dropping any
                     # stale siblings this group may still be carrying from a
@@ -6166,19 +6366,24 @@ async def retranslate_job(job_id: str, request: Request):
                     base["start"] = sub_segs[0].get("start", base.get("start"))
                     base["end"] = sub_segs[0].get("end", base.get("end"))
                     base["original_text"] = base.get("original_text") or base["text"]
+                    if base["text"] != _old_text:
+                        _invalidate_audio(base)
                     new_disk_segs.append(base)
                 else:
                     # Sentence was split — replace the ENTIRE group (fresh split
                     # and any stale siblings from a prior split alike) with one
                     # disk entry per current sub-sentence.
                     for sub in sub_segs:
-                        new_disk_segs.append({
+                        # A split ALWAYS changes text: every child would otherwise
+                        # inherit the parent's single clip, so three sentences would
+                        # all play the same wrong audio.
+                        new_disk_segs.append(_invalidate_audio({
                             **base,
                             "text":       sub.get("text", ""),
                             "start":      sub.get("start", base.get("start")),
                             "end":        sub.get("end",   base.get("end")),
                             "auto_split": True,
-                        })
+                        }))
             _seg_data["segments"] = new_disk_segs
             atomic_write_json(_segments_path, _seg_data)
             logger.info(f"[RETRANSLATE] Rebuilt segments.json: {len(_disk_segs)} → {len(new_disk_segs)} entries")

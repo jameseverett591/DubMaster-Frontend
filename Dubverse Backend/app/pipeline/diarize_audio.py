@@ -50,22 +50,59 @@ def _get_pipeline(job_id: str | None = None):
         return None
 
     try:
-        # PyTorch 2.x weights_only=True blocks TorchVersion by default — allowlist it
-        # so pyannote's checkpoint (which serializes TorchVersion) can be loaded safely.
+        # PyTorch 2.6 made weights_only=True the default for torch.load. pyannote
+        # checkpoints serialize several custom classes that are not in the default
+        # allowlist, so Pipeline.from_pretrained fails with an UnpicklingError.
+        # The checkpoints come from Hugging Face, so we disable weights_only for
+        # the duration of this process.
         try:
             import torch as _torch
-            _torch.serialization.add_safe_globals([_torch.torch_version.TorchVersion])
-        except Exception:
-            pass
+            _orig_torch_load = _torch.load
+            def _load_allow_pyannote(*args, **kwargs):
+                # Some callers (e.g. lightning_fabric) explicitly pass
+                # weights_only=True; override it for pyannote checkpoints.
+                kwargs["weights_only"] = False
+                return _orig_torch_load(*args, **kwargs)
+            _torch.load = _load_allow_pyannote
+            logger.info("[DIARIZE] Patched torch.load to allow pyannote checkpoints")
+        except Exception as _torch_load_err:
+            logger.warning(f"[DIARIZE] Could not patch torch.load: {_torch_load_err}")
 
         _PIPELINE = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
         _PIPELINE_LOAD_ERROR = None
         import torch
-        if torch.cuda.is_available():
+        # Allow forcing CPU diarization even on a GPU worker. pyannote on CUDA
+        # has been observed to collapse to a single speaker for some inputs,
+        # while the same audio on CPU produces correct multi-speaker diarization.
+        device_preference = os.getenv("DIARIZATION_DEVICE", "").lower()
+        if device_preference == "cpu":
+            _PIPELINE = _PIPELINE.to(torch.device("cpu"))
+            logger.info("[DIARIZE] Pipeline forced to CPU via DIARIZATION_DEVICE=cpu")
+        elif torch.cuda.is_available():
             _PIPELINE = _PIPELINE.to(torch.device("cuda"))
             logger.info("[DIARIZE] Pipeline moved to CUDA GPU")
         else:
             logger.info("[DIARIZE] Pipeline running on CPU")
+
+        # Lower the clustering threshold and min_cluster_size so pyannote is
+        # less aggressive about collapsing distinct speakers. Default threshold
+        # from the pretrained pipeline is ~0.70, which often merges speakers.
+        try:
+            _cluster_threshold = float(os.getenv("DIARIZATION_CLUSTERING_THRESHOLD", "0.40"))
+            _min_cluster_size = int(os.getenv("DIARIZATION_MIN_CLUSTER_SIZE", "1"))
+            _PIPELINE.instantiate({
+                "clustering": {
+                    "threshold": _cluster_threshold,
+                    "min_cluster_size": _min_cluster_size,
+                }
+            })
+            logger.info(
+                f"[DIARIZE] Clustering tuned: threshold={_cluster_threshold}, "
+                f"min_cluster_size={_min_cluster_size}"
+            )
+        except Exception as _cluster_err:
+            logger.warning(f"[DIARIZE] Could not tune clustering: {_cluster_err}")
+
         logger.info("[DIARIZE] Pipeline loaded successfully")
     except Exception as e:
         versions: Dict[str, Any] = {}
