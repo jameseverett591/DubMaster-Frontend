@@ -111,17 +111,10 @@ _CJK_SHARED: Dict[str, str] = {
     "Ip man": "Ip Man",
     "Wing Chun": "Wing Chun",
     "wing chun": "Wing Chun",
-}
-
-# ---------------------------------------------------------------------------
-# CANTONESE (yue) — Cantonese-specific terms + film-specific character names
-# (character names here are for the calibration test film only;
-#  production projects use the per-project Character Sheet)
-# ---------------------------------------------------------------------------
-_GLOSSARY_YUE: Dict[str, str] = {
-    **_CJK_SHARED,
-
-    # ── Calibration film: Ip Man character names ───────────────────────────
+    # ── Film character names — dialect-INDEPENDENT ─────────────────────────
+    # 叶问 is Ip Man whether the track is Cantonese or Mandarin. These lived in
+    # _GLOSSARY_YUE, so switching a film to Mandarin silently dropped every
+    # character name and the Ip/Yip consistency work with it. Shared by both.
     "叶问": "Ip Man",
     "葉問": "Ip Man",
     "熱吻": "Ip Man",           # Whisper mishearing of 葉問
@@ -172,13 +165,31 @@ _GLOSSARY_YUE: Dict[str, str] = {
     "武次林": "Lam",
     "武慈林": "Lam",
     "李钊": "Li Zhao",
-    "葉太": "Mrs. Yip",           # Ip Man's wife — 葉 (Yip) + 太 (wife/Mrs.)
-    "葉太太": "Mrs. Yip",        # full Cantonese form for Mrs. Yip
-    "叶太": "Mrs. Yip",           # simplified Chinese variant
-    "叶太太": "Mrs. Yip",         # simplified Chinese full form
+    # One romanisation of 葉 across the whole film. The glossary used to render
+    # him "Ip" and her "Yip", so a single scene could contain both "Master Ip"
+    # and "Mrs. Yip" for the same surname. Ip is the spelling the films use.
+    "叶先生": "Mr. Ip",          # simplified — paired with 叶太太 in address
+    "葉先生": "Mr. Ip",          # traditional
+    "葉太": "Mrs. Ip",            # Ip Man's wife — 葉 (Ip) + 太 (wife/Mrs.)
+    "葉太太": "Mrs. Ip",          # full Cantonese form
+    "叶太": "Mrs. Ip",            # simplified Chinese variant
+    "叶太太": "Mrs. Ip",          # simplified Chinese full form
     "文叔": "Uncle Ip",           # Ah Jun's term for Ip Man (文=Wen, 叔=uncle)
     "文哥": "Brother Wen",
     "文嗯": "Brother Wen",      # Whisper mishearing of 文哥
+
+    "黄少三": "Huang Shaosan",
+    "黃少三": "Huang Shaosan",
+
+}
+
+# ---------------------------------------------------------------------------
+# CANTONESE (yue) — Cantonese-specific terms + film-specific character names
+# (character names here are for the calibration test film only;
+#  production projects use the per-project Character Sheet)
+# ---------------------------------------------------------------------------
+_GLOSSARY_YUE: Dict[str, str] = {
+    **_CJK_SHARED,
 
     # ── Cantonese-specific Whisper artifacts ───────────────────────────────
     "男女路友": "male and female",
@@ -199,9 +210,9 @@ _GLOSSARY_YUE: Dict[str, str] = {
     # _apply_glossary_pre strips CJK-adjacent commas from the segment text BEFORE
     # matching (its own collapsing only handles spaces, not punctuation), so a
     # key with commas never matches — the punctuation-free form is required.
-    "喂川你慢": "Wing Chun, Yip Man!",
-    "喂，川，你慢": "Wing Chun, Yip Man!",
-    "喂，川，你慢。": "Wing Chun, Yip Man!",
+    "喂川你慢": "Wing Chun, Ip Man!",
+    "喂，川，你慢": "Wing Chun, Ip Man!",
+    "喂，川，你慢。": "Wing Chun, Ip Man!",
 
     # ── "I'll pay" — compensation phrases (moved from translation_service.py's
     # whole-segment-only exact-override table). These are 2+ character phrases,
@@ -232,7 +243,7 @@ _GLOSSARY_YUE: Dict[str, str] = {
     "久聞佛山是武術之地": "I have long heard that Foshan is famous for its martial arts",
     "久闻佛山武术之地":   "I have long heard that Foshan is famous for its martial arts",
     "久聞佛山武術之地":   "I have long heard that Foshan is famous for its martial arts",
-    # Line 15 — Mrs. Yip: yells at Master Shin ("Shut your mouth!"), then turns
+    # Line 15 — Mrs. Ip: yells at Master Shin ("Shut your mouth!"), then turns
     # to Ip Man and whispers ("Don't break my things."). These are two utterances
     # in one Velma segment. The second clause is the quiet permission to fight.
     # Velma transcribes the first part as 没打冷气的东西 across multiple runs.
@@ -298,10 +309,6 @@ _GLOSSARY_YUE: Dict[str, str] = {
     "怎么样金师傅": "Master Shin, are you alright?",
     "怎麼樣金師傅沒事吧": "How's it going? Master Shin, are you okay?",
     "怎么样金师傅没事吧": "How's it going? Master Shin, are you okay?",
-
-    # ── Cantonese character names ───────────────────────────────────────────
-    "黄少三": "Huang Shaosan",
-    "黃少三": "Huang Shaosan",
 
     # ── Cantonese idiomatic expressions ────────────────────────────────────
     "武打郎几啲嘢": "What kind of nonsense is this",
