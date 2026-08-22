@@ -41,7 +41,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   const storeJobId = useEditorStore((state) => state.jobId)
   const jobId = routeJobId ?? storeJobId ?? undefined
   const isJobAware = !!jobId
-  const { segments, speakerVoiceMap, updateSpeakerVoice, pulseSpeaker } = useEditorStore()
+  const { segments, speakerVoiceMap, speakerVoiceSource, updateSpeakerVoice, pulseSpeaker } = useEditorStore()
 
   // User-added custom voices (Fish/ElevenLabs) — shown at the top of page 1 as
   // Voice cards so they can be assigned like any catalog voice.
@@ -133,6 +133,23 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
 
   // Custom voices are assignable too, so their names belong in the cache.
   useEffect(() => { rememberVoiceNames(customVoices) }, [customVoices, rememberVoiceNames])
+
+  // Preset voices (FISH_VOICE_*) are assigned automatically at dub time, so the
+  // client never browsed them and cannot name them from the page cache. The
+  // backend knows them from env — fold the labels in so the strip can say
+  // "Male 1" instead of "(voice set)".
+  useEffect(() => {
+    let cancelled = false
+    apiClient.getPresetVoiceLabels().then(map => {
+      if (cancelled || !map) return
+      setVoiceNames(prev => {
+        const next = { ...map, ...prev }   // real catalog names win over labels
+        try { localStorage.setItem(VOICE_NAME_KEY, JSON.stringify(next)) } catch {}
+        return next
+      })
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [])
 
   // Favorites (localStorage)
   const [favorites, setFavorites] = useState<Set<string>>(new Set())
@@ -774,23 +791,61 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
               Speakers in this project:
             </span>
             {speakers.map(sp => {
-              const voiceName = sp.current_voice_id
-                ? (voiceNames[sp.current_voice_id]
-                    ?? Object.values(pageCache).flat().find(v => v.voice_id === sp.current_voice_id)?.name
-                    ?? '(voice set)')
+              // The map holds EITHER a Fish voice id (Library assignment, or derived
+              // from what was rendered) OR a preset key like "male-1" (gender
+              // defaults). Resolve both, so a speaker never reads "(voice set)".
+              const _raw = sp.current_voice_id
+              const _isPresetKey = !!_raw && /^(male|female|child)-[0-9]+$/.test(_raw)
+              const voiceName = _raw
+                ? (_isPresetKey
+                    ? _raw.split('-').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ')
+                    : voiceNames[_raw]
+                      ?? Object.values(pageCache).flat().find(v => v.voice_id === _raw)?.name
+                      ?? '(voice set)')
                 : null
+              // Green = the user chose this voice. Purple = the dub auto-assigned
+              // it and it still wants review. Amber = nothing assigned.
+              //
+              // A preset key ("male-1") can ONLY come from the dub's gender
+              // defaults — assigning from the Library always yields a 32-char
+              // Fish id — so it is proof of auto-assignment regardless of what
+              // the provenance map says. That makes the colour correct even for
+              // jobs dubbed before provenance tracking existed.
+              const source = !sp.current_voice_id
+                ? undefined
+                : _isPresetKey
+                  ? 'auto' as const
+                  : speakerVoiceSource[sp.speaker_id]
+              const tone = !sp.current_voice_id
+                ? 'bg-amber-500/10 border-amber-500/40 text-amber-300 hover:bg-amber-500/20'
+                : source === 'user'
+                  ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/20'
+                  : 'bg-purple-500/10 border-purple-500/40 text-purple-300 hover:bg-purple-500/20'
               return (
-                <span key={sp.speaker_id}
-                  title={sp.current_voice_id ? `Voice ID: ${sp.current_voice_id}` : 'No voice assigned yet'}
-                  className={`text-[11px] px-2.5 py-1 rounded-full border whitespace-nowrap ${
+                <button key={sp.speaker_id}
+                  type="button"
+                  onClick={() => {
+                    // Jump to the assigned voice in the library. Searching by name
+                    // is the reliable route: the catalog is lazily paginated, so a
+                    // voice's page number is not knowable up front.
+                    // Only search when there is a real name to find. An unassigned
+                    // speaker CLEARS the search — searching the literal words
+                    // "not assigned" returned an empty library, hiding the very
+                    // voices being chosen from.
+                    if (voiceName && voiceName !== '(voice set)') setSearch(voiceName)
+                    else setSearch('')
+                    setCurrentPage(1)
+                  }}
+                  title={
                     sp.current_voice_id
-                      ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
-                      : 'bg-amber-500/10 border-amber-500/40 text-amber-300'
-                  }`}>
+                      ? `${source === 'user' ? 'Assigned by you' : 'Auto-assigned by the dub'} — Voice ID: ${sp.current_voice_id}\nClick to find it in the library`
+                      : 'No voice assigned yet — click to search'
+                  }
+                  className={`text-[11px] px-2.5 py-1 rounded-full border whitespace-nowrap transition-colors cursor-pointer ${tone}`}>
                   <span className="font-medium">{sp.display_name}</span>
                   <span className="opacity-70 mx-1">›</span>
-                  <span>{voiceName ?? '(no voice yet)'}</span>
-                </span>
+                  <span>{voiceName ?? 'not assigned'}</span>
+                </button>
               )
             })}
           </div>

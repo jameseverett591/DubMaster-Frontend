@@ -5097,6 +5097,31 @@ async def set_tts_provider(body: dict):
     }
 
 
+@router.get("/voices/presets", dependencies=[Depends(_dep_auth)])
+async def get_preset_voice_map():
+    """Reverse map of the configured FISH_VOICE_* presets: voice_id -> label.
+
+    The editor needs to name a voice it never browsed. Preset voices are
+    assigned automatically at dub time, so their ids appear on segments while
+    their names were never seen by the client — the speakers strip could only
+    say "(voice set)". The public catalog has no lookup-by-id, but the presets
+    are ours, so we can answer authoritatively from env.
+    """
+    from app.services.fish_audio_tts import _load_voice_map_from_env
+
+    labels: Dict[str, str] = {}
+    try:
+        for key, vid in (_load_voice_map_from_env() or {}).items():
+            if not vid:
+                continue
+            # "male-1" -> "Male 1"
+            parts = key.split("-")
+            labels[vid] = " ".join(p.capitalize() for p in parts)
+    except Exception as exc:
+        logger.warning(f"[VOICES] preset map unavailable: {exc}")
+    return {"presets": labels}
+
+
 @router.get("/voices", dependencies=[Depends(_dep_auth)])
 async def get_available_voices(
     page: int = 1,

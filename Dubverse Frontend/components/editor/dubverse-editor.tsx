@@ -865,6 +865,7 @@ export function DubVerseEditor({
     cancelPreview,
     speakerVoiceMap,
     setSpeakerVoiceMap,
+    setSpeakerVoiceSource,
     speakerTraitsMap,
     setSpeakerTraitsMap,
     speakerPitchMap,
@@ -2402,12 +2403,23 @@ export function DubVerseEditor({
       const _st = useEditorStore.getState()
       const _persisted = _st.speakerVoiceMapJobId === jobId ? _st.speakerVoiceMap : {}
 
+      // Provenance drives the strip colour: green = the user chose it, purple =
+      // the dub did. Everything resolved here except a persisted entry is 'auto'.
+      const _markAuto = (m: Record<string, string>) =>
+        Object.fromEntries(Object.keys(m).map(k => [k, 'auto' as const]))
+
       if (Object.keys(_persisted).length > 0) {
         setSpeakerVoiceMap({ ..._derived, ..._persisted })
+        setSpeakerVoiceSource({
+          ..._markAuto(_derived),
+          ...Object.fromEntries(Object.keys(_persisted).map(k => [k, 'user' as const])),
+        })
       } else if (Object.keys(_derived).length > 0) {
         setSpeakerVoiceMap(_derived)
+        setSpeakerVoiceSource(_markAuto(_derived))
       } else if (initialVoiceMapping && Object.keys(initialVoiceMapping).length > 0) {
         setSpeakerVoiceMap(initialVoiceMapping)
+        setSpeakerVoiceSource(_markAuto(initialVoiceMapping))
       } else {
         const genders = speakerGenders ?? {}
         const voicesByGender: Record<string, string[]> = {
@@ -2433,6 +2445,7 @@ export function DubVerseEditor({
           usage[gender] = idx + 1
         }
         setSpeakerVoiceMap(defaultMap)
+        setSpeakerVoiceSource(_markAuto(defaultMap))
       }
 
       // Initialise speaker traits map from persisted mapping (server-side state).
