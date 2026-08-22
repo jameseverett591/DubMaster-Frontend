@@ -1040,6 +1040,7 @@ export function DubVerseEditor({
     return 320
   })
   const [isResizingQcMonitor, setIsResizingQcMonitor] = useState(false)
+  const qcMonitorRef = useRef<HTMLDivElement>(null)
 
   // Track label column width — resizable, persisted
   const [trackLabelWidth, setTrackLabelWidth] = useState(() => {
@@ -1050,6 +1051,7 @@ export function DubVerseEditor({
     return 112
   })
   const [isResizingTrackLabel, setIsResizingTrackLabel] = useState(false)
+  const trackLabelRef = useRef<HTMLDivElement>(null)
   const [emotionSource, setEmotionSource] = useState<'auto' | 'advanced'>('auto')
   const [advancedBrowserSegment, setAdvancedBrowserSegment] = useState<number | null>(null)
   const [floatingEmotionSegment, setFloatingEmotionSegment] = useState<number | null>(null)
@@ -1647,6 +1649,11 @@ export function DubVerseEditor({
   const autoRegenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingAutoRegenRef = useRef<number | null>(null)
   const [editingText, setEditingText] = useState('')
+  // Live value of the edit box. The Input is UNCONTROLLED: a controlled input
+  // here re-rendered the whole editor on every keystroke — timeline, QC monitor,
+  // every visible row — which made backspace lag and the caret jump. Typing now
+  // writes only to this ref, so it costs nothing; readers take .current.
+  const editingTextRef = useRef('')
   const [previewWidth, setPreviewWidth] = useState(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('dubverse.editor.previewWidth')
@@ -1655,6 +1662,7 @@ export function DubVerseEditor({
     return 520
   })
   const [isResizingPreview, setIsResizingPreview] = useState(false)
+  const previewPanelRef = useRef<HTMLDivElement>(null)
   const [timelineHeight, setTimelineHeight] = useState(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('dubverse.editor.timelineHeight')
@@ -1663,6 +1671,7 @@ export function DubVerseEditor({
     return 360
   })
   const [isResizingTimeline, setIsResizingTimeline] = useState(false)
+  const timelinePanelRef = useRef<HTMLDivElement>(null)
 
   // Video import state
   const [importedVideoUrl, setImportedVideoUrl] = useState<string | null>(null)
@@ -3193,25 +3202,32 @@ export function DubVerseEditor({
     if (layoutLocked) return
     e.preventDefault()
     setIsResizingPreview(true)
-    
+
     const startX = e.clientX
     const startWidth = previewWidth
-    
+    let finalWidth = previewWidth
+
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const delta = startX - moveEvent.clientX
       const newWidth = Math.min(Math.max(startWidth + delta, 300), 1100)
-      setPreviewWidth(newWidth)
+      finalWidth = newWidth
+      // Update the DOM directly during the drag so the whole editor doesn't
+      // re-render on every mousemove — same fix that made the playhead smooth.
+      if (previewPanelRef.current) {
+        previewPanelRef.current.style.width = `${newWidth}px`
+      }
     }
-    
+
     const handleMouseUp = () => {
       setIsResizingPreview(false)
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
+      setPreviewWidth(finalWidth)
       if (!layoutLocked) {
-        localStorage.setItem('dubverse.editor.previewWidth', previewWidth.toString())
+        localStorage.setItem('dubverse.editor.previewWidth', finalWidth.toString())
       }
     }
-    
+
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
   }, [previewWidth, layoutLocked])
@@ -3225,22 +3241,27 @@ export function DubVerseEditor({
     
     const startY = e.clientY
     const startHeight = timelineHeight
+    let finalHeight = timelineHeight
     
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const delta = startY - moveEvent.clientY
       const newHeight = Math.min(Math.max(startHeight + delta, 150), 700)
-      setTimelineHeight(newHeight)
+      finalHeight = newHeight
+      if (timelinePanelRef.current) {
+        timelinePanelRef.current.style.height = `${newHeight}px`
+      }
     }
     
     const handleMouseUp = () => {
       setIsResizingTimeline(false)
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
+      setTimelineHeight(finalHeight)
       if (!layoutLocked) {
-        localStorage.setItem('dubverse.editor.timelineHeight', timelineHeight.toString())
+        localStorage.setItem('dubverse.editor.timelineHeight', finalHeight.toString())
       }
     }
-    
+
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
   }, [timelineHeight, layoutLocked])
@@ -3557,7 +3578,7 @@ export function DubVerseEditor({
       return prev.map((seg, i) => i === index ? { ...seg, ...clearedFields } : seg)
     })
     if (editingSegmentIndex === index) {
-      setEditingText('')
+      setEditingText(''); editingTextRef.current = ''
       setEditingSegmentIndex(null)
     }
     setCustomEmotionDrafts(prev => { const n = { ...prev }; delete n[index]; return n })
@@ -3593,8 +3614,8 @@ export function DubVerseEditor({
 
     // Guard: if the segment has committed audio AND the text has changed from
     // what was last committed, require explicit confirmation before overwriting.
-    const incomingText = (activeIndex === selectedSegmentIndex && editingText.trim())
-      ? editingText.trim()
+    const incomingText = (activeIndex === selectedSegmentIndex && editingTextRef.current.trim())
+      ? editingTextRef.current.trim()
       : (segment.preview_text ?? segment.active_text ?? segment.target_text)
     const committedText = segment.committed_adapted_text ?? segment.target_text
     const textChanged = incomingText !== committedText
@@ -3625,12 +3646,12 @@ export function DubVerseEditor({
       // > stored preview/active text.
       const regenerateText = (textOverride && textOverride.trim())
         ? textOverride.trim()
-        : (activeIndex === selectedSegmentIndex && editingText.trim())
-          ? editingText.trim()
+        : (activeIndex === selectedSegmentIndex && editingTextRef.current.trim())
+          ? editingTextRef.current.trim()
           : segment.committed_adapted_text
             ? segment.committed_adapted_text
             : (segment.preview_text ?? segment.active_text ?? segment.target_text)
-      console.log('[REGEN] calling backend', { activeIndex, finalVoiceKey, regenerateText, textOverride, preview_text: segment.preview_text, active_text: segment.active_text, editing: editingText.trim() })
+      console.log('[REGEN] calling backend', { activeIndex, finalVoiceKey, regenerateText, textOverride, preview_text: segment.preview_text, active_text: segment.active_text, editing: editingTextRef.current.trim() })
       // Live timeline boundaries, straight from the on-screen segment — segments.json
       // on the backend can lag behind a split/resize whose commitSegmentTiming call
       // is fire-and-forget (see the interrupt handler above). Sending these lets the
@@ -3836,7 +3857,7 @@ export function DubVerseEditor({
         }, 0)
       }
     }
-  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds, lockedSegments, selectSegment, setImportedSegments, setPlaybackMode, editingText, keyAt])
+  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds, lockedSegments, selectSegment, setImportedSegments, setPlaybackMode, keyAt])
 
   const handleGenerateSpeechRef = useRef(handleGenerateSpeech)
   handleGenerateSpeechRef.current = handleGenerateSpeech
@@ -4458,7 +4479,7 @@ export function DubVerseEditor({
   const startEditing = useCallback((index: number) => {
     const currentText = displaySegments[index]?.preview_text ?? displaySegments[index]?.committed_adapted_text ?? displaySegments[index]?.active_text ?? displaySegments[index]?.target_text ?? ''
     setEditingSegmentIndex(index)
-    setEditingText(currentText)
+    setEditingText(currentText); editingTextRef.current = currentText
     // Immediately activate preview so the orange chip + Commit/Cancel appear
     setPreviewText(index, currentText)
     setImportedSegments(prev => {
@@ -4487,7 +4508,7 @@ export function DubVerseEditor({
   const saveEditing = useCallback(() => {
     if (editingSegmentIndex !== null) {
       const idx = editingSegmentIndex
-      const text = editingText
+      const text = editingTextRef.current
       // Push pre-edit text onto the global undo stack before applying the change.
       undoStack.current.push({ index: idx, prevText: displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? '' })
       emotionAutoFiredRef.current.delete(idx)
@@ -4501,7 +4522,7 @@ export function DubVerseEditor({
         )
       })
       // Clear editing state so regenerate uses preview_text, not editingText
-      setEditingText('')
+      setEditingText(''); editingTextRef.current = ''
       setEditingSegmentIndex(null)
       // Persist edited text to disk so regenerate_segment reads it from committed_adapted_text
       applyFlagOutcome(idx, 'text')
@@ -4520,12 +4541,12 @@ export function DubVerseEditor({
         }, 2000)
       }
     }
-  }, [editingSegmentIndex, editingText, setPreviewText, displaySegments])
+  }, [editingSegmentIndex, setPreviewText, displaySegments])
 
   // Cancel editing
   const cancelEditing = useCallback(() => {
     setEditingSegmentIndex(null)
-    setEditingText('')
+    setEditingText(''); editingTextRef.current = ''
   }, [])
 
   // Right-click → Copy Text: put the segment's current dubbed text on the clipboard.
@@ -6007,10 +6028,12 @@ export function DubVerseEditor({
                         onMouseUp={(e) => { if ((e.target as HTMLElement).tagName === 'INPUT') e.stopPropagation() }}
                       >
                         <Input
-                          value={editingText}
+                          key={editingSegmentIndex}
+                          defaultValue={editingText}
                           placeholder="Enter text…"
                           onChange={(e) => {
-                            setEditingText(e.target.value)
+                            // Ref only — no setState, no re-render while typing.
+                            editingTextRef.current = e.target.value
                           }}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') saveEditing()
@@ -6770,7 +6793,8 @@ export function DubVerseEditor({
         </div>
 
         {/* Right panel - Video preview (resizable) */}
-        <div 
+        <div
+          ref={previewPanelRef}
           className="flex flex-col border-l border-neutral-800 bg-neutral-900/50 relative"
           style={{ width: previewWidth }}
         >
@@ -8081,7 +8105,8 @@ export function DubVerseEditor({
 
       
       {/* Timeline - Resizable with 4 tracks */}
-      <div 
+      <div
+        ref={timelinePanelRef}
         className="border-t border-neutral-800 bg-neutral-900 flex flex-col relative"
         style={{ height: timelineHeight }}
       >
@@ -8383,7 +8408,7 @@ export function DubVerseEditor({
         {/* Timeline tracks */}
         <div className="flex-1 flex overflow-hidden">
           {/* QC Monitor - permanent fixture left of timeline tracks */}
-          <div className="shrink-0 border-r border-neutral-700 bg-neutral-950 flex flex-col overflow-hidden relative" style={{ width: qcMonitorWidth }}>
+          <div ref={qcMonitorRef} className="shrink-0 border-r border-neutral-700 bg-neutral-950 flex flex-col overflow-hidden relative" style={{ width: qcMonitorWidth }}>
               {/* Resize handle - right edge */}
               <div
                 className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group"
@@ -8391,15 +8416,20 @@ export function DubVerseEditor({
                   e.preventDefault()
                   const startX = e.clientX
                   const startW = qcMonitorWidth
+                  let finalW = qcMonitorWidth
                   setIsResizingQcMonitor(true)
                   const onMove = (ev: MouseEvent) => {
                     const delta = ev.clientX - startX
                     const next = Math.max(200, Math.min(600, startW + delta))
-                    setQcMonitorWidth(next)
+                    finalW = next
+                    if (qcMonitorRef.current) {
+                      qcMonitorRef.current.style.width = `${next}px`
+                    }
                   }
                   const onUp = () => {
                     setIsResizingQcMonitor(false)
-                    localStorage.setItem('dubverse.editor.qcMonitorWidth', String(qcMonitorWidth))
+                    setQcMonitorWidth(finalW)
+                    localStorage.setItem('dubverse.editor.qcMonitorWidth', String(finalW))
                     document.removeEventListener('mousemove', onMove)
                     document.removeEventListener('mouseup', onUp)
                   }
@@ -8520,7 +8550,7 @@ export function DubVerseEditor({
               </div>
           </div>
           {/* Track labels - resizable left column */}
-          <div className="shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col relative overflow-hidden" style={{ width: trackLabelWidth }}>
+          <div ref={trackLabelRef} className="shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col relative overflow-hidden" style={{ width: trackLabelWidth }}>
             {/* Resize handle - right edge */}
             <div
               className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group"
@@ -8528,15 +8558,20 @@ export function DubVerseEditor({
                 e.preventDefault()
                 const startX = e.clientX
                 const startW = trackLabelWidth
+                let finalW = trackLabelWidth
                 setIsResizingTrackLabel(true)
                 const onMove = (ev: MouseEvent) => {
                   const delta = ev.clientX - startX
                   const next = Math.max(60, Math.min(280, startW + delta))
-                  setTrackLabelWidth(next)
+                  finalW = next
+                  if (trackLabelRef.current) {
+                    trackLabelRef.current.style.width = `${next}px`
+                  }
                 }
                 const onUp = () => {
                   setIsResizingTrackLabel(false)
-                  localStorage.setItem('dubverse.editor.trackLabelWidth', String(trackLabelWidth))
+                  setTrackLabelWidth(finalW)
+                  localStorage.setItem('dubverse.editor.trackLabelWidth', String(finalW))
                   document.removeEventListener('mousemove', onMove)
                   document.removeEventListener('mouseup', onUp)
                 }
