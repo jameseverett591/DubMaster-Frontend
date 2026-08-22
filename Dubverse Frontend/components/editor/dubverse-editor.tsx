@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useCallback, useState, useRef, useMemo, type ReactNode } from 'react'
+import { useEffect, useCallback, useState, useRef, useMemo, memo, type ReactNode } from 'react'
 import {
   Lock,
   Unlock,
@@ -707,6 +707,99 @@ function isDeliveryScript(draft: string): boolean {
   const outside = d.replace(/\[[^\]]*\]/g, '').replace(/\s+/g, ' ').trim()
   return opens > 0 && outside.length > 0
 }
+
+/** Playback tracing. Off in every build — these fire during play and scrub,
+ *  so they are console noise in a shipped product and cost real time when
+ *  DevTools is open. Flip to true locally to trace the playhead or the RPT
+ *  scheduling effect; never commit it as true. */
+const DEBUG_PLAYBACK = false
+
+/**
+ * Timeline ruler ticks — one per second across the whole film.
+ *
+ * Split out of DubVerseEditor and memoized because it is the single most
+ * expensive thing in the render. A 105-minute feature is 6,297 ticks, and the
+ * editor renders TWO of these, so ~13,000 element slots were being reconciled
+ * on every state change anywhere in the component. Measured on Ip Man 2: a
+ * click on the header cost 2.2s, play/pause 4.8s, and the seek header 9.6s
+ * (INP, against a 200ms "good" threshold) — all of it this.
+ *
+ * Every prop here is a primitive, so memo skips the whole subtree unless the
+ * zoom level or the film changes. Keep it that way: passing an object, an
+ * array, or an inline callback would defeat the memo and quietly restore the
+ * old cost.
+ */
+interface TimeRulerProps {
+  /** Film duration in seconds. */
+  durationSec: number
+  /** Pixels per second — `40 * zoomLevel` in the editor. */
+  pps: number
+  /** 'top' draws 3-level ticks with major+mid labels; 'bottom' is half-height,
+   *  major ticks labelled, minor ticks omitted entirely. */
+  variant: 'top' | 'bottom'
+}
+
+const TimeRuler = memo(function TimeRuler({ durationSec, pps, variant }: TimeRulerProps) {
+  const ticks = Math.ceil(durationSec) + 1
+
+  if (variant === 'bottom') {
+    return (
+      <div className="h-5 shrink-0 bg-[#0d1018] border-t border-neutral-700/80 relative select-none">
+        {Array.from({ length: ticks }).map((_, i) => {
+          const isMajor = i % 10 === 0
+          const isMid = i % 5 === 0 && !isMajor
+          if (!isMajor && !isMid) return null
+          return (
+            <div
+              key={i}
+              className="absolute top-0 flex flex-col items-start"
+              style={{ left: i * pps }}
+            >
+              <div className={cn('w-px', isMajor ? 'h-2 bg-slate-400' : 'h-1.5 bg-slate-600')} />
+              {isMajor && (
+                <span className="text-[8px] font-mono leading-none mt-0.5 ml-0.5 text-slate-500 whitespace-nowrap">
+                  {formatTime(i)}
+                </span>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
+  return (
+    <div className="h-10 shrink-0 bg-[#0d1018] border-b border-neutral-700/80 relative z-10 select-none">
+      {Array.from({ length: ticks }).map((_, i) => {
+        const isMajor = i % 10 === 0
+        const isMid = i % 5 === 0 && !isMajor
+
+        const tickH = isMajor ? 'h-4' : isMid ? 'h-3' : 'h-1.5'
+        const tickColor = isMajor ? 'bg-slate-300' : isMid ? 'bg-slate-500' : 'bg-slate-700'
+
+        return (
+          <div
+            key={i}
+            className="absolute bottom-0 flex flex-col-reverse items-start"
+            style={{ left: i * pps }}
+          >
+            <div className={cn('w-px', tickH, tickColor)} />
+            {(isMajor || isMid) && (
+              <span
+                className={cn(
+                  'text-[9px] font-mono leading-none mb-1 ml-0.5 whitespace-nowrap',
+                  isMajor ? 'text-slate-300' : 'text-slate-500'
+                )}
+              >
+                {formatTime(i)}
+              </span>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+})
 
 export function DubVerseEditor({
   jobId,
@@ -2732,7 +2825,7 @@ export function DubVerseEditor({
   // RPT audio playback — separate effect to avoid hook rules violation
   useEffect(() => {
     const video = videoRef.current
-    console.log('[RPT-EFFECT] fired — isPlaying:', isPlaying,
+    if (DEBUG_PLAYBACK) console.log('[RPT-EFFECT] fired — isPlaying:', isPlaying,
       'playbackMode:', playbackMode,
       'buffer:', !!rptBufferRef.current,
       'ctx:', audioContextRef.current?.state ?? 'null',
@@ -2993,7 +3086,7 @@ export function DubVerseEditor({
           t = lastStartPosRef.current + (ctx.currentTime - audioStartTimeRef.current)
         }
       }
-      if (now - rafLastLogRef.current > 500) {
+      if (DEBUG_PLAYBACK && now - rafLastLogRef.current > 500) {
         rafLastLogRef.current = now
         console.log('[RAF]', { t, videoTime: video.currentTime, videoPaused: video.paused, isPlaying: isPlayingRef.current, isDragging: isDraggingNeedleRef.current, scrollLeft: container?.scrollLeft, clientWidth: container?.clientWidth, chunkStart: chunkStartRef.current, chunkEnd: chunkEndRef.current })
       }
@@ -8693,36 +8786,7 @@ export function DubVerseEditor({
               </div>
 
               {/* Time ruler — taller, 3-level ticks matching Vegas style */}
-              <div className="h-10 shrink-0 bg-[#0d1018] border-b border-neutral-700/80 relative z-10 select-none">
-                {Array.from({ length: Math.ceil(videoDuration) + 1 }).map((_, i) => {
-                  const isMajor = i % 10 === 0
-                  const isMid = i % 5 === 0 && !isMajor
-                  const isMinor = !isMajor && !isMid
-
-                  const tickH = isMajor ? 'h-4' : isMid ? 'h-3' : 'h-1.5'
-                  const tickColor = isMajor ? 'bg-slate-300' : isMid ? 'bg-slate-500' : 'bg-slate-700'
-
-                  return (
-                    <div
-                      key={i}
-                      className="absolute bottom-0 flex flex-col-reverse items-start"
-                      style={{ left: i * PIXELS_PER_SECOND }}
-                    >
-                      <div className={cn('w-px', tickH, tickColor)} />
-                      {(isMajor || isMid) && (
-                        <span
-                          className={cn(
-                            'text-[9px] font-mono leading-none mb-1 ml-0.5 whitespace-nowrap',
-                            isMajor ? 'text-slate-300' : 'text-slate-500'
-                          )}
-                        >
-                          {formatTime(i)}
-                        </span>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
+              <TimeRuler durationSec={videoDuration} pps={PIXELS_PER_SECOND} variant="top" />
 
 {/* Video track with thumbnails - tiled background preserves aspect ratio */}
               <div className="h-16 shrink-0 bg-neutral-900/30 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
@@ -9572,27 +9636,7 @@ export function DubVerseEditor({
                 {/* Grid filler body */}
                 <div className="flex-1" />
                 {/* Bottom ruler — half height of top (h-5), major ticks only */}
-                <div className="h-5 shrink-0 bg-[#0d1018] border-t border-neutral-700/80 relative select-none">
-                  {Array.from({ length: Math.ceil(videoDuration) + 1 }).map((_, i) => {
-                    const isMajor = i % 10 === 0
-                    const isMid = i % 5 === 0 && !isMajor
-                    if (!isMajor && !isMid) return null
-                    return (
-                      <div
-                        key={i}
-                        className="absolute top-0 flex flex-col items-start"
-                        style={{ left: i * PIXELS_PER_SECOND }}
-                      >
-                        <div className={cn('w-px', isMajor ? 'h-2 bg-slate-400' : 'h-1.5 bg-slate-600')} />
-                        {isMajor && (
-                          <span className="text-[8px] font-mono leading-none mt-0.5 ml-0.5 text-slate-500 whitespace-nowrap">
-                            {formatTime(i)}
-                          </span>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
+                <TimeRuler durationSec={videoDuration} pps={PIXELS_PER_SECOND} variant="bottom" />
               </div>
 
               {/* Player needle - yellow triangle head + silver line - DRAGGABLE */}
