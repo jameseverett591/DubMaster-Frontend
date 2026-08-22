@@ -5622,6 +5622,13 @@ export function DubVerseEditor({
           {!isTranscribing && displaySegments.length > 0 && (
           <ScrollArea className="flex-1 overflow-auto relative">
           {displaySegments.map((segment, index) => {
+              // Window the row list the same way the timeline tracks are windowed.
+              // A feature is ~817 segments and each row carries emotion/write-in/
+              // speed controls plus Commit/Clear, so the full list is thousands of
+              // nodes re-rendered on every timeupdate. Bail inside .map() rather
+              // than filtering: `index` feeds editingSegmentIndex, keyAt(index) and
+              // every commit handler, so a renumbered index would edit the wrong row.
+              if (!inActiveWindow(segment)) return null
               const speakerColor = getSpeakerColor(segment.speaker_id)
               const isEditing = editingSegmentIndex === index
               const hasQCFindings = (segment.qc_findings?.length ?? 0) > 0
