@@ -3591,7 +3591,7 @@ export function DubVerseEditor({
       }
       const filename = response.segment.path.split('/').pop() ?? ''
       const audio_url = filename
-        ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}`
+        ? apiClient.getAudioFileUrl(jobId, filename, true)
         : segment.audio_url
       // Record where the audition landed. Save reads stagedPath to promote the
       // take (the backend then sets both path and committed_audio_url); without
@@ -3994,7 +3994,7 @@ export function DubVerseEditor({
           const r = seg.transcript_index != null ? byTi.get(seg.transcript_index) : undefined
           if (!r) return seg
           const filename = (r.path || '').split('/').pop()
-          const url = filename ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}` : seg.committed_audio_url
+          const url = filename ? apiClient.getAudioFileUrl(jobId, filename, true) : seg.committed_audio_url
           return { ...seg, committed_voice_id: r.voice_id, committed_audio_url: url, audio_url: url, status: 'edited' as const, rpt_dirty: false }
         })
       })
@@ -4009,7 +4009,7 @@ export function DubVerseEditor({
         const r = seg.transcript_index != null ? byTi.get(seg.transcript_index) : undefined
         if (r) {
           const fn = (r.path || '').split('/').pop()
-          const url = fn ? `${apiClient.getAudioFileUrl(jobId, fn)}?ts=${Date.now()}` : apiClient.refreshAudioUrl(jobId, seg.committed_audio_url)
+          const url = fn ? apiClient.getAudioFileUrl(jobId, fn, true) : apiClient.refreshAudioUrl(jobId, seg.committed_audio_url)
           return { ...seg, audio_url: url, committed_audio_url: url }
         }
         return { ...seg, audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url), committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url) }
@@ -9783,7 +9783,7 @@ export function DubVerseEditor({
                       force_timing: true,
                     })
                     const filename = response.segment.path.split('/').pop() ?? ''
-                    const audio_url = filename ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}` : seg.audio_url
+                    const audio_url = filename ? apiClient.getAudioFileUrl(jobId, filename, true) : seg.audio_url
                     const audioDur = response.segment.audio_duration
                     const slotDur = seg.end_time - seg.start_time
                     const shouldShrink = audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
