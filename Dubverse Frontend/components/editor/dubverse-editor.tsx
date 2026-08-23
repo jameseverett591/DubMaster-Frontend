@@ -6996,7 +6996,11 @@ export function DubVerseEditor({
                 { id: 'quality',    label: 'Quality' },
                 { id: 'velma',      label: 'Velma',        feature: 'velmaPanel' },
                 { id: 'respeecher', label: 'Respeecher',   feature: 'respeecher' },
-                { id: 'perform',    label: 'Custom Voices', feature: 'voiceChanger' },
+                // Labelled 'Custom Voices' until now, which is what the cloned-voice
+                // dialog and the Test Clips tab are also called — three things, one
+                // name, and only one of them about custom voices. This panel converts
+                // existing audio to another voice; it is the voice changer.
+                { id: 'perform',    label: 'Voice Changer', feature: 'voiceChanger' },
                 { id: 'seeds',      label: 'Seed Library', feature: 'respeecher' },
                 { id: 'studio',     label: 'Studio',       feature: 'studioCollaboration' },
                 { id: 'adaptation', label: 'Adaptation' },

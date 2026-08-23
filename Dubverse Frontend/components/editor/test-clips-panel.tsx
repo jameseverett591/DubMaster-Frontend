@@ -160,6 +160,39 @@ export function TestClipsPanel({
           ref={fileInputRef}
           type="file"
           accept="audio/*"
+  /** Re-apply a voice to every speaker already mapped to it.
+   *
+   *  One cloned voice commonly covers several numbered speakers (the same actor
+   *  detected as two speakers, a character split across a scene). Assigning them
+   *  one at a time means remembering which numbers share the voice and repeating
+   *  the same click. Sequential, not parallel: each call regenerates a speaker's
+   *  segments server-side, and firing several at once would have them racing to
+   *  rewrite the same segments.json.
+   *
+   *  Chunk-scoped, because applyVoiceToSpeaker is — this covers the window under
+   *  review, not the whole film. */
+  const handleApplyToAll = useCallback(async (voiceId: string, speakerIds: string[]) => {
+    if (speakerIds.length === 0) return
+    setBusyId(voiceId)
+    try {
+      for (const sid of speakerIds) {
+        updateSpeakerVoice(sid, voiceId)
+        pulseSpeaker(sid)
+        onVoiceAssigned?.(sid, voiceId)
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise(r => setTimeout(r, 0))
+      }
+      if (jobId) {
+        const next = { ...speakerVoiceMap }
+        speakerIds.forEach(sid => { next[sid] = voiceId })
+        try { await apiClient.updateVoiceMapping(jobId, next) } catch {}
+      }
+      flash(voiceId, `Applied to ${speakerIds.length} speaker${speakerIds.length === 1 ? '' : 's'} in this window`)
+    } finally {
+      setBusyId(null)
+    }
+  }, [jobId, speakerVoiceMap, updateSpeakerVoice, pulseSpeaker, onVoiceAssigned, flash])
+
           className="hidden"
           onChange={(e) => setFile(e.target.files?.[0] ?? null)}
         />
@@ -207,9 +240,9 @@ export function TestClipsPanel({
         )}
 
         {voices.map(v => {
-          const assignedSpeakers = speakers
-            .filter(s => speakerVoiceMap[s.speaker_id] === v.voice_id)
-            .map(s => s.display_name)
+          const assignedMatches = speakers.filter(s => speakerVoiceMap[s.speaker_id] === v.voice_id)
+          const assignedSpeakers = assignedMatches.map(s => s.display_name)
+          const assignedIds = assignedMatches.map(s => s.speaker_id)
           const busy = busyId === v.voice_id
           return (
             <div key={v.voice_id}
@@ -295,3 +328,16 @@ export function TestClipsPanel({
     </div>
   )
 }
+                  data-role="apply-segment"
+              {assignedIds.length > 0 && (
+                <Button size="sm" variant="outline"
+                  disabled={busy}
+                  title={`Re-render every segment belonging to ${assignedSpeakers.join(', ')} with this voice, within the window you are reviewing.`}
+                  onClick={() => handleApplyToAll(v.voice_id, assignedIds)}
+                  className="w-full h-8 text-xs border-emerald-700/60 text-emerald-300 hover:bg-emerald-500/10">
+                  {busy
+                    ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Applying…</>
+                    : `Apply to all ${assignedIds.length} speaker${assignedIds.length === 1 ? '' : 's'}`}
+                </Button>
+              )}
+
