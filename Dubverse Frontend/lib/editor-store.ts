@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import type { Segment, QCFinding, QCScore, QCSeverity, QCFindingType, SidebarTab, EmotionalCurve, EmotionalCurvePoint, PlaybackMode, RebuildStatus, StagedEdit, ChunkStatus } from './editor-types'
+import type { Segment, Scene, QCFinding, QCScore, QCSeverity, QCFindingType, SidebarTab, EmotionalCurve, EmotionalCurvePoint, PlaybackMode, RebuildStatus, StagedEdit, ChunkStatus } from './editor-types'
 import type { AdaptedSegment, VariantType } from './adaptation-types'
 
 /** Chunk-lens window size in seconds — mirrors backend CHUNK_DURATION_SECONDS. */
@@ -52,6 +52,9 @@ interface EditorState {
   
   // Segments
   segments: Segment[]
+
+  // Scenes (video transition boundaries + per-scene video fades)
+  scenes: Scene[]
   
   // QC data
   qcScore: QCScore | null
@@ -139,6 +142,7 @@ interface EditorState {
     dubbedVideoUrl: string | null
     videoDuration: number
     segments: Segment[]
+    scenes?: Scene[]
     qcScore?: QCScore | null
     qcFindings?: QCFinding[]
   }) => void
@@ -185,6 +189,13 @@ interface EditorState {
   setQCFilterSeverity: (severity: QCSeverity | 'all') => void
   setQCFilterType: (type: QCFindingType | 'all') => void
   
+  // Scene actions
+  setScenes: (scenes: Scene[]) => void
+  addScene: (scene: Scene) => void
+  updateScene: (id: string, updates: Partial<Scene>) => void
+  removeScene: (id: string) => void
+  splitSceneAtTime: (time: number) => void
+
   // Segment actions
   updateSegment: (index: number, updates: Partial<Segment>) => void
   updateSegmentSpeaker: (index: number, speakerId: string, speakerLabel?: string) => void
@@ -258,6 +269,7 @@ export const useEditorStore = create<EditorState>(
   dubbedVideoUrl: null,
   videoDuration: 0,
   segments: [],
+  scenes: [],
   qcScore: null,
   qcFindings: [],
   qcFilterSeverity: 'all',
@@ -301,6 +313,7 @@ export const useEditorStore = create<EditorState>(
     dubbedVideoUrl: data.dubbedVideoUrl,
     videoDuration: data.videoDuration,
     segments: data.segments,
+    scenes: data.scenes || [],
     qcScore: data.qcScore || null,
     qcFindings: data.qcFindings || [],
   }),
@@ -352,6 +365,30 @@ export const useEditorStore = create<EditorState>(
   clearAllDirty: () => set((state) => ({
     segments: state.segments.map((seg) => ({ ...seg, rpt_dirty: false })),
   })),
+
+  // Scene actions
+  setScenes: (scenes) => set({ scenes }),
+  addScene: (scene) => set((state) => ({ scenes: [...state.scenes, scene] })),
+  updateScene: (id, updates) => set((state) => ({
+    scenes: state.scenes.map((s) => s.id === id ? { ...s, ...updates } : s),
+  })),
+  removeScene: (id) => set((state) => ({
+    scenes: state.scenes.filter((s) => s.id !== id),
+  })),
+  splitSceneAtTime: (time) => set((state) => {
+    const sorted = [...state.scenes].sort((a, b) => a.start - b.start)
+    const parent = sorted.find((s) => s.start <= time && s.end > time)
+    if (!parent) return state
+    const newScene: Scene = {
+      id: `scene-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      start: time,
+      end: parent.end,
+    }
+    return {
+      scenes: state.scenes.map((s) => s.id === parent.id ? { ...s, end: time } : s).concat(newScene),
+    }
+  }),
+
   resetEditor: () => set({
     jobId: null,
     title: '',
@@ -359,6 +396,7 @@ export const useEditorStore = create<EditorState>(
     dubbedVideoUrl: null,
     videoDuration: 0,
     segments: [],
+    scenes: [],
     qcScore: null,
     qcFindings: [],
     importedSegments: null,

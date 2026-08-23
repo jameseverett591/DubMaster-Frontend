@@ -4880,17 +4880,20 @@ async def get_separated_audio(job_id: str, audio_type: str):
 
 @router.get("/media/{job_id}/{filename}", dependencies=[Depends(_dep_job_access)])
 async def serve_job_audio_legacy(job_id: str, filename: str):
-    """Backwards-compat: serve segment audio without the /audio/ sub-path.
+    """Backwards-compat: serve segment audio and scene previews from the job dir.
     Resolves stale URLs persisted in client localStorage before the /audio/
     sub-path was introduced to the getAudioFileUrl helper."""
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
-    audio_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
-    if not os.path.exists(audio_path):
-        raise HTTPException(status_code=404, detail="Audio file not found")
+    file_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
     ext = Path(filename).suffix.lower()
-    media_types = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4"}
-    return FileResponse(audio_path, media_type=media_types.get(ext, "audio/mpeg"),
+    media_types = {
+        ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
+        ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
+    }
+    return FileResponse(file_path, media_type=media_types.get(ext, "audio/mpeg"),
         headers=_NO_STORE_HEADERS)
 
 
@@ -6757,6 +6760,63 @@ async def get_segments(job_id: str):
     return data
 
 
+@router.put("/scenes/{job_id}", dependencies=[Depends(_dep_job_access)])
+async def update_scenes(job_id: str, body: Dict[str, Any] = Body(default={})):
+    """Persist the video scene boundary list to segments.json.
+
+    Scenes are contiguous ranges covering the video with per-scene fade handles.
+    The render pipeline reads them to apply fade-to-black transitions.
+    """
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+    scenes = body.get("scenes")
+    if not isinstance(scenes, list):
+        raise HTTPException(status_code=422, detail="scenes must be a list")
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    data["scenes"] = scenes
+    atomic_write_json(segments_path, data)
+    return {"status": "ok", "job_id": job_id, "scenes": scenes}
+
+
+@router.post("/render/scene/{job_id}/{scene_id}", dependencies=[Depends(_dep_job_access)])
+async def render_scene_preview(job_id: str, scene_id: str, background_tasks: BackgroundTasks):
+    """Render a single scene with dubbed audio and video fades applied.
+
+    The output is a temporary preview file in the job directory. It is not the
+    final export; it lets the user review one scene before moving on.
+    """
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    scenes = data.get("scenes") or []
+    scene = next((s for s in scenes if s.get("id") == scene_id), None)
+    if not scene:
+        raise HTTPException(status_code=404, detail=f"Scene {scene_id} not found")
+
+    output_dir = os.path.join(settings.DUBBED_DIR, job_id)
+    output_path = os.path.join(output_dir, f"scene_{scene_id}_preview.mp4")
+    try:
+        dubbing_service.render_scene_preview(
+            job_id=job_id,
+            scene=scene,
+            output_path=output_path,
+        )
+    except Exception as e:
+        logger.error(f"Scene render failed for {job_id}/{scene_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return {
+        "status": "ok",
+        "job_id": job_id,
+        "scene_id": scene_id,
+        "url": f"/media/{job_id}/{os.path.basename(output_path)}",
+    }
+
+
 @router.get("/segments/{job_id}/snapshot", dependencies=[Depends(_dep_job_access)])
 async def get_segments_snapshot(job_id: str):
     """Return the original pipeline snapshot — never modified by user edits."""
@@ -6789,6 +6849,8 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     committed_voice_id = body.get("committed_voice_id")
     committed_speed = body.get("committed_speed")
     committed_emotion = body.get("committed_emotion")
+    fade_in = body.get("fade_in")
+    fade_out = body.get("fade_out")
     flag_status = body.get("flag_status")
     correction_type = body.get("correction_type")
     locked = body.get("locked")
@@ -6834,6 +6896,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         update_data["committed_speed"] = committed_speed
     if committed_emotion is not None:
         update_data["committed_emotion"] = committed_emotion
+    if fade_in is not None:
+        update_data["fade_in"] = fade_in
+    if fade_out is not None:
+        update_data["fade_out"] = fade_out
     if flag_status is not None:
         update_data["flag_status"] = flag_status
     if "correction_type" in body:
@@ -6872,6 +6938,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         seg["committed_speed"] = committed_speed
     if committed_emotion is not None:
         seg["committed_emotion"] = committed_emotion
+    if fade_in is not None:
+        seg["fade_in"] = fade_in
+    if fade_out is not None:
+        seg["fade_out"] = fade_out
     if flag_status is not None:
         seg["flag_status"] = flag_status
     if "correction_type" in body:
@@ -7023,6 +7093,7 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest):
         "committed_adapted_text", "committed_start_time", "committed_end_time",
         "committed_audio_url", "committed_voice_id", "committed_emotion",
         "committed_speed", "audio_url", "status",
+        "fade_in", "fade_out",
     }
 
     result = []

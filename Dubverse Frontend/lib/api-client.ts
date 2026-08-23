@@ -4,6 +4,8 @@
  * Handles all communication with the FastAPI backend
  */
 
+import type { Scene } from './editor-types'
+
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 export interface CharacterProfile {
@@ -1473,6 +1475,8 @@ class DubVerseAPIClient {
       paired_with_next?: boolean
       text?: string
       text_locked?: boolean
+      fade_in?: number
+      fade_out?: number
       // Promote a staged take: backend sets BOTH path and committed_audio_url
       // so the next rebuild merges the auditioned audio.
       staged_path?: string
@@ -1499,6 +1503,25 @@ class DubVerseAPIClient {
       }
       throw new Error(detail)
     }
+  }
+
+  async updateScenes(jobId: string, scenes: Scene[]): Promise<{ scenes: Scene[] }> {
+    const res = await this._fetch(`${this.baseURL}/api/scenes/${jobId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ scenes }),
+    })
+    if (!res.ok) throw new Error(await this._detail(res))
+    return res.json()
+  }
+
+  async renderScenePreview(jobId: string, sceneId: string): Promise<{ url: string; job_id: string; scene_id: string }> {
+    const res = await this._fetch(`${this.baseURL}/api/render/scene/${jobId}/${sceneId}`, {
+      method: 'POST',
+      headers: { ...this._authHeaders() },
+    })
+    if (!res.ok) throw new Error(await this._detail(res))
+    return res.json()
   }
 
   /** Reset the deletion countdown on unrendered work — "I'm still working on

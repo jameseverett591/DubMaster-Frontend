@@ -1696,7 +1696,7 @@ class DubbingService:
             output_video = os.path.join(output_dir, f"dubbed_{target_norm}.mp4")
             success = await asyncio.to_thread(
                 self._replace_audio_in_video, video_path, merged_audio, output_video,
-                accompaniment_path,
+                accompaniment_path, data.get("scenes"),
             )
             _stage_t["mux"] = time.monotonic()
             logger.info(
@@ -2521,7 +2521,32 @@ class DubbingService:
             end = min(offset + len(data), total_samples)
             if end <= offset:
                 continue
-            mix[offset:end] += data[: end - offset]
+
+            copy_len = end - offset
+            seg_data = data[:copy_len].copy()
+
+            # Apply per-segment fade handles. fade_in/fade_out are seconds, stored
+            # in segments.json by the editor. They are independent of overlap — a
+            # segment with a long fade_out fades out over its own tail regardless of
+            # whether the next line overlaps. When two segments overlap, the fades
+            # combine into a crossfade.
+            fade_in = float(seg.get("fade_in") or 0)
+            fade_out = float(seg.get("fade_out") or 0)
+            if fade_in > 0 or fade_out > 0:
+                fi_samples = min(int(round(fade_in * sr)), copy_len)
+                # Cap fade-out so it does not overlap the fade-in region.
+                fo_samples = min(int(round(fade_out * sr)), copy_len - fi_samples)
+
+                if fi_samples > 0:
+                    ramp = np.sin(np.linspace(0, np.pi / 2, fi_samples, dtype=np.float32))
+                    seg_data[:fi_samples, 0] *= ramp
+                    seg_data[:fi_samples, 1] *= ramp
+                if fo_samples > 0:
+                    ramp = np.cos(np.linspace(0, np.pi / 2, fo_samples, dtype=np.float32))
+                    seg_data[-fo_samples:, 0] *= ramp
+                    seg_data[-fo_samples:, 1] *= ramp
+
+            mix[offset:end] += seg_data
 
         # Match the amix path's output treatment: loudnorm to the same target.
         tmp_raw = output_path + ".raw.wav"
@@ -2598,9 +2623,24 @@ class DubbingService:
             for i, seg in enumerate(segments_sorted):
                 input_idx = i + 1
                 delay_ms = int(seg["start"] * 1000)
-                filter_parts.append(
-                    f"[{input_idx}]adelay={delay_ms}|{delay_ms},apad=whole_dur={pad_samples}[delayed{i}]"
-                )
+                slot_dur = max(0.0, float(seg.get("end", 0)) - float(seg.get("start", 0)))
+                fade_in = float(seg.get("fade_in") or 0)
+                fade_out = float(seg.get("fade_out") or 0)
+                fade_filters = []
+                if fade_in > 0:
+                    fade_filters.append(f"afade=t=in:st=0:d={fade_in:.3f}:curve=qsin")
+                if fade_out > 0 and fade_out < slot_dur:
+                    st = max(0.0, slot_dur - fade_out)
+                    fade_filters.append(f"afade=t=out:st={st:.3f}:d={fade_out:.3f}:curve=qsin")
+                fade_chain = ",".join(fade_filters)
+                if fade_chain:
+                    filter_parts.append(
+                        f"[{input_idx}]adelay={delay_ms}|{delay_ms},{fade_chain},apad=whole_dur={pad_samples}[delayed{i}]"
+                    )
+                else:
+                    filter_parts.append(
+                        f"[{input_idx}]adelay={delay_ms}|{delay_ms},apad=whole_dur={pad_samples}[delayed{i}]"
+                    )
             delayed_labels = "".join(f"[delayed{i}]" for i in range(len(segments_sorted)))
             filter_parts.append(
                 f"[0]{delayed_labels}amix=inputs={n_inputs}:duration=first:normalize=0,loudnorm=I=-16:TP=-1:LRA=11[mixout]"
@@ -2703,6 +2743,7 @@ class DubbingService:
         audio_path: str,
         output_path: str,
         accompaniment_path: Optional[str] = None,
+        scenes: Optional[List[Dict]] = None,
     ) -> bool:
         try:
             def _video_has_audio(path: str) -> bool:
@@ -2752,6 +2793,21 @@ class DubbingService:
                 and _video_has_audio(video_path)
             )
 
+            # Video fade-to-black filters from user scene boundaries. When no
+            # scenes are supplied, the video stream is mapped unchanged.
+            video_fade_filters = []
+            for scene in scenes or []:
+                start = float(scene.get("start", 0))
+                end = float(scene.get("end", start))
+                fade_in = float(scene.get("video_fade_in") or 0)
+                fade_out = float(scene.get("video_fade_out") or 0)
+                if fade_in > 0:
+                    video_fade_filters.append(f"fade=t=in:st={start:.3f}:d={fade_in:.3f}:c=black")
+                if fade_out > 0 and end > fade_out:
+                    video_fade_filters.append(f"fade=t=out:st={max(0.0, end - fade_out):.3f}:d={fade_out:.3f}:c=black")
+            video_fade_chain = ",".join(video_fade_filters)
+            video_output_label = "[vout]" if video_fade_chain else "0:v:0"
+
             if use_separation:
                 # ML-separated accompaniment path: background music/SFX has already
                 # had the original speech removed by Demucs, so we can play it at
@@ -2765,18 +2821,20 @@ class DubbingService:
                 logger.info(
                     f"[MIX] Using separated accompaniment at {accompaniment_level:.0%} volume"
                 )
+                sep_filter = (
+                    f"[1:a]volume={accompaniment_level}[bgm];"
+                    f"[2:a]volume=3.0[speech];"
+                    f"[bgm][speech]amix=inputs=2:duration=longest:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[aout]"
+                )
+                if video_fade_chain:
+                    sep_filter += f";[0:v]{video_fade_chain}[vout]"
                 cmd = [
                     "ffmpeg", "-y",
                     "-i", video_path,
                     "-i", accompaniment_path,
                     "-i", audio_to_use,
-                    "-filter_complex",
-                    (
-                        f"[1:a]volume={accompaniment_level}[bgm];"
-                        f"[2:a]volume=3.0[speech];"
-                        f"[bgm][speech]amix=inputs=2:duration=longest:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[aout]"
-                    ),
-                    "-map", "0:v:0",
+                    "-filter_complex", sep_filter,
+                    "-map", video_output_label,
                     "-map", "[aout]",
                     "-c:v", "copy",
                     "-c:a", "aac",
@@ -2797,13 +2855,15 @@ class DubbingService:
                     f"[MIX] Legacy blend: original audio at {original_level:.0%} "
                     f"(mode={original_mode})"
                 )
+                legacy_filter = f"{original_filter};[1:a]volume=1.5[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[aout]"
+                if video_fade_chain:
+                    legacy_filter += f";[0:v]{video_fade_chain}[vout]"
                 cmd = [
                     "ffmpeg", "-y",
                     "-i", video_path,
                     "-i", audio_to_use,
-                    "-filter_complex",
-                    f"{original_filter};[1:a]volume=1.5[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[aout]",
-                    "-map", "0:v:0",
+                    "-filter_complex", legacy_filter,
+                    "-map", video_output_label,
                     "-map", "[aout]",
                     "-c:v", "copy",
                     "-c:a", "aac",
@@ -2813,12 +2873,15 @@ class DubbingService:
                 ]
             else:
                 # No original audio track; use dubbed audio only.
+                only_filter = "[1:a]loudnorm=I=-14:TP=-1.5:LRA=11[aout]"
+                if video_fade_chain:
+                    only_filter += f";[0:v]{video_fade_chain}[vout]"
                 cmd = [
                     "ffmpeg", "-y",
                     "-i", video_path,
                     "-i", audio_to_use,
-                    "-filter_complex", "[1:a]loudnorm=I=-14:TP=-1.5:LRA=11[aout]",
-                    "-map", "0:v:0",
+                    "-filter_complex", only_filter,
+                    "-map", video_output_label,
                     "-map", "[aout]",
                     "-c:v", "copy",
                     "-c:a", "aac",
@@ -2842,6 +2905,110 @@ class DubbingService:
         except Exception as e:
             logger.error(f"Replace audio error: {e}")
             return False
+
+    def render_scene_preview(
+        self,
+        job_id: str,
+        scene: Dict,
+        output_path: str,
+    ) -> bool:
+        """Render one scene with dubbed audio and video fade-to-black applied.
+
+        The output is a temporary preview file, not the final export. The user
+        can review a scene, adjust fades, and render the next one.
+        """
+        output_dir = os.path.join(settings.DUBBED_DIR, job_id)
+        segments_path = os.path.join(output_dir, "segments.json")
+        if not os.path.exists(segments_path):
+            raise FileNotFoundError(f"segments.json not found for {job_id}")
+        with open(segments_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        segments = data.get("segments", [])
+
+        start = float(scene.get("start", 0))
+        end = float(scene.get("end", start))
+        duration = end - start
+        if duration <= 0:
+            raise ValueError("Scene duration must be positive")
+
+        # Resolve video path, mirroring the same fallback used in remix_dub.
+        video_path = data.get("video_path", "")
+        if not video_path or not os.path.exists(video_path):
+            upload_dir = os.path.join(settings.UPLOAD_DIR, job_id)
+            for name in ("video.mp4", "video.mov", "video.mkv", "video.avi"):
+                candidate = os.path.join(upload_dir, name)
+                if os.path.exists(candidate):
+                    video_path = candidate
+                    break
+        if not video_path or not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video not found for {job_id}")
+
+        # Build audio segments that overlap this scene and map URLs to disk paths.
+        merge_segments = []
+        for seg in segments:
+            audio_url = seg.get("committed_audio_url") or seg.get("audio_url")
+            seg_start = seg.get("committed_start_time") if seg.get("committed_start_time") is not None else seg.get("start_time")
+            seg_end = seg.get("committed_end_time") if seg.get("committed_end_time") is not None else seg.get("end_time")
+            if not audio_url or seg_start is None or seg_end is None:
+                continue
+            if seg_end <= start or seg_start >= end:
+                continue
+            seg_path = audio_url
+            if not os.path.isabs(seg_path):
+                if seg_path.startswith("/media/"):
+                    seg_path = seg_path.split("/")[-1]
+                seg_path = os.path.join(output_dir, seg_path)
+            merge_segments.append({
+                "path": seg_path,
+                "start": seg_start,
+                "end": seg_end,
+                "fade_in": seg.get("fade_in"),
+                "fade_out": seg.get("fade_out"),
+            })
+
+        total_duration = max(end, max((s.get("end") or 0 for s in merge_segments), default=0))
+        mixed_audio = output_path + ".audio.wav"
+        if not self._merge_audio_segments_mixdown(merge_segments, mixed_audio, total_duration):
+            raise RuntimeError("Audio mix failed for scene preview")
+
+        # Video fades are measured from the start of the scene cut.
+        video_filters = []
+        fade_in = float(scene.get("video_fade_in") or 0)
+        fade_out = float(scene.get("video_fade_out") or 0)
+        if fade_in > 0:
+            video_filters.append(f"fade=t=in:st=0:d={fade_in:.3f}:c=black")
+        if fade_out > 0 and duration > fade_out:
+            video_filters.append(f"fade=t=out:st={duration - fade_out:.3f}:d={fade_out:.3f}:c=black")
+        video_filter = ",".join(video_filters)
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(start),
+            "-t", str(duration),
+            "-i", video_path,
+            "-ss", str(start),
+            "-t", str(duration),
+            "-i", mixed_audio,
+        ]
+        if video_filter:
+            cmd += ["-filter_complex", f"[0:v]{video_filter}[vout]", "-map", "[vout]"]
+        else:
+            cmd += ["-map", "0:v:0"]
+        cmd += [
+            "-map", "1:a:0",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.error(f"Scene render ffmpeg error: {result.stderr}")
+            return False
+        return os.path.exists(output_path)
 
     # ------------------------------------------------------------------
     # Segment editor support
@@ -3274,6 +3441,16 @@ class DubbingService:
         backend_slot_start = _effective_start(seg)
         backend_slot_end   = _effective_end(seg)
 
+        # Snapshot before any fit branch can move the window, so the final overlap
+        # guard can tell "a branch set this window" from "this is stale disk state".
+        # Defined unconditionally: the fit section is guarded, and a NameError here
+        # would silently disable the guard rather than fail loudly.
+        _pre_fit_committed = (seg.get("committed_start_time"), seg.get("committed_end_time"))
+        # Defaults so the guard is safe if the fit section never ran; it prefers
+        # these live-aware boundaries over anything re-read from segments.json.
+        next_start = None
+        prev_end = None
+
         # The frontend's live timeline can be ahead of segments.json — a split/resize's
         # commitSegmentTiming sync is fire-and-forget (see dubverse-editor.tsx), so this
         # persisted copy is sometimes stale. Prefer what the user is actually looking at,
@@ -3441,16 +3618,6 @@ class DubbingService:
             respeecher_meta = result
         elif use_engine == "elevenlabs-sts":
             # Re-convert from the stored performance. The recording is the source
-        # Snapshot before any fit branch can move the window, so the final overlap
-        # guard can tell "a branch set this window" from "this is stale disk state".
-        # Defined unconditionally: the fit section is guarded, and a NameError here
-        # would silently disable the guard rather than fail loudly.
-        _pre_fit_committed = (seg.get("committed_start_time"), seg.get("committed_end_time"))
-        # Defaults so the guard is safe if the fit section never ran; it prefers
-        # these live-aware boundaries over anything re-read from segments.json.
-        next_start = None
-        prev_end = None
-
             # of truth here, so text edits, emotion pills and Delivery Scripts do
             # NOT reach this engine — same as Respeecher, for the same reason:
             # there is no directive channel to put them through.
@@ -3977,7 +4144,7 @@ class DubbingService:
 
         output_video = os.path.join(output_dir, f"dubbed_{language}.mp4")
         ok = await asyncio.to_thread(
-            self._replace_audio_in_video, video_path, merged_audio, output_video, accompaniment_path
+            self._replace_audio_in_video, video_path, merged_audio, output_video, accompaniment_path, data.get("scenes")
         )
         if not ok:
             raise RuntimeError(f"Remix failed: could not mux audio into video for job {job_id}")
