@@ -4382,6 +4382,15 @@ export function DubVerseEditor({
       .catch(err => console.warn('[REVIEW-QUEUE] mark-ok persist failed:', err))
   }, [jobId, updateSegment, displaySegments])
 
+  // MAKE MOVIE is never blocked by judgement calls — only by the two states
+  // where a click is meaningless (a render already running, a save mid-flight).
+  // Everything else becomes a warning on click. A disabled button tells the user
+  // "no" without telling them why or what to do about it, and the reason lived
+  // in a tooltip, which is undiscoverable. See renderWarnings below.
+  const [confirmRender, setConfirmRender] = useState<null | {
+    staged: number; unreviewed: number; failed: string[]
+  }>(null)
+
   const handleRebuildVideo = useCallback(async () => {
     setRebuildError(null)
     setIsRebuilding(true)
@@ -5084,32 +5093,31 @@ export function DubVerseEditor({
                   "bg-red-500/10 border border-red-400/70 text-red-100 " +
                   "[text-shadow:0_0_6px_rgba(248,113,113,0.9)]",
               )}
-              onClick={handleRebuildVideo}
+              onClick={() => {
+                const staged = Object.keys(stagedEdits).length
+                const unreviewed = allWindowsReviewed ? 0 : chunkCount - savedWindowCount
+                const failed = releasedForRender ? [] : Object.keys(failedSegments)
+                // Clean run: render straight away. A confirm on the happy path is
+                // just friction on the button the user came here to press.
+                if (staged === 0 && unreviewed === 0 && failed.length === 0) {
+                  handleRebuildVideo()
+                  return
+                }
+                setConfirmRender({ staged, unreviewed, failed })
+              }}
               // Blocked while any counted segment is still outstanding. A render
               // is expensive and slow, and it assembles from COMMITTED segments
               // only — so staged-but-unsaved edits and failed commits would both
               // be silently missing from the finished film. Better to refuse the
               // render than hand back a movie the user believes contains work it
               // does not.
-              disabled={
-                isRebuilding ||
-                saveProgress !== null ||
-                Object.keys(stagedEdits).length > 0 ||
-                (!allWindowsReviewed && !releasedForRender) ||
-                (Object.keys(failedSegments).length > 0 && !releasedForRender)
-              }
+              disabled={isRebuilding || saveProgress !== null}
               title={
                 saveProgress
                   ? `Saving ${saveProgress.done} of ${saveProgress.total} — wait for the save to finish`
-                  : Object.keys(stagedEdits).length > 0
-                    ? `${Object.keys(stagedEdits).length} segment(s) staged but not saved — press Save first`
-                    : !allWindowsReviewed && !releasedForRender
-                      ? `${savedWindowCount} of ${chunkCount} windows reviewed — Save each window, or use Advanced ▸ Release for render`
-                      : Object.keys(failedSegments).length > 0 && !releasedForRender
-                      ? `Segment(s) ${Object.keys(failedSegments).join(', ')} failed to save — fix them, or use Advanced ▸ Release for render`
-                      : Object.keys(failedSegments).length > 0 && releasedForRender
-                        ? `Released: rendering WITHOUT segment(s) ${Object.keys(failedSegments).join(', ')}`
-                        : "Render the finished dubbed video from the current timeline"
+                  : isRebuilding
+                    ? 'Render in progress'
+                    : "Render the finished dubbed video from the current timeline"
               }
             >
               {rebuildStatus === 'complete'
@@ -7763,6 +7771,94 @@ export function DubVerseEditor({
           stagedSpeeds={stagedSpeeds}
           stagedVoices={stagedVoices}
         />
+      )}
+
+      {/* MAKE MOVIE confirmation. Shown only when something is actually
+          outstanding — a clean render never sees it.
+
+          The three warnings are NOT equal, and the dialog says so:
+            staged     an edit the user MADE that will be missing, because the
+                       render assembles from committed segments only. This is
+                       the one with teeth, so it gets a fix ("Save, then make
+                       movie") rather than only a yes/no.
+            unreviewed windows they simply have not opened yet. Harmless.
+            failed     commits that did not land; already surfaced in the banner. */}
+      {confirmRender && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
+          role="dialog" aria-modal="true" aria-labelledby="confirm-render-title"
+          onClick={() => setConfirmRender(null)}>
+          <div className="w-full max-w-md rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}>
+            <h2 id="confirm-render-title" className="text-base font-semibold text-slate-100">
+              Make movie now?
+            </h2>
+
+            <div className="mt-3 space-y-2.5">
+              {confirmRender.staged > 0 && (
+                <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-2.5">
+                  <div className="text-xs font-semibold text-amber-200">
+                    {confirmRender.staged} segment{confirmRender.staged === 1 ? '' : 's'} staged but not saved
+                  </div>
+                  <div className="mt-1 text-[11px] leading-relaxed text-amber-100/70">
+                    These takes will be <strong>missing from the film</strong> — the render
+                    uses saved segments only. Save first to include them.
+                  </div>
+                </div>
+              )}
+
+              {confirmRender.failed.length > 0 && (
+                <div className="rounded-md border border-red-500/50 bg-red-500/10 p-2.5">
+                  <div className="text-xs font-semibold text-red-200">
+                    Segment{confirmRender.failed.length === 1 ? '' : 's'} {confirmRender.failed.join(', ')} failed to save
+                  </div>
+                  <div className="mt-1 text-[11px] leading-relaxed text-red-100/70">
+                    These will not be in the film either.
+                  </div>
+                </div>
+              )}
+
+              {confirmRender.unreviewed > 0 && (
+                <div className="rounded-md border border-slate-600 bg-slate-800/60 p-2.5">
+                  <div className="text-xs font-semibold text-slate-200">
+                    {confirmRender.unreviewed} of {chunkCount} windows not reviewed yet
+                  </div>
+                  <div className="mt-1 text-[11px] leading-relaxed text-slate-400">
+                    Your edits are already saved — this just means you have not been
+                    through those windows. The film will still render.
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <Button variant="ghost" size="sm"
+                onClick={() => setConfirmRender(null)}
+                className="h-8 text-xs text-slate-400">
+                Cancel
+              </Button>
+              {confirmRender.staged > 0 && (
+                <Button size="sm"
+                  onClick={async () => {
+                    setConfirmRender(null)
+                    await handleSave()
+                    handleRebuildVideo()
+                  }}
+                  className="h-8 text-xs bg-teal-600 hover:bg-teal-700 text-white">
+                  Save, then make movie
+                </Button>
+              )}
+              <Button size="sm"
+                variant={confirmRender.staged > 0 ? 'outline' : 'default'}
+                onClick={() => { setConfirmRender(null); handleRebuildVideo() }}
+                className={cn('h-8 text-xs',
+                  confirmRender.staged > 0
+                    ? 'border-slate-600 text-slate-300'
+                    : 'bg-teal-600 hover:bg-teal-700 text-white')}>
+                {confirmRender.staged > 0 ? 'Make movie without them' : 'Make movie anyway'}
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
 
       <CustomVoicesModal
