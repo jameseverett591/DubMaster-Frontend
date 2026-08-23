@@ -5421,10 +5421,56 @@ async def add_custom_voice(body: CustomVoiceRequest, request: Request):
     return entry
 
 
+CUSTOM_VOICE_SAMPLE_DIR = os.path.join("data", "custom_voice_samples")
+
+
+def _custom_voice_sample_path(voice_id: str, ext: str) -> str:
+    """Filesystem-safe path for a cloned voice's source clip.
+
+    Voice ids come from an upstream provider and may contain slashes or other
+    reserved characters, so hash rather than trusting them as a filename — the
+    same approach /voice-preview already takes.
+    """
+    safe = hashlib.sha256(voice_id.encode("utf-8")).hexdigest()
+    return os.path.join(CUSTOM_VOICE_SAMPLE_DIR, f"{safe}{ext}")
+
+
+@router.get("/voices/custom/{voice_id:path}/sample", dependencies=[Depends(_dep_auth)])
+async def get_custom_voice_sample(voice_id: str):
+    """Serve the clip a voice was cloned from, so the panel can preview it.
+
+    Media route: an <audio> element cannot send an Authorization header, so auth
+    travels as access_token like every other media URL.
+    """
+    entry = next(
+        (v for v in _load_custom_voices() if v.get("voice_id") == voice_id),
+        None,
+    )
+    if not entry:
+        raise HTTPException(status_code=404, detail="Unknown voice")
+    ext = entry.get("sample_ext")
+    if not ext:
+        # Cloned before samples were kept. Nothing to serve and nothing to fix.
+        raise HTTPException(status_code=404, detail="No stored sample for this voice")
+    path = _custom_voice_sample_path(voice_id, ext)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Sample file is missing")
+    return FileResponse(path, media_type="audio/mpeg", filename=f"{entry.get('name', 'voice')}{ext}")
+
+
 @router.delete("/voices/custom/{voice_id:path}", dependencies=[Depends(_dep_auth)])
 async def delete_custom_voice(voice_id: str, provider: Optional[str] = None):
     voices = _load_custom_voices()
     before = len(voices)
+    # Remove the stored clip too, or deleting a voice would leak its audio.
+    for v in voices:
+        if v.get("voice_id") == voice_id and v.get("sample_ext"):
+            try:
+                _p = _custom_voice_sample_path(voice_id, v["sample_ext"])
+                if os.path.exists(_p):
+                    os.remove(_p)
+            except Exception as _e:
+                logger.warning(f"[VOICE-DELETE] could not remove sample for {voice_id}: {_e}")
     voices = [
         v for v in voices
         if not (v.get("voice_id") == voice_id and (provider is None or v.get("provider") == provider))
@@ -5473,6 +5519,22 @@ async def clone_voice(
     if not voice_id:
         raise HTTPException(status_code=502, detail="Voice cloning did not return a voice id.")
 
+    # Keep the uploaded clip. It used to be discarded the moment it was sent to
+    # Fish, which left a cloned voice with nothing to preview (so the panel had a
+    # dead Preview button) and made re-cloning impossible without the original
+    # file, which only the user had. Stored under the voice id so delete can find
+    # it. Failure here must not fail the clone — the voice already exists upstream.
+    sample_ext = os.path.splitext(file.filename or "")[1].lower() or ".mp3"
+    if sample_ext not in (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm"):
+        sample_ext = ".mp3"
+    try:
+        os.makedirs(CUSTOM_VOICE_SAMPLE_DIR, exist_ok=True)
+        with open(_custom_voice_sample_path(voice_id, sample_ext), "wb") as _sf:
+            _sf.write(audio_bytes)
+    except Exception as _e:
+        logger.warning(f"[VOICE-CLONE] could not store sample for {voice_id}: {_e}")
+        sample_ext = None
+
     entry = {
         "voice_id": voice_id,
         "provider": "fish-audio",
@@ -5480,6 +5542,9 @@ async def clone_voice(
         "tags": list(getattr(voice, "tags", None) or []),
         "custom": True,
         "cloned": True,
+        # Extension of the stored source clip, or absent for voices cloned before
+        # samples were kept — the endpoint 404s for those rather than guessing.
+        **({"sample_ext": sample_ext} if sample_ext else {}),
     }
     voices = _load_custom_voices()
     voices = [v for v in voices if v.get("voice_id") != voice_id]

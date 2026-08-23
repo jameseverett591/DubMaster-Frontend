@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Mic2, Trash2, Loader2, Upload, Wand2, Check, AlertTriangle } from 'lucide-react'
+import { Mic2, Trash2, Loader2, Upload, Wand2, Check, AlertTriangle, Play, Square } from 'lucide-react'
 import { apiClient, type CustomVoice } from '@/lib/api-client'
 import { useEditorStore } from '@/lib/editor-store'
 
@@ -44,6 +44,36 @@ export function TestClipsPanel({
   const [name, setName] = useState('')
   const [cloning, setCloning] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Preview of the clip a voice was cloned from. One <audio> reused for all
+  // rows so two samples can never play over each other.
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const [playingId, setPlayingId] = useState<string | null>(null)
+
+  const stopPreview = useCallback(() => {
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
+    setPlayingId(null)
+  }, [])
+
+  const togglePreview = useCallback((v: CustomVoice) => {
+    if (playingId === v.voice_id) { stopPreview(); return }
+    stopPreview()
+    const a = new Audio(apiClient.getCustomVoiceSampleUrl(v.voice_id))
+    a.onended = () => setPlayingId(null)
+    a.onerror = () => {
+      setPlayingId(null)
+      setError(`Could not play the sample for "${v.name}".`)
+    }
+    audioRef.current = a
+    setPlayingId(v.voice_id)
+    a.play().catch(() => {
+      setPlayingId(null)
+      setError(`Could not play the sample for "${v.name}".`)
+    })
+  }, [playingId, stopPreview])
+
+  // Leaving the panel must not leave audio running.
+  useEffect(() => stopPreview, [stopPreview])
 
   // Per-row transient UI
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
@@ -130,36 +160,6 @@ export function TestClipsPanel({
     }
   }, [jobId, speakerVoiceMap, updateSpeakerVoice, pulseSpeaker, onVoiceAssigned, speakers, flash])
 
-  const handleDelete = useCallback(async (v: CustomVoice) => {
-    setBusyId(v.voice_id)
-    try {
-      await apiClient.deleteCustomVoice(v.voice_id, v.provider)
-      setConfirmDelete(null)
-      await refresh()
-    } catch {
-      setError('Could not delete that voice.')
-    } finally {
-      setBusyId(null)
-    }
-  }, [refresh])
-
-  return (
-    <div className="h-full overflow-y-auto p-4 space-y-4">
-      {/* Create */}
-      <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-3 space-y-3">
-        <div className="flex items-center gap-2">
-          <Mic2 className="h-4 w-4 text-[#A855F7]" />
-          <h3 className="text-sm font-semibold text-slate-200">Create a voice from a clip</h3>
-        </div>
-        <p className="text-xs text-slate-500">
-          10&ndash;30 seconds of clean, single-speaker speech (WAV or MP3) &mdash; no music
-          or background noise. The clip is sent straight to the cloning service and is
-          not stored here, so keep your own copy if you may want to re-clone it.
-        </p>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="audio/*"
   /** Re-apply a voice to every speaker already mapped to it.
    *
    *  One cloned voice commonly covers several numbered speakers (the same actor
@@ -193,6 +193,36 @@ export function TestClipsPanel({
     }
   }, [jobId, speakerVoiceMap, updateSpeakerVoice, pulseSpeaker, onVoiceAssigned, flash])
 
+  const handleDelete = useCallback(async (v: CustomVoice) => {
+    setBusyId(v.voice_id)
+    try {
+      await apiClient.deleteCustomVoice(v.voice_id, v.provider)
+      setConfirmDelete(null)
+      await refresh()
+    } catch {
+      setError('Could not delete that voice.')
+    } finally {
+      setBusyId(null)
+    }
+  }, [refresh])
+
+  return (
+    <div className="h-full overflow-y-auto p-4 space-y-4">
+      {/* Create */}
+      <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-3 space-y-3">
+        <div className="flex items-center gap-2">
+          <Mic2 className="h-4 w-4 text-[#A855F7]" />
+          <h3 className="text-sm font-semibold text-slate-200">Create a voice from a clip</h3>
+        </div>
+        <p className="text-xs text-slate-500">
+          10&ndash;30 seconds of clean, single-speaker speech (WAV or MP3) &mdash; no music
+          or background noise. The clip is sent straight to the cloning service and is
+          not stored here, so keep your own copy if you may want to re-clone it.
+        </p>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="audio/*"
           className="hidden"
           onChange={(e) => setFile(e.target.files?.[0] ?? null)}
         />
@@ -248,11 +278,27 @@ export function TestClipsPanel({
             <div key={v.voice_id}
               className="rounded-lg border border-amber-500/20 bg-[#08131D]/90 p-3 space-y-2.5">
               <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
+                <div className="min-w-0 flex items-start gap-2">
+                  {v.sample_ext && (
+                    <button
+                      type="button"
+                      title={playingId === v.voice_id ? 'Stop' : 'Play the clip this voice was cloned from'}
+                      aria-label={`Preview ${v.name}`}
+                      onClick={() => togglePreview(v)}
+                      className="mt-0.5 shrink-0 text-amber-300 hover:text-amber-200"
+                    >
+                      {playingId === v.voice_id
+                        ? <Square className="h-3.5 w-3.5" />
+                        : <Play className="h-3.5 w-3.5" />}
+                    </button>
+                  )}
+                  <div className="min-w-0">
                   <div className="text-sm font-semibold text-amber-300 truncate">{v.name}</div>
                   <div className="text-[10px] text-slate-500">
                     {v.provider === 'fish-audio' ? 'Fish Audio' : 'ElevenLabs'} &middot; cloned
                     {assignedSpeakers.length > 0 && ` · ${assignedSpeakers.join(', ')}`}
+                    {!v.sample_ext && ' · no stored sample'}
+                  </div>
                   </div>
                 </div>
                 {confirmDelete === v.voice_id ? (
@@ -303,6 +349,7 @@ export function TestClipsPanel({
                 </select>
                 <Button size="sm" variant="outline"
                   disabled={selectedSegmentIndex === null || busy || !onApplyToSegment}
+                  data-role="apply-segment"
                   title={selectedSegmentIndex === null
                     ? 'Select a segment first'
                     : 'Use this voice for the selected segment only'}
@@ -316,19 +363,6 @@ export function TestClipsPanel({
                 </Button>
               </div>
 
-              {feedback[v.voice_id] && (
-                <div className="flex items-center gap-1 text-[10px] text-emerald-400">
-                  <Check className="h-3 w-3" />{feedback[v.voice_id]}
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-                  data-role="apply-segment"
               {assignedIds.length > 0 && (
                 <Button size="sm" variant="outline"
                   disabled={busy}
@@ -341,3 +375,15 @@ export function TestClipsPanel({
                 </Button>
               )}
 
+              {feedback[v.voice_id] && (
+                <div className="flex items-center gap-1 text-[10px] text-emerald-400">
+                  <Check className="h-3 w-3" />{feedback[v.voice_id]}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
