@@ -83,7 +83,7 @@ import { HeatmapBar } from '@/components/timeline/HeatmapBar'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { ExportModal } from '@/components/editor/export-modal'
 import { ReviewQueuePanel } from '@/components/editor/review-queue-panel'
-import { stitchRPT, stitchRPTWindow, overlayStagedEdits, invalidateCache, scheduleRPTPlayback, effStart, effEnd } from '@/lib/rpt-engine'
+import { stitchRPT, stitchRPTWindow, overlayStagedEdits, clearCache, scheduleRPTPlayback, effStart, effEnd } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { createClient } from '@/lib/supabase/client'
 
@@ -4212,7 +4212,17 @@ export function DubVerseEditor({
       .map((seg, i) => ({ seg, i }))
       .filter(({ seg }) => seg.speaker_id === speakerId)
       .map(({ i }) => i)
-    if (indices.length === 0) return
+    if (indices.length === 0) {
+      // Silence here read as "the button is broken": assigning to a speaker with
+      // no segments in the current window did nothing and said nothing.
+      setRegenError(
+        chunkModeRef.current
+          ? 'That speaker has no segments in this window — move to a window where they speak, or assign from the full timeline.'
+          : 'That speaker has no segments to apply the voice to.'
+      )
+      return
+    }
+    setRegenError(null)
     setSpeakerRegenQueue(new Set(indices))
     try {
       // Confine the change to the window under review. Assigning a voice while
@@ -4235,7 +4245,7 @@ export function DubVerseEditor({
           return { ...seg, committed_voice_id: r.voice_id, committed_audio_url: url, audio_url: url, status: 'edited' as const, rpt_dirty: false }
         })
       })
-      invalidateCache()
+      clearCache()
       // Rebuild the preview audio so playback reflects the new voices. Without this
       // the files regenerate but you keep hearing the old stitch — the "assignment
       // does nothing" symptom (the single-segment path already re-stitches).
@@ -7259,6 +7269,12 @@ export function DubVerseEditor({
                     return next
                   })
                   setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: voiceId }))
+                  // Then actually render it. Updating the map alone only relabels
+                  // the speaker — the audio keeps whatever voice it had, which is
+                  // indistinguishable from the assignment doing nothing.
+                  if (voiceId) {
+                    applyVoiceToSpeaker(speakerId, voiceId)
+                  }
                 }}
                 onApplyToSegment={(segmentIndex, voiceId) => {
                   // Segment-only: stage the voice, then render it so the take is
