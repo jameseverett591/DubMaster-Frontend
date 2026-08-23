@@ -261,13 +261,40 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   // state previously lived only in the speakers strip, so there was no way to
   // tell from the library which voices were already in play.
   const voiceAssignments = useMemo(() => {
-    const byVoice: Record<string, string[]> = {}
+    const byVoice: Record<string, { id: string; name: string }[]> = {}
     for (const [speakerId, voiceId] of Object.entries(speakerVoiceMap || {})) {
       if (!voiceId) continue
-      ;(byVoice[voiceId] ||= []).push(getSpeakerDisplayName(speakerId))
+      ;(byVoice[voiceId] ||= []).push({ id: speakerId, name: getSpeakerDisplayName(speakerId) })
     }
     return byVoice
   }, [speakerVoiceMap, getSpeakerDisplayName])
+
+  /** Right-click target for "remove speaker" on an assignment chip. */
+  const [assignMenu, setAssignMenu] = useState<
+    { x: number; y: number; speakerId: string; name: string } | null
+  >(null)
+
+  /** Unassign one speaker from a voice.
+   *
+   *  Two speakers sharing a voice is legitimate, so this cannot be inferred —
+   *  the user has to say which one goes. Clearing the mapping only: the segments
+   *  keep the audio they already have, because re-rendering a speaker's whole
+   *  part as a side effect of a cleanup gesture would be a nasty surprise. */
+  const removeSpeakerAssignment = useCallback(async (speakerId: string) => {
+    updateSpeakerVoice(speakerId, '')
+    useEditorStore.setState((st) => {
+      const src = { ...(st.speakerVoiceSource || {}) }
+      delete src[speakerId]
+      return { speakerVoiceSource: src }
+    })
+    if (jobId) {
+      const next = Object.fromEntries(
+        Object.entries({ ...speakerVoiceMap, [speakerId]: '' }).filter(([, v]) => !!v)
+      )
+      try { await apiClient.updateVoiceMapping(jobId, next) } catch {}
+    }
+    setAssignMenu(null)
+  }, [jobId, speakerVoiceMap, updateSpeakerVoice])
 
   // Preview audio
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -673,9 +700,19 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                   </div>
                   {assigned.length > 0 && (
                     <div className="mt-1 flex flex-wrap gap-1">
-                      {assigned.map(s => (
-                        <span key={s} className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-300">
-                          {s}
+                      {assigned.map(a => (
+                        <span
+                          key={a.id}
+                          title={`${a.name} — right-click to remove this assignment`}
+                          onClick={(e) => e.stopPropagation()}
+                          onContextMenu={(e) => {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            setAssignMenu({ x: e.clientX, y: e.clientY, speakerId: a.id, name: a.name })
+                          }}
+                          className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-300 cursor-context-menu hover:bg-emerald-500/25"
+                        >
+                          {a.name}
                         </span>
                       ))}
                     </div>
@@ -712,7 +749,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
 
                 {(voiceAssignments[selected.voice_id] || []).length > 0 && (
                   <p className="text-xs text-emerald-300">
-                    Assigned to {(voiceAssignments[selected.voice_id] || []).join(', ')}
+                    Assigned to {(voiceAssignments[selected.voice_id] || []).map(a => a.name).join(', ')}
                   </p>
                 )}
 
@@ -967,6 +1004,29 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {assignMenu && (
+        <div
+          className="fixed z-[60] bg-slate-800 border border-slate-700 rounded-md shadow-lg overflow-hidden"
+          style={{ left: `${assignMenu.x}px`, top: `${assignMenu.y}px` }}
+          onMouseLeave={() => setAssignMenu(null)}
+        >
+          <button
+            type="button"
+            onClick={() => removeSpeakerAssignment(assignMenu.speakerId)}
+            className="w-full text-left px-3 py-2 text-xs text-red-300 hover:bg-slate-700 whitespace-nowrap"
+          >
+            Remove {assignMenu.name}
+          </button>
+          <button
+            type="button"
+            onClick={() => setAssignMenu(null)}
+            className="w-full text-left px-3 py-2 text-xs text-slate-300 hover:bg-slate-700 whitespace-nowrap"
+          >
+            Cancel
+          </button>
         </div>
       )}
 
