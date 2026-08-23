@@ -260,6 +260,15 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   // Reverse of speakerVoiceMap: voice_id → the speakers using it. Assignment
   // state previously lived only in the speakers strip, so there was no way to
   // tell from the library which voices were already in play.
+  /** Ids of the user's cloned voices. They are deliberately absent from the
+   *  catalog grid (no preview_url, no paging), so searching the catalog for one
+   *  by name can never find it — a chip assigned a cloned voice has to route to
+   *  the Test Clips panel instead. */
+  const customVoiceIds = useMemo(
+    () => new Set(customVoices.map(v => v.voice_id)),
+    [customVoices],
+  )
+
   const voiceAssignments = useMemo(() => {
     const byVoice: Record<string, { id: string; name: string }[]> = {}
     for (const [speakerId, voiceId] of Object.entries(speakerVoiceMap || {})) {
@@ -548,6 +557,19 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
             <Star className={`${isHero ? 'h-6 w-6' : 'h-4 w-4'} ${isFav ? 'fill-current' : ''}`} />
           </button>
         </div>
+        {customVoiceIds.has(v.voice_id) && (
+          <div className={`flex ${isHero ? 'shrink-0' : ''}`}>
+            <span
+              title="Your cloned voice — manage it in Test Clips"
+              className={`inline-flex items-center gap-1 rounded-full border border-purple-500/50 bg-purple-500/15 text-purple-300 ${
+                isHero ? 'text-[11px] px-2.5 py-0.5' : 'text-[9px] px-2 py-0.5'
+              }`}
+            >
+              <Mic2 className={isHero ? 'h-3 w-3' : 'h-2.5 w-2.5'} />
+              custom voice
+            </span>
+          </div>
+        )}
         {v.tags && v.tags.length > 0 && (
           <div className={`flex flex-wrap gap-1 ${isHero ? 'shrink-0' : ''}`}>
             {(isHero ? v.tags : v.tags.slice(0, 5)).map(t => (
@@ -650,11 +672,13 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
         </div>
       )
     }
-    // Custom/cloned voices are NOT mixed into the catalog listing — they live
-    // behind the Test Clips button. The customVoices fetch above is still needed:
-    // it feeds rememberVoiceNames so a speaker chip can show a cloned voice's
-    // real name instead of "(voice set)".
-    const pageVoices = voices
+    // Cloned voices lead page 1. They are not part of the paginated catalog, so
+    // they cannot be reached by paging or by a name search against it — without
+    // this they exist only in Test Clips and are invisible while casting. The
+    // purple tag marks them: catalog voices are amber, yours are purple.
+    const pageVoices = pageNum === 1 && customVoices.length > 0
+      ? [...customVoices, ...voices]
+      : voices
 
     // Panel layout: master list on the left, detail on the right. The hero card
     // it replaced was sized for the modal (p-6, text-3xl, one voice per page),
@@ -875,13 +899,20 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                     // speaker CLEARS the search — searching the literal words
                     // "not assigned" returned an empty library, hiding the very
                     // voices being chosen from.
+                    // A cloned voice is not in the catalog and never will be, so
+                    // searching for it lands on an empty library. Send the user to
+                    // the panel where it actually lives.
+                    if (sp.current_voice_id && customVoiceIds.has(sp.current_voice_id)) {
+                      onOpenCustomVoices?.()
+                      return
+                    }
                     if (voiceName && voiceName !== '(voice set)') setSearch(voiceName)
                     else setSearch('')
                     setCurrentPage(1)
                   }}
                   title={
                     sp.current_voice_id
-                      ? `${source === 'user' ? 'Assigned by you' : 'Auto-assigned by the dub'} — Voice ID: ${sp.current_voice_id}\nClick to find it in the library`
+                      ? `${source === 'user' ? 'Assigned by you' : 'Auto-assigned by the dub'} — Voice ID: ${sp.current_voice_id}\n${customVoiceIds.has(sp.current_voice_id) ? "Cloned voice — click to open it in Test Clips" : "Click to find it in the library"}`
                       : 'No voice assigned yet — click to search'
                   }
                   className={`text-[11px] px-2.5 py-1 rounded-full border whitespace-nowrap transition-colors cursor-pointer ${tone}`}>
