@@ -27,6 +27,9 @@ interface VoiceLibraryContentProps {
   onVoiceAssigned?: (speakerId: string, voiceId: string) => void
   /** Bumped by the Custom Voices modal to trigger a re-fetch of the user's voices. */
   customVoicesVersion?: number
+  /** Opens the Custom Voices modal, where clips are uploaded, cloned and deleted.
+   *  Omitted in browse-only contexts, where the button is simply not rendered. */
+  onOpenCustomVoices?: () => void
 }
 
 /**
@@ -34,7 +37,7 @@ interface VoiceLibraryContentProps {
  * Rendered inside both <VoiceLibraryModal> (Dialog wrapper) and <VoiceLibraryPanel>
  * (right-panel-tab wrapper). All state lives here.
  */
-export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVoicesVersion = 0 }: VoiceLibraryContentProps) {
+export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVoicesVersion = 0, onOpenCustomVoices }: VoiceLibraryContentProps) {
   // Job context (browse-only when no jobId in URL)
   const params = useParams<{ jobId?: string }>()
   const routeJobId = (params as any)?.jobId as string | undefined
@@ -620,8 +623,11 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
         </div>
       )
     }
-    // Surface the user's custom voices at the very top of page 1.
-    const pageVoices = pageNum === 1 && customVoices.length > 0 ? [...customVoices, ...voices] : voices
+    // Custom/cloned voices are NOT mixed into the catalog listing — they live
+    // behind the Test Clips button. The customVoices fetch above is still needed:
+    // it feeds rememberVoiceNames so a speaker chip can show a cloned voice's
+    // real name instead of "(voice set)".
+    const pageVoices = voices
 
     // Panel layout: master list on the left, detail on the right. The hero card
     // it replaced was sized for the modal (p-6, text-3xl, one voice per page),
@@ -903,6 +909,13 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
             <Star className={`h-3.5 w-3.5 mr-1 ${showOnlyFavorites ? 'fill-current' : ''}`} />
             Favorites ({favorites.size})
           </Button>
+          {onOpenCustomVoices && (
+            <Button size="sm" variant="outline" onClick={onOpenCustomVoices}
+              className="h-8 text-xs border-slate-700 text-slate-300">
+              <Mic2 className="h-3.5 w-3.5 mr-1" />
+              Test Clips
+            </Button>
+          )}
         </div>
       ) : (
         /* Panel (list) layout: search + gender context menu + active filter chip + favorites */
@@ -930,6 +943,13 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
             <Star className={`h-3.5 w-3.5 mr-1 ${showOnlyFavorites ? 'fill-current' : ''}`} />
             Favorites ({favorites.size})
           </Button>
+          {onOpenCustomVoices && (
+            <Button size="sm" variant="outline" onClick={onOpenCustomVoices}
+              className="h-8 text-xs border-slate-700 text-slate-300">
+              <Mic2 className="h-3.5 w-3.5 mr-1" />
+              Test Clips
+            </Button>
+          )}
           {/* Gender context menu */}
           {contextMenu && (
             <div className="fixed z-50 bg-slate-800 border border-slate-700 rounded-md shadow-lg overflow-hidden"
@@ -1121,10 +1141,10 @@ export function VoiceLibraryModal({ open, onOpenChange }: VoiceLibraryModalProps
  * Right-panel tab wrapper — narrow, single-column. Used inside the editor's
  * right rail as a sibling to the Speakers tab.
  */
-export function VoiceLibraryPanel({ onVoiceAssigned, customVoicesVersion }: { onVoiceAssigned?: (speakerId: string, voiceId: string) => void; customVoicesVersion?: number } = {}) {
+export function VoiceLibraryPanel({ onVoiceAssigned, customVoicesVersion, onOpenCustomVoices }: { onVoiceAssigned?: (speakerId: string, voiceId: string) => void; customVoicesVersion?: number; onOpenCustomVoices?: () => void } = {}) {
   return (
     <div className="flex-1 min-h-0 flex flex-col p-3">
-      <VoiceLibraryContent layout="list" onVoiceAssigned={onVoiceAssigned} customVoicesVersion={customVoicesVersion} />
+      <VoiceLibraryContent layout="list" onVoiceAssigned={onVoiceAssigned} customVoicesVersion={customVoicesVersion} onOpenCustomVoices={onOpenCustomVoices} />
     </div>
   )
 }
