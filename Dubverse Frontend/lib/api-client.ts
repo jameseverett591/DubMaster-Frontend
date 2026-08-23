@@ -239,6 +239,7 @@ export interface RegenerateSegmentRequest {
   live_segment_start?: number
   live_segment_end?: number
   live_next_segment_start?: number
+  live_prev_segment_end?: number
   // Chunk-lens staged mode: render the take for audition only — the backend
   // writes the file but does NOT commit it to segments.json/Supabase. The take
   // is promoted via commitSegmentTiming's staged_path when the chunk is saved.

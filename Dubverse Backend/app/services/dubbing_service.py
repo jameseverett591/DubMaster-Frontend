@@ -3125,6 +3125,7 @@ class DubbingService:
         live_segment_start: Optional[float] = None,
         live_segment_end: Optional[float] = None,
         live_next_segment_start: Optional[float] = None,
+        live_prev_segment_end: Optional[float] = None,
         stage: bool = False,
         text: Optional[str] = None,
     ) -> Dict:
@@ -3587,6 +3588,18 @@ class DubbingService:
                     (_effective_end(s) for s in segments if _effective_end(s) <= slot_start + 0.01),
                     default=0.0,
                 )
+                # Same trust rule as next_start: prefer the live value when it is
+                # sane. Taking the LATER of the two is deliberate — a neighbour the
+                # editor has already extended is the binding constraint, and using
+                # the stale (earlier) backend copy is exactly how a segment ends up
+                # moved back into audio that is already there.
+                if _is_finite_number(live_prev_segment_end) and 0.0 <= live_prev_segment_end <= slot_start + 0.01:
+                    if live_prev_segment_end > prev_end + 0.01:
+                        logger.info(
+                            f"[REGEN-LIVE-OVERRIDE] seg {segment_index}: prev_end "
+                            f"backend={prev_end:.2f} → live={float(live_prev_segment_end):.2f}"
+                        )
+                    prev_end = max(prev_end, float(live_prev_segment_end))
                 window_start = max(0.0, prev_end + 0.05)
                 full_room = next_start - window_start  # room growing in BOTH directions
 
@@ -3669,6 +3682,49 @@ class DubbingService:
                         f"[REGEN-EXCLUSION] seg {segment_index}: "
                         f"{actual_dur:.2f}s exceeds full window {full_room:.2f}s by {overlap:.2f}s"
                     )
+
+        # Final overlap guard.
+        #
+        # Every fit branch above clamps to next_start - 0.05, so none of them
+        # INTENDS an overlap — yet 17 of 817 segments in a real feature ended up
+        # overlapping a neighbour. That happens when the boundary a branch trusted
+        # was itself wrong (a stale copy, a neighbour moved after this segment was
+        # last rendered), and neither regen could detect it: each one believed it
+        # had fitted correctly, so no exclusion was raised and the user got a silent
+        # overrun with a 200 OK.
+        #
+        # Verify the window actually written against the real neighbours, whatever
+        # the branches concluded. Overlapping audio is never acceptable output, so
+        # surface it as a timing exclusion and let the user decide.
+        try:
+            _fs = seg.get("committed_start_time", seg.get("start"))
+            _fe = seg.get("committed_end_time", seg.get("end"))
+            if _is_finite_number(_fs) and _is_finite_number(_fe):
+                _next = min(
+                    (_effective_start(o) for o in segments
+                     if o is not seg and _effective_start(o) >= _fs + 0.01),
+                    default=None,
+                )
+                _prev = max(
+                    (_effective_end(o) for o in segments
+                     if o is not seg and _effective_end(o) <= _fe - 0.01),
+                    default=None,
+                )
+                _over_next = (_fe - _next) if _next is not None else 0.0
+                _over_prev = (_prev - _fs) if _prev is not None else 0.0
+                _worst = max(_over_next, _over_prev)
+                if _worst > 0.01:
+                    seg["timing_exclusion"] = True
+                    seg["timing_audio_duration"] = round(actual_dur, 2)
+                    seg["timing_slot_duration"] = round(_fe - _fs, 2)
+                    seg["timing_overlap"] = round(_worst, 2)
+                    logger.error(
+                        f"[REGEN-OVERLAP] seg {segment_index}: window "
+                        f"[{_fs:.2f}, {_fe:.2f}] overlaps a neighbour by {_worst:.2f}s "
+                        f"(next={_next}, prev={_prev}) — raising timing exclusion"
+                    )
+        except Exception as _e:
+            logger.warning(f"[REGEN-OVERLAP] guard failed for seg {segment_index}: {_e}")
 
         # Raise the clip if Fish rendered it far below its neighbours. Boost only,
         # peak-capped — see _ensure_min_loudness. Runs before the duration measure

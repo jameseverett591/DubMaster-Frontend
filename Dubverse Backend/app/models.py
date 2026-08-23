@@ -248,6 +248,12 @@ class RegenerateRequest(BaseModel):
     live_segment_start: Optional[float] = None
     live_segment_end: Optional[float] = None
     live_next_segment_start: Optional[float] = None
+    # The previous segment's live end. next_start has had a live override for a
+    # while; prev_end did not, so backward growth used the backend's own copy —
+    # which lags a fire-and-forget commitSegmentTiming. That asymmetry let a
+    # segment be moved earlier into a neighbour that had already been extended,
+    # producing a silent overlap neither regen could detect.
+    live_prev_segment_end: Optional[float] = None
     # Staged mode (chunk-lens editor): render the take and return it for
     # audition, but do NOT mutate segments.json or Supabase. The take is
     # promoted to committed audio only when the user saves the chunk (see

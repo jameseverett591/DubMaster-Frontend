@@ -7176,6 +7176,7 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest, r
             live_segment_start=body.live_segment_start,
             live_segment_end=body.live_segment_end,
             live_next_segment_start=body.live_next_segment_start,
+            live_prev_segment_end=body.live_prev_segment_end,
             stage=body.stage,
             text=body.text,
         )

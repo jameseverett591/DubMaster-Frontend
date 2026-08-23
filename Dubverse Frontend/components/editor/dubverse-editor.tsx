@@ -1714,6 +1714,31 @@ export function DubVerseEditor({
   // mounting it, and so it recomputes on the same input the timeline renders from.
   const seedLibrary = useMemo(() => buildSeedLibrary(displaySegments), [displaySegments])
 
+  /** Segments whose committed window collides with a neighbour's.
+   *
+   *  Overlapping audio is never valid output — two lines play over each other.
+   *  The backend now refuses to create one, but overlaps written before that
+   *  guard existed are still on disk (17 of 817 on the first feature) and no
+   *  regen will revisit them unless the user goes back. Surfacing them on the
+   *  row is what turns "why is this running into the next line" into something
+   *  actionable. Compared in time order, not array order: the two can diverge
+   *  after splits and moves. */
+  const overlapById = useMemo(() => {
+    const byTime = displaySegments
+      .map((seg, index) => ({ index, start: effStart(seg), end: effEnd(seg) }))
+      .filter(s => Number.isFinite(s.start) && Number.isFinite(s.end))
+      .sort((a, b) => a.start - b.start)
+    const out = new Map<number, number>()
+    for (let i = 0; i < byTime.length - 1; i++) {
+      const by = byTime[i].end - byTime[i + 1].start
+      if (by > 0.01) {
+        out.set(byTime[i].index, Math.max(out.get(byTime[i].index) ?? 0, by))
+        out.set(byTime[i + 1].index, Math.max(out.get(byTime[i + 1].index) ?? 0, by))
+      }
+    }
+    return out
+  }, [displaySegments])
+
   /**
    * Resolve a row position to the stable key of whatever segment is sitting
    * there RIGHT NOW. Every transient collection (staged voices/emotions/speeds/
@@ -3694,6 +3719,17 @@ export function DubVerseEditor({
       const liveEnd = effEnd(segment)
       const nextSegment = displaySegments[activeIndex + 1]
       const liveNextStart = nextSegment ? effStart(nextSegment) : undefined
+      // The backend grows a segment backwards as well as forwards, but only had a
+      // live value for the forward boundary — so backward growth used its own copy
+      // of the previous segment, which lags a fire-and-forget commit. That is how a
+      // segment gets moved back into a neighbour that was already extended.
+      // Scanned by time, not array position: order can diverge after splits/moves.
+      const livePrevEnd = displaySegments.reduce<number | undefined>((acc, s, i) => {
+        if (i === activeIndex) return acc
+        const e = effEnd(s)
+        if (e <= liveStart + 0.01 && (acc === undefined || e > acc)) return e
+        return acc
+      }, undefined)
       const regenPayload = {
         text: regenerateText,
         speed: stagedSpeeds[keyAt(activeIndex)] ?? 1.0,
@@ -3717,6 +3753,7 @@ export function DubVerseEditor({
         live_segment_start: liveStart,
         live_segment_end: liveEnd,
         live_next_segment_start: liveNextStart,
+        live_prev_segment_end: livePrevEnd,
         // Engine-specific extras (Respeecher sampling_params / seed). Last so an
         // explicit caller value wins over the defaults assembled above.
         ...(extraPayload ?? {}),
@@ -6224,6 +6261,15 @@ export function DubVerseEditor({
                         >
                           <Plus className="h-2 w-2" />write-in
                         </span>
+                        {overlapById.has(index) && (
+                          <span
+                            className="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full border border-red-500/50 bg-red-500/15 text-red-300"
+                            title={`This segment's audio window overlaps a neighbour by ${overlapById.get(index)!.toFixed(2)}s, so the two lines play over each other. Shorten the text and regenerate, or drag the segment edge to clear the neighbour.`}
+                          >
+                            <AlertCircle className="h-2.5 w-2.5" />
+                            overlaps {overlapById.get(index)!.toFixed(2)}s
+                          </span>
+                        )}
                         {inlineEmotionPicker === index && (
                           <div
                             className="w-full mt-1 p-2 rounded-xl border border-violet-500/40 bg-[#0d1525] shadow-lg shadow-violet-900/30"
