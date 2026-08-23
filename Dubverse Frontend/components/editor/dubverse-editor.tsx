@@ -5768,6 +5768,13 @@ export function DubVerseEditor({
                         {String(segmentsInWindow).padStart(2, '0')}
                       </span>
                       {chunkMode ? ' in window' : ' total'}
+                      {/* Film total alongside the window count: 27 on its own gives no
+                          sense of scale — it could be 27 of 30 or 27 of 817. */}
+                      {chunkMode && displaySegments.length > 0 && (
+                        <span className="text-slate-500 font-normal">
+                          {' · '}{displaySegments.length} total
+                        </span>
+                      )}
                     </span>
                     {chunkMode && (
                       <>
@@ -5788,7 +5795,7 @@ export function DubVerseEditor({
                           <span className="text-amber-300 tabular-nums">
                             {String(chunkCount).padStart(2, '0')}
                           </span>
-                          {' reviewed'}
+                          {' windows reviewed'}
                         </span>
                       </>
                     )}
@@ -6116,8 +6123,12 @@ export function DubVerseEditor({
                             <span>{segment.speaker_label && !/^\d+$/.test(segment.speaker_label) ? segment.speaker_label : `speaker-${speakerNumberMap[segment.speaker_id] ?? 1}`}</span>
                           </div>
                         </DropdownMenuTrigger>
-                        <DropdownMenuContent align="start" className="w-44 bg-slate-900 border-slate-700">
-                          {[1, 2, 3, 4, 5].map(n => {
+                        <DropdownMenuContent align="start" className="w-44 max-h-72 overflow-y-auto bg-slate-900 border-slate-700">
+                          {/* 15 slots, matching the Voice Library and Test Clips.
+                              A feature has far more speaking parts than the 5 Velma
+                              tends to return, and a speaker that cannot be named
+                              cannot be cast. */}
+                          {Array.from({ length: 15 }, (_, i) => i + 1).map(n => {
                             const spkId = `speaker-${n}`
                             const spkColor = getSpeakerColor(spkId)
                             const existing = uniqueSpeakers.find(s => s.id === spkId)
