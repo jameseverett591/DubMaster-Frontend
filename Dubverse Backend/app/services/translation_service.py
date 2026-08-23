@@ -241,6 +241,27 @@ def split_translated_sentences(segments: list) -> list:
     return out
 
 
+def _aligned(result, chunk, provider: str, start: int):
+    """Return result only if it lines up 1:1 with the chunk that was sent.
+
+    Chunks are reassembled BY POSITION. A provider that returns 18 rows for 20
+    does not lose two lines — it shifts every remaining line in the film, pairing
+    dialogue with the wrong speaker and the wrong timing, with nothing downstream
+    able to notice. Treating a length mismatch as a provider failure lets the
+    normal retry/fallback chain handle it instead.
+    """
+    if result is None:
+        return None
+    if len(result) != len(chunk):
+        logger.error(
+            f"[TRANSLATE] {provider} returned {len(result)} segment(s) for the "
+            f"{len(chunk)} sent in chunk {start}-{start + len(chunk)} — discarding "
+            f"this result rather than misaligning every segment after it."
+        )
+        return None
+    return result
+
+
 class TranslationService:
     def __init__(self):
         settings = get_settings()
@@ -746,8 +767,11 @@ class TranslationService:
             results: List[Dict] = []
             for start in range(0, len(segments), _CHUNK_SIZE):
                 chunk = segments[start:start + _CHUNK_SIZE]
-                chunk_result = await self._translate_segments_claude(
-                    chunk, target_language, source_language, character_profiles
+                chunk_result = _aligned(
+                    await self._translate_segments_claude(
+                        chunk, target_language, source_language, character_profiles
+                    ),
+                    chunk, "Claude", start,
                 )
                 # A failed chunk must never discard the chunks that already
                 # succeeded. This used to `return None` on the first failure: a
@@ -762,22 +786,39 @@ class TranslationService:
                         f"[TRANSLATE] Claude chunk {start}-{start + len(chunk)} failed "
                         f"— retrying once before falling back"
                     )
-                    chunk_result = await self._translate_segments_claude(
-                        chunk, target_language, source_language, character_profiles
+                    chunk_result = _aligned(
+                        await self._translate_segments_claude(
+                            chunk, target_language, source_language, character_profiles
+                        ),
+                        chunk, "Claude (retry)", start,
                     )
                 if chunk_result is None:
                     logger.warning(
                         f"[TRANSLATE] Claude chunk {start}-{start + len(chunk)} failed "
                         f"twice — falling back to GPT-4 for THIS CHUNK ONLY"
                     )
-                    chunk_result = await self._translate_segments_gpt(
-                        chunk, target_language, source_language, character_profiles
+                    chunk_result = _aligned(
+                        await self._translate_segments_gpt(
+                            chunk, target_language, source_language, character_profiles
+                        ),
+                        chunk, "GPT-4", start,
                     )
                 if chunk_result is None:
                     logger.error(
                         f"[TRANSLATE] Chunk {start}-{start + len(chunk)} could not be "
                         f"translated by any provider — keeping original text. These "
                         f"{len(chunk)} segment(s) will be skipped by TTS as untranslated."
+                    )
+                    chunk_result = chunk
+                # Final guard. Reassembly is POSITIONAL, so a chunk of the wrong
+                # length does not lose one line — it shifts every line after it
+                # for the rest of the film, silently pairing dialogue with the
+                # wrong speaker and timing. Nothing downstream can detect that.
+                if len(chunk_result) != len(chunk):
+                    logger.error(
+                        f"[TRANSLATE] Chunk {start}-{start + len(chunk)} returned "
+                        f"{len(chunk_result)} segment(s) for {len(chunk)} sent — "
+                        f"refusing to misalign the timeline; keeping original text."
                     )
                     chunk_result = chunk
                 results.extend(chunk_result)
