@@ -166,6 +166,9 @@ export interface CustomVoice {
   name: string
   tags?: string[]
   custom?: boolean
+  /** Extension of the stored source clip. Absent on voices cloned before the
+   *  upload was kept — those have no sample to preview. */
+  sample_ext?: string
 }
 
 export interface DubRequest {
@@ -1245,6 +1248,12 @@ class DubVerseAPIClient {
    *  so it goes through the same `?`/`&` separator logic as access_token —
    *  callers that concatenated `?ts=` onto the returned string produced a
    *  second `?`, which folded the buster into the token value and 401'd. */
+  /** URL of the clip a voice was cloned from. Goes through _mediaUrl so the
+   *  access_token rides along — an <audio> element cannot send a header. */
+  getCustomVoiceSampleUrl(voiceId: string): string {
+    return this._mediaUrl(`/api/voices/custom/${encodeURIComponent(voiceId)}/sample`)
+  }
+
   getAudioFileUrl(jobId: string, filename: string, cacheBust = false): string {
     const bust = cacheBust ? `?ts=${Date.now()}` : ''
     return this._mediaUrl(`/api/media/${jobId}/audio/${filename}${bust}`)
