@@ -193,6 +193,45 @@ export function TestClipsPanel({
     }
   }, [jobId, speakerVoiceMap, updateSpeakerVoice, pulseSpeaker, onVoiceAssigned, flash])
 
+  /** Drag payload, byte-for-byte what the Voice Library sends.
+   *
+   *  The editor's segment and timeline drop handlers already read
+   *  'application/x-voice-payload' and apply the voice — a cloned voice is just a
+   *  voice id to them. Matching the existing contract exactly means dragging works
+   *  from here with no changes on the receiving side; inventing a second payload
+   *  shape would mean two drop paths to keep in step. */
+  const voiceDragProps = (v: CustomVoice) => ({
+    draggable: true,
+    title: `${v.name} — drag onto a segment to apply it there`,
+    onPointerDown: (e: React.PointerEvent) => e.stopPropagation(),
+    onDragStart: (e: React.DragEvent) => {
+      e.dataTransfer.effectAllowed = 'copy'
+      e.dataTransfer.setData(
+        'application/x-voice-payload',
+        JSON.stringify({ voice_id: v.voice_id, name: v.name }),
+      )
+      e.dataTransfer.setData('text/plain', v.voice_id)
+      const ghost = document.createElement('div')
+      ghost.textContent = `${v.name} ▸`
+      ghost.style.cssText = [
+        'position:absolute', 'top:-1000px', 'left:-1000px',
+        'padding:8px 12px',
+        // Purple, matching the custom-voice tag in the library, so what is being
+        // dragged is identifiable mid-drag.
+        'background:rgba(168,85,247,0.95)',
+        'color:#faf5ff',
+        'border:1px solid rgba(147,51,234,0.95)',
+        'border-radius:8px',
+        'font:700 13px system-ui,sans-serif',
+        'box-shadow:0 6px 18px rgba(0,0,0,0.35)',
+        'pointer-events:none', 'z-index:9999',
+      ].join(';')
+      document.body.appendChild(ghost)
+      e.dataTransfer.setDragImage(ghost, 0, 0)
+      setTimeout(() => ghost.remove(), 0)
+    },
+  })
+
   const handleDelete = useCallback(async (v: CustomVoice) => {
     setBusyId(v.voice_id)
     try {
@@ -293,7 +332,12 @@ export function TestClipsPanel({
                     </button>
                   )}
                   <div className="min-w-0">
-                  <div className="text-sm font-semibold text-amber-300 truncate">{v.name}</div>
+                  <div
+                    className="text-sm font-semibold text-amber-300 truncate cursor-grab active:cursor-grabbing select-none"
+                    {...voiceDragProps(v)}
+                  >
+                    {v.name}
+                  </div>
                   <div className="text-[10px] text-slate-500">
                     {v.provider === 'fish-audio' ? 'Fish Audio' : 'ElevenLabs'} &middot; cloned
                     {assignedSpeakers.length > 0 && ` · ${assignedSpeakers.join(', ')}`}

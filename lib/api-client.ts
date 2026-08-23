@@ -1268,8 +1268,18 @@ class DubVerseAPIClient {
    *  via getAudioFileUrl so the URL always carries the current token. */
   refreshAudioUrl(jobId: string, url: string | undefined): string | undefined {
     if (!url) return url
-    const filename = url.split('?')[0].split('/').pop()
-    return filename ? this.getAudioFileUrl(jobId, filename) : url
+    const [base, query] = url.split('?')
+    const filename = base.split('/').pop()
+    if (!filename) return url
+    // Carry the original ts across. A staged take reuses one filename
+    // (segment_NNNN_staged.mp3) every time it is re-rendered, so dropping the
+    // buster here would let the browser serve the previous take's audio. Minting
+    // a NEW ts instead would miss the decode cache on every stitch.
+    const ts = new URLSearchParams(query || '').get('ts')
+    const fresh = this.getAudioFileUrl(jobId, filename)
+    if (!ts) return fresh
+    const sep = fresh.includes('?') ? '&' : '?'
+    return `${fresh}${sep}ts=${encodeURIComponent(ts)}`
   }
 
   async exportVideo(

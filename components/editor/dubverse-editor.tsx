@@ -83,7 +83,7 @@ import { HeatmapBar } from '@/components/timeline/HeatmapBar'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { ExportModal } from '@/components/editor/export-modal'
 import { ReviewQueuePanel } from '@/components/editor/review-queue-panel'
-import { stitchRPT, stitchRPTWindow, overlayStagedEdits, clearCache, scheduleRPTPlayback, effStart, effEnd } from '@/lib/rpt-engine'
+import { stitchRPT, stitchRPTWindow, overlayStagedEdits, clearCache, scheduleRPTPlayback, effStart, effEnd, CROSSFADE_MAX_SEC, CROSSFADE_WARN_SEC } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { createClient } from '@/lib/supabase/client'
 
@@ -180,6 +180,8 @@ interface SegmentContextMenuProps {
   canMergeNext: boolean
   onDelete: (index: number) => void
   onToggleLock: (index: number) => void
+  onLockScene: (index: number) => void
+  onUnlockScene: (index: number) => void
   onTogglePair: (index: number) => void
   onRevert: (index: number) => void
   onUndoLastEdit: (index: number) => void
@@ -211,6 +213,8 @@ function SegmentContextMenu({
   canMergeNext,
   onDelete,
   onToggleLock,
+  onLockScene,
+  onUnlockScene,
   onTogglePair,
   onRevert,
   onUndoLastEdit,
@@ -288,6 +292,15 @@ function SegmentContextMenu({
         <ContextMenuSeparator />
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onToggleLock(index) }} className="text-xs gap-2">
           {lockedSegments.has(segmentKey) ? '🔓 Unlock' : '🔒 Lock'}
+        </ContextMenuItem>
+        <ContextMenuItem
+          onClick={(e) => {
+            e.stopPropagation()
+            if (lockedSegments.has(segmentKey)) onUnlockScene(index)
+            else onLockScene(index)
+          }}
+          className="text-xs gap-2">
+          {lockedSegments.has(segmentKey) ? '🔓 Unlock Scene' : '🔒 Lock Scene…'}
         </ContextMenuItem>
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onTogglePair(index) }} className="text-xs gap-2">
           {lockedPairs.has(segmentKey) ? '🔗 Unpair' : '🔗 Pair with Next'}
@@ -1681,6 +1694,22 @@ export function DubVerseEditor({
   const videoInputRef = useRef<HTMLInputElement>(null)
   const transcriptInputRef = useRef<HTMLInputElement>(null)
 
+  /** Whether the timeline scrolls to keep the playhead centred.
+   *
+   *  OFF by default. Following is what you want while WATCHING a pass; while
+   *  editing it means the view slides out from under you the moment playback
+   *  moves, and a line you were correcting ends up somewhere you have to go and
+   *  find. Editing is the common case here, so the timeline holds still unless
+   *  asked otherwise. */
+  const [followPlayhead, setFollowPlayhead] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('dubverse.editor.followPlayhead') === '1'
+    }
+    return false
+  })
+  const followPlayheadRef = useRef(followPlayhead)
+  followPlayheadRef.current = followPlayhead
+
   // Reference import state (transcribe-only, for emotion analysis / EI Library)
   type RefSegment = { id: string; index: number; start: number; end: number; text: string; speaker_id: string }
   const [referenceSegments, setReferenceSegments] = useState<RefSegment[] | null>(null)
@@ -2160,6 +2189,11 @@ export function DubVerseEditor({
       if ((s as unknown as { paired_with_next?: boolean }).paired_with_next) restoredPairs.add(k)
     })
     if (restoredLocks.size) setLockedSegments(restoredLocks)
+  // Read by the scene helpers, which are declared before setSegmentLocked and run
+  // long after the render that created them.
+  const lockedSegmentsRef = useRef(lockedSegments)
+  lockedSegmentsRef.current = lockedSegments
+  const setSegmentLockedRef = useRef<((index: number, lock: boolean) => void) | null>(null)
     if (restoredPairs.size) setLockedPairs(restoredPairs)
     locksInitRef.current = jobId
   }, [displaySegments, jobId])
@@ -2195,6 +2229,16 @@ export function DubVerseEditor({
     const ti = displaySegmentsRef.current[index]?.transcript_index ?? index
     apiClient.commitSegmentTiming(jobId, ti, { locked: lock })
       .catch(err => console.warn('[LOCK] persist failed:', err))
+    // Persist immediately. Locking used to live only in component state until the
+    // next Save, so a lock set to protect finished work was gone after a refresh —
+    // exactly the case where you most expect it to hold. The backend has always
+    // accepted a locked flag on commit_segment_timing; nothing was sending it.
+    const _ti = displaySegmentsRef.current[index]?.transcript_index ?? index
+    commitOrStageRef.current?.(_ti, { locked: lock })
+      ?.catch(err => console.warn('[LOCK] persist failed', err))
+    setImportedSegments(prev => prev ? prev.map((seg, i) =>
+      i === index ? { ...seg, locked: lock, status: lock ? 'locked' as const : 'auto' as const } : seg
+    ) : prev)
   }, [jobId, keyAt])
 
   const canMergeWithNext = useCallback((index: number): boolean => {
@@ -2213,6 +2257,8 @@ export function DubVerseEditor({
     if (!first || !second) return
     if (first.speaker_id !== second.speaker_id) return
     if (lockedSegments.has(keyAt(index)) || lockedSegments.has(keyAt(index + 1))) return
+  // Published for the scene helpers above, which are declared earlier in the file.
+  setSegmentLockedRef.current = setSegmentLocked
     if (lockedPairs.has(keyAt(index)) || lockedPairs.has(keyAt(index + 1))) return
 
     const joinText = (a: string | null | undefined, b: string | null | undefined) => {
@@ -3253,7 +3299,7 @@ export function DubVerseEditor({
       setCurrentTime(seg.start_time)
       if (videoRef.current) videoRef.current.currentTime = seg.start_time
     }
-  }, [selectSegment, groupSelectMode, handleGroupRangeClick])
+  }, [selectSegment, groupSelectMode, handleGroupRangeClick, sceneLockMode, handleSceneRangeClick])
   
   // Handle preview panel resize
   const handlePreviewResizeStart = useCallback((e: React.MouseEvent) => {
@@ -3267,9 +3313,70 @@ export function DubVerseEditor({
     let finalWidth = previewWidth
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
+  /** Scene lock — pick a contiguous run and freeze it.
+   *
+   *  Deliberately a SEPARATE mode from group move, not a shared selection with
+   *  two buttons on it. The gesture is the same (ctrl+click each end) but the
+   *  intents are opposites: one moves a run, the other guarantees a run cannot
+   *  move. Sharing state would mean every action had to ask which mode armed the
+   *  selection, and one wrong answer relocates work the user locked to protect. */
+  const [sceneLockMode, setSceneLockMode] = useState(false)
+  const [sceneAnchor, setSceneAnchor] = useState<number | null>(null)
+  const [sceneRange, setSceneRange] = useState<{ start: number; end: number } | null>(null)
+
+  useEffect(() => {
+    if (!sceneLockMode) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { setSceneLockMode(false); setSceneAnchor(null); setSceneRange(null) }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [sceneLockMode])
+
+  const exitSceneLockMode = useCallback(() => {
+    setSceneLockMode(false)
+    setSceneAnchor(null)
+    setSceneRange(null)
+  }, [])
+
+  const handleSceneRangeClick = useCallback((index: number) => {
+    setSceneAnchor(prev => {
+      if (prev === null) { setSceneRange({ start: index, end: index }); return index }
+      setSceneRange({ start: Math.min(prev, index), end: Math.max(prev, index) })
+      return prev
+    })
+  }, [])
+
+  /** Lock every segment in the picked run. Goes through setSegmentLocked so each
+   *  one persists individually — a scene half-written to disk is worse than none,
+   *  and per-segment commits mean a failure loses one segment, not the scene. */
+  const lockScene = useCallback((from: number, to: number) => {
+    for (let i = from; i <= to; i++) setSegmentLockedRef.current?.(i, true)
+    exitSceneLockMode()
+  }, [exitSceneLockMode])
+
+  /** Unlock the contiguous run of locked segments containing `index`. The scene IS
+   *  the run, so there is no scene id to store, migrate, or keep in sync. */
+  const unlockScene = useCallback((index: number) => {
+    const segs = displaySegmentsRef.current
+    const isLocked = (i: number) => !!segs[i] && lockedSegmentsRef.current.has(keyAt(i))
+    if (!isLocked(index)) return
+    let from = index, to = index
+    while (from - 1 >= 0 && isLocked(from - 1)) from--
+    while (to + 1 < segs.length && isLocked(to + 1)) to++
+    for (let i = from; i <= to; i++) setSegmentLockedRef.current?.(i, false)
+  }, [keyAt])
+
       const delta = startX - moveEvent.clientX
       const newWidth = Math.min(Math.max(startWidth + delta, 300), 1100)
       finalWidth = newWidth
+    // Scene lock is checked FIRST: if both modes were somehow armed, freezing a
+    // run is the safer of the two to perform by accident.
+    if (sceneLockMode && e && (e.ctrlKey || e.metaKey)) {
+      e.stopPropagation()
+      handleSceneRangeClick(index)
+      return
+    }
       // Update the DOM directly during the drag so the whole editor doesn't
       // re-render on every mousemove — same fix that made the playhead smooth.
       if (previewPanelRef.current) {
@@ -3683,14 +3790,12 @@ export function DubVerseEditor({
       return false
     }
 
-    // Locked segment — refuse to regenerate. This is the choke point that freezes
-    // voice / emotion / speed: those are staged and only applied on regenerate, so
-    // blocking here keeps a locked segment's audio and attachments exactly as-is.
-    // Unlock (Shift+U) to change it.
-    if (lockedSegments.has(keyAt(activeIndex))) {
-      console.warn('[REGEN] blocked — segment is locked', activeIndex)
-      return false
-    }
+    // Lock freezes POSITION, not the segment. A locked scene still plays, still
+    // takes a new voice, emotion or speed, and still regenerates — what it will
+    // not do is move. This used to refuse regeneration outright, which made lock
+    // unusable for its actual purpose: pinning finished timing while continuing
+    // to work on the performance. Movement is blocked where movement happens —
+    // the drag handler and the merge guard — not here.
 
     selectSegment(activeIndex)
     setRegenError(null)
@@ -3766,13 +3871,12 @@ export function DubVerseEditor({
       const response = await apiClient.regenerateSegment(jobId, segment.transcript_index ?? activeIndex, regenPayload)
       console.log('[REGEN] backend response', { path: response.segment.path, voice_id: response.segment.voice_id, status: response.status })
       if (response.segment.timing_exclusion) {
-        setTimingExclusion({
-          audioDuration: response.segment.timing_audio_duration ?? 0,
-          slotDuration: response.segment.timing_slot_duration ?? 0,
-          overlap: response.segment.timing_overlap ?? 0,
-          segmentIndex: activeIndex,
+        console.warn('[TIMING] backend reported an exclusion (not blocking)', {
+          activeIndex,
+          audioDuration: response.segment.timing_audio_duration,
+          slotDuration: response.segment.timing_slot_duration,
+          overlap: response.segment.timing_overlap,
         })
-        return false
       }
       const filename = response.segment.path.split('/').pop() ?? ''
       const audio_url = filename
@@ -3793,6 +3897,17 @@ export function DubVerseEditor({
       // of truth — backend timing can lag for split/added segments.
       const bStart = response.segment.start
       const bEnd = response.segment.end
+      // The backend still reports timing_exclusion, but it is no longer allowed to
+      // block the render or raise a dialog. Judging it needs the CURRENT timeline,
+      // and the backend reads segments.json — which lags the editor, because the
+      // ripple that makes room after an Expand is committed fire-and-forget. Three
+      // attempts to reconcile the two produced three different wrong answers, each
+      // refusing a generate the user had already made room for.
+      //
+      // The overlap badge on the row does the same job from the frontend, where the
+      // timeline is authoritative and no staleness is possible. It informs rather
+      // than blocks, which is the right trade for something that was wrong this
+      // often. Logged so the backend's view is still visible when debugging.
       const expanded = bEnd > liveEnd + 0.02 || bStart < liveStart - 0.02
       if (expanded) {
         updateSegment(activeIndex, { start_time: bStart, end_time: bEnd })
@@ -4047,6 +4162,26 @@ export function DubVerseEditor({
         if (!e) return seg
         painted++
         return {
+  // Suppress the OS/browser right-click menu while the editor is mounted.
+  //
+  // Right-click is a working gesture here — segment actions, the gender filter,
+  // removing a speaker from a voice, deleting a curve point — and the native menu
+  // appearing over the app's own menu (or instead of it, on any surface without a
+  // handler) reads as the app misbehaving.
+  //
+  // Text entry is exempt: Paste/Undo/spellcheck live in that menu and there is no
+  // in-app replacement for them. Scoped to this component's lifetime, so the rest
+  // of the site keeps normal browser behaviour.
+  useEffect(() => {
+    const onCtx = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t?.closest('input, textarea, [contenteditable="true"]')) return
+      e.preventDefault()
+    }
+    document.addEventListener('contextmenu', onCtx)
+    return () => document.removeEventListener('contextmenu', onCtx)
+  }, [])
+
           ...seg,
           ...(e.text ? { preview_text: e.text, isPreviewing: true } : {}),
           ...(e.stagedAudioUrl ? { audio_url: e.stagedAudioUrl } : {}),
@@ -4103,7 +4238,16 @@ export function DubVerseEditor({
   // Callers pass their own segment array when they need a just-edited value
   // inlined ahead of the store update; the overlay still applies on top.
   const stitchWith = useCallback((segs: Segment[], ctx: AudioContext) => {
-    const overlaid = overlayStagedEdits(segs, stagedEditsRef.current)
+    // Resolve tokens HERE, after the staged overlay. A staged take's URL is minted
+    // when the take is rendered and then persisted in stagedEdits, so once Supabase
+    // rotates the JWT that stored URL 401s — the audio is on disk and unplayable.
+    // Committed URLs were already refreshed by some callers; doing it centrally
+    // covers the staged ones too, which no caller could reach.
+    const overlaid = overlayStagedEdits(segs, stagedEditsRef.current).map(seg => ({
+      ...seg,
+      audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
+      committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
+    }))
     if (chunkModeRef.current) {
       return stitchRPTWindow(overlaid, chunkStartRef.current, chunkEndRef.current, ctx)
     }
@@ -4126,7 +4270,10 @@ export function DubVerseEditor({
   // 300s past the end of a 300s buffer (which played silence).
   const rptOffsetFor = useCallback((absTime: number) => {
     return chunkModeRef.current ? Math.max(0, absTime - chunkStartRef.current) : absTime
-  }, [])
+    // jobId is needed to rebuild media URLs above. It is stable for the life of the
+    // editor, but leaving it out of the deps would be a stale closure waiting to
+    // happen if the editor ever switches job in place.
+  }, [jobId])
 
   // Route a server commit through the chunk-lens staging gate. In chunk mode,
   // audio-affecting fields (text/timing) are recorded in stagedEdits and NOT
@@ -5942,6 +6089,8 @@ export function DubVerseEditor({
                 >
                 <div
                   data-segment-row
+                      onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+                      onUnlockScene={(idx) => unlockScene(idx)}
                   data-index={index}
                   className={cn(
                     'flex items-start gap-3 px-4 py-3 border-b border-slate-800/50 transition-colors relative group',
@@ -6282,15 +6431,32 @@ export function DubVerseEditor({
                         >
                           <Plus className="h-2 w-2" />write-in
                         </span>
-                        {overlapById.has(index) && (
-                          <span
-                            className="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full border border-red-500/50 bg-red-500/15 text-red-300"
-                            title={`This segment's audio window overlaps a neighbour by ${overlapById.get(index)!.toFixed(2)}s, so the two lines play over each other. Shorten the text and regenerate, or drag the segment edge to clear the neighbour.`}
-                          >
-                            <AlertCircle className="h-2.5 w-2.5" />
-                            overlaps {overlapById.get(index)!.toFixed(2)}s
-                          </span>
-                        )}
+                        {/* Overlap is a timing TECHNIQUE, not a fault — a short one
+                            crossfades the join between two separately rendered lines
+                            and is a large part of why a dub stops sounding cut
+                            together. Below CROSSFADE_MAX_SEC it is invisible. Past
+                            CROSSFADE_WARN_SEC two lines really are talking over each
+                            other and that is worth saying loudly. */}
+                        {overlapById.has(index) && overlapById.get(index)! > CROSSFADE_MAX_SEC && (() => {
+                          const _by = overlapById.get(index)!
+                          const _bad = _by > CROSSFADE_WARN_SEC
+                          return (
+                            <span
+                              className={cn(
+                                'inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full border',
+                                _bad
+                                  ? 'border-red-500/50 bg-red-500/15 text-red-300'
+                                  : 'border-slate-600 bg-slate-700/40 text-slate-300',
+                              )}
+                              title={_bad
+                                ? `Overlaps a neighbour by ${_by.toFixed(2)}s — long enough that two lines are talking over each other. Still crossfaded, but worth shortening.`
+                                : `Crossfaded with its neighbour over ${_by.toFixed(2)}s.`}
+                            >
+                              {_bad && <AlertCircle className="h-2.5 w-2.5" />}
+                              {_bad ? `overlaps ${_by.toFixed(2)}s` : `crossfade ${_by.toFixed(2)}s`}
+                            </span>
+                          )
+                        })()}
                         {inlineEmotionPicker === index && (
                           <div
                             className="w-full mt-1 p-2 rounded-xl border border-violet-500/40 bg-[#0d1525] shadow-lg shadow-violet-900/30"
@@ -8511,9 +8677,26 @@ export function DubVerseEditor({
                     // pause position, not the last 1s snapshot.
                     setCurrentTime(currentTimeRef.current)
                   } else {
-                    lastStartPosRef.current = currentTime  // save start pos for Stop
-                    rptCancelRef.current = false           // allow the stitch to (re)schedule
-                    videoRef.current.currentTime = currentTime
+                    // Start from the SELECTED segment when the playhead has drifted
+                    // outside it. Playback leaves the playhead wherever it stopped,
+                    // so after auditioning once, pressing play again resumed from
+                    // there — and the timeline, which follows the playhead, scrolled
+                    // away from the segment being edited. Resuming in place is only
+                    // what you want while the playhead is still inside the segment
+                    // you are working on; outside it, "play" means "play this line".
+                    const _sel = selectedSegmentIndex !== null
+                      ? displaySegments[selectedSegmentIndex]
+                      : null
+                    let _from = currentTime
+                    if (_sel) {
+                      const _s = effStart(_sel)
+                      const _e = effEnd(_sel)
+                      if (currentTime < _s - 0.05 || currentTime > _e + 0.05) _from = _s
+                    }
+                    if (_from !== currentTime) setCurrentTime(_from)
+                    lastStartPosRef.current = _from  // save start pos for Stop
+                    rptCancelRef.current = false     // allow the stitch to (re)schedule
+                    videoRef.current.currentTime = _from
                     videoRef.current.play().catch(() => {})
                   }
                 }
@@ -8640,6 +8823,26 @@ export function DubVerseEditor({
           </div>
         </div>
         
+            <button
+              type="button"
+              onClick={() => {
+                const next = !followPlayhead
+                setFollowPlayhead(next)
+                localStorage.setItem('dubverse.editor.followPlayhead', next ? '1' : '0')
+              }}
+              title={followPlayhead
+                ? 'Follow playhead is ON — the timeline scrolls to keep the playhead centred. Turn it off to keep the view still while editing.'
+                : 'Follow playhead is OFF — the timeline stays where you put it. Turn it on to have it follow during playback.'}
+              className={cn(
+                'h-7 px-2 rounded text-[11px] font-medium transition-colors whitespace-nowrap',
+                followPlayhead
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                  : 'text-slate-500 hover:text-slate-300 border border-transparent',
+              )}
+            >
+              {followPlayhead ? '⇢ following' : '⇥ locked'}
+            </button>
+            <div className="w-px h-5 bg-white/10 mx-1" />
         {/* Chunk bar — the lens over a long film. One 5-minute window is shown
             at a time, so a 2-hour job edits as 24 windows instead of a single
             timeline nobody can navigate. Only appears when the film is long
@@ -9173,6 +9376,34 @@ export function DubVerseEditor({
                 {displaySegments.map((segment, index) => {
                   if (!inActiveWindow(segment)) return null
                   const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'original'
+              {/* Scene-lock band: the picked run, pulsing, with the LOCK action in
+                  the middle. Positioned in absolute time like every other timeline
+                  overlay, so it lines up with the blocks it is describing. */}
+              {sceneLockMode && sceneRange && displaySegments[sceneRange.start] && displaySegments[sceneRange.end] && (() => {
+                const _s = effStart(displaySegments[sceneRange.start])
+                const _e = effEnd(displaySegments[sceneRange.end])
+                const _left = _s * PIXELS_PER_SECOND
+                const _width = Math.max(8, (_e - _s) * PIXELS_PER_SECOND)
+                const _count = sceneRange.end - sceneRange.start + 1
+                return (
+                  <div
+                    className="absolute top-0 bottom-0 z-40 rounded-md border-2 border-emerald-400/70 bg-emerald-400/15 animate-pulse pointer-events-none"
+                    style={{ left: _left, width: _width }}
+                  >
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); lockScene(sceneRange.start, sceneRange.end) }}
+                        title={_count + ' segment(s) — click to freeze their position. They keep playing, and voice, emotion and speed can still be changed.'}
+                        className="pointer-events-auto px-4 py-2 rounded-md bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold tracking-widest uppercase shadow-lg"
+                      >
+                        🔒 Lock {_count > 1 ? _count + ' segments' : 'segment'}
+                      </button>
+                    </div>
+                  </div>
+                )
+              })()}
+
                   // Any drag of this segment (on any track) moves every track's block
                   // for it, since they all share the one committed position; a paired
                   // neighbor (Shift+P) moves too.
@@ -9399,6 +9630,8 @@ export function DubVerseEditor({
                               return base.map((seg, i) => i === index ? { ...seg, end_time: newEnd, committed_end_time: newEnd } : seg)
                             })
                             document.removeEventListener('mousemove', onMouseMove)
+                      onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+                      onUnlockScene={(idx) => unlockScene(idx)}
                             document.removeEventListener('mouseup', onMouseUp)
                           }
                           document.addEventListener('mousemove', onMouseMove)
@@ -9683,6 +9916,8 @@ export function DubVerseEditor({
                           const originalStart = effStart(segment)
                           const originalEnd = effEnd(segment)
                           const onMouseMove = (ev: MouseEvent) => {
+                      onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+                      onUnlockScene={(idx) => unlockScene(idx)}
                             const dx = ev.clientX - startX
                             const newStart = Math.max(0, Math.min(originalEnd - 0.1, originalStart + dx / PIXELS_PER_SECOND))
                             setImportedSegments(prev => {
