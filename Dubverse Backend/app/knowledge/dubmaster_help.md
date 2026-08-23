@@ -513,7 +513,77 @@ DubMaster has three tiers: **Basic**, **Premium**, and **Professional**.
 If a user on a lower tier asks about a feature above their plan, say so plainly and
 suggest upgrading, rather than describing the feature as if they can use it.
 
+## Make Movie — rendering the finished film
+
+**Make Movie** (top bar, Professional only) renders the finished dubbed video from the
+current timeline. It is never disabled by the state of your edits — the only times it is
+unavailable are while a render is already running or while a Save is still in flight.
+
+If anything is outstanding when you press it, a confirmation appears listing exactly what.
+A clean project renders straight away with no dialog.
+
+**The critical thing to understand: the render assembles from SAVED segments only.**
+A staged (unsaved) take is not in the film, no matter how good it sounded when you
+auditioned it. This is why the confirmation exists.
+
+The confirmation offers:
+
+- **Save, then make movie** — shown when you have staged takes. This saves first so the
+  staged work is included, then renders. This is almost always the right button.
+- **Make movie without them** / **Make movie anyway** — renders immediately, accepting
+  that staged or failed segments will be missing.
+- **Cancel** — go back and fix things first.
+
+## The three edit counters: staged, reviewed, failed
+
+The segment header shows three counters. They mean different things and carry very
+different weight.
+
+| Counter | What it counts | Does it affect the film? |
+| --- | --- | --- |
+| **staged** | Edits you made that are not saved yet | **Yes — they will be MISSING.** Press Save. |
+| **reviewed** | 5-minute **windows** you have pressed Save on | No. Purely "have you looked at this yet". |
+| **failed** | Segments whose save did not land | **Yes — they will be MISSING.** |
+
+**Staged** is the one that matters. On a long film, editing happens in windows, and
+regenerating a segment writes a separate staged audio file without touching the saved
+project. That is deliberate — it means trying a different voice, speed or emotion costs
+nothing until you commit. Pressing **Save** promotes the staged take to be the segment's
+real audio. Until then it exists but is not part of the film.
+
+**Reviewed counts windows, not segments.** A 105-minute film is 21 windows of 5 minutes
+each, so "1 of 21 reviewed" means you have pressed Save in one window — not that only one
+segment is good. Your edits are saved as you make them; an unreviewed window is simply one
+you have not been through yet. It is safe to render with windows unreviewed.
+
+**Failed** means a save did not land for that segment. Saving is commit-what-you-can, so
+one failure does not stop the rest — but the failed segment stays staged and will not be
+in the render. The warning names the specific segments so they can be found and fixed.
+
+## Test Clips — voices cloned from your own audio
+
+The **Test Clips** tab (Professional) is where voices cloned from an uploaded audio sample
+live. Upload 10–30 seconds of clean, single-speaker speech (WAV or MP3, no music or
+background noise) and give it a name to create one.
+
+Each cloned voice can be:
+
+- **Assigned to a speaker** — applies to every segment belonging to that speaker, the same
+  as assigning from the Voice Library.
+- **Applied to the selected segment only** — via the "This segment" button, which renders
+  it immediately as a staged take so it can be heard before committing.
+- **Deleted** — permanently, with a confirmation. A deleted clone cannot be recovered.
+
+**The uploaded clip is not stored by DubMaster.** It is sent straight to the cloning
+service and discarded, so keep your own copy of the audio if you may want to re-clone it
+later. This is also why cloned voices have no preview button — there is no stored sample
+to play. To hear one, assign it to a segment and generate.
+
+Cloned voices do not appear in the main Voice Library grid; they are only in Test Clips.
+This is separate from the automatic cloning of the original video's speakers, and separate
+again from the Custom Voices (voice changer) feature.
+
 ## Exporting
 
 Once satisfied, users export the final dubbed video via the Export button, or trigger
-a full rebuild via "Rebuild Video" if segments changed since the last export.
+a full render via **Make Movie** (see above) if segments changed since the last export.
