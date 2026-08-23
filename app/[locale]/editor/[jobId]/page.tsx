@@ -4,7 +4,7 @@ import { use, useState, useEffect, useRef, useCallback } from 'react'
 import { DubVerseEditor } from '@/components/editor/dubverse-editor'
 import { LoadingSpinner } from '@/components/loading-spinner'
 import { ErrorBoundary } from '@/components/error-boundary'
-import type { Segment, QCFinding } from '@/lib/editor-types'
+import type { Segment, Scene, QCFinding } from '@/lib/editor-types'
 import { newSegmentId } from '@/lib/editor-types'
 
 import { apiClient } from '@/lib/api-client'
@@ -29,6 +29,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   const [editorProps, setEditorProps] = useState<any>(null)
   const [segments, setSegments] = useState<Segment[]>([])
   const [snapshotSegments, setSnapshotSegments] = useState<Segment[]>([])
+  const [scenes, setScenes] = useState<Scene[]>([])
   // Chunk-lens state and the deletion countdown both ride along on the segments
   // response. Without forwarding them the countdown card can never appear.
   const [chunkStatus, setChunkStatus] = useState<Record<string, string> | undefined>(undefined)
@@ -172,6 +173,8 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             text_locked: seg.text_locked ?? false,
             committed_start_time: seg.committed_start_time ?? undefined,
             committed_end_time: seg.committed_end_time ?? undefined,
+            fade_in: seg.fade_in ?? undefined,
+            fade_out: seg.fade_out ?? undefined,
             // Casting and pacing. Absent here, the editor's restore had nothing
             // to read and every per-segment voice override vanished on reload.
             committed_voice_id: seg.committed_voice_id ?? undefined,
@@ -261,6 +264,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
           traitsMapping: persistedTraitsMapping,
         })
         setSegments(editorSegments)
+        setScenes((segmentsData?.scenes as Scene[] | undefined) || [])
         setChunkStatus(segmentsData?.chunk_status)
         setRetention(segmentsData?.retention)
         setSnapshotSegments(mappedSnapshotSegments)
@@ -425,6 +429,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         dubbedVideoUrl={editorProps.dubbedVideoUrl}
         videoDuration={editorProps.videoDuration}
         segments={segments}
+        scenes={scenes}
         snapshotSegments={snapshotSegments}
         chunkStatus={chunkStatus}
         retention={retention}

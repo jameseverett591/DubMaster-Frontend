@@ -101,6 +101,10 @@ export interface Segment {
   committed_audio_url?: string
   committed_start_time?: number
   committed_end_time?: number
+  // User-defined fade handles on the Preview Audio / dubbed track, in seconds.
+  // 0 = no explicit fade; the RPT engine falls back to overlap-based crossfade.
+  fade_in?: number
+  fade_out?: number
   committed_adapted_text?: string
   // True only when a human committed a text correction. Never written by any
   // pipeline path, so it — unlike committed_adapted_text, which Generate Speech
@@ -266,6 +270,17 @@ export interface EmotionalCurve {
   }
 }
 
+/** A video scene boundary. Scenes are contiguous ranges covering the video.
+ *  video_fade_in / video_fade_out are seconds of fade from/to black at the
+ *  scene's start and end. */
+export interface Scene {
+  id: string
+  start: number
+  end: number
+  video_fade_in?: number
+  video_fade_out?: number
+}
+
 export interface EditorJob {
   id: string
   title: string
@@ -275,6 +290,7 @@ export interface EditorJob {
   dubbed_video_url?: string
   video_duration: number
   segments: Segment[]
+  scenes?: Scene[]
   qc_score?: QCScore
   created_at: string
   updated_at: string
@@ -341,6 +357,41 @@ export function newSegmentId(): string {
   }
   // crypto.randomUUID needs a secure context; fall back for anything else.
   return `seg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+export function newSceneId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `scene-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+export function defaultScenes(videoDuration: number): Scene[] {
+  if (!Number.isFinite(videoDuration) || videoDuration <= 0) return []
+  return [{ id: newSceneId(), start: 0, end: videoDuration }]
+}
+
+/** Compute the black overlay opacity for a video frame at a given time.
+ *  0 = fully visible video, 1 = fully black. */
+export function computeVideoFadeOpacity(time: number, scenes: Scene[]): number {
+  if (!scenes.length) return 0
+  const scene = scenes.find(s => s.start <= time && time < s.end)
+    ?? scenes[scenes.length - 1]
+  if (!scene) return 0
+  const fadeIn = scene.video_fade_in ?? 0
+  const fadeOut = scene.video_fade_out ?? 0
+  const duration = scene.end - scene.start
+  if (duration <= 0) return 0
+  const relative = time - scene.start
+
+  let gain = 1
+  if (fadeIn > 0 && relative < fadeIn && fadeIn > 0) {
+    gain = Math.sin((relative / fadeIn) * Math.PI / 2)
+  } else if (fadeOut > 0 && relative > duration - fadeOut) {
+    const remaining = scene.end - time
+    gain = Math.sin((remaining / fadeOut) * Math.PI / 2)
+  }
+  return 1 - gain
 }
 
 /**
