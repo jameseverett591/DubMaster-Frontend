@@ -59,6 +59,7 @@ import { apiClient } from '@/lib/api-client'
 import type { RegenerateSegmentRequest, RetentionState } from '@/lib/api-client'
 import { VoiceLibraryPanel } from '@/components/voice-library-modal'
 import { CustomVoicesModal } from '@/components/editor/custom-voices-modal'
+import { TestClipsPanel } from '@/components/editor/test-clips-panel'
 import { EmotionLibraryPopup } from '@/components/editor/emotion-library-popup'
 import { CharacterProfilePopover } from '@/components/editor/character-profile-popover'
 import { useEditorStore, type SidebarTab, CHUNK_SECONDS } from '@/lib/editor-store'
@@ -955,7 +956,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'respeecher' | 'perform' | 'seeds' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'ei-library' | 'nuances' | 'chord' | 'advanced' | 'characters'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'respeecher' | 'perform' | 'seeds' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'ei-library' | 'nuances' | 'chord' | 'advanced' | 'characters' | 'testclips'>('result')
   const [velmaEnrichLoading, setVelmaEnrichLoading] = useState(false)
   const [velmaEnrichResult, setVelmaEnrichResult] = useState<{ patched: number; total: number } | null>(null)
 
@@ -6835,6 +6836,7 @@ export function DubVerseEditor({
                 { id: 'adaptation', label: 'Adaptation' },
                 { id: 'speakers',   label: 'Speakers' },
                 { id: 'library',    label: 'Voice Library' },
+                { id: 'testclips',  label: 'Test Clips',   feature: 'customVoices' },
                 { id: 'ei-library', label: 'E.I. Library', feature: 'emotionalIntelligence' },
               ] as const).filter((t) => !('feature' in t) || hasFeature(t.feature as any)).map((t) => (
                 <button
@@ -7096,6 +7098,34 @@ export function DubVerseEditor({
             </div>
           )}
 
+          {rightPanelTab === 'testclips' && (
+            <div className="flex-1 min-h-0 overflow-hidden bg-neutral-950">
+              <TestClipsPanel
+                jobId={jobId}
+                selectedSegmentIndex={selectedSegmentIndex}
+                onVoiceAssigned={(speakerId, voiceId) => {
+                  // Same propagation the Voice Library uses: clear per-segment
+                  // overrides for this speaker so nothing shadows the assignment.
+                  setStagedVoices(prev => {
+                    const next = { ...prev }
+                    displaySegments.forEach((seg) => {
+                      if (seg.speaker_id === speakerId) delete next[getSegmentKey(seg)]
+                    })
+                    return next
+                  })
+                  setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: voiceId }))
+                }}
+                onApplyToSegment={(segmentIndex, voiceId) => {
+                  // Segment-only: stage the voice, then render it so the take is
+                  // audible immediately. In chunk mode that writes a *_staged file
+                  // and leaves segments.json alone, so it costs nothing until Save.
+                  setStagedVoices(prev => ({ ...prev, [keyAt(segmentIndex)]: voiceId }))
+                  handleGenerateSpeechRef.current(segmentIndex, voiceId)
+                }}
+              />
+            </div>
+          )}
+
           {rightPanelTab === 'perform' && (
             <div className="flex-1 min-h-0 overflow-hidden bg-neutral-950">
               <PerformPanel
@@ -7204,6 +7234,7 @@ export function DubVerseEditor({
             <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
               <VoiceLibraryPanel
                 customVoicesVersion={customVoicesVersion}
+                onOpenCustomVoices={() => setRightPanelTab('testclips')}
                 onVoiceAssigned={(speakerId, voiceId) => {
                   // Clear any per-segment staged voice overrides for this speaker so
                   // nothing shadows the assignment, then apply the voice to all of the
