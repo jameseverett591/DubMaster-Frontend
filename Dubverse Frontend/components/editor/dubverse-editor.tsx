@@ -2375,6 +2375,26 @@ export function DubVerseEditor({
       setStagedEmotions(prev => ({ ...restoredEmotions, ...prev }))
     }
 
+    // Same for voice and speed. committed_voice_id / committed_speed are WRITTEN
+    // on every commit but were never read back, so a per-segment voice override
+    // survived on disk and vanished from the UI on refresh — the casting looked
+    // like it had reverted to the speaker default. stagedVoices/stagedSpeeds are
+    // component state, not persisted, so segments.json is the only way home.
+    const restoredVoices: Record<string, string> = {}
+    const restoredSpeeds: Record<string, number> = {}
+    segmentsWithFindings.forEach((seg) => {
+      if (seg.committed_voice_id) restoredVoices[getSegmentKey(seg)] = seg.committed_voice_id
+      if (seg.committed_speed != null && seg.committed_speed !== 1.0) {
+        restoredSpeeds[getSegmentKey(seg)] = seg.committed_speed
+      }
+    })
+    if (Object.keys(restoredVoices).length > 0) {
+      setStagedVoices(prev => ({ ...restoredVoices, ...prev }))
+    }
+    if (Object.keys(restoredSpeeds).length > 0) {
+      setStagedSpeeds(prev => ({ ...restoredSpeeds, ...prev }))
+    }
+
     // Speaker voice/traits maps: only initialize on initial mount or job switch.
     // Without this gate, any unrelated prop reference change (e.g. a QC poll
     // re-render passing a fresh [] for qcFindings) would re-run this effect and
@@ -3805,12 +3825,25 @@ export function DubVerseEditor({
           : seg)
       })
       setPlaybackMode('preview')
+      const _committedVoice = response.segment.voice_id ?? voiceOverride ?? stagedVoices[keyAt(activeIndex)] ?? speakerVoiceMap[segment.speaker_id]
+      const _committedSpeed = stagedSpeeds[keyAt(activeIndex)] ?? 1.0
       commitSegmentChanges(activeIndex, {
         committed_audio_url: audio_url,
-        committed_voice_id: response.segment.voice_id ?? voiceOverride ?? stagedVoices[keyAt(activeIndex)] ?? speakerVoiceMap[segment.speaker_id],
-        committed_speed: stagedSpeeds[keyAt(activeIndex)] ?? 1.0,
+        committed_voice_id: _committedVoice,
+        committed_speed: _committedSpeed,
         committed_emotion: stagedEmotions[keyAt(activeIndex)],
       })
+      // ...and to disk. commitSegmentChanges only touches the store, so the
+      // casting choice died on refresh: committed_voice_id was written on 0 of
+      // 817 segments even though the backend has always accepted it. Voice and
+      // speed are not text or timing, so commitOrStage sends them straight
+      // through even in chunk mode — the choice should not wait for Save.
+      if (_committedVoice) {
+        commitOrStageRef.current!(segment.transcript_index ?? activeIndex, {
+          committed_voice_id: _committedVoice,
+          committed_speed: _committedSpeed,
+        }).catch(err => console.warn('[REGEN] voice persist failed', err))
+      }
       applyFlagOutcome(activeIndex, 'voice')
       requestStitchWith(
         displaySegments.map((seg, segArrayIdx) => {
@@ -3948,6 +3981,45 @@ export function DubVerseEditor({
     }
     useEditorStore.setState({ stagedEditsJobId: jobId })
   }, [jobId, clearStagedEdits])
+
+  // Repaint staged edits after a reload.
+  //
+  // stagedEdits survives a refresh (it is in the store's persist partialize —
+  // it is the only editor state that exists nowhere else). importedSegments does
+  // NOT: it is refetched from segments.json. Nothing else reads stagedEdits.text
+  // back into a row, so after a refresh the user saw the OLD text and the old
+  // audio while the counter still said "N staged" — the work was intact but
+  // invisible, which reads as "my edit reverted every time I refresh".
+  //
+  // Painted as preview_text/isPreviewing, the editor's existing representation
+  // for an uncommitted edit, so it keeps the orange styling and Commit/Clear.
+  // It must NOT look saved: it is still staged until Save promotes it.
+  const stagedRepaintedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!jobId || stagedRepaintedRef.current === jobId) return
+    const staged = useEditorStore.getState().stagedEdits
+    if (Object.keys(staged).length === 0) return
+    const base = displaySegmentsRef.current
+    if (!base || base.length === 0) return
+    stagedRepaintedRef.current = jobId
+    let painted = 0
+    setImportedSegments(prev => {
+      const src = prev ?? base
+      return src.map(seg => {
+        const e = staged[seg.transcript_index ?? -1]
+        if (!e) return seg
+        painted++
+        return {
+          ...seg,
+          ...(e.text ? { preview_text: e.text, isPreviewing: true } : {}),
+          ...(e.stagedAudioUrl ? { audio_url: e.stagedAudioUrl } : {}),
+          ...(e.start_time != null ? { committed_start_time: e.start_time } : {}),
+          ...(e.end_time != null ? { committed_end_time: e.end_time } : {}),
+        }
+      })
+    })
+    if (painted > 0) console.log(`[staged] repainted ${painted} staged edit(s) after reload`)
+  }, [jobId, displaySegments.length, setImportedSegments])
 
   // A commit that fails is lost work, and almost every call site is
   // fire-and-forget. api-client announces failures globally; catching them here
@@ -6062,6 +6134,10 @@ export function DubVerseEditor({
                             if (e.key === 'Escape') cancelEditing()
                             e.stopPropagation()
                           }}
+                          // Without this, clicking anywhere other than Enter abandoned
+                          // the typed value: it lived only in the ref and nothing copied
+                          // it into preview_text.
+                          onBlur={() => { if (editingTextRef.current.trim()) saveEditing() }}
                           onMouseDown={(e) => e.stopPropagation()}
                           onMouseUp={(e) => e.stopPropagation()}
                           onFocus={(e) => {
@@ -6269,7 +6345,7 @@ export function DubVerseEditor({
                                 // browser's double-click word-select behave normally.
                                 if (!(customEmotionDrafts[index] ?? '').trim()) {
                                   e.preventDefault()
-                                  const line = segment.preview_text ?? segment.active_text ?? segment.target_text ?? ''
+                                  const line = segment.preview_text ?? segment.committed_adapted_text ?? segment.active_text ?? segment.target_text ?? ''
                                   setCustomEmotionDrafts(prev => ({ ...prev, [index]: line }))
                                   setWriteInError(validateWriteIn(line))
                                 }
@@ -6329,7 +6405,7 @@ export function DubVerseEditor({
                             onClick={(e) => e.stopPropagation()}
                           >
                             <span className="text-[10px] text-amber-400 font-medium w-full">✂️ Click a word to split before it</span>
-                            {(segment.preview_text ?? segment.active_text ?? segment.target_text).split(' ').map((word, wordIdx) => (
+                            {(segment.preview_text ?? segment.committed_adapted_text ?? segment.active_text ?? segment.target_text).split(' ').map((word, wordIdx) => (
                               <span
                                 key={wordIdx}
                                 title={wordIdx === 0 ? 'Cannot split before first word' : `Split before "${word}"`}
@@ -6376,7 +6452,7 @@ export function DubVerseEditor({
                               // into that field (Delivery Script) so you can add [tags]. Otherwise
                               // double-click edits the line inline as before.
                               if (inlineEmotionWriteIn === index) {
-                                const line = (segment.preview_text ?? segment.active_text ?? segment.target_text ?? '')
+                                const line = (segment.preview_text ?? segment.committed_adapted_text ?? segment.active_text ?? segment.target_text ?? '')
                                 setCustomEmotionDrafts(prev => ({ ...prev, [index]: line }))
                               } else {
                                 startEditing(index)
@@ -6417,6 +6493,18 @@ export function DubVerseEditor({
                           className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors pointer-events-auto cursor-pointer select-none"
                           onClick={(e) => {
                             e.stopPropagation()
+                            // The edit box is uncontrolled, so while a row is being
+                            // edited the typed value exists ONLY in editingTextRef.
+                            // preview_text is written by saveEditing(), which runs on
+                            // Enter/blur — so "type, then click Commit" used to persist
+                            // the ORIGINAL text and look like the edit had reverted.
+                            // Blur fires before this click, but setImportedSegments is
+                            // async, so preview_text is still stale in this tick: read
+                            // the ref directly, as handleGenerateSpeech already does.
+                            const _liveText =
+                              (editingSegmentIndex === index && editingTextRef.current.trim())
+                                ? editingTextRef.current.trim()
+                                : (displaySegments[index]?.preview_text ?? undefined)
                             commitPreview(index)
                             // Use the bound store action if available, otherwise fall back
                             // to the live store getter to avoid HMR/stale-binding runtime
@@ -6425,14 +6513,13 @@ export function DubVerseEditor({
                               ? commitSegmentChanges
                               : useEditorStore.getState().commitSegmentChanges
                             _commit(index, {
-                              committed_adapted_text: displaySegments[index]?.preview_text ?? undefined,
+                              committed_adapted_text: _liveText,
                             });
                             // Persist the committed adapted text to the backend so the
                             // user's correction survives refreshes, hard reloads, and shutdowns.
                             (function persistCommittedText(idx) {
                               const ti = displaySegments[idx]?.transcript_index ?? idx
-                              const text = displaySegments[idx]?.preview_text ?? undefined
-                              commitOrStage(ti, { committed_adapted_text: text, text_locked: true })
+                              commitOrStage(ti, { committed_adapted_text: _liveText, text_locked: true })
                                 .catch(err => console.warn('[COMMIT] persist failed', err))
                             })(index)
                             setImportedSegments(prev => {
@@ -6441,13 +6528,13 @@ export function DubVerseEditor({
                                 i === index
                                   ? {
                                       ...seg,
-                                      active_text: seg.preview_text ?? seg.active_text ?? seg.target_text,
-                                      target_text: seg.preview_text ?? seg.target_text,
-                                      variant_text: seg.preview_text ?? seg.variant_text ?? seg.target_text,
+                                      active_text: _liveText ?? seg.active_text ?? seg.target_text,
+                                      target_text: _liveText ?? seg.target_text,
+                                      variant_text: _liveText ?? seg.variant_text ?? seg.target_text,
                                       // commitSegmentChanges writes these into the store's
                                       // `segments` array, which is not mirrored here — set them
                                       // on importedSegments too or displaySegments never sees them.
-                                      committed_adapted_text: seg.preview_text ?? seg.committed_adapted_text,
+                                      committed_adapted_text: _liveText ?? seg.committed_adapted_text,
                                       text_locked: true,
                                       isUserEdited: true,
                                       preview_text: null,
@@ -6458,7 +6545,11 @@ export function DubVerseEditor({
                               )
                             })
                             setEditingSegmentIndex(null)
-                            handleGenerateSpeech(index)
+                            // Pass the text explicitly: handleGenerateSpeech infers it from
+                            // editingTextRef only while the row is still the selected one,
+                            // and editing has just been closed. Without this the commit
+                            // could save the new text but speak the old.
+                            handleGenerateSpeech(index, undefined, _liveText)
                           }}
                         >
                           Commit
