@@ -3441,6 +3441,16 @@ class DubbingService:
             respeecher_meta = result
         elif use_engine == "elevenlabs-sts":
             # Re-convert from the stored performance. The recording is the source
+        # Snapshot before any fit branch can move the window, so the final overlap
+        # guard can tell "a branch set this window" from "this is stale disk state".
+        # Defined unconditionally: the fit section is guarded, and a NameError here
+        # would silently disable the guard rather than fail loudly.
+        _pre_fit_committed = (seg.get("committed_start_time"), seg.get("committed_end_time"))
+        # Defaults so the guard is safe if the fit section never ran; it prefers
+        # these live-aware boundaries over anything re-read from segments.json.
+        next_start = None
+        prev_end = None
+
             # of truth here, so text edits, emotion pills and Delivery Scripts do
             # NOT reach this engine — same as Respeecher, for the same reason:
             # there is no directive channel to put them through.
@@ -3697,17 +3707,42 @@ class DubbingService:
         # the branches concluded. Overlapping audio is never acceptable output, so
         # surface it as a timing exclusion and let the user decide.
         try:
-            _fs = seg.get("committed_start_time", seg.get("start"))
-            _fe = seg.get("committed_end_time", seg.get("end"))
+            # The window this segment ACTUALLY ends up with. The fit branches write
+            # committed_* only when they change something, so when the audio fitted
+            # as-is those fields still hold whatever was on disk — which is stale
+            # exactly when the editor sent a live override. Reading them made the
+            # guard measure a window the regen never used, and report an overlap
+            # against it. Fall back to the stored values only if no live slot ran.
+            _now_committed = (seg.get("committed_start_time"), seg.get("committed_end_time"))
+            if _now_committed != _pre_fit_committed:
+                # A fit branch moved the window this call — that is the result.
+                _fs, _fe = _now_committed
+            else:
+                # No branch changed it, so the window is the slot the fit used,
+                # which already carries the editor's live override. committed_* is
+                # whatever was on disk and may be stale — reading it here made the
+                # guard measure a window the regen never used.
+                _fs, _fe = slot_start, slot_end
             if _is_finite_number(_fs) and _is_finite_number(_fe):
-                _next = min(
+                # Neighbours must come from the same source the fit logic used.
+                # Re-deriving them from `segments` reads segments.json, which lags
+                # the editor: expanding a slot ripples the later segments right, but
+                # those commits are fire-and-forget, so the on-disk neighbour is
+                # still where it was. Judging against it reported a large overlap
+                # for a window the user had just made room for — the guard
+                # contradicting the very fit logic it exists to backstop.
+                _next = next_start if _is_finite_number(next_start) else min(
                     (_effective_start(o) for o in segments
                      if o is not seg and _effective_start(o) >= _fs + 0.01),
                     default=None,
                 )
-                _prev = max(
+                # Segments ending at or before this one STARTS. The bound was _fe,
+                # which swept up every short segment nested inside a long window and
+                # reported its end as "prev" — producing overlaps of several seconds
+                # against a neighbour that was never behind this segment at all.
+                _prev = prev_end if _is_finite_number(prev_end) else max(
                     (_effective_end(o) for o in segments
-                     if o is not seg and _effective_end(o) <= _fe - 0.01),
+                     if o is not seg and _effective_end(o) <= _fs + 0.01),
                     default=None,
                 )
                 _over_next = (_fe - _next) if _next is not None else 0.0
@@ -3718,7 +3753,10 @@ class DubbingService:
                     seg["timing_audio_duration"] = round(actual_dur, 2)
                     seg["timing_slot_duration"] = round(_fe - _fs, 2)
                     seg["timing_overlap"] = round(_worst, 2)
-                    logger.error(
+                    # Informational only: the editor no longer blocks on this. Its
+                    # verdict is computed from segments.json, which lags the live
+                    # timeline, so it is a debugging aid rather than a fault.
+                    logger.info(
                         f"[REGEN-OVERLAP] seg {segment_index}: window "
                         f"[{_fs:.2f}, {_fe:.2f}] overlaps a neighbour by {_worst:.2f}s "
                         f"(next={_next}, prev={_prev}) — raising timing exclusion"

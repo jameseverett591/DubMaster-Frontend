@@ -676,8 +676,18 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     // they cannot be reached by paging or by a name search against it — without
     // this they exist only in Test Clips and are invisible while casting. The
     // purple tag marks them: catalog voices are amber, yours are purple.
-    const pageVoices = pageNum === 1 && customVoices.length > 0
-      ? [...customVoices, ...voices]
+    //
+    // They must still honour the search box. Prepending them unconditionally meant
+    // searching for a catalog voice listed the clones first anyway, and the detail
+    // pane — which falls back to pageVoices[0] — showed a clone instead of the
+    // voice that had been asked for. The catalog is filtered server-side; these are
+    // client-side, so the same filter has to be applied here by hand.
+    const _q = debouncedSearch.trim().toLowerCase()
+    const _visibleCustom = _q
+      ? customVoices.filter(v => v.name.toLowerCase().includes(_q))
+      : customVoices
+    const pageVoices = pageNum === 1 && _visibleCustom.length > 0
+      ? [..._visibleCustom, ...voices]
       : voices
 
     // Panel layout: master list on the left, detail on the right. The hero card
