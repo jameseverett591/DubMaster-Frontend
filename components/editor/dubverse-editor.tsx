@@ -784,12 +784,54 @@ interface TimeRulerProps {
   /** Pixels per second — `40 * zoomLevel` in the editor. */
   pps: number
   /** 'top' draws 3-level ticks with major+mid labels; 'bottom' is half-height,
-   *  major ticks labelled, minor ticks omitted entirely. */
-  variant: 'top' | 'bottom'
+   *  major ticks labelled, minor ticks omitted entirely; 'mid' is the strip between
+   *  the parking bay and the picture — second-by-second markers, labelled at 10s. */
+  variant: 'top' | 'bottom' | 'mid'
 }
 
 const TimeRuler = memo(function TimeRuler({ durationSec, pps, variant }: TimeRulerProps) {
   const ticks = Math.ceil(durationSec) + 1
+
+  if (variant === 'mid') {
+    return (
+      <div
+        className="h-5 shrink-0 bg-[#0d1018] border-b border-neutral-700/80 relative select-none"
+        style={{
+          // Second markers are painted as a background gradient, NOT as elements.
+          // A feature film is 6,000+ seconds, and rendering a node per tick is
+          // precisely what once made a click take five seconds. The gradient costs
+          // one paint and lines up exactly, because it steps by the same pps the
+          // blocks and the needle use.
+          backgroundImage:
+            `repeating-linear-gradient(to right, rgba(148,163,184,0.40) 0px, ` +
+            `rgba(148,163,184,0.40) 1px, transparent 1px, transparent ${pps}px)`,
+          backgroundSize: '100% 5px',
+          backgroundPosition: 'left bottom',
+          backgroundRepeat: 'repeat-x',
+        }}
+      >
+        {Array.from({ length: ticks }).map((_, i) => {
+          const isMajor = i % 10 === 0
+          const isMid = i % 5 === 0 && !isMajor
+          if (!isMajor && !isMid) return null
+          return (
+            <div
+              key={i}
+              className="absolute bottom-0 flex flex-col-reverse items-start"
+              style={{ left: i * pps }}
+            >
+              <div className={cn('w-px', isMajor ? 'h-3 bg-slate-300' : 'h-2 bg-slate-500')} />
+              {isMajor && (
+                <span className="text-[8px] font-mono leading-none mb-0.5 ml-0.5 text-slate-400 whitespace-nowrap">
+                  {formatTime(i)}
+                </span>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
 
   if (variant === 'bottom') {
     return (
@@ -9693,17 +9735,11 @@ export function DubVerseEditor({
                 </ContextMenuContent>
                 </ContextMenu>
               )}
-              {/* Infinite repeating grid — 3 levels: 10s / 5s / 1s — always continuous */}
-              <div
-                className="absolute inset-0 pointer-events-none z-20"
-                style={{
-                  backgroundImage: [
-                    `repeating-linear-gradient(to right, rgba(255,255,255,0.18) 0px, rgba(255,255,255,0.18) 1px, transparent 1px, transparent ${PIXELS_PER_SECOND * 10}px)`,
-                    `repeating-linear-gradient(to right, rgba(255,255,255,0.10) 0px, rgba(255,255,255,0.10) 1px, transparent 1px, transparent ${PIXELS_PER_SECOND * 5}px)`,
-                    `repeating-linear-gradient(to right, rgba(255,255,255,0.04) 0px, rgba(255,255,255,0.04) 1px, transparent 1px, transparent ${PIXELS_PER_SECOND}px)`,
-                  ].join(', '),
-                }}
-              />
+              {/* No background grid. It was a 3-level 10s/5s/1s gradient across the
+                  whole timeline, but zoomed out the 1s level lands a line every ~12px
+                  and reads as grey striping, and at z-20 it hatched the picture too —
+                  which is the one thing that has to stay clean when you are reading
+                  frames for sync. The rulers carry the scale instead. */}
 
               {/* Clickable seek header */}
               <div
@@ -9906,7 +9942,7 @@ export function DubVerseEditor({
                   a long way up now that the layover track sits under it, and
                   aligning a cut to a timecode means reading the scale next to the
                   footage rather than across two tracks. */}
-              <TimeRuler durationSec={videoDuration} pps={PIXELS_PER_SECOND} variant="bottom" />
+              <TimeRuler durationSec={videoDuration} pps={PIXELS_PER_SECOND} variant="mid" />
               <div className="h-20 shrink-0 bg-neutral-900/30 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
                 {/* Scene blocks + fade handles */}
                 <div className="absolute top-0 left-0 right-0 h-6 z-10">
@@ -11164,17 +11200,8 @@ export function DubVerseEditor({
 
               {/* Filler — fills remaining height, shows grid + bottom ruler */}
               <div className="flex-1 relative bg-[#07090f] flex flex-col">
-                {/* Filler grid — same 3-level gradient as main timeline */}
-                <div
-                  className="absolute inset-0 bottom-6 pointer-events-none"
-                  style={{
-                    backgroundImage: [
-                      `repeating-linear-gradient(to right, rgba(255,255,255,0.18) 0px, rgba(255,255,255,0.18) 1px, transparent 1px, transparent ${PIXELS_PER_SECOND * 10}px)`,
-                      `repeating-linear-gradient(to right, rgba(255,255,255,0.10) 0px, rgba(255,255,255,0.10) 1px, transparent 1px, transparent ${PIXELS_PER_SECOND * 5}px)`,
-                      `repeating-linear-gradient(to right, rgba(255,255,255,0.04) 0px, rgba(255,255,255,0.04) 1px, transparent 1px, transparent ${PIXELS_PER_SECOND}px)`,
-                    ].join(', '),
-                  }}
-                />
+                {/* No filler grid either — it was the same gradient, and the empty area
+                    below the tracks is where the striping showed up worst. */}
                 {/* Grid filler body */}
                 <div className="flex-1" />
                 {/* Bottom ruler — half height of top (h-5), major ticks only */}
