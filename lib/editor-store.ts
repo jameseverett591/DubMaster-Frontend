@@ -194,6 +194,8 @@ interface EditorState {
   addScene: (scene: Scene) => void
   updateScene: (id: string, updates: Partial<Scene>) => void
   removeScene: (id: string) => void
+  /** Undo a split: absorb this scene into the one before it. */
+  mergeSceneWithPrevious: (id: string) => void
   splitSceneAtTime: (time: number) => void
 
   // Segment actions
@@ -375,17 +377,48 @@ export const useEditorStore = create<EditorState>(
   removeScene: (id) => set((state) => ({
     scenes: state.scenes.filter((s) => s.id !== id),
   })),
+  // Undoing a split is a MERGE, not a delete. Removing the scene outright would
+  // leave a hole in the timeline where its footage used to be; the boundary has
+  // to be dissolved instead, with the previous scene taking over this one's span
+  // — both its timeline end and its source end, or the retimed footage would be
+  // silently truncated.
+  mergeSceneWithPrevious: (id) => set((state) => {
+    const sorted = [...state.scenes].sort((a, b) => a.start - b.start)
+    const idx = sorted.findIndex((s) => s.id === id)
+    if (idx <= 0) return state   // nothing before it: this is the first scene
+    const cur = sorted[idx]
+    const prev = sorted[idx - 1]
+    return {
+      scenes: state.scenes
+        .filter((s) => s.id !== cur.id)
+        .map((s) => s.id === prev.id
+          ? {
+              ...s,
+              end: cur.end,
+              source_end: cur.source_end ?? cur.end,
+              // The absorbed scene's fade-out becomes the merged scene's.
+              video_fade_out: cur.video_fade_out ?? s.video_fade_out,
+            }
+          : s),
+    }
+  }),
   splitSceneAtTime: (time) => set((state) => {
     const sorted = [...state.scenes].sort((a, b) => a.start - b.start)
     const parent = sorted.find((s) => s.start <= time && s.end > time)
     if (!parent) return state
+    const parentSourceStart = parent.source_start ?? parent.start
+    const parentSourceEnd = parent.source_end ?? parent.end
+    const ratio = parent.end === parent.start ? 0 : (time - parent.start) / (parent.end - parent.start)
+    const sourceSplit = parentSourceStart + ratio * (parentSourceEnd - parentSourceStart)
     const newScene: Scene = {
       id: `scene-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       start: time,
       end: parent.end,
+      source_start: sourceSplit,
+      source_end: parentSourceEnd,
     }
     return {
-      scenes: state.scenes.map((s) => s.id === parent.id ? { ...s, end: time } : s).concat(newScene),
+      scenes: state.scenes.map((s) => s.id === parent.id ? { ...s, end: time, source_end: sourceSplit } : s).concat(newScene),
     }
   }),
 
