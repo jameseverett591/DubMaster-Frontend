@@ -283,6 +283,16 @@ export interface Scene {
   // timeline position (i.e., it is not retimed/moved).
   source_start?: number
   source_end?: number
+  /** Parked on the layover track: lifted out of the picture but kept.
+   *
+   *  Cutting a section to fix lip sync should not mean losing it. A parked scene
+   *  holds its source range and its fades, takes no time on the timeline, and is
+   *  skipped by the render — so it can be dropped back in later or discarded once
+   *  the sync around it is settled. */
+  parked?: boolean
+  /** Where it sat before being lifted, so it can be dropped straight back. */
+  parked_from_start?: number
+  parked_from_end?: number
   video_fade_in?: number
   video_fade_out?: number
 }
@@ -414,27 +424,38 @@ export function computeVideoFadeOpacity(time: number, scenes: Scene[]): number {
  */
 export function normalizeScenes(scenes: Scene[], videoDuration: number): Scene[] {
   if (!scenes.length) return scenes
-  const sorted = [...scenes]
-    .filter(s => Number.isFinite(s.start) && Number.isFinite(s.end))
+  // Parked scenes are not part of the picture, so they take no part in tiling it.
+  // They keep their source range untouched and are re-appended afterwards.
+  const parked = scenes.filter(s => s.parked)
+  const sorted = scenes
+    .filter(s => !s.parked && Number.isFinite(s.start) && Number.isFinite(s.end))
+    .map(s => ({ ...s }))
     .sort((a, b) => a.start - b.start)
 
   const out: Scene[] = []
   for (let i = 0; i < sorted.length; i++) {
     const cur = { ...sorted[i] }
-    // First scene owns the head of the timeline; nothing may precede it.
-    if (out.length === 0) cur.start = 0
-    else cur.start = out[out.length - 1].end
-    // End at the next scene's start, or the end of the film for the last one.
+    // GAPS ARE LEFT ALONE. Lifting a section to the layover track opens a hole on
+    // purpose: it is working space, held while the footage either side is adjusted,
+    // until the cut is dropped back in or discarded. Closing it automatically would
+    // undo the edit the moment anything persisted. Gaps render as black.
+    //
+    // Overlaps are always wrong, though — two scenes claiming the same instant have
+    // no meaning, and their fade ramps draw stacked over each other. So a scene is
+    // only ever TRIMMED back to where the next one begins, never moved.
+    if (out.length > 0 && cur.start < out[out.length - 1].end) {
+      cur.start = out[out.length - 1].end
+    }
+    cur.start = Math.max(0, cur.start)
     const nextStart = i + 1 < sorted.length ? sorted[i + 1].start : videoDuration
-    cur.end = Math.max(cur.start, Math.min(nextStart, videoDuration))
+    cur.end = Math.max(cur.start, Math.min(cur.end, nextStart, videoDuration))
     if (cur.end - cur.start < 0.01) continue   // collapsed to nothing
     const dur = cur.end - cur.start
     if ((cur.video_fade_in ?? 0) > dur) cur.video_fade_in = 0
     if ((cur.video_fade_out ?? 0) > dur) cur.video_fade_out = 0
     out.push(cur)
   }
-  if (out.length) out[out.length - 1].end = videoDuration
-  return out
+  return [...out, ...parked]
 }
 /** Map a timeline time to the corresponding source video time for a scene.
  *  Returns null if the timeline time is not inside any scene (gap). */

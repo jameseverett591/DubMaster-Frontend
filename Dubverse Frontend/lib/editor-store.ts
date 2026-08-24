@@ -196,6 +196,11 @@ interface EditorState {
   removeScene: (id: string) => void
   /** Undo a split: absorb this scene into the one before it. */
   mergeSceneWithPrevious: (id: string) => void
+  /** Lift a scene out of the picture onto the layover track, closing the gap. */
+  parkScene: (id: string) => void
+  /** Drop a parked scene back in. Defaults to the gap it left; pass atTime to put
+   *  it somewhere else instead. Nothing else moves either way. */
+  restoreScene: (id: string, atTime?: number) => void
   splitSceneAtTime: (time: number) => void
 
   // Segment actions
@@ -402,6 +407,43 @@ export const useEditorStore = create<EditorState>(
           : s),
     }
   }),
+  // Lifting a section out is how a passage that will not sync gets removed while
+  // staying recoverable. The picture must close up behind it — a dub has no holes
+  // — so every later scene moves earlier by exactly the lifted duration. Source
+  // ranges are untouched: what the footage IS does not change, only when it plays.
+  parkScene: (id) => set((state) => {
+    const target = state.scenes.find((s) => s.id === id)
+    if (!target || target.parked) return state
+    // The hole it leaves is the point. Nothing else moves: the gap is working
+    // space, held while the footage on either side is adjusted, until the cut
+    // goes back in or is discarded. Its own span is remembered so it can return
+    // to exactly where it came from.
+    return {
+      scenes: state.scenes.map((s) => s.id === id
+        ? { ...s, parked: true, parked_from_start: s.start, parked_from_end: s.end }
+        : s),
+    }
+  }),
+
+  // Dropping it back is the same move in reverse: everything from the drop point
+  // on shifts right by the restored duration, so nothing is overwritten and the
+  // footage either side keeps its own timing.
+  restoreScene: (id, atTime) => set((state) => {
+    const target = state.scenes.find((s) => s.id === id)
+    if (!target || !target.parked) return state
+    const dur = Math.max(0.01, (target.source_end ?? target.end) - (target.source_start ?? target.start))
+    // Drops into the hole it left, not on top of its neighbours: nothing else
+    // moves, so footage either side keeps whatever sync was worked out while the
+    // gap was open. atTime overrides only when it is put back somewhere else.
+    const start = atTime ?? target.parked_from_start ?? target.start
+    return {
+      scenes: state.scenes.map((s) => s.id === id
+        ? { ...s, parked: false, start, end: start + dur,
+            parked_from_start: undefined, parked_from_end: undefined }
+        : s),
+    }
+  }),
+
   splitSceneAtTime: (time) => set((state) => {
     const sorted = [...state.scenes].sort((a, b) => a.start - b.start)
     const parent = sorted.find((s) => s.start <= time && s.end > time)

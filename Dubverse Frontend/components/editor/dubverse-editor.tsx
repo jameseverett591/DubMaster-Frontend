@@ -901,6 +901,9 @@ export function DubVerseEditor({
     updateSegmentSpeaker,
     setPreviewText,
     commitPreview,
+    parkScene,
+    restoreScene,
+    removeScene,
     cancelPreview,
     speakerVoiceMap,
     setSpeakerVoiceMap,
@@ -1958,6 +1961,11 @@ export function DubVerseEditor({
     if (!segment || wordIndex <= 0) return
     const words = segment.target_text.split(' ')
     if (wordIndex >= words.length) return
+  /** Sections lifted out of the picture. Laid out by arrival, not by timeline
+   *  position — a parked scene owns no position, which is the point of it. */
+  const parkedScenes = useMemo(() => scenes.filter(sc => sc.parked), [scenes])
+  const [parkedMenu, setParkedMenu] = useState<{ x: number; y: number; sceneId: string } | null>(null)
+
     const leftText = words.slice(0, wordIndex).join(' ')
     const rightText = words.slice(wordIndex).join(' ')
     const splitRatio = wordIndex / words.length
@@ -9642,6 +9650,46 @@ export function DubVerseEditor({
               className="w-full text-left px-3 py-2 text-xs text-slate-400 hover:bg-slate-700 whitespace-nowrap"
             >
               Cancel
+      {parkedMenu && (
+        <div
+          className="fixed z-[70] bg-slate-800 border border-slate-700 rounded-md shadow-lg overflow-hidden"
+          style={{ left: `${parkedMenu.x}px`, top: `${parkedMenu.y}px` }}
+          onMouseLeave={() => setParkedMenu(null)}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              // Back in at the playhead: the picture from there on shifts right by
+              // its duration, so nothing already in sync is overwritten.
+              restoreScene(parkedMenu.sceneId, currentTimeRef.current)
+              persistScenes().catch(err => console.warn('[RESTORE]', err))
+              setParkedMenu(null)
+            }}
+            className="w-full text-left px-3 py-2 text-xs text-cyan-300 hover:bg-slate-700 whitespace-nowrap"
+          >
+            ⬇ Put back at playhead
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              removeScene(parkedMenu.sceneId)
+              persistScenes().catch(err => console.warn('[DISCARD]', err))
+              setParkedMenu(null)
+            }}
+            className="w-full text-left px-3 py-2 text-xs text-red-300 hover:bg-slate-700 whitespace-nowrap"
+          >
+            🗑 Discard this section
+          </button>
+          <button
+            type="button"
+            onClick={() => setParkedMenu(null)}
+            className="w-full text-left px-3 py-2 text-xs text-slate-400 hover:bg-slate-700 whitespace-nowrap"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
             </button>
           </div>
         )
@@ -9672,6 +9720,17 @@ export function DubVerseEditor({
                       </button>
                     </div>
                   </div>
+            <button
+              type="button"
+              onClick={() => {
+                parkScene(sceneMenu.sceneId)
+                persistScenes().catch(err => console.warn('[PARK]', err))
+                setSceneMenu(null)
+              }}
+              className="w-full text-left px-3 py-2 text-xs text-cyan-300 hover:bg-slate-700 whitespace-nowrap"
+            >
+              ⬆ Lift to layover
+            </button>
                 )
               })()}
 
@@ -9707,7 +9766,7 @@ export function DubVerseEditor({
                           const duration = startEnd - startStart
                           const onMove = (ev: MouseEvent) => {
                             const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
-                            const newStart = Math.max(0, startStart + delta)
+                            const newStart = Math.min(_maxStart, Math.max(_minStart, startStart + delta))
                             updateScene(scene.id, { start: newStart, end: newStart + duration })
                           }
                           const onUp = () => {
@@ -9726,6 +9785,57 @@ export function DubVerseEditor({
                         <button
                           type="button"
                           className="absolute right-1 top-0.5 text-[8px] text-emerald-300 hover:text-white px-1 py-0.5 rounded bg-emerald-950/60 hover:bg-emerald-500/40 pointer-events-auto z-30"
+              {/* Layover track. Sits ABOVE the picture: a section that will not sync gets
+                  lifted here, the surrounding footage closes up, and it can be dropped back
+                  or discarded once the sync around it is settled. Parked scenes take no
+                  time on the timeline, so they are laid out left to right by arrival
+                  rather than at a timeline position they no longer own. */}
+              <div
+                className="h-20 shrink-0 bg-cyan-950/20 border-b border-cyan-800/40 relative overflow-hidden"
+                data-timeline-track
+              >
+                {parkedScenes.length === 0 && (
+                  <div className="absolute inset-0 flex items-center pl-3 text-[10px] text-cyan-600/50 pointer-events-none">
+                    Lift a scene here to take it out of the picture without losing it
+                  </div>
+                )}
+                {parkedScenes.map((sc, pIdx) => {
+                  const dur = (sc.source_end ?? sc.end) - (sc.source_start ?? sc.start)
+                  const w = Math.max(60, dur * PIXELS_PER_SECOND)
+                  const left = parkedScenes.slice(0, pIdx).reduce((acc, s) =>
+                    acc + Math.max(60, ((s.source_end ?? s.end) - (s.source_start ?? s.start)) * PIXELS_PER_SECOND) + 6, 8)
+                  return (
+                    <div
+                      key={sc.id}
+                      className="absolute top-2 bottom-2 rounded border-2 border-cyan-400/60 bg-cyan-500/15 flex items-center justify-center cursor-pointer hover:bg-cyan-500/25"
+                      style={{ left, width: w }}
+                      title={`Parked — ${dur.toFixed(2)}s of footage. Right-click to put it back at the playhead or discard it.`}
+                      onContextMenu={(e) => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        setParkedMenu({ x: e.clientX, y: e.clientY, sceneId: sc.id })
+                      }}
+                      // Double-click puts it back at the playhead — the reverse of the
+                      // gesture that lifted it.
+                      onDoubleClick={(e) => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        // Straight back into the hole it left. The gap was held open
+                        // for exactly this, so no position needs choosing.
+                        restoreScene(sc.id)
+                        persistScenes().catch(err => console.warn('[RESTORE]', err))
+                      }}
+                    >
+                      <span className="text-[10px] text-cyan-200 font-medium px-1 truncate">{dur.toFixed(1)}s</span>
+                    </div>
+                  )
+                })}
+              </div>
+              {/* Ruler between the parking bay and the picture. The top ruler is
+                  a long way up now that the layover track sits under it, and
+                  aligning a cut to a timecode means reading the scale next to the
+                  footage rather than across two tracks. */}
+              <TimeRuler durationSec={videoDuration} pps={PIXELS_PER_SECOND} variant="bottom" />
                           title="Render this scene preview"
                           onClick={(e) => {
                             e.stopPropagation()
@@ -9752,6 +9862,25 @@ export function DubVerseEditor({
                             const onMove = (ev: MouseEvent) => {
                               const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
                               const newStart = Math.max(prev ? prev.start + 0.05 : 0, Math.min(scene.end - 0.1, startStart + delta))
+                          // Sliding picture against audio is how sync is found, so the
+                          // scene moves freely — but only into space that is actually
+                          // free. Bounded by its neighbours in TIME order (the array is
+                          // not sorted), because sliding into one would leave two scenes
+                          // claiming the same instant, and the normaliser resolves that
+                          // by trimming — quietly shortening footage the user was trying
+                          // to move. A gap left by a lifted section is fair game: that is
+                          // what it is for.
+                          const _others = scenes
+                            .filter(sc => sc.id !== scene.id && !sc.parked)
+                            .sort((a, b) => a.start - b.start)
+                          const _prevEnd = _others
+                            .filter(sc => sc.end <= startStart + 0.001)
+                            .reduce((m, sc) => Math.max(m, sc.end), 0)
+                          const _nextStart = _others
+                            .filter(sc => sc.start >= startEnd - 0.001)
+                            .reduce((m, sc) => Math.min(m, sc.start), videoDuration)
+                          const _minStart = _prevEnd
+                          const _maxStart = Math.max(_minStart, _nextStart - duration)
                               updateScene(scene.id, { start: newStart })
                               if (prev) updateScene(prev.id, { end: newStart })
                             }

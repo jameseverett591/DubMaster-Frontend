@@ -2889,7 +2889,11 @@ class DubbingService:
             # are applied at the SOURCE time of each scene so the rendered
             # output matches the original video before any scene rearrangement.
             video_fade_filters = []
-            for scene in scenes or []:
+            # Parked scenes sit on the layover track: lifted out of the picture
+            # but kept so they can be dropped back in. They occupy no time on the
+            # timeline, so a fade of theirs would land on whatever footage closed
+            # the gap behind them.
+            for scene in [sc for sc in (scenes or []) if not sc.get("parked")]:
                 start = float(scene.get("source_start", scene.get("start", 0)))
                 end = float(scene.get("source_end", scene.get("end", start)))
                 fade_in = float(scene.get("video_fade_in") or 0)
@@ -3015,7 +3019,13 @@ class DubbingService:
         so the export matches the browser preview.
         """
         try:
-            scenes_sorted = sorted(scenes, key=lambda s: float(s.get("start", 0)))
+            # Parked scenes are excluded outright: they are not part of the cut, and
+            # including one would splice footage back in that was deliberately
+            # lifted, at whatever timeline position it happened to keep.
+            scenes_sorted = sorted(
+                [sc for sc in scenes if not sc.get("parked")],
+                key=lambda s: float(s.get("start", 0)),
+            )
             n = len(scenes_sorted)
             if n == 0:
                 return self._replace_audio_in_video(video_path, audio_path, output_path)
