@@ -3322,14 +3322,34 @@ export function DubVerseEditor({
     }
   }, [])
 
-  // Sync video time when user seeks (not during playback)
+  // THE PICTURE FOLLOWS THE PLAYHEAD. One place, so every way of moving the
+  // playhead lands the same way — needle drag, chunk buttons, skip-to-start,
+  // clicking a segment — instead of each call site remembering to seek.
+  //
+  // Two faults this replaces. It compared video.currentTime against currentTime
+  // directly, but those are different domains once a scene is retimed: the video
+  // is in SOURCE time and the playhead in TIMELINE time, so the comparison could
+  // read as "close enough" and skip a seek that was needed. And it bailed on
+  // isPlaying, which also covers dragging the needle mid-playback — where the
+  // user is the clock and the picture must follow.
   useEffect(() => {
     const video = videoRef.current
-    if (!video || isPlaying) return
-    
-    if (Math.abs(video.currentTime - currentTime) > 0.1) {
-      video.currentTime = currentTime
+    if (!video) return
+    // While genuinely advancing, the video IS the clock and seeking it here
+    // would fight playback. Dragging is the exception.
+    if (isPlaying && !isDraggingNeedleRef.current) return
+    const target = timelineToSourceTime(currentTime, scenesRef.current) ?? currentTime
+    if (!Number.isFinite(target)) return
+    const seek = () => {
+      if (Math.abs(video.currentTime - target) > 0.05) video.currentTime = target
     }
+    // A seek issued before metadata exists is silently dropped, which leaves the
+    // picture frozen on the last frame it managed to decode.
+    if (video.readyState === 0) {
+      video.addEventListener('loadedmetadata', seek, { once: true })
+      return () => video.removeEventListener('loadedmetadata', seek)
+    }
+    seek()
   }, [currentTime, isPlaying])
   
   useEffect(() => {
