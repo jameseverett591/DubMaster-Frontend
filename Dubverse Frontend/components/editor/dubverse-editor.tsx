@@ -918,6 +918,9 @@ export function DubVerseEditor({
     setChunkStatusMap,
   } = useEditorStore()
 
+  const zoomLevelRef = useRef(zoomLevel)
+  zoomLevelRef.current = zoomLevel
+
   const importedSegments = useEditorStore((state) => state.importedSegments)
   const importedSegmentsJobId = useEditorStore((state) => state.importedSegmentsJobId)
   const setImportedSegmentsRaw = useEditorStore((state) => state.setImportedSegments)
@@ -3475,24 +3478,41 @@ export function DubVerseEditor({
     }
   }, [layoutLocked, previewWidth, timelineHeight, zoomLevel])
 
-  // Handle mouse wheel zoom on timeline
-  const handleTimelineWheel = useCallback((e: React.WheelEvent) => {
-    // Only zoom if not holding shift (shift = horizontal scroll)
-    if (e.shiftKey) return
-    
-    e.preventDefault()
-    const delta = e.deltaY
-    
-    // Scroll up (negative delta) = zoom in (stretch), scroll down = zoom out (shrink)
-    if (delta < 0) {
-      // Zoom in - stretch timeline
-      setZoomLevel(Math.min(zoomLevel * 1.15, 4))
-    } else {
-      // Zoom out - shrink timeline
-      setZoomLevel(Math.max(zoomLevel / 1.15, 0.25))
+  // Native wheel zoom on the timeline: non-passive listener so we can prevent
+  // the default horizontal scroll, current zoom via ref so rapid notches stack,
+  // and the mouse pointer is kept over the same time so the timeline expands
+  // and contracts around the cursor rather than jumping left/right.
+  useEffect(() => {
+    const el = timelineRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      // Shift+wheel = horizontal scroll; leave it alone.
+      if (e.shiftKey) return
+      e.preventDefault()
+      const delta = e.deltaY || e.deltaX
+      if (!delta) return
+      const currentZoom = zoomLevelRef.current
+      const factor = 1.3
+      const newZoom = delta < 0
+        ? Math.min(currentZoom * factor, 4)
+        : Math.max(currentZoom / factor, 0.25)
+      const rect = el.getBoundingClientRect()
+      const pps = 40 * currentZoom
+      const timeUnderMouse = (e.clientX - rect.left + el.scrollLeft) / pps
+      zoomLevelRef.current = newZoom
+      setZoomLevel(newZoom)
+      // Apply the scroll correction after React re-renders the wider timeline.
+      requestAnimationFrame(() => {
+        const timeline = timelineRef.current
+        if (!timeline) return
+        const newScrollLeft = timeUnderMouse * 40 * newZoom - (e.clientX - rect.left)
+        timeline.scrollLeft = Math.max(0, newScrollLeft)
+      })
     }
-  }, [zoomLevel, setZoomLevel])
-  
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [])
+
   // Handle needle/playhead drag
   const handleNeedleDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -9268,7 +9288,6 @@ export function DubVerseEditor({
           <div 
             ref={timelineRef} 
             className="flex-1 overflow-x-auto overflow-y-hidden flex flex-col"
-            onWheel={handleTimelineWheel}
           >
             <div
               className="flex flex-col min-h-full relative"
@@ -9495,15 +9514,22 @@ export function DubVerseEditor({
                         />
                         {/* Top-left fade-in handle */}
                         <div
-                          className="absolute top-0 left-0 z-30 group-hover:opacity-100 opacity-0 transition-opacity"
+                          className="absolute top-0 left-0 h-full z-30 group-hover:opacity-100 opacity-0 transition-opacity pointer-events-none"
                           style={{
-                            width: Math.min(Math.max(6, (scene.video_fade_in ?? 0) * PIXELS_PER_SECOND), sceneDuration * PIXELS_PER_SECOND / 2),
-                            height: '100%',
+                            width: Math.min(Math.max(0, (scene.video_fade_in ?? 0) * PIXELS_PER_SECOND), sceneDuration * PIXELS_PER_SECOND / 2),
                           }}
-                          title={`Fade in ${(scene.video_fade_in ?? 0).toFixed(2)}s`}
                         >
+                          <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                            <polygon points="0,0 100,0 0,100" fill="rgba(34,211,238,0.45)" />
+                          </svg>
                           <div
-                            className="absolute inset-0 cursor-ew-resize"
+                            className="absolute top-0 left-0 w-3 h-3 cursor-ew-resize animate-pulse pointer-events-auto z-40"
+                            title={`Fade in ${(scene.video_fade_in ?? 0).toFixed(2)}s`}
+                            style={{
+                              background: 'linear-gradient(135deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
+                              clipPath: 'polygon(0 0, 100% 0, 0 100%)',
+                              boxShadow: '0 0 8px rgba(0,245,212,0.9)',
+                            }}
                             onMouseDown={(e) => {
                               e.preventDefault()
                               e.stopPropagation()
@@ -9522,23 +9548,26 @@ export function DubVerseEditor({
                               document.addEventListener('mousemove', onMove)
                               document.addEventListener('mouseup', onUp)
                             }}
-                          >
-                            <svg className="w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
-                              <polygon points="0,0 100,0 0,100" fill="rgba(251,191,36,0.7)" />
-                            </svg>
-                          </div>
+                          />
                         </div>
                         {/* Top-right fade-out handle */}
                         <div
-                          className="absolute top-0 right-0 z-30 group-hover:opacity-100 opacity-0 transition-opacity"
+                          className="absolute top-0 right-0 h-full z-30 group-hover:opacity-100 opacity-0 transition-opacity pointer-events-none"
                           style={{
-                            width: Math.min(Math.max(6, (scene.video_fade_out ?? 0) * PIXELS_PER_SECOND), sceneDuration * PIXELS_PER_SECOND / 2),
-                            height: '100%',
+                            width: Math.min(Math.max(0, (scene.video_fade_out ?? 0) * PIXELS_PER_SECOND), sceneDuration * PIXELS_PER_SECOND / 2),
                           }}
-                          title={`Fade out ${(scene.video_fade_out ?? 0).toFixed(2)}s`}
                         >
+                          <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                            <polygon points="100,0 100,100 0,0" fill="rgba(34,211,238,0.45)" />
+                          </svg>
                           <div
-                            className="absolute inset-0 cursor-ew-resize"
+                            className="absolute top-0 right-0 w-3 h-3 cursor-ew-resize animate-pulse pointer-events-auto z-40"
+                            title={`Fade out ${(scene.video_fade_out ?? 0).toFixed(2)}s`}
+                            style={{
+                              background: 'linear-gradient(225deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
+                              clipPath: 'polygon(100% 0, 100% 100%, 0 0)',
+                              boxShadow: '0 0 8px rgba(0,245,212,0.9)',
+                            }}
                             onMouseDown={(e) => {
                               e.preventDefault()
                               e.stopPropagation()
@@ -9557,11 +9586,7 @@ export function DubVerseEditor({
                               document.addEventListener('mousemove', onMove)
                               document.addEventListener('mouseup', onUp)
                             }}
-                          >
-                            <svg className="w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
-                              <polygon points="0,0 100,0 100,100" fill="rgba(251,191,36,0.7)" />
-                            </svg>
-                          </div>
+                          />
                         </div>
                       </div>
                     )
@@ -10337,24 +10362,57 @@ export function DubVerseEditor({
                         <GripHorizontal className="h-3 w-3 rotate-90" />
                       </div>
 
+                      {/* The fade RAMPS, drawn permanently.
+                          Only the drag handles existed before, and they were hidden
+                          until hover — so setting a fade and moving the mouse away
+                          left no trace of it at all, which reads as the fade having
+                          snapped back. The shaded triangle is the attenuated part of
+                          the segment: it is what you can actually hear. */}
+                      {(seg.fade_in ?? 0) > 0 && (
+                        <div
+                          className="absolute top-0 bottom-0 left-0 pointer-events-none z-10"
+                          style={{
+                            width: (seg.fade_in ?? 0) * PIXELS_PER_SECOND,
+                            background: 'rgba(16,185,129,0.45)',
+                            // Above the ramp line: level rises 0 -> full across the
+                            // region, so the missing part is the top-left triangle.
+                            clipPath: 'polygon(0 0, 100% 0, 0 100%)',
+                          }}
+                        />
+                      )}
+                      {(seg.fade_out ?? 0) > 0 && (
+                        <div
+                          className="absolute top-0 bottom-0 right-0 pointer-events-none z-10"
+                          style={{
+                            width: (seg.fade_out ?? 0) * PIXELS_PER_SECOND,
+                            background: 'rgba(16,185,129,0.45)',
+                            // Mirrored: level falls full -> 0, so the missing part is
+                            // the top-right triangle.
+                            clipPath: 'polygon(0 0, 100% 0, 100% 100%)',
+                          }}
+                        />
+                      )}
+
                       {/* Fade handles — only on Preview Audio track */}
                       {!layoutLocked && (
                         <>
                           {/* Top-left fade-in handle */}
                           <div
-                            className="absolute top-0 left-0 z-20 group-hover:opacity-100 opacity-0 transition-opacity"
-                            style={{
-                              width: Math.min(
-                                Math.max(8, (seg.fade_in ?? 0) * PIXELS_PER_SECOND),
-                                ((endT - startT) * PIXELS_PER_SECOND) / 2
-                              ),
-                              height: '100%',
-                            }}
-                            title={`Fade in ${(seg.fade_in ?? 0).toFixed(2)}s`}
+                            className="absolute top-0 left-0 h-full z-30 pointer-events-none"
+                            style={{ width: Math.min(Math.max(12, (seg.fade_in ?? 0) * PIXELS_PER_SECOND), (endT - startT) * PIXELS_PER_SECOND / 2) }}
                           >
+                            <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                              <polygon points="0,0 100,0 0,100" fill="rgba(34,211,238,0.45)" />
+                            </svg>
                             <div
                               data-fade-handle="in"
-                              className="absolute top-0 left-0 w-full h-full cursor-ew-resize"
+                              className={cn("absolute top-0 right-0 w-3 h-3 cursor-ew-resize pointer-events-auto z-40", (seg.fade_in ?? 0) > 0 && "animate-pulse")}
+                              title={`Fade in ${(seg.fade_in ?? 0).toFixed(2)}s`}
+                              style={{
+                                background: 'linear-gradient(135deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
+                                clipPath: 'polygon(0 0, 100% 0, 0 100%)',
+                                boxShadow: '0 0 8px rgba(0,245,212,0.9)',
+                              }}
                               onMouseDown={(e) => {
                                 e.preventDefault()
                                 e.stopPropagation()
@@ -10363,7 +10421,7 @@ export function DubVerseEditor({
                                 const duration = endT - startT
                                 const onMouseMove = (ev: MouseEvent) => {
                                   const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
-                                  const newFade = Math.min(Math.max(0, initialFade + delta), duration)
+                                  const newFade = Math.min(Math.max(0, initialFade + delta), duration / 2)
                                   setImportedSegments(prev => {
                                     const base = prev ?? displaySegmentsRef.current
                                     return base.map((s, idx) => idx === i ? { ...s, fade_in: newFade } : s)
@@ -10371,7 +10429,7 @@ export function DubVerseEditor({
                                 }
                                 const onMouseUp = (ev: MouseEvent) => {
                                   const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
-                                  const finalFade = Math.min(Math.max(0, initialFade + delta), endT - startT)
+                                  const finalFade = Math.min(Math.max(0, initialFade + delta), (endT - startT) / 2)
                                   updateSegment(i, { fade_in: finalFade })
                                   commitSegmentChanges(i, { fade_in: finalFade })
                                   commitOrStage(seg.transcript_index ?? i, { fade_in: finalFade }).catch(err => console.warn('[FADE-IN]', err))
@@ -10389,28 +10447,26 @@ export function DubVerseEditor({
                                 document.addEventListener('mousemove', onMouseMove)
                                 document.addEventListener('mouseup', onMouseUp)
                               }}
-                            >
-                              <svg className="w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
-                                <polygon points="0,0 100,0 0,100" fill="rgba(251,191,36,0.6)" />
-                              </svg>
-                            </div>
+                            />
                           </div>
 
                           {/* Top-right fade-out handle */}
                           <div
-                            className="absolute top-0 right-0 z-20 group-hover:opacity-100 opacity-0 transition-opacity"
-                            style={{
-                              width: Math.min(
-                                Math.max(8, (seg.fade_out ?? 0) * PIXELS_PER_SECOND),
-                                ((endT - startT) * PIXELS_PER_SECOND) / 2
-                              ),
-                              height: '100%',
-                            }}
-                            title={`Fade out ${(seg.fade_out ?? 0).toFixed(2)}s`}
+                            className="absolute top-0 right-0 h-full z-30 pointer-events-none"
+                            style={{ width: Math.min(Math.max(12, (seg.fade_out ?? 0) * PIXELS_PER_SECOND), (endT - startT) * PIXELS_PER_SECOND / 2) }}
                           >
+                            <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                              <polygon points="100,0 100,100 0,0" fill="rgba(34,211,238,0.45)" />
+                            </svg>
                             <div
                               data-fade-handle="out"
-                              className="absolute top-0 right-0 w-full h-full cursor-ew-resize"
+                              className={cn("absolute top-0 left-0 w-3 h-3 cursor-ew-resize pointer-events-auto z-40", (seg.fade_out ?? 0) > 0 && "animate-pulse")}
+                              title={`Fade out ${(seg.fade_out ?? 0).toFixed(2)}s`}
+                              style={{
+                                background: 'linear-gradient(225deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
+                                clipPath: 'polygon(100% 0, 100% 100%, 0 0)',
+                                boxShadow: '0 0 8px rgba(0,245,212,0.9)',
+                              }}
                               onMouseDown={(e) => {
                                 e.preventDefault()
                                 e.stopPropagation()
@@ -10419,7 +10475,7 @@ export function DubVerseEditor({
                                 const duration = endT - startT
                                 const onMouseMove = (ev: MouseEvent) => {
                                   const delta = (startX - ev.clientX) / PIXELS_PER_SECOND
-                                  const newFade = Math.min(Math.max(0, initialFade + delta), duration)
+                                  const newFade = Math.min(Math.max(0, initialFade + delta), duration / 2)
                                   setImportedSegments(prev => {
                                     const base = prev ?? displaySegmentsRef.current
                                     return base.map((s, idx) => idx === i ? { ...s, fade_out: newFade } : s)
@@ -10427,7 +10483,7 @@ export function DubVerseEditor({
                                 }
                                 const onMouseUp = (ev: MouseEvent) => {
                                   const delta = (startX - ev.clientX) / PIXELS_PER_SECOND
-                                  const finalFade = Math.min(Math.max(0, initialFade + delta), endT - startT)
+                                  const finalFade = Math.min(Math.max(0, initialFade + delta), (endT - startT) / 2)
                                   updateSegment(i, { fade_out: finalFade })
                                   commitSegmentChanges(i, { fade_out: finalFade })
                                   commitOrStage(seg.transcript_index ?? i, { fade_out: finalFade }).catch(err => console.warn('[FADE-OUT]', err))
@@ -10445,11 +10501,7 @@ export function DubVerseEditor({
                                 document.addEventListener('mousemove', onMouseMove)
                                 document.addEventListener('mouseup', onMouseUp)
                               }}
-                            >
-                              <svg className="w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
-                                <polygon points="0,0 100,0 100,100" fill="rgba(251,191,36,0.6)" />
-                              </svg>
-                            </div>
+                            />
                           </div>
                         </>
                       )}
