@@ -1585,7 +1585,30 @@ export function DubVerseEditor({
     if (!jobId) return
     // Media is owner-only; toAbsoluteUrl attaches the access token.
     const url = apiClient.toAbsoluteUrl(`/api/media/${jobId}/separated/accompaniment`)
-    fetch(url)
+    // Ask how big it is before downloading it.
+    //
+    // The accompaniment stem is a full-length uncompressed WAV: 1.06 GB for a
+    // 105-minute feature. The editor was fetching the whole thing on every load
+    // and then handing it to decodeAudioData, which needs it again as float32 —
+    // over 2 GB — and throws EncodingError. So the cost was paid in full, twice,
+    // for a background waveform that never appeared.
+    //
+    // A peaks file generated server-side would be the real answer; until then,
+    // decline anything that cannot plausibly be decoded rather than trying.
+    const MAX_WAVEFORM_BYTES = 200 * 1024 * 1024
+    fetch(url, { method: 'HEAD' })
+      .then(head => {
+        if (head.status === 404) return null
+        const len = Number(head.headers.get('content-length') || 0)
+        if (len > MAX_WAVEFORM_BYTES) {
+          console.info(
+            `[waveform] skipping background waveform — stem is ${(len / 1048576).toFixed(0)}MB, ` +
+            `over the ${(MAX_WAVEFORM_BYTES / 1048576).toFixed(0)}MB decode limit`,
+          )
+          return null
+        }
+        return fetch(url)
+      })
       .then(res => {
         // 404 is expected, not a failure: the accompaniment stem only exists
         // when separation ran, and long-form sources skip it (see the backend's
@@ -1604,6 +1627,7 @@ export function DubVerseEditor({
         if (!audioBuffer) return
         decodedBufferRef.current = audioBuffer
         setWaveformReady(true)
+        if (!res) return null
       })
       .catch(err => {
         console.error('Waveform decode failed:', err)
