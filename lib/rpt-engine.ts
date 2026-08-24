@@ -42,32 +42,43 @@ export const CROSSFADE_MAX_SEC = 0.3
  *  — a blend beats a hard cut either way — but flagged red. */
 export const CROSSFADE_WARN_SEC = 1.0
 
+/** One decoded segment, with where its audio ACTUALLY sits on the timeline. */
+interface Placed {
+  index: number
+  buffer: AudioBuffer
+  /** Absolute time the audio starts. */
+  start: number
+  /** Absolute time the audio ENDS — placement plus however much of the buffer
+   *  survives the slot clamp, which is not the same as the slot end. */
+  audioEnd: number
+  /** Fades set by hand on the segment's corner handles, in seconds. */
+  manualFadeIn: number
+  manualFadeOut: number
+}
+
 /**
- * Fade lengths in SECONDS for each segment, from how far it overlaps its
- * neighbours.
+ * Fade lengths in SECONDS, measured from where the audio really is.
  *
- * Both sides of one overlap must use the same length, or the two curves stop
- * being complementary and their sum dips or peaks in the middle. The overlap is
- * therefore measured once, in absolute time, and given to both participants: the
- * outgoing segment fades over its LAST N, the incoming over its FIRST N — the
- * same stretch of timeline.
+ * This used to read slot boundaries, which are only the same thing when a
+ * segment's audio fills its slot. Where the audio was shorter, widening a slot
+ * produced a phantom overlap: a fade was scheduled over the end of the audio,
+ * which had already finished before the next line began. The result was a dip on
+ * the outgoing tail AND a gap before the incoming line — worse than the hard cut
+ * it replaced, and impossible to tell apart from a badly timed overlap by ear.
  *
- * Seconds rather than samples because stitchRPTWindow clips segments at the
- * window edge: a fade can begin before the window starts, and only absolute time
- * survives that translation intact.
+ * Both sides of one overlap must share a length, or the curves stop being
+ * complementary and their sum dips or peaks in the middle. Each is capped by both
+ * segments' audible durations, or a short line beside a long overlap fades across
+ * its whole length and disappears.
+ *
+ * Only consecutive pairs in time order are considered. A segment long enough to
+ * span two later ones would only crossfade with the first; that has not come up,
+ * and handling it properly means an interval tree rather than a sort.
  */
 function computeFades(
-  segments: Segment[],
+  placed: Placed[],
 ): Map<number, { fadeIn: number; fadeOut: number }> {
-  const order = segments
-    .map((seg, index) => ({
-      index,
-      start: effStart(seg),
-      end: effEnd(seg),
-      duration: effEnd(seg) - effStart(seg),
-    }))
-    .filter(s => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start)
-    .sort((a, b) => a.start - b.start)
+  const order = [...placed].sort((a, b) => a.start - b.start)
 
   const fades = new Map<number, { fadeIn: number; fadeOut: number }>()
   const get = (i: number) => {
@@ -76,35 +87,34 @@ function computeFades(
     return f
   }
 
-  // Start from any user-defined fade handles, clamped to the segment's duration.
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i]
-    const duration = effEnd(seg) - effStart(seg)
-    const fadeIn = Math.min(Math.max(0, seg.fade_in ?? 0), duration)
-    const fadeOut = Math.min(Math.max(0, seg.fade_out ?? 0), duration)
-    fades.set(i, { fadeIn, fadeOut })
+  // Hand-set fades come first: a fade dragged onto a corner is an explicit
+  // instruction and must be audible even where nothing overlaps. The overlap pass
+  // below then takes the GREATER of the two — a crossfade the timing needs is
+  // never shortened by a smaller manual fade, and a longer manual fade is never
+  // cut back by a shorter overlap.
+  for (const item of order) {
+    const dur = Math.max(0, item.audioEnd - item.start)
+    const f = get(item.index)
+    f.fadeIn = Math.min(Math.max(0, item.manualFadeIn), dur)
+    f.fadeOut = Math.min(Math.max(0, item.manualFadeOut), dur)
   }
 
   for (let i = 0; i < order.length - 1; i++) {
     const a = order[i]
     const b = order[i + 1]
-    const overlapSec = a.end - b.start
+    const overlapSec = a.audioEnd - b.start
     if (overlapSec <= 0.001) continue
-    // Never fade longer than either segment lasts, or a short line beside a long
-    // overlap fades across its whole duration and effectively disappears.
-    const n = Math.min(overlapSec, a.duration, b.duration)
-    const fa = get(a.index)
-    const fb = get(b.index)
-    // If the user set an explicit fade on either side, let it dominate; only
-    // auto-compute a complementary crossfade when neither side has one.
-    if (fa.fadeOut === 0 && fb.fadeIn === 0) {
-      fa.fadeOut = Math.max(fa.fadeOut, n)
-      fb.fadeIn = Math.max(fb.fadeIn, n)
-    }
+    const n = Math.min(
+      overlapSec,
+      a.audioEnd - a.start,
+      b.audioEnd - b.start,
+    )
+    if (n <= 0) continue
+    get(a.index).fadeOut = Math.max(get(a.index).fadeOut, n)
+    get(b.index).fadeIn = Math.max(get(b.index).fadeIn, n)
   }
   return fades
 }
-
 // ─── Cache ───────────────────────────────────────────────────────────────────
 
 const audioCache = new Map<string, AudioBuffer>()
@@ -199,10 +209,12 @@ export async function stitchRPT(
   const leftChannel = outputBuffer.getChannelData(0)
   const rightChannel = outputBuffer.getChannelData(1)
 
-  let stitchedCount = 0
   const skipped: { index: number; url: string }[] = []
-  const fades = computeFades(segments)
 
+  // PASS 1 — decode everything, and record where each segment's audio really
+  // lands. Nothing is written yet: the crossfade lengths depend on how far the
+  // audio actually overlaps, which is not knowable from the slots alone.
+  const placed: (Placed & { startSample: number; copyLength: number })[] = []
   await Promise.all(
     segments.map(async (seg, segIndex) => {
       const audioUrl = seg.committed_audio_url ?? seg.audio_url
@@ -218,53 +230,67 @@ export async function stitchRPT(
         skipped.push({ index: seg.transcript_index ?? seg.index ?? -1, url: audioUrl })
         return
       }
-
-      const srcLeft = segBuffer.numberOfChannels > 0
-        ? segBuffer.getChannelData(0)
-        : null
-      const srcRight = segBuffer.numberOfChannels > 1
-        ? segBuffer.getChannelData(1)
-        : srcLeft
-
-      if (!srcLeft) return
+      if (segBuffer.numberOfChannels < 1) return
 
       const copyLength = Math.min(
         segBuffer.length,
         maxSlotSamples,
-        totalSamples - startSample
+        totalSamples - startSample,
       )
+      if (copyLength <= 0) return
 
-      // Equal-power crossfade, ADDING rather than assigning.
-      //
-      // Assignment let the last decode to finish win an overlap outright: the
-      // earlier line was cut off mid-word, and which one survived depended on
-      // network timing, so two plays of the same timeline could differ. Adding
-      // complementary curves is commutative, so order stops mattering.
-      //
-      // cos/sin rather than a linear ramp: the two sources are different voices
-      // and so uncorrelated, where a linear fade sums to an audible dip at the
-      // midpoint. Equal-power holds the perceived level across the join.
-      const _f = fades.get(segIndex)
-      const _fadeIn = Math.min(Math.floor((_f?.fadeIn ?? 0) * sampleRate), copyLength)
-      const _fadeOut = Math.min(Math.floor((_f?.fadeOut ?? 0) * sampleRate), copyLength - _fadeIn)
-      const _fadeOutFrom = copyLength - _fadeOut
-      const _R = (srcRight ?? srcLeft)
-
-      for (let i = 0; i < copyLength; i++) {
-        let gain = 1
-        if (_fadeIn > 0 && i < _fadeIn) {
-          gain = Math.sin((i / _fadeIn) * Math.PI / 2)
-        } else if (_fadeOut > 0 && i >= _fadeOutFrom) {
-          gain = Math.cos(((i - _fadeOutFrom) / _fadeOut) * Math.PI / 2)
-        }
-        leftChannel[startSample + i] += srcLeft[i] * gain
-        rightChannel[startSample + i] += _R[i] * gain
-      }
-
-      stitchedCount++
+      placed.push({
+        index: segIndex,
+        buffer: segBuffer,
+        start: startTime,
+        // The slot can cut the audio short, so this is the audible end, not the
+        // slot end — the whole point of measuring after decode.
+        audioEnd: startTime + copyLength / sampleRate,
+        manualFadeIn: seg.fade_in ?? 0,
+        manualFadeOut: seg.fade_out ?? 0,
+        startSample,
+        copyLength,
+      })
     })
   )
 
+  const fades = computeFades(placed)
+
+  // PASS 2 — mix. Sequential because it is pure CPU work on a shared buffer;
+  // parallelism would buy nothing and reintroduce ordering questions.
+  for (const item of placed) {
+    const srcLeft = item.buffer.getChannelData(0)
+    const srcRight = item.buffer.numberOfChannels > 1 ? item.buffer.getChannelData(1) : srcLeft
+    const { startSample, copyLength } = item
+
+    // Equal-power crossfade, ADDING rather than assigning.
+    //
+    // Assignment let the last decode to finish win an overlap outright: the
+    // earlier line was cut off mid-word, and which one survived depended on
+    // network timing, so two plays of the same timeline could differ. Adding
+    // complementary curves is commutative, so order stops mattering.
+    //
+    // cos/sin rather than a linear ramp: the two sources are different voices and
+    // so uncorrelated, where a linear fade sums to an audible dip at the midpoint.
+    // Equal-power holds the perceived level across the join.
+    const f = fades.get(item.index)
+    const fadeIn = Math.min(Math.floor((f?.fadeIn ?? 0) * sampleRate), copyLength)
+    const fadeOut = Math.min(Math.floor((f?.fadeOut ?? 0) * sampleRate), copyLength - fadeIn)
+    const fadeOutFrom = copyLength - fadeOut
+
+    for (let i = 0; i < copyLength; i++) {
+      let gain = 1
+      if (fadeIn > 0 && i < fadeIn) {
+        gain = Math.sin((i / fadeIn) * Math.PI / 2)
+      } else if (fadeOut > 0 && i >= fadeOutFrom) {
+        gain = Math.cos(((i - fadeOutFrom) / fadeOut) * Math.PI / 2)
+      }
+      leftChannel[startSample + i] += srcLeft[i] * gain
+      rightChannel[startSample + i] += srcRight[i] * gain
+    }
+  }
+
+  const stitchedCount = placed.length
   reportSkipped(skipped, stitchedCount)
 
   return {
@@ -323,9 +349,14 @@ export async function stitchRPTWindow(
   const leftChannel = outputBuffer.getChannelData(0)
   const rightChannel = outputChannelData(outputBuffer)
 
-  let stitchedCount = 0
   const skipped: { index: number; url: string }[] = []
-  const fades = computeFades(segments)
+
+  // PASS 1 — decode, and record where each segment's audio really lands. See
+  // stitchRPT: crossfade lengths depend on actual audio overlap, not slots.
+  const placed: (Placed & {
+    absStart: number; absEnd: number
+    dstStartSample: number; srcOffsetSamples: number; copyLength: number; ratio: number
+  })[] = []
 
   await Promise.all(
     segments.map(async (seg, segIndex) => {
@@ -342,10 +373,7 @@ export async function stitchRPTWindow(
         skipped.push({ index: seg.transcript_index ?? seg.index ?? -1, url: audioUrl })
         return
       }
-
-      const srcLeft = segBuffer.numberOfChannels > 0 ? segBuffer.getChannelData(0) : null
-      const srcRight = segBuffer.numberOfChannels > 1 ? segBuffer.getChannelData(1) : srcLeft
-      if (!srcLeft) return
+      if (segBuffer.numberOfChannels < 1) return
 
       // Source offset when the segment starts before the window (clip left edge)
       const srcOffsetSamples = absStart < windowStart
@@ -357,66 +385,91 @@ export async function stitchRPTWindow(
       const copyLength = Math.max(0, Math.min(
         segBuffer.length - srcOffsetSamples,
         maxSlotSamples,
-        totalSamples - dstStartSample
+        totalSamples - dstStartSample,
       ))
       if (copyLength <= 0) return
 
-      // Resample-by-nearest only if rates differ (segment files are 44.1k mp3,
-      // decoded at ctx rate — decodeAudioData already normalizes, so rates match
-      // in practice; guard anyway by scaling through the ratio).
-      // Equal-power crossfade, ADDING rather than assigning — see stitchRPT for
-      // why. The fade bounds are resolved in ABSOLUTE time and then translated
-      // into this window's index space, because a segment can start before the
-      // window: its fade-in may lie partly or wholly outside, and measuring from
-      // the clipped start would place the curve in the wrong spot.
-      const _f = fades.get(segIndex)
-      const _fadeInSec = _f?.fadeIn ?? 0
-      const _fadeOutSec = _f?.fadeOut ?? 0
-      // dst index at which the segment's own fade-in ends / fade-out begins.
-      const _fadeInEnd = _fadeInSec > 0
-        ? Math.floor((absStart + _fadeInSec - windowStart) * sampleRate) - dstStartSample
-        : 0
-      const _fadeInLen = Math.floor(_fadeInSec * sampleRate)
-      const _fadeOutFrom = _fadeOutSec > 0
-        ? Math.floor((absEnd - _fadeOutSec - windowStart) * sampleRate) - dstStartSample
-        : Number.POSITIVE_INFINITY
-      const _fadeOutLen = Math.floor(_fadeOutSec * sampleRate)
-      const _R = (srcRight ?? srcLeft)
+      // Audible extent in ABSOLUTE time. Measured from the segment's own start,
+      // not the clipped one, so a segment straddling the window edge still
+      // reports the same span it would in a full-film stitch — the fade must not
+      // change depending on which window happens to be open.
+      const audibleSec = Math.min(
+        segBuffer.duration,
+        absEnd - absStart,
+      )
 
-      const gainAt = (i: number): number => {
-        if (_fadeInLen > 0 && i < _fadeInEnd) {
-          // Distance back to the segment's true start, which may precede i = 0.
-          const pos = _fadeInLen - (_fadeInEnd - i)
-          if (pos < _fadeInLen) return Math.sin((Math.max(0, pos) / _fadeInLen) * Math.PI / 2)
-        }
-        if (_fadeOutLen > 0 && i >= _fadeOutFrom) {
-          const pos = i - _fadeOutFrom
-          return Math.cos((Math.min(_fadeOutLen, pos) / _fadeOutLen) * Math.PI / 2)
-        }
-        return 1
-      }
-
-      const ratio = segBuffer.sampleRate / sampleRate
-      if (Math.abs(ratio - 1) < 0.001) {
-        for (let i = 0; i < copyLength; i++) {
-          const g = gainAt(i)
-          leftChannel[dstStartSample + i] += srcLeft[srcOffsetSamples + i] * g
-          rightChannel[dstStartSample + i] += _R[srcOffsetSamples + i] * g
-        }
-      } else {
-        for (let i = 0; i < copyLength; i++) {
-          const si = srcOffsetSamples + Math.floor(i * ratio)
-          if (si >= segBuffer.length) break
-          const g = gainAt(i)
-          leftChannel[dstStartSample + i] += srcLeft[si] * g
-          rightChannel[dstStartSample + i] += _R[si] * g
-        }
-      }
-
-      stitchedCount++
+      placed.push({
+        index: segIndex,
+        buffer: segBuffer,
+        start: absStart,
+        audioEnd: absStart + audibleSec,
+        manualFadeIn: seg.fade_in ?? 0,
+        manualFadeOut: seg.fade_out ?? 0,
+        absStart, absEnd,
+        dstStartSample, srcOffsetSamples, copyLength,
+        ratio: segBuffer.sampleRate / sampleRate,
+      })
     })
   )
 
+  const fades = computeFades(placed)
+
+  // PASS 2 — mix.
+  for (const item of placed) {
+    const srcLeft = item.buffer.getChannelData(0)
+    const srcRight = item.buffer.numberOfChannels > 1 ? item.buffer.getChannelData(1) : srcLeft
+    const { absStart, absEnd, dstStartSample, srcOffsetSamples, copyLength, ratio } = item
+
+    // Fade bounds are resolved in ABSOLUTE time and then translated into this
+    // window's index space, because a segment can start before the window: its
+    // fade-in may lie partly or wholly outside, and measuring from the clipped
+    // start would place the curve in the wrong spot.
+    const f = fades.get(item.index)
+    const fadeInSec = f?.fadeIn ?? 0
+    const fadeOutSec = f?.fadeOut ?? 0
+    const fadeInEnd = fadeInSec > 0
+      ? Math.floor((absStart + fadeInSec - windowStart) * sampleRate) - dstStartSample
+      : 0
+    const fadeInLen = Math.floor(fadeInSec * sampleRate)
+    // Anchored to the AUDIBLE end, not the slot end — they differ whenever the
+    // audio is shorter than its slot, which is exactly the case this pass exists
+    // to get right.
+    const fadeOutFrom = fadeOutSec > 0
+      ? Math.floor((item.audioEnd - fadeOutSec - windowStart) * sampleRate) - dstStartSample
+      : Number.POSITIVE_INFINITY
+    const fadeOutLen = Math.floor(fadeOutSec * sampleRate)
+
+    const gainAt = (i: number): number => {
+      if (fadeInLen > 0 && i < fadeInEnd) {
+        // Distance back to the segment's true start, which may precede i = 0.
+        const pos = fadeInLen - (fadeInEnd - i)
+        if (pos < fadeInLen) return Math.sin((Math.max(0, pos) / fadeInLen) * Math.PI / 2)
+      }
+      if (fadeOutLen > 0 && i >= fadeOutFrom) {
+        const pos = i - fadeOutFrom
+        return Math.cos((Math.min(fadeOutLen, pos) / fadeOutLen) * Math.PI / 2)
+      }
+      return 1
+    }
+
+    if (Math.abs(ratio - 1) < 0.001) {
+      for (let i = 0; i < copyLength; i++) {
+        const g = gainAt(i)
+        leftChannel[dstStartSample + i] += srcLeft[srcOffsetSamples + i] * g
+        rightChannel[dstStartSample + i] += srcRight[srcOffsetSamples + i] * g
+      }
+    } else {
+      for (let i = 0; i < copyLength; i++) {
+        const si = srcOffsetSamples + Math.floor(i * ratio)
+        if (si >= item.buffer.length) break
+        const g = gainAt(i)
+        leftChannel[dstStartSample + i] += srcLeft[si] * g
+        rightChannel[dstStartSample + i] += srcRight[si] * g
+      }
+    }
+  }
+
+  const stitchedCount = placed.length
   reportSkipped(skipped, stitchedCount)
 
   return { buffer: outputBuffer, duration, segmentCount: stitchedCount, skipped }
