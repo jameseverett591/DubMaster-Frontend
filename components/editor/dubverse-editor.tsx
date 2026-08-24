@@ -889,7 +889,8 @@ export function DubVerseEditor({
   const editorContainerRef = useRef<HTMLDivElement>(null)
   const waveformCanvasLRef = useRef<HTMLCanvasElement>(null)
   const waveformCanvasRRef = useRef<HTMLCanvasElement>(null)
-  const decodedBufferRef = useRef<AudioBuffer | null>(null)
+  /** Per-bucket amplitude peaks from the backend, already normalised to 0..1. */
+  const peaksRef = useRef<{ left: Float32Array; right: Float32Array } | null>(null)
   const groupMoveStartXRef = useRef(0)
   const groupMoveActiveRef = useRef(false)
 
@@ -1597,91 +1598,58 @@ export function DubVerseEditor({
     return () => el.removeEventListener('scroll', onScroll)
   }, [layoutLocked])
 
-  // Fetch and decode separated accompaniment audio for waveform — runs once on mount
+  // Fetch precomputed waveform peaks — runs once on mount.
+  //
+  // This used to fetch the separated stem itself and decode it here. A stem is
+  // full-length uncompressed WAV — 1.06 GB for a 105-minute feature — and
+  // decodeAudioData needs it again as float32, so it threw EncodingError every
+  // time: a gigabyte transferred and no waveform, on every editor load. The
+  // backend now reduces it to per-bucket peaks once and caches them: 57 KB.
+  //
+  // Nothing is lost by it. A waveform is only ever drawn at screen resolution,
+  // so the samples were being discarded by the renderer regardless.
   useEffect(() => {
     if (!jobId) return
-    // Media is owner-only; toAbsoluteUrl attaches the access token.
-    const url = apiClient.toAbsoluteUrl(`/api/media/${jobId}/separated/accompaniment`)
-    // Ask how big it is before downloading it.
-    //
-    // The accompaniment stem is a full-length uncompressed WAV: 1.06 GB for a
-    // 105-minute feature. The editor was fetching the whole thing on every load
-    // and then handing it to decodeAudioData, which needs it again as float32 —
-    // over 2 GB — and throws EncodingError. So the cost was paid in full, twice,
-    // for a background waveform that never appeared.
-    //
-    // A peaks file generated server-side would be the real answer; until then,
-    // decline anything that cannot plausibly be decoded rather than trying.
-    const MAX_WAVEFORM_BYTES = 200 * 1024 * 1024
-    fetch(url, { method: 'HEAD' })
-      .then(head => {
-        if (head.status === 404) return null
-        const len = Number(head.headers.get('content-length') || 0)
-        if (len > MAX_WAVEFORM_BYTES) {
-          console.info(
-            `[waveform] skipping background waveform — stem is ${(len / 1048576).toFixed(0)}MB, ` +
-            `over the ${(MAX_WAVEFORM_BYTES / 1048576).toFixed(0)}MB decode limit`,
-          )
-          return null
-        }
-        return fetch(url)
-      })
+    const url = apiClient.toAbsoluteUrl(`/api/media/${jobId}/waveform/accompaniment`)
+    fetch(url)
       .then(res => {
-        if (!res) return null
-        // 404 is expected, not a failure: the accompaniment stem only exists
-        // when separation ran, and long-form sources skip it (see the backend's
-        // ACCOMPANIMENT_MAX_DURATION_S guard). No stem simply means no
-        // background waveform to draw.
+        // 404 is expected, not a failure: the stem only exists when separation
+        // ran, and long-form sources skip it (see the backend's
+        // ACCOMPANIMENT_MAX_DURATION_S guard). No stem, no background waveform.
         if (res.status === 404) return null
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        return res.arrayBuffer()
+        return res.json()
       })
-      .then(arrayBuffer => {
-        if (!arrayBuffer) return null
-        const audioCtx = new AudioContext()
-        return audioCtx.decodeAudioData(arrayBuffer)
-      })
-      .then(audioBuffer => {
-        if (!audioBuffer) return
-        decodedBufferRef.current = audioBuffer
+      .then((data: { left: number[]; right: number[] } | null) => {
+        if (!data?.left?.length) return
+        // Stored as int8 (-127..127) because the renderer maps them to 48px of
+        // height; normalised here once rather than per draw.
+        peaksRef.current = {
+          left: Float32Array.from(data.left, v => v / 127),
+          right: Float32Array.from(data.right ?? data.left, v => v / 127),
+        }
         setWaveformReady(true)
       })
       .catch(err => {
-        console.error('Waveform decode failed:', err)
+        console.warn('[waveform] peaks unavailable:', err)
       })
   }, [jobId])
 
-  // Redraw canvas waveform when buffer is ready or zoom/duration changes
+  // Redraw the waveform when the peaks arrive or the zoom changes.
   useEffect(() => {
-    if (!waveformReady || !decodedBufferRef.current) return
-    const buffer = decodedBufferRef.current
+    const peaks = peaksRef.current
+    if (!waveformReady || !peaks) return
     const canvasWidth = Math.min(Math.floor(videoDuration * 40 * zoomLevel), 16000)
     const canvasHeight = 48 // h-12 = 48px per channel row
-
-    const leftChannel = buffer.getChannelData(0)
-    const rightChannel = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : leftChannel
-    const samplesPerPixel = Math.max(1, Math.floor(leftChannel.length / canvasWidth))
-
-    const leftPeaks = new Float32Array(canvasWidth)
-    const rightPeaks = new Float32Array(canvasWidth)
-    for (let i = 0; i < canvasWidth; i++) {
-      const start = i * samplesPerPixel
-      const end = start + samplesPerPixel
-      let lMax = 0
-      let rMax = 0
-      for (let j = start; j < end && j < leftChannel.length; j++) {
-        const lv = Math.abs(leftChannel[j])
-        const rv = Math.abs(rightChannel[j])
-        if (lv > lMax) lMax = lv
-        if (rv > rMax) rMax = rv
-      }
-      leftPeaks[i] = lMax
-      rightPeaks[i] = rMax
-    }
-
     const barW = 2
-
-    const drawChannel = (canvasRef: React.RefObject<HTMLCanvasElement>, peaks: Float32Array) => {
+  
+    // Peaks are a fixed 8000 buckets regardless of zoom, so each bar takes the
+    // loudest bucket it covers. Zoomed in that is fewer than one bucket per bar
+    // and the same value repeats — the honest result, since the backend cannot
+    // send detail the renderer could not have drawn anyway.
+    const bucketsPerPx = peaks.left.length / Math.max(1, canvasWidth)
+  
+    const drawChannel = (canvasRef: React.RefObject<HTMLCanvasElement>, data: Float32Array) => {
       const canvas = canvasRef.current
       if (!canvas) return
       canvas.width = canvasWidth
@@ -1692,14 +1660,20 @@ export function DubVerseEditor({
       if (!ctx) return
       ctx.clearRect(0, 0, canvasWidth, canvasHeight)
       ctx.fillStyle = '#67c8c8'
-      for (let i = 0; i < canvasWidth; i += barW) {
-        const h = (peaks[i] ?? 0) * (canvasHeight - 1) * 0.75
-        if (h > 0.5) ctx.fillRect(i, canvasHeight - h, barW, h)
+      for (let x = 0; x < canvasWidth; x += barW) {
+        const from = Math.floor(x * bucketsPerPx)
+        const to = Math.max(from + 1, Math.floor((x + barW) * bucketsPerPx))
+        let peak = 0
+        for (let b = from; b < to && b < data.length; b++) {
+          if (data[b] > peak) peak = data[b]
+        }
+        const h = peak * (canvasHeight - 1) * 0.75
+        if (h > 0.5) ctx.fillRect(x, canvasHeight - h, barW, h)
       }
     }
-
-    drawChannel(waveformCanvasLRef, leftPeaks)
-    drawChannel(waveformCanvasRRef, rightPeaks)
+  
+    drawChannel(waveformCanvasLRef, peaks.left)
+    drawChannel(waveformCanvasRRef, peaks.right)
   }, [waveformReady, zoomLevel, videoDuration])
   // Selected finding for the docked QC panel (no floating UI)
   const [selectedQCFinding, setSelectedQCFinding] = useState<QCFinding | null>(null)
