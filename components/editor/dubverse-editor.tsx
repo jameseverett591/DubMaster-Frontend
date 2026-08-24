@@ -925,6 +925,9 @@ export function DubVerseEditor({
   const timelineRef = useRef<HTMLDivElement>(null)
   const overviewBarRef = useRef<HTMLDivElement>(null)
   const overviewThumbRef = useRef<HTMLDivElement>(null)
+  /** True while a pan drag owns the thumb, so the scroll listener does not also
+   *  measure. Every measurement during a drag is a forced synchronous layout. */
+  const panningRef = useRef(false)
 
   /** Move the overview thumb to match the timeline, writing style directly.
    *
@@ -9581,8 +9584,10 @@ export function DubVerseEditor({
               const top = (e.currentTarget as HTMLElement).scrollTop
               if (trackLabelRef.current) trackLabelRef.current.scrollTop = top
               // The overview thumb reads scrollLeft straight from the DOM, which
-              // React cannot observe — nudge it to redraw.
-              syncOverviewThumb()
+              // React cannot observe — nudge it to redraw. Skipped mid-pan: the pan
+              // updates the thumb itself from numbers it already has, and measuring
+              // here as well cost a second forced layout on every pointermove.
+              if (!panningRef.current) syncOverviewThumb()
             }}
           >
             {/* The whole timeline is a context-menu target, so right-click works on empty
@@ -9654,21 +9659,45 @@ export function DubVerseEditor({
                 if (!tl) return
                 const startX = e.clientX
                 const startScroll = tl.scrollLeft
+                // Measure ONCE. Content width and viewport width cannot change
+                // during a drag, and reading them per move — right after writing
+                // scrollLeft — forced a synchronous layout every time and left the
+                // timeline lagging behind the cursor instead of tracking it.
+                const total = Math.max(1, tl.scrollWidth)
+                const view = tl.clientWidth
+                const maxScroll = Math.max(0, total - view)
+                const frac = Math.min(1, view / total)
+                const thumb = overviewThumbRef.current
                 let panned = false
                 const onMove = (ev: PointerEvent) => {
+                  // No buttons held means the release was missed — the browser fires
+                  // pointercancel instead of pointerup when it takes over a gesture on
+                  // a scrollable element, and the drag then latched on after mouse-up.
+                  if (ev.buttons === 0) { onUp(); return }
                   const dx = ev.clientX - startX
                   // A few pixels of slop so a click still reads as a click.
                   if (!panned && Math.abs(dx) < 4) return
-                  panned = true
-                  tl.scrollLeft = startScroll - dx
-                  syncOverviewThumb()
+                  if (!panned) { panned = true; panningRef.current = true }
+                  // Clamp here rather than setting and reading back what the browser
+                  // clamped to — the read is what costs the layout.
+                  const next = Math.max(0, Math.min(maxScroll, startScroll - dx))
+                  tl.scrollLeft = next
+                  if (thumb && maxScroll > 0) {
+                    thumb.style.left = `${(next / maxScroll) * (1 - frac) * 100}%`
+                  }
                 }
-                const onUp = () => {
+                function onUp() {
+                  panningRef.current = false
                   document.removeEventListener('pointermove', onMove)
                   document.removeEventListener('pointerup', onUp)
+                  document.removeEventListener('pointercancel', onUp)
+                  window.removeEventListener('blur', onUp)
                 }
                 document.addEventListener('pointermove', onMove)
                 document.addEventListener('pointerup', onUp)
+                document.addEventListener('pointercancel', onUp)
+                // Alt-tabbing away mid-drag also never delivers a release.
+                window.addEventListener('blur', onUp)
               }}
               onMouseMove={handleTimelineMouseMove}
               onMouseUp={handleTimelineMouseUpWrapper}
@@ -11321,20 +11350,33 @@ export function DubVerseEditor({
             const usable = rect.width * (1 - thumbFrac)
             // Centre the thumb on the press, then track the pointer, so grabbing
             // anywhere on the bar jumps there rather than nudging by a fixed step.
+            const thumb = overviewThumbRef.current
+            panningRef.current = true
+            // Same rule as the timeline pan: everything needed was measured above,
+            // so move the thumb from the fraction we just computed rather than
+            // re-reading the DOM and forcing a layout on every pointermove.
             const seek = (clientX: number) => {
               const x = clientX - rect.left - (rect.width * thumbFrac) / 2
               const frac = usable > 0 ? Math.min(1, Math.max(0, x / usable)) : 0
               tl.scrollLeft = frac * maxScroll
-              syncOverviewThumb()
+              if (thumb) thumb.style.left = `${frac * (1 - thumbFrac) * 100}%`
             }
             seek(e.clientX)
-            const onMove = (ev: PointerEvent) => seek(ev.clientX)
-            const onUp = () => {
+            const onMove = (ev: PointerEvent) => {
+              if (ev.buttons === 0) { onUp(); return }
+              seek(ev.clientX)
+            }
+            function onUp() {
+              panningRef.current = false
               document.removeEventListener('pointermove', onMove)
               document.removeEventListener('pointerup', onUp)
+              document.removeEventListener('pointercancel', onUp)
+              window.removeEventListener('blur', onUp)
             }
             document.addEventListener('pointermove', onMove)
             document.addEventListener('pointerup', onUp)
+            document.addEventListener('pointercancel', onUp)
+            window.addEventListener('blur', onUp)
           }}
         >
           {(() => {
