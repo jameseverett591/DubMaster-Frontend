@@ -881,6 +881,29 @@ export function DubVerseEditor({
   const videoRef = useRef<HTMLVideoElement>(null)
   const videoFadeOverlayRef = useRef<HTMLDivElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
+  const overviewBarRef = useRef<HTMLDivElement>(null)
+  const overviewThumbRef = useRef<HTMLDivElement>(null)
+
+  /** Move the overview thumb to match the timeline, writing style directly.
+   *
+   *  This was a state bump, which re-rendered the whole editor on every scroll
+   *  event and every pointermove of a pan — the same thing that made the fade
+   *  handles lag half a second behind the cursor. Scrolling fires far more often
+   *  than dragging does, so it was worse here. The thumb is one element and its
+   *  position derives entirely from the DOM; React never needed to be involved.
+   */
+  // Re-derive when the content width changes: zoom, duration, tracks added.
+  const syncOverviewThumb = useCallback(() => {
+    const tl = timelineRef.current
+    const thumb = overviewThumbRef.current
+    if (!tl || !thumb) return
+    const total = Math.max(1, tl.scrollWidth)
+    const view = tl.clientWidth
+    const frac = Math.min(1, view / total)
+    const pos = total > view ? (tl.scrollLeft / (total - view)) * (1 - frac) : 0
+    thumb.style.width = `${frac * 100}%`
+    thumb.style.left = `${pos * 100}%`
+  }, [])
   const playheadRef = useRef<HTMLDivElement>(null)
   // Size the needle to the LAST track rather than to the timeline container.
   // `bottom-0` looked right but stopped the needle at the foot of the Original
@@ -1705,6 +1728,10 @@ export function DubVerseEditor({
     drawChannel(waveformCanvasLRef, peaks.left)
     drawChannel(waveformCanvasRRef, peaks.right)
   }, [waveformReady, zoomLevel, videoDuration])
+
+  // Re-derive the overview thumb when the content width changes: zoom, duration,
+  // or a track being added all change scrollWidth without a scroll event firing.
+  useEffect(() => { syncOverviewThumb() }, [syncOverviewThumb, zoomLevel, videoDuration, scenes.length])
   // Selected finding for the docked QC panel (no floating UI)
   const [selectedQCFinding, setSelectedQCFinding] = useState<QCFinding | null>(null)
   const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
@@ -9497,6 +9524,9 @@ export function DubVerseEditor({
             onScroll={(e) => {
               const top = (e.currentTarget as HTMLElement).scrollTop
               if (trackLabelRef.current) trackLabelRef.current.scrollTop = top
+              // The overview thumb reads scrollLeft straight from the DOM, which
+              // React cannot observe — nudge it to redraw.
+              syncOverviewThumb()
             }}
           >
             {/* The whole timeline is a context-menu target, so right-click works on empty
@@ -9550,6 +9580,40 @@ export function DubVerseEditor({
               className="flex flex-col min-h-full relative"
               style={{ minWidth: timelineWidth, width: '100%' }}
               data-timeline-container
+              // Grab empty track space to pan left and right.
+              //
+              // Only where nothing else claimed the press: blocks, handles and
+              // grips all stopPropagation, so this cannot steal a segment drag or
+              // a fade. The cursor stays a plain pointer deliberately — a
+              // multi-direction move cursor says the thing under it will be moved,
+              // and what actually moves is the view.
+              onPointerDown={(e) => {
+                if (e.button !== 0) return
+                const tgt = e.target as HTMLElement
+                // The needle scrubs when grabbed. Panning at the same time dragged
+                // the playhead and the view in opposite directions at once — the
+                // needle moving WITH a pan is fine, being dragged BY one is not.
+                if (tgt.closest('[data-playhead-handle], [data-fade-handle], [data-scene-handle], [data-segment-block]')) return
+                const tl = timelineRef.current
+                if (!tl) return
+                const startX = e.clientX
+                const startScroll = tl.scrollLeft
+                let panned = false
+                const onMove = (ev: PointerEvent) => {
+                  const dx = ev.clientX - startX
+                  // A few pixels of slop so a click still reads as a click.
+                  if (!panned && Math.abs(dx) < 4) return
+                  panned = true
+                  tl.scrollLeft = startScroll - dx
+                  syncOverviewThumb()
+                }
+                const onUp = () => {
+                  document.removeEventListener('pointermove', onMove)
+                  document.removeEventListener('pointerup', onUp)
+                }
+                document.addEventListener('pointermove', onMove)
+                document.addEventListener('pointerup', onUp)
+              }}
               onMouseMove={handleTimelineMouseMove}
               onMouseUp={handleTimelineMouseUpWrapper}
               onClick={(e) => {
@@ -11195,6 +11259,61 @@ export function DubVerseEditor({
             </div>
             </SegmentContextMenu>
           </div>
+        </div>
+        {/* Overview bar — full width, under the track labels as well as the tracks.
+            The container's own scrollbar only spans the track area and sits inside a
+            panel that scrolls vertically too, so it moves out from under the cursor.
+            This is fixed at the bottom and always the whole timeline: the thumb's
+            width is the fraction of the film on screen, so it narrows as you zoom in
+            and fills the bar when zoomed out. */}
+        <div
+          ref={overviewBarRef}
+          className="h-4 shrink-0 bg-neutral-950 border-t border-neutral-800 relative select-none"
+          onPointerDown={(e) => {
+            const bar = overviewBarRef.current
+            const tl = timelineRef.current
+            if (!bar || !tl) return
+            try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch {}
+            const rect = bar.getBoundingClientRect()
+            const maxScroll = Math.max(1, tl.scrollWidth - tl.clientWidth)
+            const thumbFrac = Math.min(1, tl.clientWidth / Math.max(1, tl.scrollWidth))
+            const usable = rect.width * (1 - thumbFrac)
+            // Centre the thumb on the press, then track the pointer, so grabbing
+            // anywhere on the bar jumps there rather than nudging by a fixed step.
+            const seek = (clientX: number) => {
+              const x = clientX - rect.left - (rect.width * thumbFrac) / 2
+              const frac = usable > 0 ? Math.min(1, Math.max(0, x / usable)) : 0
+              tl.scrollLeft = frac * maxScroll
+              syncOverviewThumb()
+            }
+            seek(e.clientX)
+            const onMove = (ev: PointerEvent) => seek(ev.clientX)
+            const onUp = () => {
+              document.removeEventListener('pointermove', onMove)
+              document.removeEventListener('pointerup', onUp)
+            }
+            document.addEventListener('pointermove', onMove)
+            document.addEventListener('pointerup', onUp)
+          }}
+        >
+          {(() => {
+            const tl = timelineRef.current
+            const total = tl ? Math.max(1, tl.scrollWidth) : 1
+            const view = tl ? tl.clientWidth : 1
+            const frac = Math.min(1, view / total)
+            const pos = total > view ? (tl!.scrollLeft / (total - view)) * (1 - frac) : 0
+            return (
+              <div
+                // The ref MUST be here: syncOverviewThumb writes this element's style
+                // directly on scroll and on pan, and without it that function returned
+                // early every time and the thumb never moved. The values below are the
+                // first paint only — React does not re-render on scroll by design.
+                ref={overviewThumbRef}
+                className="absolute top-0.5 bottom-0.5 rounded bg-amber-500/40 hover:bg-amber-500/60 transition-colors"
+                style={{ left: `${pos * 100}%`, width: `${frac * 100}%` }}
+              />
+            )
+          })()}
         </div>
         
         {/* Language indicators */}
