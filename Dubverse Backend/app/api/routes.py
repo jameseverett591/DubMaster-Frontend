@@ -4878,6 +4878,89 @@ async def get_separated_audio(job_id: str, audio_type: str):
         headers={"Cache-Control": "public, max-age=3600"})
 
 
+# Peaks are precomputed at a fixed resolution rather than per-request: the editor
+# caps its canvas at 16000px and draws 2px bars, so 8000 buckets is every bar it
+# can ever show. More would be discarded by the renderer; fewer would visibly step.
+WAVEFORM_BUCKETS = 8000
+
+
+@router.get("/media/{job_id}/waveform/{audio_type}", dependencies=[Depends(_dep_job_access)])
+async def get_waveform_peaks(job_id: str, audio_type: str):
+    """Amplitude peaks for a separated stem, for drawing a waveform.
+
+    The editor used to fetch the stem itself and decode it in the browser. A stem
+    is full-length uncompressed WAV — 1.06 GB for a 105-minute feature — and
+    decoding needs it again as float32, so it never succeeded on anything
+    feature-length: a gigabyte transferred, twice the memory asked for, and no
+    waveform. A waveform is only ever drawn at screen resolution, so the samples
+    were discarded by the renderer regardless.
+
+    This does the reduction once, server-side, and hands back about 60 KB of JSON.
+    Cached beside the stem, because reading a gigabyte takes a few seconds and the
+    answer never changes for a given file.
+    """
+    if audio_type not in ("vocals", "accompaniment"):
+        raise HTTPException(status_code=400, detail="audio_type must be 'vocals' or 'accompaniment'")
+
+    src = os.path.join(settings.SEPARATED_DIR, f"{job_id}_{audio_type}.wav")
+    if not os.path.exists(src):
+        raise HTTPException(status_code=404, detail=f"No {audio_type} stem for this job")
+
+    cache = os.path.join(settings.SEPARATED_DIR, f"{job_id}_{audio_type}_peaks.json")
+    # Rebuild if the stem is newer than the cache, so a re-separation is picked up.
+    if os.path.exists(cache) and os.path.getmtime(cache) >= os.path.getmtime(src):
+        return FileResponse(cache, media_type="application/json",
+            headers={"Cache-Control": "public, max-age=3600"})
+
+    def _build() -> dict:
+        import soundfile as _sf
+        import numpy as _np
+        with _sf.SoundFile(src) as f:
+            total = len(f)
+            rate = f.samplerate
+            channels = f.channels
+            if total <= 0:
+                return {"duration": 0.0, "buckets": 0, "left": [], "right": []}
+            per_bucket = max(1, total // WAVEFORM_BUCKETS)
+            left: list[int] = []
+            right: list[int] = []
+            # Streamed in blocks: the point of this endpoint is not to hold the
+            # whole file in memory either.
+            for block in f.blocks(blocksize=per_bucket, dtype="float32"):
+                if block.size == 0:
+                    continue
+                if channels > 1:
+                    l = float(_np.abs(block[:, 0]).max())
+                    r = float(_np.abs(block[:, 1]).max())
+                else:
+                    l = r = float(_np.abs(block).max())
+                # int8 rather than float: the renderer maps these to at most 48px
+                # of height, so a byte per bucket is already finer than the display.
+                left.append(int(round(min(1.0, l) * 127)))
+                right.append(int(round(min(1.0, r) * 127)))
+            return {
+                "duration": total / float(rate),
+                "buckets": len(left),
+                "left": left,
+                "right": right,
+            }
+
+    try:
+        data = await asyncio.to_thread(_build)
+    except Exception as e:
+        logger.error(f"[WAVEFORM] failed to build peaks for {job_id}/{audio_type}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Could not build waveform peaks")
+
+    try:
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        with open(cache, "w", encoding="utf-8") as f:
+            _json.dump(data, f)
+    except Exception as e:
+        # A cache that cannot be written is not a reason to fail the request.
+        logger.warning(f"[WAVEFORM] could not cache peaks: {e}")
+
+    return JSONResponse(data, headers={"Cache-Control": "public, max-age=3600"})
+
 @router.get("/media/{job_id}/{filename}", dependencies=[Depends(_dep_job_access)])
 async def serve_job_audio_legacy(job_id: str, filename: str):
     """Backwards-compat: serve segment audio and scene previews from the job dir.
