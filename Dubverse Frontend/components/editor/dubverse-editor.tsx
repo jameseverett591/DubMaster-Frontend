@@ -64,7 +64,8 @@ import { EmotionLibraryPopup } from '@/components/editor/emotion-library-popup'
 import { CharacterProfilePopover } from '@/components/editor/character-profile-popover'
 import { useEditorStore, type SidebarTab, CHUNK_SECONDS } from '@/lib/editor-store'
 import type { Segment, Scene, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType, StagedEdit } from '@/lib/editor-types'
-import { DEFAULT_NUANCES, NUANCE_MARKER_META, newSegmentId, newSceneId, getSegmentKey, defaultScenes, computeVideoFadeOpacity } from '@/lib/editor-types'
+import { normalizeScenes } from '@/lib/editor-types'
+import { DEFAULT_NUANCES, NUANCE_MARKER_META, newSegmentId, newSceneId, getSegmentKey, defaultScenes, computeVideoFadeOpacity, timelineToSourceTime, sourceToTimelineTime } from '@/lib/editor-types'
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
 import { applyQCFix } from '@/lib/qc-fixes'
 import { VideoRecorder } from '@/components/video-recorder'
@@ -185,6 +186,8 @@ interface SegmentContextMenuProps {
   onTogglePair: (index: number) => void
   onRevert: (index: number) => void
   onUndoLastEdit: (index: number) => void
+  onUndoSplit: () => void
+  undoSplitLabel: string | null
   onCopyText: (index: number) => void
   onPasteText: (index: number) => void
   onClearSegment: (index: number) => void
@@ -218,6 +221,8 @@ function SegmentContextMenu({
   onTogglePair,
   onRevert,
   onUndoLastEdit,
+  onUndoSplit,
+  undoSplitLabel,
   onCopyText,
   onPasteText,
   onClearSegment,
@@ -240,7 +245,13 @@ function SegmentContextMenu({
         <span
           style={{ display: 'contents' }}
           onClick={() => onSelect(index)}
-          onContextMenu={(e) => { coordsRef.current = { x: e.clientX, y: e.clientY } }}
+          onContextMenu={(e) => {
+            coordsRef.current = { x: e.clientX, y: e.clientY }
+            // The timeline as a whole is also a context-menu trigger, for empty
+            // track space. Stop here so the innermost target wins and two menus
+            // never open on one click.
+            e.stopPropagation()
+          }}
         >
           {children}
         </span>
@@ -260,6 +271,12 @@ function SegmentContextMenu({
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onSplit(index) }} className="text-xs gap-2">
           ✂️ Split at Playhead
           <ContextMenuShortcut>C</ContextMenuShortcut>
+        </ContextMenuItem>
+        <ContextMenuItem
+          disabled={!undoSplitLabel}
+          onClick={(e) => { e.stopPropagation(); if (undoSplitLabel) onUndoSplit() }}
+          className="text-xs gap-2">
+          {undoSplitLabel ? `✂ Undo ${undoSplitLabel}` : '✂ Undo Split'}
         </ContextMenuItem>
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onSplitAtWord(index) }} className="text-xs gap-2">
           ✂️ Split at Word…
@@ -866,6 +883,7 @@ export function DubVerseEditor({
     setScenes,
     updateScene,
     splitSceneAtTime,
+    mergeSceneWithPrevious,
     activeSidebarTab,
     setActiveSidebarTab,
     selectedSegmentIndex,
@@ -1252,7 +1270,7 @@ export function DubVerseEditor({
     setActiveChunk(target)
     setCurrentTime(newStart)
     if (videoRef.current) {
-      videoRef.current.currentTime = newStart
+      videoRef.current.currentTime = timelineToSourceTime(newStart, scenesRef.current) ?? newStart
     }
     const container = timelineRef.current
     if (container) {
@@ -1895,14 +1913,44 @@ export function DubVerseEditor({
       const gen = handleGenerateSpeechRef.current
       if (leftText.trim()) await gen(index, undefined, leftText.trim())
     }, 0)
+    undoStack.current.push({ kind: 'segment-split', index, at: 'playhead' })
+    setUndoSplitLabel('Segment Split')
   }, [displaySegments, currentTime, syncSegmentsToBackend])
+
+  /** Right-click target on the video strip. */
+  /** Segment the timeline-wide context menu acts on. The selected one, or the
+   *  first segment when nothing is selected — the menu's playhead-based actions
+   *  (Split at Playhead, Merge with Next) already work from the playhead, so this
+   *  only decides which row Copy/Paste/Lock apply to. */
+  const timelineCtxIndex = Math.max(0, Math.min(selectedSegmentIndex ?? 0, Math.max(0, displaySegments.length - 1)))
+
+  const [sceneMenu, setSceneMenu] = useState<{ x: number; y: number; sceneId: string } | null>(null)
+
+  /** Persist scenes, repairing the list first.
+   *
+   *  Scene drags only ever wrote the scene being dragged, so moving a boundary
+   *  left its neighbour where it was and the list stopped being a partition of
+   *  the timeline — overlapping scenes whose fade ramps both drew, stacked, over
+   *  continuous footage. Normalising here catches every route to disk rather than
+   *  relying on each call site to remember.
+   */
+  const persistScenes = useCallback(() => {
+    const fixed = normalizeScenes(useEditorStore.getState().scenes, videoDuration)
+    setScenes(fixed)
+    return apiClient.updateScenes(jobId, fixed)
+  }, [jobId, setScenes, videoDuration])
 
   const handleSplitSceneAtPlayhead = useCallback(() => {
     const t = currentTimeRef.current
     if (!Number.isFinite(t) || t <= 0.05 || t >= videoDuration - 0.05) return
     splitSceneAtTime(t)
     const updatedScenes = useEditorStore.getState().scenes
-    apiClient.updateScenes(jobId, updatedScenes).catch(err => console.warn('[SCENE-SPLIT]', err))
+    // The new scene is the one that now begins exactly at the split point. Record
+    // it so undo knows which boundary to dissolve — splitSceneAtTime mints the id
+    // internally and does not hand it back.
+    const created = updatedScenes.find(sc => Math.abs(sc.start - t) < 0.001)
+    if (created) { undoStack.current.push({ kind: 'scene-split', sceneId: created.id }); setUndoSplitLabel('Scene Split') }
+    persistScenes().catch(err => console.warn('[SCENE-SPLIT]', err))
   }, [splitSceneAtTime, videoDuration, jobId])
 
   const handleSplitAtWord = useCallback((index: number, wordIndex: number) => {
@@ -1944,6 +1992,8 @@ export function DubVerseEditor({
       if (leftText.trim()) await gen(index, undefined, leftText.trim())
       if (rightText.trim()) await gen(index + 1, undefined, rightText.trim())
     }, 0)
+    undoStack.current.push({ kind: 'segment-split', index, at: 'word' })
+    setUndoSplitLabel('Word Split')
   }, [displaySegments, syncSegmentsToBackend])
 
   const handleAddSegmentAfter = useCallback((index: number) => {
@@ -2273,6 +2323,7 @@ export function DubVerseEditor({
     return true
   }, [displaySegments, lockedSegments, lockedPairs, keyAt])
 
+  const handleMergeWithNextRef = useRef<((index: number) => void) | null>(null)
   const handleMergeWithNext = useCallback((index: number) => {
     const first = displaySegments[index]
     const second = displaySegments[index + 1]
@@ -2370,6 +2421,7 @@ export function DubVerseEditor({
     selectSegment(index)
     setTimeout(() => syncSegmentsToBackend(displaySegmentsRef.current), 0)
   }, [displaySegments, lockedSegments, lockedPairs, selectSegment, syncSegmentsToBackend, keyAt])
+  handleMergeWithNextRef.current = handleMergeWithNext
 
   const [groupedSegments, setGroupedSegments] = useState<Set<number>>(new Set())
   
@@ -2453,7 +2505,9 @@ export function DubVerseEditor({
       dubbedVideoUrl,
       videoDuration,
       segments: segmentsWithFindings,
-      scenes: initialScenes?.length ? initialScenes : defaultScenes(videoDuration),
+      scenes: initialScenes?.length
+        ? normalizeScenes(initialScenes, videoDuration)
+        : defaultScenes(videoDuration),
       qcScore,
       qcFindings,
     })
@@ -3215,7 +3269,8 @@ export function DubVerseEditor({
         return
       }
 
-      let t = video.currentTime
+      const sourceT = video.currentTime
+      let t = sourceToTimelineTime(sourceT, scenesRef.current) ?? sourceT
       // Keep the black fade overlay in sync even when paused/scrubbed.
       if (videoFadeOverlayRef.current) {
         videoFadeOverlayRef.current.style.opacity = String(computeVideoFadeOpacity(t, scenesRef.current))
@@ -3540,7 +3595,9 @@ export function DubVerseEditor({
       // making the needle feel 3 seconds behind. DOM + video are updated here;
       // the store is written once on mouseup.
       currentTimeRef.current = newTime
-      if (videoRef.current) videoRef.current.currentTime = newTime
+      if (videoRef.current) {
+        videoRef.current.currentTime = timelineToSourceTime(newTime, scenesRef.current) ?? newTime
+      }
       // Update the needle directly so it tracks the cursor exactly.
       if (playheadRef.current) {
         playheadRef.current.style.left = `${newTime * pps}px`
@@ -3690,7 +3747,19 @@ export function DubVerseEditor({
 
   // Global undo stack: each text edit pushes {index, prevText} so the top-bar
   // undo button can step backward through all edits in reverse order.
-  const undoStack = useRef<Array<{ index: number; prevText: string }>>([])
+  /** Undo history. A discriminated union rather than a second stack: "undo last
+   *  edit" has to mean the last thing you actually did, and two parallel stacks
+   *  would undo a text change you made five minutes ago in preference to the
+   *  split you made a second ago. */
+  type UndoEntry =
+    | { kind: 'text'; index: number; prevText: string }
+    // A scene boundary on the video strip. Reversed by dissolving the boundary.
+    | { kind: 'scene-split'; sceneId: string }
+    // A segment cut in two, at the playhead or at a word. Both splice one segment
+    // into two at index/index+1, so both are reversed by merging index with next.
+    // `at` exists only to name the action in the menu — undoing them is identical.
+    | { kind: 'segment-split'; index: number; at: 'playhead' | 'word' }
+  const undoStack = useRef<UndoEntry[]>([])
   // Hume auto-fire guard, lifted out of FloatingEmotionChart so Clear Segment
   // and text edits can reset it (re-fire emotion analysis on next dwell).
   const emotionAutoFiredRef = useRef<Set<number>>(new Set())
@@ -3701,12 +3770,42 @@ export function DubVerseEditor({
     setImportedSegments(p => p ? p.map((seg, i) => i === index ? { ...seg, preview_text: prevText, active_text: prevText } : seg) : p)
   }, [setPreviewText, updateSegment])
 
+  const _splitLabelOf = (e: UndoEntry): string | null =>
+    e.kind === 'scene-split' ? 'Scene Split'
+      : e.kind === 'segment-split' ? (e.at === 'word' ? 'Word Split' : 'Segment Split')
+      : null
+
+  const _refreshUndoSplit = useCallback(() => {
+    const stack = undoStack.current
+    for (let i = stack.length - 1; i >= 0; i--) {
+      const lbl = _splitLabelOf(stack[i])
+      if (lbl) { setUndoSplitLabel(lbl); return }
+    }
+    setUndoSplitLabel(null)
+  }, [])
+
   // Global undo — pops the most recent edit off the stack (any segment).
   const handleGlobalUndo = useCallback(() => {
     const entry = undoStack.current.pop()
     if (!entry) return
+    if (entry.kind === 'scene-split') {
+      // Dissolve the boundary rather than deleting the scene, or the timeline
+      // is left with a hole where that footage was.
+      mergeSceneWithPrevious(entry.sceneId)
+      persistScenes()
+        .catch(err => console.warn('[UNDO-SPLIT]', err))
+      _refreshUndoSplit()
+      return
+    }
+    if (entry.kind === 'segment-split') {
+      // Rejoin the two halves. Same merge the context menu offers, so there is no
+      // second un-split path that could drift from it.
+      handleMergeWithNextRef.current?.(entry.index)
+      _refreshUndoSplit()
+      return
+    }
     _applyUndo(entry.index, entry.prevText)
-  }, [_applyUndo])
+  }, [_applyUndo, mergeSceneWithPrevious, jobId, _refreshUndoSplit])
 
   const submitAskAiChat = useCallback(async () => {
     const text = askAiChatInput.trim()
@@ -3745,13 +3844,51 @@ export function DubVerseEditor({
   const handleUndoLastEdit = useCallback((index: number) => {
     const stackArr = undoStack.current
     for (let i = stackArr.length - 1; i >= 0; i--) {
-      if (stackArr[i].index === index) {
-        const [entry] = stackArr.splice(i, 1)
-        _applyUndo(entry.index, entry.prevText)
+      // Segment-scoped: skip scene splits, which belong to no segment. They stay
+      // on the stack and remain reachable through the global undo.
+      const e = stackArr[i]
+      if (e.kind === 'text' && e.index === index) {
+        stackArr.splice(i, 1)
+        _applyUndo(e.index, e.prevText)
         return
       }
     }
   }, [_applyUndo])
+
+  /** Undo the most recent scene split, wherever it was made.
+   *
+   *  Separate from "Undo Last Edit", which is segment-scoped and deliberately
+   *  skips scene splits — a split belongs to no segment, so that entry could
+   *  never reach one. This walks the same single stack for the newest split and
+   *  dissolves that boundary, merging the two halves back into one scene. */
+  /** Names the split that Undo Split will reverse, or null when there is none.
+   *  A label rather than a boolean: with three kinds of split in play, an entry
+   *  reading just "Undo Split" gives no way to tell whether it is about to
+   *  dissolve a scene boundary or rejoin two lines of dialogue. */
+  const [undoSplitLabel, setUndoSplitLabel] = useState<string | null>(null)
+  const handleUndoSplit = useCallback(() => {
+    const stack = undoStack.current
+    for (let i = stack.length - 1; i >= 0; i--) {
+      const e = stack[i]
+      if (e.kind === 'scene-split') {
+        stack.splice(i, 1)
+        mergeSceneWithPrevious(e.sceneId)
+        persistScenes()
+          .catch(err => console.warn('[UNDO-SPLIT]', err))
+        _refreshUndoSplit()
+        return
+      }
+      if (e.kind === 'segment-split') {
+        stack.splice(i, 1)
+        // Both halves sit at index and index+1, so rejoining them is the same
+        // merge the context menu offers — no separate un-split path to maintain.
+        handleMergeWithNextRef.current?.(e.index)
+        _refreshUndoSplit()
+        return
+      }
+    }
+    setUndoSplitLabel(null)
+  }, [mergeSceneWithPrevious, jobId, _refreshUndoSplit])
 
   const handleClearSegment = useCallback((index: number) => {
     const original = initialSegments[index]
@@ -4847,7 +4984,7 @@ export function DubVerseEditor({
       const idx = editingSegmentIndex
       const text = editingTextRef.current
       // Push pre-edit text onto the global undo stack before applying the change.
-      undoStack.current.push({ index: idx, prevText: displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? '' })
+      undoStack.current.push({ kind: 'text', index: idx, prevText: displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? '' })
       emotionAutoFiredRef.current.delete(idx)
       setPreviewText(idx, text)
       setImportedSegments(prev => {
@@ -4908,7 +5045,7 @@ export function DubVerseEditor({
     }
     if (text == null) return
     const segs = displaySegmentsRef.current
-    undoStack.current.push({ index, prevText: segs[index]?.preview_text ?? segs[index]?.active_text ?? segs[index]?.target_text ?? '' })
+    undoStack.current.push({ kind: 'text', index, prevText: segs[index]?.preview_text ?? segs[index]?.active_text ?? segs[index]?.target_text ?? '' })
     emotionAutoFiredRef.current.delete(index)
     setPreviewText(index, text)
     setImportedSegments(prev => {
@@ -6114,6 +6251,8 @@ export function DubVerseEditor({
                   onTogglePair={togglePairWithNext}
                   onRevert={() => handleRevert()}
                   onUndoLastEdit={handleUndoLastEdit}
+                  onUndoSplit={handleUndoSplit}
+                  undoSplitLabel={undoSplitLabel}
                   onCopyText={handleCopyText}
                   onPasteText={handlePasteText}
                   onClearSegment={handleClearSegment}
@@ -8749,7 +8888,8 @@ export function DubVerseEditor({
                     if (_from !== currentTime) setCurrentTime(_from)
                     lastStartPosRef.current = _from  // save start pos for Stop
                     rptCancelRef.current = false     // allow the stitch to (re)schedule
-                    videoRef.current.currentTime = _from
+                    const sourceFrom = timelineToSourceTime(_from, scenesRef.current) ?? _from
+                    videoRef.current.currentTime = sourceFrom
                     videoRef.current.play().catch(() => {})
                   }
                 }
@@ -8801,7 +8941,8 @@ export function DubVerseEditor({
                 setIsPlaying(false)
                 if (videoRef.current) {
                   videoRef.current.pause()
-                  videoRef.current.currentTime = returnTo
+                  const sourceReturn = timelineToSourceTime(returnTo, scenesRef.current) ?? returnTo
+                  videoRef.current.currentTime = sourceReturn
                 }
                 setCurrentTime(returnTo)
               }}
@@ -9298,6 +9439,53 @@ export function DubVerseEditor({
               if (trackLabelRef.current) trackLabelRef.current.scrollTop = top
             }}
           >
+            {/* The whole timeline is a context-menu target, so right-click works on empty
+                track space, the ruler, and past the last block — not only on a row or a
+                scene. Rows and blocks stop propagation, so the innermost one still wins;
+                this is the fallback beneath them. It acts on the SELECTED segment, which
+                is also what the playhead-based actions in the menu already assume. */}
+            <SegmentContextMenu
+              index={timelineCtxIndex}
+              segmentKey={displaySegments[timelineCtxIndex] ? getSegmentKey(displaySegments[timelineCtxIndex]) : ''}
+              lockedSegments={lockedSegments}
+              lockedPairs={lockedPairs}
+              stagedEmotions={stagedEmotions}
+              emotions={EMOTIONS}
+              onSelect={(idx) => { selectSegment(idx); setContextSegmentIndex(idx) }}
+              onSplit={handleSplitAtPlayhead}
+              onSplitAtWord={(idx) => setSplitWordMode(idx)}
+              onAddAfter={handleAddSegmentAfter}
+              onMerge={handleMergeWithNext}
+              canMergeNext={canMergeWithNext(timelineCtxIndex)}
+              onDelete={(idx) => setPendingDelete(idx)}
+              onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
+              onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+              onUnlockScene={(idx) => unlockScene(idx)}
+              onTogglePair={togglePairWithNext}
+              onRevert={revertToOriginal}
+              onUndoLastEdit={handleUndoLastEdit}
+              onUndoSplit={handleUndoSplit}
+              undoSplitLabel={undoSplitLabel}
+              onCopyText={handleCopyText}
+              onPasteText={handlePasteText}
+              onClearSegment={handleClearSegment}
+              onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [keyAt(idx)]: emotion }))}
+              onClearEmotion={(idx) => {
+                setStagedEmotions(prev => ({ ...prev, [keyAt(idx)]: '' }))
+                updateSegment(idx, { committed_emotion: null })
+                setImportedSegments(prev => prev ? prev.map((seg, i) => i === idx ? { ...seg, committed_emotion: null } : seg) : prev)
+              }}
+              onRenameSpeaker={(idx) => {
+                const spkId = displaySegments[idx]?.speaker_id
+                if (!spkId) return
+                setRenamingSpeakerId(spkId)
+                setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
+              }}
+              onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
+              onGroupSelect={enterGroupSelectMode}
+              onClearGroup={clearGroupSelection}
+              groupSelectActive={groupSelectMode || groupSelectedSegments.size > 0}
+            >
             <div
               className="flex flex-col min-h-full relative"
               style={{ minWidth: timelineWidth, width: '100%' }}
@@ -9318,7 +9506,8 @@ export function DubVerseEditor({
                 const newTime = Math.max(0, Math.min(x / PIXELS_PER_SECOND, videoDuration))
                 setCurrentTime(newTime)
                 if (videoRef.current) {
-                  videoRef.current.currentTime = newTime
+                  const sourceTime = timelineToSourceTime(newTime, scenes)
+                  videoRef.current.currentTime = sourceTime ?? newTime
                 }
                 selectSegment(null)
               }}
@@ -9404,7 +9593,61 @@ export function DubVerseEditor({
               >
               </div>
 
-              {/* Scene-lock band: the picked run, pulsing, with the LOCK action in
+
+      {sceneMenu && (() => {
+        const _sorted = [...scenes].sort((a, b) => a.start - b.start)
+        const _idx = _sorted.findIndex(sc => sc.id === sceneMenu.sceneId)
+        // The first scene has no boundary before it to dissolve.
+        const _canMerge = _idx > 0
+        return (
+          <div
+            className="fixed z-[70] bg-slate-800 border border-slate-700 rounded-md shadow-lg overflow-hidden"
+            style={{ left: `${sceneMenu.x}px`, top: `${sceneMenu.y}px` }}
+            onMouseLeave={() => setSceneMenu(null)}
+          >
+            <button
+              type="button"
+              disabled={!_canMerge}
+              onClick={() => {
+                mergeSceneWithPrevious(sceneMenu.sceneId)
+                persistScenes()
+                  .catch(err => console.warn('[UNDO-SPLIT]', err))
+                // Drop any undo entry for this split — it has just been undone by
+                // hand, and leaving it would make the next global undo dissolve a
+                // boundary the user never asked about.
+                undoStack.current = undoStack.current.filter(
+                  en => !(en.kind === 'scene-split' && en.sceneId === sceneMenu.sceneId))
+                setSceneMenu(null)
+              }}
+              className={cn('w-full text-left px-3 py-2 text-xs whitespace-nowrap',
+                _canMerge ? 'text-amber-300 hover:bg-slate-700' : 'text-slate-600 cursor-not-allowed')}
+            >
+              ✂ Undo split — merge into previous
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                updateScene(sceneMenu.sceneId, { video_fade_in: 0, video_fade_out: 0 })
+                persistScenes()
+                  .catch(err => console.warn('[SCENE-FADE]', err))
+                setSceneMenu(null)
+              }}
+              className="w-full text-left px-3 py-2 text-xs text-slate-300 hover:bg-slate-700 whitespace-nowrap"
+            >
+              Clear fades
+            </button>
+            <button
+              type="button"
+              onClick={() => setSceneMenu(null)}
+              className="w-full text-left px-3 py-2 text-xs text-slate-400 hover:bg-slate-700 whitespace-nowrap"
+            >
+              Cancel
+            </button>
+          </div>
+        )
+      })()}
+
+      {/* Scene-lock band: the picked run, pulsing, with the LOCK action in
                   the middle. Positioned in absolute time like every other timeline
                   overlay, so it lines up with the blocks it is describing. */}
               {sceneLockMode && sceneRange && displaySegments[sceneRange.start] && displaySegments[sceneRange.end] && (() => {
@@ -9445,10 +9688,35 @@ export function DubVerseEditor({
                     return (
                       <div
                         key={scene.id}
-                        className="absolute top-0 h-full group"
+                        className="absolute top-0 h-full group cursor-move"
+                        onContextMenu={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          setSceneMenu({ x: e.clientX, y: e.clientY, sceneId: scene.id })
+                        }}
                         style={{
                           left: scene.start * PIXELS_PER_SECOND,
                           width: Math.max(4, sceneDuration * PIXELS_PER_SECOND),
+                        }}
+                        onMouseDown={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          const startX = e.clientX
+                          const startStart = scene.start
+                          const startEnd = scene.end
+                          const duration = startEnd - startStart
+                          const onMove = (ev: MouseEvent) => {
+                            const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
+                            const newStart = Math.max(0, startStart + delta)
+                            updateScene(scene.id, { start: newStart, end: newStart + duration })
+                          }
+                          const onUp = () => {
+                            persistScenes().catch(err => console.warn('[SCENE-MOVE]', err))
+                            document.removeEventListener('mousemove', onMove)
+                            document.removeEventListener('mouseup', onUp)
+                          }
+                          document.addEventListener('mousemove', onMove)
+                          document.addEventListener('mouseup', onUp)
                         }}
                       >
                         <div className="absolute inset-0 bg-emerald-500/10 border-x border-emerald-500/30 pointer-events-none" />
@@ -9488,7 +9756,7 @@ export function DubVerseEditor({
                               if (prev) updateScene(prev.id, { end: newStart })
                             }
                             const onUp = () => {
-                              apiClient.updateScenes(jobId, useEditorStore.getState().scenes).catch(err => console.warn('[SCENE-MOVE]', err))
+                              persistScenes().catch(err => console.warn('[SCENE-MOVE]', err))
                               document.removeEventListener('mousemove', onMove)
                               document.removeEventListener('mouseup', onUp)
                             }
@@ -9513,7 +9781,7 @@ export function DubVerseEditor({
                               if (next) updateScene(next.id, { start: newEnd })
                             }
                             const onUp = () => {
-                              apiClient.updateScenes(jobId, useEditorStore.getState().scenes).catch(err => console.warn('[SCENE-MOVE]', err))
+                              persistScenes().catch(err => console.warn('[SCENE-MOVE]', err))
                               document.removeEventListener('mousemove', onMove)
                               document.removeEventListener('mouseup', onUp)
                             }
@@ -9521,82 +9789,118 @@ export function DubVerseEditor({
                             document.addEventListener('mouseup', onUp)
                           }}
                         />
-                        {/* Top-left fade-in handle */}
+                        {/* Fade in. Ramp and grip are SIBLINGS so the ramp can be zero-width
+                            (drawing nothing) while the grip still sits on the corner. */}
                         <div
-                          className="absolute top-0 left-0 h-full z-30 group-hover:opacity-100 opacity-0 transition-opacity pointer-events-none"
+                          data-scene-ramp="in"
+                          className="absolute top-0 left-0 h-full pointer-events-none z-10 bg-cyan-400/45"
                           style={{
-                            width: Math.min(Math.max(0, (scene.video_fade_in ?? 0) * PIXELS_PER_SECOND), sceneDuration * PIXELS_PER_SECOND / 2),
+                            width: Math.min((scene.video_fade_in ?? 0) * PIXELS_PER_SECOND, sceneDuration * PIXELS_PER_SECOND / 2),
+                            clipPath: 'polygon(0 0, 100% 0, 0 100%)',
                           }}
-                        >
-                          <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-                            <polygon points="0,0 100,0 0,100" fill="rgba(34,211,238,0.45)" />
-                          </svg>
-                          <div
-                            className="absolute top-0 left-0 w-3 h-3 cursor-ew-resize animate-pulse pointer-events-auto z-40"
-                            title={`Fade in ${(scene.video_fade_in ?? 0).toFixed(2)}s`}
-                            style={{
-                              background: 'linear-gradient(135deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
-                              clipPath: 'polygon(0 0, 100% 0, 0 100%)',
-                              boxShadow: '0 0 8px rgba(0,245,212,0.9)',
-                            }}
-                            onMouseDown={(e) => {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              const startX = e.clientX
-                              const initialFade = scene.video_fade_in ?? 0
-                              const onMove = (ev: MouseEvent) => {
-                                const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
-                                const newFade = Math.min(Math.max(0, initialFade + delta), sceneDuration / 2)
-                                updateScene(scene.id, { video_fade_in: newFade })
-                              }
-                              const onUp = () => {
-                                apiClient.updateScenes(jobId, useEditorStore.getState().scenes).catch(err => console.warn('[SCENE-FADE]', err))
-                                document.removeEventListener('mousemove', onMove)
-                                document.removeEventListener('mouseup', onUp)
-                              }
-                              document.addEventListener('mousemove', onMove)
-                              document.addEventListener('mouseup', onUp)
-                            }}
-                          />
-                        </div>
-                        {/* Top-right fade-out handle */}
+                        />
                         <div
-                          className="absolute top-0 right-0 h-full z-30 group-hover:opacity-100 opacity-0 transition-opacity pointer-events-none"
+                          data-scene-handle="in"
+                          className={cn("absolute top-0 w-3 h-3 pointer-events-auto z-40 opacity-0 group-hover:opacity-100 transition-opacity", (scene.video_fade_in ?? 0) > 0 && "animate-pulse")}
+                          title={`Fade in ${(scene.video_fade_in ?? 0).toFixed(2)}s`}
                           style={{
-                            width: Math.min(Math.max(0, (scene.video_fade_out ?? 0) * PIXELS_PER_SECOND), sceneDuration * PIXELS_PER_SECOND / 2),
+                            left: Math.min((scene.video_fade_in ?? 0) * PIXELS_PER_SECOND, sceneDuration * PIXELS_PER_SECOND / 2),
+                            background: 'linear-gradient(135deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
+                            clipPath: 'polygon(0 0, 100% 0, 0 100%)',
+                            boxShadow: '0 0 8px rgba(0,245,212,0.9)',
+                            // The scene block itself uses a move cursor for dragging the boundary.
+                            // Force the plain pointer back so the tip stays on the grip.
+                            cursor: 'default',
+                            willChange: 'transform',
                           }}
-                        >
-                          <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-                            <polygon points="100,0 100,100 0,0" fill="rgba(34,211,238,0.45)" />
-                          </svg>
-                          <div
-                            className="absolute top-0 right-0 w-3 h-3 cursor-ew-resize animate-pulse pointer-events-auto z-40"
-                            title={`Fade out ${(scene.video_fade_out ?? 0).toFixed(2)}s`}
-                            style={{
-                              background: 'linear-gradient(225deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
-                              clipPath: 'polygon(100% 0, 100% 100%, 0 0)',
-                              boxShadow: '0 0 8px rgba(0,245,212,0.9)',
-                            }}
-                            onMouseDown={(e) => {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              const startX = e.clientX
-                              const initialFade = scene.video_fade_out ?? 0
-                              const onMove = (ev: MouseEvent) => {
-                                const delta = (startX - ev.clientX) / PIXELS_PER_SECOND
-                                const newFade = Math.min(Math.max(0, initialFade + delta), sceneDuration / 2)
-                                updateScene(scene.id, { video_fade_out: newFade })
-                              }
-                              const onUp = () => {
-                                apiClient.updateScenes(jobId, useEditorStore.getState().scenes).catch(err => console.warn('[SCENE-FADE]', err))
-                                document.removeEventListener('mousemove', onMove)
-                                document.removeEventListener('mouseup', onUp)
-                              }
-                              document.addEventListener('mousemove', onMove)
-                              document.addEventListener('mouseup', onUp)
-                            }}
-                          />
-                        </div>
+                          onClick={(e) => { e.preventDefault(); e.stopPropagation() }}
+                          onPointerDown={(e) => {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch {}
+                            const grip = e.currentTarget as HTMLElement
+                            const ramp = grip.parentElement?.querySelector('[data-scene-ramp="in"]') as HTMLElement | null
+                            const startX = e.clientX
+                            const initialFade = scene.video_fade_in ?? 0
+                            const maxFade = sceneDuration / 2
+                            let latest = initialFade
+                            // DOM-driven while dragging. updateScene on every move wrote to the
+                            // store and re-rendered the editor per mouse event, so the grip lagged
+                            // the cursor. The store is written once, on release.
+                            // Grows as the grip is pulled right.
+                            const onPointerMove = (ev: PointerEvent) => {
+                              const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
+                              latest = Math.min(Math.max(0, initialFade + delta), maxFade)
+                              const px = latest * PIXELS_PER_SECOND
+                              if (ramp) ramp.style.width = `${px}px`
+                              grip.style.left = `${px}px`
+                            }
+                            const onPointerUp = () => {
+                              document.removeEventListener('pointermove', onPointerMove)
+                              document.removeEventListener('pointerup', onPointerUp)
+                              updateScene(scene.id, { video_fade_in: latest })
+                              persistScenes().catch(err => console.warn('[SCENE-FADE]', err))
+                            }
+                            document.addEventListener('pointermove', onPointerMove)
+                            document.addEventListener('pointerup', onPointerUp)
+                          }}
+                        />
+                        {/* Fade out. Ramp and grip are SIBLINGS so the ramp can be zero-width
+                            (drawing nothing) while the grip still sits on the corner. */}
+                        <div
+                          data-scene-ramp="out"
+                          className="absolute top-0 right-0 h-full pointer-events-none z-10 bg-cyan-400/45"
+                          style={{
+                            width: Math.min((scene.video_fade_out ?? 0) * PIXELS_PER_SECOND, sceneDuration * PIXELS_PER_SECOND / 2),
+                            clipPath: 'polygon(100% 0, 100% 100%, 0 0)',
+                          }}
+                        />
+                        <div
+                          data-scene-handle="out"
+                          className={cn("absolute top-0 w-3 h-3 pointer-events-auto z-40 opacity-0 group-hover:opacity-100 transition-opacity", (scene.video_fade_out ?? 0) > 0 && "animate-pulse")}
+                          title={`Fade out ${(scene.video_fade_out ?? 0).toFixed(2)}s`}
+                          style={{
+                            right: Math.min((scene.video_fade_out ?? 0) * PIXELS_PER_SECOND, sceneDuration * PIXELS_PER_SECOND / 2),
+                            background: 'linear-gradient(225deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
+                            clipPath: 'polygon(100% 0, 100% 100%, 0 0)',
+                            boxShadow: '0 0 8px rgba(0,245,212,0.9)',
+                            // The scene block itself uses a move cursor for dragging the boundary.
+                            // Force the plain pointer back so the tip stays on the grip.
+                            cursor: 'default',
+                            willChange: 'transform',
+                          }}
+                          onClick={(e) => { e.preventDefault(); e.stopPropagation() }}
+                          onPointerDown={(e) => {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch {}
+                            const grip = e.currentTarget as HTMLElement
+                            const ramp = grip.parentElement?.querySelector('[data-scene-ramp="out"]') as HTMLElement | null
+                            const startX = e.clientX
+                            const initialFade = scene.video_fade_out ?? 0
+                            const maxFade = sceneDuration / 2
+                            let latest = initialFade
+                            // DOM-driven while dragging. updateScene on every move wrote to the
+                            // store and re-rendered the editor per mouse event, so the grip lagged
+                            // the cursor. The store is written once, on release.
+                            // Grows as the grip is pulled left.
+                            const onPointerMove = (ev: PointerEvent) => {
+                              const delta = (startX - ev.clientX) / PIXELS_PER_SECOND
+                              latest = Math.min(Math.max(0, initialFade + delta), maxFade)
+                              const px = latest * PIXELS_PER_SECOND
+                              if (ramp) ramp.style.width = `${px}px`
+                              grip.style.right = `${px}px`
+                            }
+                            const onPointerUp = () => {
+                              document.removeEventListener('pointermove', onPointerMove)
+                              document.removeEventListener('pointerup', onPointerUp)
+                              updateScene(scene.id, { video_fade_out: latest })
+                              persistScenes().catch(err => console.warn('[SCENE-FADE]', err))
+                            }
+                            document.addEventListener('pointermove', onPointerMove)
+                            document.addEventListener('pointerup', onPointerUp)
+                          }}
+                        />
                       </div>
                     )
                   })}
@@ -9669,6 +9973,8 @@ export function DubVerseEditor({
                       onTogglePair={togglePairWithNext}
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
+                      onUndoSplit={handleUndoSplit}
+                      undoSplitLabel={undoSplitLabel}
                       onCopyText={handleCopyText}
                       onPasteText={handlePasteText}
                       onClearSegment={handleClearSegment}
@@ -9955,6 +10261,8 @@ export function DubVerseEditor({
                       onTogglePair={togglePairWithNext}
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
+                      onUndoSplit={handleUndoSplit}
+                      undoSplitLabel={undoSplitLabel}
                       onCopyText={handleCopyText}
                       onPasteText={handlePasteText}
                       onClearSegment={handleClearSegment}
@@ -10405,113 +10713,148 @@ export function DubVerseEditor({
                       {/* Fade handles — only on Preview Audio track */}
                       {!layoutLocked && (
                         <>
-                          {/* Top-left fade-in handle */}
+                          {/* Fade in — ramp and grip are SIBLINGS, not nested.
+                              Nested, the grip's position was tied to the ramp's box and the ramp
+                              needed a minimum width to keep the grip reachable — which painted a
+                              wedge on every block that had no fade. Separately positioned, the ramp
+                              can be zero-width (drawing nothing) while the grip still sits exactly
+                              on the block corner. */}
                           <div
-                            className="absolute top-0 left-0 h-full z-30 pointer-events-none"
-                            style={{ width: Math.min(Math.max(12, (seg.fade_in ?? 0) * PIXELS_PER_SECOND), (endT - startT) * PIXELS_PER_SECOND / 2) }}
-                          >
-                            <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-                              <polygon points="0,0 100,0 0,100" fill="rgba(34,211,238,0.45)" />
-                            </svg>
-                            <div
-                              data-fade-handle="in"
-                              className={cn("absolute top-0 right-0 w-3 h-3 cursor-ew-resize pointer-events-auto z-40", (seg.fade_in ?? 0) > 0 && "animate-pulse")}
-                              title={`Fade in ${(seg.fade_in ?? 0).toFixed(2)}s`}
-                              style={{
-                                background: 'linear-gradient(135deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
-                                clipPath: 'polygon(0 0, 100% 0, 0 100%)',
-                                boxShadow: '0 0 8px rgba(0,245,212,0.9)',
-                              }}
-                              onMouseDown={(e) => {
-                                e.preventDefault()
-                                e.stopPropagation()
-                                const startX = e.clientX
-                                const initialFade = seg.fade_in ?? 0
-                                const duration = endT - startT
-                                const onMouseMove = (ev: MouseEvent) => {
-                                  const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
-                                  const newFade = Math.min(Math.max(0, initialFade + delta), duration / 2)
-                                  setImportedSegments(prev => {
-                                    const base = prev ?? displaySegmentsRef.current
-                                    return base.map((s, idx) => idx === i ? { ...s, fade_in: newFade } : s)
-                                  })
-                                }
-                                const onMouseUp = (ev: MouseEvent) => {
-                                  const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
-                                  const finalFade = Math.min(Math.max(0, initialFade + delta), (endT - startT) / 2)
-                                  updateSegment(i, { fade_in: finalFade })
-                                  commitSegmentChanges(i, { fade_in: finalFade })
-                                  commitOrStage(seg.transcript_index ?? i, { fade_in: finalFade }).catch(err => console.warn('[FADE-IN]', err))
-                                  setImportedSegments(prev => {
-                                    const base = prev ?? displaySegmentsRef.current
-                                    return base.map((s, idx) => idx === i ? { ...s, fade_in: finalFade } : s)
-                                  })
-                                  if (audioContextRef.current) {
-                                    const stitchSegs = displaySegmentsRef.current.map((s, idx) => idx === i ? { ...s, fade_in: finalFade } : s)
-                                    requestStitchWith(stitchSegs, audioContextRef.current)
-                                  }
-                                  document.removeEventListener('mousemove', onMouseMove)
-                                  document.removeEventListener('mouseup', onMouseUp)
-                                }
-                                document.addEventListener('mousemove', onMouseMove)
-                                document.addEventListener('mouseup', onMouseUp)
-                              }}
-                            />
-                          </div>
-
-                          {/* Top-right fade-out handle */}
+                            data-fade-ramp="in"
+                            className="absolute top-0 left-0 h-full pointer-events-none z-10 bg-cyan-400/45"
+                            style={{
+                              width: Math.min((seg.fade_in ?? 0) * PIXELS_PER_SECOND, (endT - startT) * PIXELS_PER_SECOND / 2),
+                              clipPath: 'polygon(0 0, 100% 0, 0 100%)',
+                            }}
+                          />
                           <div
-                            className="absolute top-0 right-0 h-full z-30 pointer-events-none"
-                            style={{ width: Math.min(Math.max(12, (seg.fade_out ?? 0) * PIXELS_PER_SECOND), (endT - startT) * PIXELS_PER_SECOND / 2) }}
-                          >
-                            <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-                              <polygon points="100,0 100,100 0,0" fill="rgba(34,211,238,0.45)" />
-                            </svg>
-                            <div
-                              data-fade-handle="out"
-                              className={cn("absolute top-0 left-0 w-3 h-3 cursor-ew-resize pointer-events-auto z-40", (seg.fade_out ?? 0) > 0 && "animate-pulse")}
-                              title={`Fade out ${(seg.fade_out ?? 0).toFixed(2)}s`}
-                              style={{
-                                background: 'linear-gradient(225deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
-                                clipPath: 'polygon(100% 0, 100% 100%, 0 0)',
-                                boxShadow: '0 0 8px rgba(0,245,212,0.9)',
-                              }}
-                              onMouseDown={(e) => {
-                                e.preventDefault()
-                                e.stopPropagation()
-                                const startX = e.clientX
-                                const initialFade = seg.fade_out ?? 0
-                                const duration = endT - startT
-                                const onMouseMove = (ev: MouseEvent) => {
-                                  const delta = (startX - ev.clientX) / PIXELS_PER_SECOND
-                                  const newFade = Math.min(Math.max(0, initialFade + delta), duration / 2)
-                                  setImportedSegments(prev => {
-                                    const base = prev ?? displaySegmentsRef.current
-                                    return base.map((s, idx) => idx === i ? { ...s, fade_out: newFade } : s)
-                                  })
+                            data-fade-handle="in"
+                            className={cn("absolute top-0 w-3 h-3 pointer-events-auto z-40 opacity-0 group-hover:opacity-100 transition-opacity", (seg.fade_in ?? 0) > 0 && "animate-pulse")}
+                            title={`Fade in ${(seg.fade_in ?? 0).toFixed(2)}s`}
+                            style={{
+                              left: Math.min((seg.fade_in ?? 0) * PIXELS_PER_SECOND, (endT - startT) * PIXELS_PER_SECOND / 2),
+                              background: 'linear-gradient(135deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
+                              clipPath: 'polygon(0 0, 100% 0, 0 100%)',
+                              boxShadow: '0 0 8px rgba(0,245,212,0.9)',
+                              willChange: 'transform',
+                            }}
+                            // The block below also handles click-to-seek. Without this the playhead
+                            // jumped to wherever the drag ended, every single time.
+                            onClick={(e) => { e.preventDefault(); e.stopPropagation() }}
+                            onPointerDown={(e) => {
+                              e.preventDefault()
+                              e.stopPropagation()
+                              try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch {}
+                              const grip = e.currentTarget as HTMLElement
+                              const ramp = grip.parentElement?.querySelector('[data-fade-ramp="in"]') as HTMLElement | null
+                              const startX = e.clientX
+                              const initialFade = seg.fade_in ?? 0
+                              const maxFade = (endT - startT) / 2
+                              let latest = initialFade
+                              // Drive the DOM directly while dragging. This used to call
+                              // setImportedSegments on every pointermove, which rebuilt an 818-entry
+                              // array and re-rendered the whole editor per mouse event — the handle
+                              // arrived where the cursor had been half a second earlier. State is
+                              // written once, on release.
+                              const onPointerMove = (ev: PointerEvent) => {
+                                const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
+                                latest = Math.min(Math.max(0, initialFade + delta), maxFade)
+                                const px = latest * PIXELS_PER_SECOND
+                                if (ramp) ramp.style.width = `${px}px`
+                                grip.style.left = `${px}px`
+                              }
+                              const onPointerUp = () => {
+                                document.removeEventListener('pointermove', onPointerMove)
+                                document.removeEventListener('pointerup', onPointerUp)
+                                const finalFade = latest
+                                updateSegment(i, { fade_in: finalFade })
+                                commitSegmentChanges(i, { fade_in: finalFade })
+                                commitOrStage(seg.transcript_index ?? i, { fade_in: finalFade }).catch(err => console.warn('[FADE]', err))
+                                setImportedSegments(prev => {
+                                  const base = prev ?? displaySegmentsRef.current
+                                  return base.map((s, idx) => idx === i ? { ...s, fade_in: finalFade } : s)
+                                })
+                                if (audioContextRef.current) {
+                                  const stitchSegs = displaySegmentsRef.current.map((s, idx) => idx === i ? { ...s, fade_in: finalFade } : s)
+                                  requestStitchWith(stitchSegs, audioContextRef.current)
                                 }
-                                const onMouseUp = (ev: MouseEvent) => {
-                                  const delta = (startX - ev.clientX) / PIXELS_PER_SECOND
-                                  const finalFade = Math.min(Math.max(0, initialFade + delta), (endT - startT) / 2)
-                                  updateSegment(i, { fade_out: finalFade })
-                                  commitSegmentChanges(i, { fade_out: finalFade })
-                                  commitOrStage(seg.transcript_index ?? i, { fade_out: finalFade }).catch(err => console.warn('[FADE-OUT]', err))
-                                  setImportedSegments(prev => {
-                                    const base = prev ?? displaySegmentsRef.current
-                                    return base.map((s, idx) => idx === i ? { ...s, fade_out: finalFade } : s)
-                                  })
-                                  if (audioContextRef.current) {
-                                    const stitchSegs = displaySegmentsRef.current.map((s, idx) => idx === i ? { ...s, fade_out: finalFade } : s)
-                                    requestStitchWith(stitchSegs, audioContextRef.current)
-                                  }
-                                  document.removeEventListener('mousemove', onMouseMove)
-                                  document.removeEventListener('mouseup', onMouseUp)
+                              }
+                              document.addEventListener('pointermove', onPointerMove)
+                              document.addEventListener('pointerup', onPointerUp)
+                            }}
+                          />
+                          {/* Fade out — ramp and grip are SIBLINGS, not nested.
+                              Nested, the grip's position was tied to the ramp's box and the ramp
+                              needed a minimum width to keep the grip reachable — which painted a
+                              wedge on every block that had no fade. Separately positioned, the ramp
+                              can be zero-width (drawing nothing) while the grip still sits exactly
+                              on the block corner. */}
+                          <div
+                            data-fade-ramp="out"
+                            className="absolute top-0 right-0 h-full pointer-events-none z-10 bg-cyan-400/45"
+                            style={{
+                              width: Math.min((seg.fade_out ?? 0) * PIXELS_PER_SECOND, (endT - startT) * PIXELS_PER_SECOND / 2),
+                              clipPath: 'polygon(100% 0, 100% 100%, 0 0)',
+                            }}
+                          />
+                          <div
+                            data-fade-handle="out"
+                            className={cn("absolute top-0 w-3 h-3 pointer-events-auto z-40 opacity-0 group-hover:opacity-100 transition-opacity", (seg.fade_out ?? 0) > 0 && "animate-pulse")}
+                            title={`Fade out ${(seg.fade_out ?? 0).toFixed(2)}s`}
+                            style={{
+                              right: Math.min((seg.fade_out ?? 0) * PIXELS_PER_SECOND, (endT - startT) * PIXELS_PER_SECOND / 2),
+                              background: 'linear-gradient(225deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
+                              clipPath: 'polygon(100% 0, 100% 100%, 0 0)',
+                              boxShadow: '0 0 8px rgba(0,245,212,0.9)',
+                              willChange: 'transform',
+                            }}
+                            // The block below also handles click-to-seek. Without this the playhead
+                            // jumped to wherever the drag ended, every single time.
+                            onClick={(e) => { e.preventDefault(); e.stopPropagation() }}
+                            onPointerDown={(e) => {
+                              e.preventDefault()
+                              e.stopPropagation()
+                              try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch {}
+                              const grip = e.currentTarget as HTMLElement
+                              const ramp = grip.parentElement?.querySelector('[data-fade-ramp="out"]') as HTMLElement | null
+                              const startX = e.clientX
+                              const initialFade = seg.fade_out ?? 0
+                              const maxFade = (endT - startT) / 2
+                              let latest = initialFade
+                              // Drive the DOM directly while dragging. This used to call
+                              // setImportedSegments on every pointermove, which rebuilt an 818-entry
+                              // array and re-rendered the whole editor per mouse event — the handle
+                              // arrived where the cursor had been half a second earlier. State is
+                              // written once, on release.
+                              const onPointerMove = (ev: PointerEvent) => {
+                                // Inverted: fade-out grows as the grip is pulled LEFT, back into the
+                            // block, mirroring fade-in growing rightward.
+                            const delta = (startX - ev.clientX) / PIXELS_PER_SECOND
+                                latest = Math.min(Math.max(0, initialFade + delta), maxFade)
+                                const px = latest * PIXELS_PER_SECOND
+                                if (ramp) ramp.style.width = `${px}px`
+                                grip.style.right = `${px}px`
+                              }
+                              const onPointerUp = () => {
+                                document.removeEventListener('pointermove', onPointerMove)
+                                document.removeEventListener('pointerup', onPointerUp)
+                                const finalFade = latest
+                                updateSegment(i, { fade_out: finalFade })
+                                commitSegmentChanges(i, { fade_out: finalFade })
+                                commitOrStage(seg.transcript_index ?? i, { fade_out: finalFade }).catch(err => console.warn('[FADE]', err))
+                                setImportedSegments(prev => {
+                                  const base = prev ?? displaySegmentsRef.current
+                                  return base.map((s, idx) => idx === i ? { ...s, fade_out: finalFade } : s)
+                                })
+                                if (audioContextRef.current) {
+                                  const stitchSegs = displaySegmentsRef.current.map((s, idx) => idx === i ? { ...s, fade_out: finalFade } : s)
+                                  requestStitchWith(stitchSegs, audioContextRef.current)
                                 }
-                                document.addEventListener('mousemove', onMouseMove)
-                                document.addEventListener('mouseup', onMouseUp)
-                              }}
-                            />
-                          </div>
+                              }
+                              document.addEventListener('pointermove', onPointerMove)
+                              document.addEventListener('pointerup', onPointerUp)
+                            }}
+                          />
                         </>
                       )}
                     </div>
@@ -10632,6 +10975,7 @@ export function DubVerseEditor({
               </div>
 
             </div>
+            </SegmentContextMenu>
           </div>
         </div>
         

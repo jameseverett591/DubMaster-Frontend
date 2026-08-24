@@ -275,8 +275,14 @@ export interface EmotionalCurve {
  *  scene's start and end. */
 export interface Scene {
   id: string
+  // Timeline position: where this scene plays in the final output.
   start: number
   end: number
+  // Source position: where the scene content comes from in the original video.
+  // When absent, the scene is assumed to start/end at the same time as the
+  // timeline position (i.e., it is not retimed/moved).
+  source_start?: number
+  source_end?: number
   video_fade_in?: number
   video_fade_out?: number
 }
@@ -368,7 +374,7 @@ export function newSceneId(): string {
 
 export function defaultScenes(videoDuration: number): Scene[] {
   if (!Number.isFinite(videoDuration) || videoDuration <= 0) return []
-  return [{ id: newSceneId(), start: 0, end: videoDuration }]
+  return [{ id: newSceneId(), start: 0, end: videoDuration, source_start: 0, source_end: videoDuration }]
 }
 
 /** Compute the black overlay opacity for a video frame at a given time.
@@ -392,6 +398,72 @@ export function computeVideoFadeOpacity(time: number, scenes: Scene[]): number {
     gain = Math.sin((remaining / fadeOut) * Math.PI / 2)
   }
   return 1 - gain
+}
+
+/** Force a scene list back into a clean partition of the timeline.
+ *
+ * Scenes must tile the timeline: sorted, contiguous, no gaps, no overlaps. Drags
+ * only ever wrote the scene being dragged, so moving one boundary left the
+ * neighbour where it was — producing overlapping scenes whose fade ramps both
+ * draw, stacked, in the overlap. Real data from one session: a scene ending at
+ * 324.95 while the next began at 320.38, plus two gaps and an unsorted list.
+ *
+ * A fade that outlived the boundary it was drawn for is dropped: a fade longer
+ * than the scene it now belongs to is meaningless, and keeping it is what leaves
+ * a ramp sitting in the middle of otherwise continuous footage.
+ */
+export function normalizeScenes(scenes: Scene[], videoDuration: number): Scene[] {
+  if (!scenes.length) return scenes
+  const sorted = [...scenes]
+    .filter(s => Number.isFinite(s.start) && Number.isFinite(s.end))
+    .sort((a, b) => a.start - b.start)
+
+  const out: Scene[] = []
+  for (let i = 0; i < sorted.length; i++) {
+    const cur = { ...sorted[i] }
+    // First scene owns the head of the timeline; nothing may precede it.
+    if (out.length === 0) cur.start = 0
+    else cur.start = out[out.length - 1].end
+    // End at the next scene's start, or the end of the film for the last one.
+    const nextStart = i + 1 < sorted.length ? sorted[i + 1].start : videoDuration
+    cur.end = Math.max(cur.start, Math.min(nextStart, videoDuration))
+    if (cur.end - cur.start < 0.01) continue   // collapsed to nothing
+    const dur = cur.end - cur.start
+    if ((cur.video_fade_in ?? 0) > dur) cur.video_fade_in = 0
+    if ((cur.video_fade_out ?? 0) > dur) cur.video_fade_out = 0
+    out.push(cur)
+  }
+  if (out.length) out[out.length - 1].end = videoDuration
+  return out
+}
+/** Map a timeline time to the corresponding source video time for a scene.
+ *  Returns null if the timeline time is not inside any scene (gap). */
+export function timelineToSourceTime(time: number, scenes: Scene[]): number | null {
+  const scene = scenes.find(s => s.start <= time && time < s.end)
+  if (!scene) return null
+  const sourceStart = scene.source_start ?? scene.start
+  const sourceEnd = scene.source_end ?? scene.end
+  const duration = scene.end - scene.start
+  if (duration <= 0) return sourceStart
+  const ratio = (time - scene.start) / duration
+  return sourceStart + ratio * (sourceEnd - sourceStart)
+}
+
+/** Map a source video time back to timeline time. Returns null if the source time
+ *  does not belong to any scene (gap). */
+export function sourceToTimelineTime(sourceTime: number, scenes: Scene[]): number | null {
+  const scene = scenes.find((s) => {
+    const ss = s.source_start ?? s.start
+    const se = s.source_end ?? s.end
+    return ss <= sourceTime && sourceTime < se
+  })
+  if (!scene) return null
+  const sourceStart = scene.source_start ?? scene.start
+  const sourceEnd = scene.source_end ?? scene.end
+  const sourceDuration = sourceEnd - sourceStart
+  if (sourceDuration <= 0) return scene.start
+  const ratio = (sourceTime - sourceStart) / sourceDuration
+  return scene.start + ratio * (scene.end - scene.start)
 }
 
 /**
