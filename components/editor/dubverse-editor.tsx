@@ -954,28 +954,39 @@ export function DubVerseEditor({
   // [data-timeline-track] ends it exactly at the bottom of the Emotion track and
   // stays correct if tracks are added, removed or toggled off.
   useLayoutEffect(() => {
-    const el = playheadRef.current
-    const container = el?.closest('[data-timeline-container]') as HTMLElement | null
-    if (!el || !container) return
-    const measure = () => {
+    let ro: ResizeObserver | null = null
+    let raf = 0
+    let tries = 0
+    const measure = (): boolean => {
+      const el = playheadRef.current
+      const container = el?.closest('[data-timeline-container]') as HTMLElement | null
+      if (!el || !container) return false
       const tracks = container.querySelectorAll('[data-timeline-track]')
       const last = tracks[tracks.length - 1] as HTMLElement | undefined
-      if (!last) return
+      if (!last) return false
       const bottom = last.getBoundingClientRect().bottom - container.getBoundingClientRect().top
-      el.style.height = `${Math.max(0, bottom - PLAYHEAD_TOP)}px`
+      const h = Math.max(0, bottom - PLAYHEAD_TOP)
+      if (h <= 0) return false
+      el.style.height = `${h}px`
+      // Only start observing once there is something real to observe.
+      if (!ro) {
+        ro = new ResizeObserver(() => { measure() })
+        ro.observe(container)
+      }
+      return true
     }
-    measure()
-    // Tracks appear and disappear with features and imports, so let the observer
-    // catch height changes rather than listing every dependency that causes one.
-    //
-    // EMPTY DEP ARRAY MATTERS. With no array this re-ran after every render,
-    // rebuilding the observer and forcing TWO synchronous layouts each time on a
-    // timeline with hundreds of thumbnails. Web Audio runs off the main thread so
-    // it played on regardless, while the video element stalled — the symptom was
-    // picture freezing with sound continuing.
-    const ro = new ResizeObserver(measure)
-    ro.observe(container)
-    return () => ro.disconnect()
+    // RETRY UNTIL IT LANDS. The needle and the track rows are not necessarily in
+    // the DOM on the first layout pass, and a single attempt that returned early
+    // left the box zero-height forever, because [] deps mean this never runs
+    // again. The head still painted (it is absolutely positioned) while the body
+    // vanished and the drag handle — top-0 bottom-0 — had no area to grab.
+    const tick = () => {
+      if (measure()) return
+      if (++tries > 300) return   // ~5s; give up rather than spin forever
+      raf = requestAnimationFrame(tick)
+    }
+    tick()
+    return () => { cancelAnimationFrame(raf); ro?.disconnect() }
   }, [])
   const timeDisplayRef = useRef<HTMLSpanElement>(null)
   const chunkBarRef = useRef<HTMLDivElement>(null)
