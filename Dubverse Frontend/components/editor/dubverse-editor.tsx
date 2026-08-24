@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useCallback, useState, useRef, useMemo, memo, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useCallback, useState, useRef, useMemo, memo, type ReactNode } from 'react'
 import {
   Lock,
   Unlock,
@@ -882,6 +882,36 @@ export function DubVerseEditor({
   const videoFadeOverlayRef = useRef<HTMLDivElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const playheadRef = useRef<HTMLDivElement>(null)
+  // Size the needle to the LAST track rather than to the timeline container.
+  // `bottom-0` looked right but stopped the needle at the foot of the Original
+  // track — the container's own box ends short of the rows painted below it, so
+  // anchoring to it silently truncated the needle. Measuring the last
+  // [data-timeline-track] ends it exactly at the bottom of the Emotion track and
+  // stays correct if tracks are added, removed or toggled off.
+  useLayoutEffect(() => {
+    const el = playheadRef.current
+    const container = el?.closest('[data-timeline-container]') as HTMLElement | null
+    if (!el || !container) return
+    const measure = () => {
+      const tracks = container.querySelectorAll('[data-timeline-track]')
+      const last = tracks[tracks.length - 1] as HTMLElement | undefined
+      if (!last) return
+      const bottom = last.getBoundingClientRect().bottom - container.getBoundingClientRect().top
+      el.style.height = `${Math.max(0, bottom - PLAYHEAD_TOP)}px`
+    }
+    measure()
+    // Tracks appear and disappear with features and imports, so let the observer
+    // catch height changes rather than listing every dependency that causes one.
+    //
+    // EMPTY DEP ARRAY MATTERS. With no array this re-ran after every render,
+    // rebuilding the observer and forcing TWO synchronous layouts each time on a
+    // timeline with hundreds of thumbnails. Web Audio runs off the main thread so
+    // it played on regardless, while the video element stalled — the symptom was
+    // picture freezing with sound continuing.
+    const ro = new ResizeObserver(measure)
+    ro.observe(container)
+    return () => ro.disconnect()
+  }, [])
   const timeDisplayRef = useRef<HTMLSpanElement>(null)
   const chunkBarRef = useRef<HTMLDivElement>(null)
   const dragLastStateUpdateRef = useRef(0)
@@ -11084,10 +11114,14 @@ export function DubVerseEditor({
                 <TimeRuler durationSec={videoDuration} pps={PIXELS_PER_SECOND} variant="bottom" />
               </div>
 
-              {/* Player needle - yellow triangle head + silver line - DRAGGABLE */}
+              {/* Player needle — draggable. Teal to match MAKE MOVIE, deliberately:
+                  it is the one marker the eye tracks constantly, and teal is not used
+                  by any block, fade or badge on the timeline. */}
               <div
                 ref={playheadRef}
-                className="absolute bottom-0 z-30 pointer-events-none"
+                // z-50: fade grips and the selected-scene highlight are z-40, so at
+                // z-30 the needle passed underneath them and broke up mid-track.
+                className="absolute z-50 pointer-events-none"
                 style={{
                   left: `${currentTime * PIXELS_PER_SECOND}px`,
                   // Head sits on the picture, below the parking bay.
@@ -11097,6 +11131,7 @@ export function DubVerseEditor({
               >
                 {/* Wide invisible drag handle so the needle is easy to grab */}
                 <div
+                  data-playhead-handle
                   className="absolute top-0 bottom-0 -left-3 w-6 cursor-ew-resize pointer-events-auto"
                   onMouseDown={(e) => {
                     e.preventDefault()
@@ -11108,8 +11143,13 @@ export function DubVerseEditor({
                     the tick marks. 1px and left-0 to match the ticks exactly, which
                     the 2px body would sit half a pixel off. */}
                 <div
-                  className="absolute left-0 w-px bg-amber-300/70 pointer-events-none"
-                  style={{ top: -MID_RULER_H, height: MID_RULER_H }}
+                  className="absolute left-0 w-px pointer-events-none"
+                  style={{
+                    top: -MID_RULER_H,
+                    height: MID_RULER_H,
+                    background: '#ccfbf1',
+                    boxShadow: '0 0 3px rgba(153,246,228,0.9), 0 0 8px rgba(45,212,191,0.7)',
+                  }}
                 />
                 {/* Head. Sits at the needle's own top — the needle already starts at
                     the video track, so the old 64px nudge for the ruler above it
@@ -11121,14 +11161,35 @@ export function DubVerseEditor({
                     height: 0,
                     borderLeft: '9px solid transparent',
                     borderRight: '9px solid transparent',
-                    borderTop: '14px solid #fcd34d',
-                    filter: 'drop-shadow(0 0 4px rgba(252,211,77,0.8))',
+                    borderTop: '14px solid #5eead4',
+                    filter: 'drop-shadow(0 0 3px rgba(240,253,250,0.95)) drop-shadow(0 0 9px rgba(45,212,191,0.8)) drop-shadow(0 0 20px rgba(45,212,191,0.45))',
                   }}
                 />
-                {/* Needle line — runs from the picture down through every track,
-                    including Emotion at the bottom. */}
-                <div className="absolute top-0 bottom-0 left-0 w-[2px] bg-amber-300 pointer-events-none"
-                  style={{ boxShadow: '0 0 6px rgba(252,211,77,0.9)' }} />
+                {/* Needle line. top-0/bottom-0 span the needle's own box, which
+                    starts at the picture and ends at the foot of the track stack —
+                    so it crosses Original, Dubbed, Preview Audio and Emotion, and
+                    stays that way if tracks are added below. */}
+                {/* Light spill. A shadow alone still reads as a drawn line; a soft wash
+                    either side makes the needle look like it is LIGHTING the tracks it
+                    crosses. Sits before the filament so the core paints over it. */}
+                <div
+                  className="absolute top-0 bottom-0 -left-[10px] w-[22px] pointer-events-none"
+                  style={{
+                    background:
+                      'linear-gradient(to right, rgba(45,212,191,0) 0%, rgba(45,212,191,0.14) 38%, ' +
+                      'rgba(45,212,191,0.30) 50%, rgba(45,212,191,0.14) 62%, rgba(45,212,191,0) 100%)',
+                  }}
+                />
+                {/* Filament. White-hot core bleeding to teal at the edges, with the bloom
+                    in four falloff stops — one big soft shadow reads as fog, several tight
+                    ones read as a source. */}
+                <div className="absolute top-0 bottom-0 left-0 w-[2px] pointer-events-none"
+                  style={{
+                    background: 'linear-gradient(to right, #5eead4, #f0fdfa 50%, #5eead4)',
+                    boxShadow:
+                      '0 0 3px rgba(240,253,250,0.95), 0 0 8px rgba(45,212,191,0.85), ' +
+                      '0 0 18px rgba(45,212,191,0.5), 0 0 32px rgba(45,212,191,0.22)',
+                  }} />
               </div>
 
             </div>
