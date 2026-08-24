@@ -8957,23 +8957,18 @@ export function DubVerseEditor({
                     // pause position, not the last 1s snapshot.
                     setCurrentTime(currentTimeRef.current)
                   } else {
-                    // Start from the SELECTED segment when the playhead has drifted
-                    // outside it. Playback leaves the playhead wherever it stopped,
-                    // so after auditioning once, pressing play again resumed from
-                    // there — and the timeline, which follows the playhead, scrolled
-                    // away from the segment being edited. Resuming in place is only
-                    // what you want while the playhead is still inside the segment
-                    // you are working on; outside it, "play" means "play this line".
-                    const _sel = selectedSegmentIndex !== null
-                      ? displaySegments[selectedSegmentIndex]
-                      : null
-                    let _from = currentTime
-                    if (_sel) {
-                      const _s = effStart(_sel)
-                      const _e = effEnd(_sel)
-                      if (currentTime < _s - 0.05 || currentTime > _e + 0.05) _from = _s
-                    }
-                    if (_from !== currentTime) setCurrentTime(_from)
+                    // Play from the PLAYHEAD, always. The playhead marks the spot.
+                    //
+                    // This used to snap to the selected segment whenever the playhead
+                    // sat outside it, so that pressing play again re-auditioned the
+                    // line. The cost was that parking the playhead in a silent stretch
+                    // and pressing play jumped to the selected line instead — which
+                    // makes timing a dub against picture impossible, because the quiet
+                    // run-up to a line is exactly the part you need to watch.
+                    //
+                    // Auditioning one line still works: clicking a segment seeks to it,
+                    // and play then starts there.
+                    const _from = currentTime
                     lastStartPosRef.current = _from  // save start pos for Stop
                     rptCancelRef.current = false     // allow the stitch to (re)schedule
                     const sourceFrom = timelineToSourceTime(_from, scenesRef.current) ?? _from
