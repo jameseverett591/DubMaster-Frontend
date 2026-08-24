@@ -9163,8 +9163,8 @@ export function DubVerseEditor({
             {/* Each spacer/label MUST match its track height exactly */}
             <div className="h-6 shrink-0 border-b border-neutral-800 bg-neutral-900" />
             <div className="h-10 shrink-0 border-b border-neutral-700 bg-neutral-900" />
-            <div className="h-16 shrink-0 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-800">Video</div>
-            <div className="h-14 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
+            <div className="h-20 shrink-0 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-800">Video</div>
+            <div className="h-20 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1">
                   <button type="button" onClick={() => setIsMutedOriginal(v => !v)} className="flex-shrink-0">
@@ -9185,7 +9185,7 @@ export function DubVerseEditor({
             </div>
             {/* Reference track label — shown only when a reference video has been imported */}
             {referenceSegments && referenceSegments.length > 0 && (
-              <div className="h-14 shrink-0 flex flex-col justify-center px-2 text-xs border-b border-amber-800/40 gap-0.5 bg-amber-950/20">
+              <div className="h-20 shrink-0 flex flex-col justify-center px-2 text-xs border-b border-amber-800/40 gap-0.5 bg-amber-950/20">
                 <span className="truncate text-amber-400/80 font-medium">Reference</span>
                 {referenceDetectedLang && (
                   <span className="text-[10px] text-neutral-500 uppercase">{referenceDetectedLang}</span>
@@ -9193,7 +9193,7 @@ export function DubVerseEditor({
               </div>
             )}
 
-            <div className="h-14 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
+            <div className="h-20 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1">
                   <button type="button" onClick={() => setIsMutedDubbed(v => !v)} className="flex-shrink-0">
@@ -9287,7 +9287,16 @@ export function DubVerseEditor({
           {/* Scrollable timeline */}
           <div 
             ref={timelineRef} 
-            className="flex-1 overflow-x-auto overflow-y-hidden flex flex-col"
+            className="flex-1 overflow-x-auto overflow-y-auto flex flex-col"
+            // Track labels live in a SEPARATE column, so scrolling the tracks
+            // vertically without moving the labels would slide every name out of
+            // line with its track — the same desync that makes track heights have
+            // to be changed in both places. Mirror the scroll instead of trying to
+            // merge the two columns, which would mean rebuilding the whole header.
+            onScroll={(e) => {
+              const top = (e.currentTarget as HTMLElement).scrollTop
+              if (trackLabelRef.current) trackLabelRef.current.scrollTop = top
+            }}
           >
             <div
               className="flex flex-col min-h-full relative"
@@ -9427,7 +9436,7 @@ export function DubVerseEditor({
               <TimeRuler durationSec={videoDuration} pps={PIXELS_PER_SECOND} variant="top" />
 
 {/* Video track with thumbnails - tiled background preserves aspect ratio */}
-              <div className="h-16 shrink-0 bg-neutral-900/30 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+              <div className="h-20 shrink-0 bg-neutral-900/30 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
                 {/* Scene blocks + fade handles */}
                 <div className="absolute top-0 left-0 right-0 h-6 z-10">
                   {scenes.map((scene, idx) => {
@@ -9628,7 +9637,7 @@ export function DubVerseEditor({
               </div>
 
               {/* Original audio track */}
-              <div className="h-14 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative" data-timeline-track>
+              <div className="h-20 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative" data-timeline-track>
                 {displaySegments.map((segment, index) => {
                   if (!inActiveWindow(segment)) return null
                   const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'original'
@@ -9876,7 +9885,7 @@ export function DubVerseEditor({
 
               {/* Reference track — shown only when a video has been imported for transcription */}
               {referenceSegments && referenceSegments.length > 0 && (
-                <div className="h-14 shrink-0 bg-amber-950/20 border-b border-amber-800/40 relative" data-timeline-track>
+                <div className="h-20 shrink-0 bg-amber-950/20 border-b border-amber-800/40 relative" data-timeline-track>
                   {referenceSegments.map((seg, i) => (
                     <div
                       key={seg.id}
@@ -9908,7 +9917,7 @@ export function DubVerseEditor({
 {/* Dubbed audio track with stretch/squeeze handles */}
               <div
                 className={cn(
-                  "h-14 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative",
+                  "h-20 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative",
                   draggedTranslation && "bg-amber-500/10 border-amber-500/30"
                 )}
                 data-timeline-track
