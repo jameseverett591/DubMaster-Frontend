@@ -3307,8 +3307,11 @@ export function DubVerseEditor({
         // Keep the playhead in the middle third of the timeline viewport.
         // Direct scrollLeft avoids browsers where smooth scrollTo stalls.
         const margin = container.clientWidth * 0.3
+        // Playing implies following: losing the playhead off-screen mid-pass is
+        // never wanted. The toggle governs the PAUSED case — seeks and jumps while
+        // editing, where a moving view is what made the work hard.
         if (
-          followPlayheadRef.current &&
+          (isPlayingRef.current || followPlayheadRef.current) &&
           (playheadPx < visibleLeft + margin || playheadPx > visibleRight - margin)
         ) {
           container.scrollLeft = Math.max(0, playheadPx - container.clientWidth * 0.5)
@@ -3370,6 +3373,29 @@ export function DubVerseEditor({
       const pps = 40 * zoomLevel
       // Update the needle, time display, and active chunk fill directly in the DOM.
       if (playheadRef.current) playheadRef.current.style.left = `${t * pps}px`
+      // Follow the playhead HERE, right beside the line that moves it.
+      //
+      // This used to live in the else of the chunk-boundary check below. The
+      // needle kept moving while the view never followed, which is only possible
+      // if that branch was swallowing it. Anything that reaches the needle now
+      // reaches the scroll, so the two can no longer disagree.
+      //
+      // Throttled to 500ms: setting scrollLeft on a timeline with hundreds of
+      // thumbnails forces a layout, and doing it every frame once made this
+      // handler take ~5 seconds.
+      if (
+        container &&
+        (isPlayingRef.current || followPlayheadRef.current) &&
+        now - rafLastScrollRef.current > 500
+      ) {
+        const headPx = t * pps
+        const viewLeft = container.scrollLeft
+        const margin = container.clientWidth * 0.3
+        if (headPx < viewLeft + margin || headPx > viewLeft + container.clientWidth - margin) {
+          rafLastScrollRef.current = now
+          container.scrollLeft = Math.max(0, headPx - container.clientWidth * 0.5)
+        }
+      }
       if (timeDisplayRef.current) timeDisplayRef.current.textContent = `${formatTime(t)} / ${formatTime(videoDuration)}`
       const activeFill = chunkBarRef.current?.querySelector('[data-active-chunk-fill]') as HTMLElement | null
       if (activeFill && chunkBoundariesRef.current.length > 1) {
@@ -3393,24 +3419,6 @@ export function DubVerseEditor({
         // then hid the five minutes the user had just watched. Stop here and
         // the segments stay on screen, ready to work on.
         setCurrentTime(chunkEndRef.current - 0.05)
-      } else {
-        // Scroll the timeline no more than every 500ms, and only when the playhead
-        // leaves the middle third. Setting scrollLeft on a timeline with hundreds
-        // of thumbnails forces a layout each time — doing it every frame was
-        // making the rAF handler take ~5 seconds.
-        if (container && now - rafLastScrollRef.current > 500) {
-          const playheadPx = t * pps
-          const visibleLeft = container.scrollLeft
-          const visibleRight = visibleLeft + container.clientWidth
-          const margin = container.clientWidth * 0.3
-          if (
-            followPlayheadRef.current &&
-            (playheadPx < visibleLeft + margin || playheadPx > visibleRight - margin)
-          ) {
-            rafLastScrollRef.current = now
-            container.scrollLeft = Math.max(0, playheadPx - container.clientWidth * 0.5)
-          }
-        }
       }
       raf = requestAnimationFrame(loop)
     }
@@ -9072,8 +9080,8 @@ export function DubVerseEditor({
                 localStorage.setItem('dubverse.editor.followPlayhead', next ? '1' : '0')
               }}
               title={followPlayhead
-                ? 'Follow playhead is ON — the timeline scrolls to keep the playhead centred. Turn it off to keep the view still while editing.'
-                : 'Follow playhead is OFF — the timeline stays where you put it. Turn it on to have it follow during playback.'}
+                ? 'Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.'
+                : 'Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.'}
               className={cn(
                 'h-7 px-2 rounded text-[11px] font-medium transition-colors whitespace-nowrap',
                 followPlayhead
@@ -9081,7 +9089,7 @@ export function DubVerseEditor({
                   : 'text-slate-500 hover:text-slate-300 border border-transparent',
               )}
             >
-              {followPlayhead ? '⇢ following' : '⇥ locked'}
+              {followPlayhead ? '⇢ always' : '⇢ on play'}
             </button>
             <div className="w-px h-5 bg-white/10 mx-1" />
             {([
