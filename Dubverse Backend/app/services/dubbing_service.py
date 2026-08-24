@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 import logging
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any, Tuple
 import asyncio
 import json
 import httpx
@@ -1694,10 +1694,23 @@ class DubbingService:
 
             # accompaniment_path was set earlier from the Demucs run at the top
             output_video = os.path.join(output_dir, f"dubbed_{target_norm}.mp4")
-            success = await asyncio.to_thread(
-                self._replace_audio_in_video, video_path, merged_audio, output_video,
-                accompaniment_path, data.get("scenes"),
+            scenes = data.get("scenes") or []
+            scenes_moved = any(
+                float(s.get("source_start", s.get("start", 0))) != float(s.get("start", 0)) or
+                float(s.get("source_end", s.get("end", 0))) != float(s.get("end", 0))
+                for s in scenes
             )
+            if scenes_moved:
+                if accompaniment_path:
+                    logger.warning("[DUB] Scenes have been moved; separated accompaniment is not yet supported in scene-based mux. Using dubbed audio only.")
+                success = await asyncio.to_thread(
+                    self._replace_audio_in_video_with_scenes, video_path, merged_audio, output_video, scenes,
+                )
+            else:
+                success = await asyncio.to_thread(
+                    self._replace_audio_in_video, video_path, merged_audio, output_video,
+                    accompaniment_path, scenes,
+                )
             _stage_t["mux"] = time.monotonic()
             logger.info(
                 f"[STAGE] mux: {_stage_t['mux'] - _stage_t['merge']:.1f}s"
@@ -2021,7 +2034,36 @@ class DubbingService:
         except Exception as e:
             logger.error(f"Failed to get video duration: {e}")
             return 0.0
-    
+
+    def _get_video_info(self, video_path: str) -> Dict[str, Any]:
+        """Return width, height, fps, duration for a video file."""
+        defaults = {"width": 1920, "height": 1080, "fps": 24.0, "duration": 0.0}
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=width,height,r_frame_rate,avg_frame_rate,duration",
+                    "-show_entries", "format=duration",
+                    "-of", "json", video_path
+                ],
+                capture_output=True,
+                text=True,
+            )
+            data = json.loads(result.stdout)
+            stream = data.get("streams", [{}])[0]
+            fmt = data.get("format", {})
+            width = int(stream.get("width", 1920))
+            height = int(stream.get("height", 1080))
+            fps_str = stream.get("r_frame_rate") or stream.get("avg_frame_rate") or "24/1"
+            num, den = fps_str.split("/")
+            fps = float(num) / float(den) if float(den) else 24.0
+            duration = float(stream.get("duration") or fmt.get("duration") or 0.0)
+            return {"width": width, "height": height, "fps": fps, "duration": duration}
+        except Exception as e:
+            logger.warning(f"Failed to probe video info: {e}")
+            return defaults
+
     def _ensure_min_loudness(self, audio_path: str) -> bool:
         """Raise a too-quiet segment to a usable floor. BOOST ONLY — never cuts.
 
@@ -2514,7 +2556,51 @@ class DubbingService:
         with ThreadPoolExecutor(max_workers=8) as pool:
             decoded = list(pool.map(_decode, paths))
 
-        for seg, data in zip(segments_sorted, decoded):
+        # Overlap-derived crossfades. Mirrors computeFades in lib/rpt-engine.ts —
+        # the preview and the export have to reach the same answer or the film does
+        # not sound like what was approved.
+        #
+        # Hand-set fades alone are not enough: overlap is a TIMING TECHNIQUE here,
+        # used to tuck one line under the next, and it is normally applied by
+        # dragging segments rather than by dragging fade handles. Summing two
+        # full-level speech signals in the overlap is louder than either and can
+        # clip; it reads as two people talking over each other, which is exactly
+        # what the crossfade exists to avoid.
+        #
+        # Measured from where the audio ACTUALLY ends (start + decoded length),
+        # never from the slot: a segment whose audio is shorter than its slot has
+        # no acoustic overlap to blend, and fading it would dip a tail that had
+        # already finished.
+        _extents = []
+        for _i, (_seg, _data) in enumerate(zip(segments_sorted, decoded)):
+            if _data is None or not len(_data):
+                continue
+            _st = float(_seg["start"])
+            _off = int(round(_st * sr))
+            _en = min(_off + len(_data), total_samples)
+            if _en <= _off:
+                continue
+            _extents.append((_i, _st, _st + (_en - _off) / sr))
+        _extents.sort(key=lambda e: e[1])
+
+        _auto_fade: Dict[int, List[float]] = {}
+        for _k in range(len(_extents) - 1):
+            _ai, _a_start, _a_end = _extents[_k]
+            _bi, _b_start, _b_end = _extents[_k + 1]
+            _overlap = _a_end - _b_start
+            if _overlap <= 0.001:
+                continue
+            # Both sides of one overlap must use the SAME length, or the curves stop
+            # being complementary and their sum dips or peaks in the middle. Capped
+            # by each segment, so a short line beside a long overlap is not faded
+            # across its whole duration.
+            _n = min(_overlap, _a_end - _a_start, _b_end - _b_start)
+            if _n <= 0:
+                continue
+            _auto_fade.setdefault(_ai, [0.0, 0.0])[1] = max(_auto_fade[_ai][1], _n)
+            _auto_fade.setdefault(_bi, [0.0, 0.0])[0] = max(_auto_fade[_bi][0], _n)
+
+        for _idx, (seg, data) in enumerate(zip(segments_sorted, decoded)):
             if data is None or not len(data):
                 continue
             offset = int(round(float(seg["start"]) * sr))
@@ -2530,8 +2616,13 @@ class DubbingService:
             # segment with a long fade_out fades out over its own tail regardless of
             # whether the next line overlaps. When two segments overlap, the fades
             # combine into a crossfade.
-            fade_in = float(seg.get("fade_in") or 0)
-            fade_out = float(seg.get("fade_out") or 0)
+            # Greater of hand-set and overlap-derived, per side — the same rule the
+            # browser applies. A crossfade the timing needs is never shortened by a
+            # smaller manual fade, and a longer manual fade is never cut back by a
+            # shorter overlap.
+            _auto = _auto_fade.get(_idx, (0.0, 0.0))
+            fade_in = max(float(seg.get("fade_in") or 0), float(_auto[0]))
+            fade_out = max(float(seg.get("fade_out") or 0), float(_auto[1]))
             if fade_in > 0 or fade_out > 0:
                 fi_samples = min(int(round(fade_in * sr)), copy_len)
                 # Cap fade-out so it does not overlap the fade-in region.
@@ -2794,11 +2885,13 @@ class DubbingService:
             )
 
             # Video fade-to-black filters from user scene boundaries. When no
-            # scenes are supplied, the video stream is mapped unchanged.
+            # scenes are supplied, the video stream is mapped unchanged. Fades
+            # are applied at the SOURCE time of each scene so the rendered
+            # output matches the original video before any scene rearrangement.
             video_fade_filters = []
             for scene in scenes or []:
-                start = float(scene.get("start", 0))
-                end = float(scene.get("end", start))
+                start = float(scene.get("source_start", scene.get("start", 0)))
+                end = float(scene.get("source_end", scene.get("end", start)))
                 fade_in = float(scene.get("video_fade_in") or 0)
                 fade_out = float(scene.get("video_fade_out") or 0)
                 if fade_in > 0:
@@ -2906,6 +2999,141 @@ class DubbingService:
             logger.error(f"Replace audio error: {e}")
             return False
 
+    def _replace_audio_in_video_with_scenes(
+        self,
+        video_path: str,
+        audio_path: str,
+        output_path: str,
+        scenes: List[Dict],
+    ) -> bool:
+        """Mux video + audio when scenes have been moved/retimed on the timeline.
+
+        Each scene is cut from its source_start..source_end range in the original
+        video/audio and placed at its timeline start. Gaps between scenes are
+        filled with black/silence. Per-scene video fade-in/fade-out and per-
+        segment audio fades (already applied in the mixed audio) are preserved,
+        so the export matches the browser preview.
+        """
+        try:
+            scenes_sorted = sorted(scenes, key=lambda s: float(s.get("start", 0)))
+            n = len(scenes_sorted)
+            if n == 0:
+                return self._replace_audio_in_video(video_path, audio_path, output_path)
+
+            info = self._get_video_info(video_path)
+            width = info.get("width", 1920)
+            height = info.get("height", 1080)
+            fps = info.get("fps", 24.0)
+
+            # Build an interleaved list of scenes and gap fillers on the output
+            # timeline, starting at t=0 and ending at the last scene end.
+            output_end = max(float(s.get("end", 0)) for s in scenes_sorted)
+            segments: List[Tuple[str, Any]] = []
+            cursor = 0.0
+            for scene in scenes_sorted:
+                scene_start = float(scene.get("start", 0))
+                scene_end = float(scene.get("end", scene_start))
+                if scene_start > cursor:
+                    segments.append(("gap", scene_start - cursor))
+                segments.append(("scene", scene))
+                cursor = max(cursor, scene_end)
+            if cursor < output_end:
+                segments.append(("gap", output_end - cursor))
+
+            num_scenes = sum(1 for s in segments if s[0] == "scene")
+            num_gaps = sum(1 for s in segments if s[0] == "gap")
+
+            # ----------------- Video filter graph -----------------
+            v_filters: List[str] = []
+            v_filters.append(f"[0:v]split={num_scenes}{''.join(f'[v{i}]' for i in range(num_scenes))}")
+
+            scene_labels: List[str] = []
+            scene_idx = 0
+            gap_idx = 0
+            for seg_type, seg_value in segments:
+                if seg_type == "scene":
+                    scene = seg_value
+                    ss = float(scene.get("source_start", scene.get("start", 0)))
+                    se = float(scene.get("source_end", scene.get("end", ss)))
+                    dur = max(0.0, se - ss)
+                    fade_in = float(scene.get("video_fade_in") or 0)
+                    fade_out = float(scene.get("video_fade_out") or 0)
+                    fade_chain = ""
+                    if fade_in > 0:
+                        fade_chain += f",fade=t=in:st=0:d={min(fade_in, dur):.3f}:c=black"
+                    if fade_out > 0 and dur > fade_out:
+                        fade_chain += f",fade=t=out:st={max(0.0, dur - fade_out):.3f}:d={fade_out:.3f}:c=black"
+                    v_filters.append(f"[v{scene_idx}]trim=start={ss:.3f}:end={se:.3f},setpts=PTS-STARTPTS{fade_chain}[s{scene_idx}]")
+                    scene_labels.append(f"[s{scene_idx}]")
+                    scene_idx += 1
+                else:
+                    gap_dur = float(seg_value)
+                    v_filters.append(f"[bg{gap_idx}]trim=duration={gap_dur:.3f}[g{gap_idx}]")
+                    scene_labels.append(f"[g{gap_idx}]")
+                    gap_idx += 1
+
+            if num_gaps > 0:
+                v_filters.insert(0, f"[black]color=c=black:s={width}x{height}:r={fps}[bgbase]")
+                v_filters.insert(1, f"[bgbase]split={num_gaps}{''.join(f'[bg{i}]' for i in range(num_gaps))}")
+
+            total_segments = len(scene_labels)
+            v_filters.append(f"{''.join(scene_labels)}concat=n={total_segments}:v=1:a=0[outv]")
+
+            # ----------------- Audio filter graph -----------------
+            a_filters: List[str] = []
+            a_filters.append(f"[1:a]asplit={num_scenes}{''.join(f'[a{i}]' for i in range(num_scenes))}")
+
+            audio_labels: List[str] = []
+            scene_idx = 0
+            gap_idx = 0
+            for seg_type, seg_value in segments:
+                if seg_type == "scene":
+                    scene = seg_value
+                    ss = float(scene.get("source_start", scene.get("start", 0)))
+                    se = float(scene.get("source_end", scene.get("end", ss)))
+                    a_filters.append(f"[a{scene_idx}]atrim=start={ss:.3f}:end={se:.3f},asetpts=PTS-STARTPTS[a{scene_idx}_c]")
+                    audio_labels.append(f"[a{scene_idx}_c]")
+                    scene_idx += 1
+                else:
+                    gap_dur = float(seg_value)
+                    a_filters.append(f"[sg{gap_idx}]atrim=duration={gap_dur:.3f}[ag{gap_idx}]")
+                    audio_labels.append(f"[ag{gap_idx}]")
+                    gap_idx += 1
+
+            if num_gaps > 0:
+                a_filters.insert(0, "[sil]anullsrc=r=44100:cl=stereo[silbase]")
+                a_filters.insert(1, f"[silbase]asplit={num_gaps}{''.join(f'[sg{i}]' for i in range(num_gaps))}")
+
+            total_audio_segments = len(audio_labels)
+            a_filters.append(f"{''.join(audio_labels)}concat=n={total_audio_segments}:v=0:a=1[outa]")
+
+            filter_complex = ";".join(v_filters + a_filters)
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", video_path,
+                "-i", audio_path,
+                "-filter_complex", filter_complex,
+                "-map", "[outv]",
+                "-map", "[outa]",
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "23",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart",
+                output_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.error(f"Scene-based mux error: {result.stderr}")
+                return False
+            logger.info(f"[MIX] Scene-based output written: {output_path}")
+            return os.path.exists(output_path)
+        except Exception as e:
+            logger.error(f"Scene-based mux error: {e}")
+            return False
+
     def render_scene_preview(
         self,
         job_id: str,
@@ -2927,9 +3155,12 @@ class DubbingService:
 
         start = float(scene.get("start", 0))
         end = float(scene.get("end", start))
+        source_start = float(scene.get("source_start", start))
+        source_end = float(scene.get("source_end", end))
+        source_duration = source_end - source_start
+        if source_duration <= 0:
+            raise ValueError("Scene source duration must be positive")
         duration = end - start
-        if duration <= 0:
-            raise ValueError("Scene duration must be positive")
 
         # Resolve video path, mirroring the same fallback used in remix_dub.
         video_path = data.get("video_path", "")
@@ -2983,11 +3214,11 @@ class DubbingService:
 
         cmd = [
             "ffmpeg", "-y",
-            "-ss", str(start),
-            "-t", str(duration),
+            "-ss", str(source_start),
+            "-t", str(source_duration),
             "-i", video_path,
-            "-ss", str(start),
-            "-t", str(duration),
+            "-ss", str(source_start),
+            "-t", str(source_duration),
             "-i", mixed_audio,
         ]
         if video_filter:
@@ -3732,7 +3963,41 @@ class DubbingService:
             # In the regen path we key by use_voice_id (the actual reference ID)
             # rather than the canonical voice_key — still a valid per-voice signal.
             update_voice_rate(use_voice_id, use_text, actual_dur)
-            if actual_dur > slot_dur + 0.05:
+
+            # If the user has committed a manual timing (drag/resize), treat the slot
+            # as authoritative. Fit the audio inside it with speed or trim, but never
+            # relocate the segment. This stops the "snap-back" where regenerating a
+            # manually placed segment moves it to match the TTS duration.
+            user_committed_timing = (
+                _pre_fit_committed[0] is not None and _pre_fit_committed[1] is not None
+            )
+
+            if user_committed_timing and actual_dur > slot_dur + 0.05:
+                target = max(0.2, slot_dur)
+                stretched_path = os.path.join(output_dir, f"segment_{segment_index:04d}{_take_suffix}_fit.mp3")
+                stretched = await asyncio.to_thread(
+                    self._adjust_audio_duration,
+                    final_path, stretched_path, target,
+                    min_speed=0.5, max_speed=2.0,
+                )
+                if stretched and os.path.exists(stretched_path):
+                    final_path = stretched_path
+                    logger.info(
+                        f"[REGEN-PRESERVE] seg {segment_index}: user-committed slot "
+                        f"[{slot_start:.2f}-{slot_end:.2f}] kept; audio speed-fit {actual_dur:.2f}s → {target:.2f}s"
+                    )
+                else:
+                    trimmed_path = os.path.join(output_dir, f"segment_{segment_index:04d}{_take_suffix}_trim.mp3")
+                    trimmed = await asyncio.to_thread(
+                        self._trim_audio_duration, final_path, trimmed_path, target
+                    )
+                    if trimmed and os.path.exists(trimmed_path):
+                        final_path = trimmed_path
+                        logger.warning(
+                            f"[REGEN-PRESERVE] seg {segment_index}: user-committed slot "
+                            f"[{slot_start:.2f}-{slot_end:.2f}] kept; audio hard-trimmed {actual_dur:.2f}s → {target:.2f}s"
+                        )
+            elif actual_dur > slot_dur + 0.05:
                 # Room before the next segment starts. The segments array is NOT
                 # guaranteed to be in time order (splits insert out-of-order
                 # transcript_indexes), so take the temporally-NEAREST segment that
@@ -4143,9 +4408,22 @@ class DubbingService:
             raise RuntimeError(f"Remix failed: could not merge {len(merge_segments)} segments for job {job_id}")
 
         output_video = os.path.join(output_dir, f"dubbed_{language}.mp4")
-        ok = await asyncio.to_thread(
-            self._replace_audio_in_video, video_path, merged_audio, output_video, accompaniment_path, data.get("scenes")
+        scenes = data.get("scenes") or []
+        scenes_moved = any(
+            float(s.get("source_start", s.get("start", 0))) != float(s.get("start", 0)) or
+            float(s.get("source_end", s.get("end", 0))) != float(s.get("end", 0))
+            for s in scenes
         )
+        if scenes_moved:
+            if accompaniment_path:
+                logger.warning("[REMIX] Scenes have been moved; separated accompaniment is not yet supported in scene-based mux. Using dubbed audio only.")
+            ok = await asyncio.to_thread(
+                self._replace_audio_in_video_with_scenes, video_path, merged_audio, output_video, scenes
+            )
+        else:
+            ok = await asyncio.to_thread(
+                self._replace_audio_in_video, video_path, merged_audio, output_video, accompaniment_path, scenes
+            )
         if not ok:
             raise RuntimeError(f"Remix failed: could not mux audio into video for job {job_id}")
 
