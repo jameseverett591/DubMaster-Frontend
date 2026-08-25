@@ -9751,7 +9751,7 @@ export function DubVerseEditor({
                 // once: the scene moved right by dx while the view panned left by
                 // dx, and the block looked welded in place. Exclusion by name is
                 // the only thing that separates them.
-                if (tgt.closest('[data-playhead-handle], [data-fade-handle], [data-scene-handle], [data-scene-block], [data-resize-handle], [data-segment-block]')) return
+                if (tgt.closest('[data-playhead-handle], [data-fade-handle], [data-scene-handle], [data-scene-block], [data-parked-clip], [data-resize-handle], [data-segment-block]')) return
                 const tl = timelineRef.current
                 if (!tl) return
                 const startX = e.clientX
@@ -10037,6 +10037,16 @@ export function DubVerseEditor({
                 className="h-20 shrink-0 bg-cyan-950/20 border-b border-cyan-800/40 relative overflow-hidden"
                 data-timeline-track
               >
+                {/* CEILING OF THE WORKING AREA.
+                    A clip is dragged between the parking bay and the picture, and
+                    nothing marked where that region began or ended — the drop target
+                    was invisible and had to be learned. This is the top edge: above
+                    it there is nothing to drop onto. Drawn inside the track so it
+                    spans the whole timeline width and scrolls with it. */}
+                <div
+                  className="absolute top-0 left-0 right-0 h-[2px] bg-cyan-400/70 pointer-events-none z-20"
+                  style={{ boxShadow: `0 0 6px rgba(34,211,238,0.45)` }}
+                />
                 {parkedScenes.length === 0 && (
                   <div className="absolute inset-0 flex items-center pl-3 text-[10px] text-cyan-600/50 pointer-events-none">
                     Lift a scene here to take it out of the picture without losing it
@@ -10050,6 +10060,7 @@ export function DubVerseEditor({
                   return (
                     <div
                       key={sc.id}
+                      data-parked-clip
                       draggable={false}
                       className="absolute top-2 bottom-2 rounded border-2 border-cyan-400/70 hover:border-cyan-300 bg-neutral-950 overflow-hidden flex items-center justify-center cursor-move select-none shadow-lg shadow-black/60"
                       onDragStart={(e) => { e.preventDefault() }}
@@ -10064,7 +10075,13 @@ export function DubVerseEditor({
                         e.stopPropagation()
                         setParkedMenu({ x: e.clientX, y: e.clientY, sceneId: sc.id })
                       }}
-                      onMouseDown={(e) => {
+                      // Pointer drag with capture, exactly as the scene blocks do it.
+                      // On mousedown the pan (which listens on POINTERDOWN) had already
+                      // claimed the gesture, so the timeline scrolled while the clip
+                      // transformed — the two moved opposite ways and the clip appeared
+                      // to slide away from the cursor.
+                      onPointerDown={(e) => {
+                        if (e.button !== 0) return
                         e.preventDefault()
                         e.stopPropagation()
                         const startX = e.clientX
@@ -10075,8 +10092,24 @@ export function DubVerseEditor({
                         // fades, the overview thumb and the pan. During a drag, write
                         // only; React finds out when the drag ends.
                         const el = e.currentTarget as HTMLElement
+                        const pointerId = e.pointerId
+                        try { el.setPointerCapture(pointerId) } catch {}
                         let dx = 0
                         let dy = 0
+                        // THE BOUNDARIES ARE REAL, NOT DECORATION.
+                        // Measured once on the way down: the ceiling is the top of the
+                        // parking bay, the floor is the bottom of the picture. The clip
+                        // is clamped so no part of it can leave that band. There is
+                        // nothing above or below to drop onto, so dragging out there
+                        // only ever produced a drop that snapped back unexplained.
+                        const elRect = el.getBoundingClientRect()
+                        const ceilRect = layoverTrackRef.current?.getBoundingClientRect()
+                        const floorRect = videoTrackRef.current?.getBoundingClientRect()
+                        const ceilY = ceilRect ? ceilRect.top : elRect.top
+                        const floorY = floorRect ? floorRect.bottom : elRect.bottom
+                        const minDy = ceilY - elRect.top
+                        const maxDy = floorY - elRect.bottom
+                        let lastY = startY
                         // Same clipping problem in reverse: dropping back into the
                         // picture meant crossing a boundary both tracks clip, so the
                         // clip vanished behind the edge on the way down.
@@ -10084,26 +10117,39 @@ export function DubVerseEditor({
                         const lTrack = layoverTrackRef.current
                         if (vTrack) vTrack.style.overflow = 'visible'
                         if (lTrack) lTrack.style.overflow = 'visible'
-                        el.style.pointerEvents = 'none'
+                        el.style.zIndex = '60'
+                        el.style.cursor = 'grabbing'
+                        el.style.boxShadow = '0 10px 28px rgba(0,0,0,0.85)'
+                        el.style.outline = '2px solid rgba(34,211,238,0.9)'
+                        el.style.willChange = 'transform'
                         setDraggingParkedId(sc.id)
-                        const onMove = (ev: MouseEvent) => {
-                          dx = ev.clientX - startX
-                          dy = ev.clientY - startY
+                        const onMove = (ev: PointerEvent) => {
+                          if (ev.buttons === 0) { finish(lastY); return }
+                          // Never past the start of the film either: a negative
+                          // layover_time puts the clip off the front of the track.
+                          dx = Math.max(-left, ev.clientX - startX)
+                          dy = Math.min(maxDy, Math.max(minDy, ev.clientY - startY))
+                          lastY = ev.clientY
                           el.style.transform = `translate(${dx}px, ${dy}px)`
                         }
-                        const onUp = (ev: MouseEvent) => {
+                        function finish(dropY: number) {
+                          try { el.releasePointerCapture(pointerId) } catch {}
                           el.style.transform = ''
-                          el.style.pointerEvents = ''
+                          el.style.zIndex = ''
+                          el.style.cursor = ''
+                          el.style.boxShadow = ''
+                          el.style.outline = ''
+                          el.style.willChange = ''
                           if (vTrack) vTrack.style.overflow = ''
                           if (lTrack) lTrack.style.overflow = ''
                           setDraggingParkedId(null)
-                          document.removeEventListener('mousemove', onMove)
-                          document.removeEventListener('mouseup', onUp)
+                          document.removeEventListener('pointermove', onMove)
+                          document.removeEventListener('pointerup', onUp)
                           document.removeEventListener('pointercancel', onUp)
-                          window.removeEventListener('blur', onUp)
+                          window.removeEventListener('blur', onBlur)
                           const videoRect = videoTrackRef.current?.getBoundingClientRect()
                           // Dragged down into the picture track: restore it to its hole.
-                          if (videoRect && ev.clientY >= videoRect.top && ev.clientY < videoRect.bottom) {
+                          if (videoRect && dropY >= videoRect.top && dropY < videoRect.bottom) {
                             restoreScene(sc.id)
                             persistScenes().catch(err => console.warn('[RESTORE]', err))
                             return
@@ -10113,10 +10159,12 @@ export function DubVerseEditor({
                           updateScene(sc.id, { layover_time: newLeft / PIXELS_PER_SECOND })
                           persistScenes().catch(err => console.warn('[PARK-MOVE]', err))
                         }
-                        document.addEventListener('mousemove', onMove)
-                        document.addEventListener('mouseup', onUp)
+                        const onUp = (ev: PointerEvent) => finish(ev.clientY)
+                        const onBlur = () => finish(lastY)
+                        document.addEventListener('pointermove', onMove)
+                        document.addEventListener('pointerup', onUp)
                         document.addEventListener('pointercancel', onUp)
-                        window.addEventListener('blur', onUp)
+                        window.addEventListener('blur', onBlur)
                       }}
                     >
                       {/* THE LIFTED FOOTAGE, CARRIED WITH THE CLIP.
@@ -10167,6 +10215,15 @@ export function DubVerseEditor({
                   footage rather than across two tracks. */}
               <TimeRuler durationSec={videoDuration} pps={PIXELS_PER_SECOND} variant="mid" />
               <div ref={videoTrackRef} className="h-20 shrink-0 bg-neutral-900/30 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+                {/* FLOOR OF THE WORKING AREA. The bottom edge of the picture: below
+                    it is audio, which a video clip cannot be dropped onto. Together
+                    with the ceiling above the parking bay these two lines bound the
+                    region a clip travels in, so the gesture reads before you make it
+                    rather than after. */}
+                <div
+                  className="absolute bottom-0 left-0 right-0 h-[2px] bg-emerald-400/70 pointer-events-none z-20"
+                  style={{ boxShadow: `0 0 6px rgba(52,211,153,0.45)` }}
+                />
                 {/* THE HOLE A LIFTED SECTION LEAVES.
                     The filmstrip is one continuous run of thumbnails across the whole
                     duration — it is not built from scenes — so removing a scene block
@@ -10256,7 +10313,7 @@ export function DubVerseEditor({
                         key={scene.id}
                         data-scene-block
                         draggable={false}
-                        className="absolute top-0 h-full group cursor-move select-none"
+                        className="absolute top-0 h-full group cursor-move select-none overflow-hidden"
                         onContextMenu={(e) => {
                           e.preventDefault()
                           e.stopPropagation()
@@ -10267,7 +10324,17 @@ export function DubVerseEditor({
                           left: scene.start * PIXELS_PER_SECOND,
                           width: Math.max(4, sceneDuration * PIXELS_PER_SECOND),
                         }}
-                        onMouseDown={(e) => {
+                        // POINTER DRAG, the same shape as the fade handles — the most
+                        // precise thing on this timeline. Capture the pointer on the way
+                        // down so every move is delivered here even when the cursor
+                        // outruns the clip or leaves the window, follow the cursor by
+                        // writing transform, and tell React once on release.
+                        //
+                        // Listening on pointerdown also ends the pointerdown/mousedown
+                        // ordering trap: the pan listens on pointerdown, so a mousedown
+                        // handler could not stop it and both drags ran at once.
+                        onPointerDown={(e) => {
+                          if (e.button !== 0) return
                           e.preventDefault()
                           e.stopPropagation()
                           const startX = e.clientX
@@ -10275,14 +10342,6 @@ export function DubVerseEditor({
                           const startStart = scene.start
                           const startEnd = scene.end
                           const duration = startEnd - startStart
-                          // Sliding picture against audio is how sync is found, so the
-                          // scene moves freely — but only into space that is actually
-                          // free. Bounded by its neighbours in TIME order (the array is
-                          // not sorted), because sliding into one would leave two scenes
-                          // claiming the same instant, and the normaliser resolves that
-                          // by trimming — quietly shortening footage the user was trying
-                          // to move. A gap left by a lifted section is fair game: that is
-                          // what it is for.
                           // FREE TRAVEL, THE FULL LENGTH OF THE TRACK.
                           //
                           // This was clamped to the free space between the neighbours,
@@ -10304,6 +10363,8 @@ export function DubVerseEditor({
                           // rule this file keeps relearning) and the store is written
                           // once, on drop.
                           const el = e.currentTarget as HTMLElement
+                          const pointerId = e.pointerId
+                          try { el.setPointerCapture(pointerId) } catch {}
                           const vTrack = videoTrackRef.current
                           const lTrack = layoverTrackRef.current
                           // Both tracks clip their contents, so a clip crossing between
@@ -10311,32 +10372,51 @@ export function DubVerseEditor({
                           // of the picture. Lift the clipping for the duration of the drag.
                           if (vTrack) vTrack.style.overflow = 'visible'
                           if (lTrack) lTrack.style.overflow = 'visible'
+                          // Lift it off the backdrop. A clip that stays flat in the row
+                          // reads as though the ROW is moving rather than the clip.
                           el.style.zIndex = '60'
-                          el.style.pointerEvents = 'none'
-                          const onMove = (ev: MouseEvent) => {
+                          el.style.cursor = 'grabbing'
+                          el.style.boxShadow = '0 10px 28px rgba(0,0,0,0.85)'
+                          el.style.outline = '2px solid rgba(52,211,153,0.9)'
+                          el.style.willChange = 'transform'
+                          // Same band, same reason as the parked clip above.
+                          const elRect = el.getBoundingClientRect()
+                          const ceilY = lTrack ? lTrack.getBoundingClientRect().top : elRect.top
+                          const floorY = vTrack ? vTrack.getBoundingClientRect().bottom : elRect.bottom
+                          const minDy = ceilY - elRect.top
+                          const maxDy = floorY - elRect.bottom
+                          let lastY = startY
+                          const onMove = (ev: PointerEvent) => {
+                            // A move with no button held means the release was missed.
+                            if (ev.buttons === 0) { finish(lastY); return }
                             didMove = true
+                            lastY = ev.clientY
                             const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
                             newStart = Math.min(_maxStart, Math.max(_minStart, startStart + delta))
-                            // Horizontal follows the clamp so it cannot be dragged
-                            // through a neighbour; vertical is free so the lift reads.
+                            // Bounded only by the film itself, so the clip tracks the
+                            // cursor one-to-one everywhere in between.
                             const dx = (newStart - startStart) * PIXELS_PER_SECOND
-                            const dy = ev.clientY - startY
+                            const dy = Math.min(maxDy, Math.max(minDy, ev.clientY - startY))
                             el.style.transform = `translate(${dx}px, ${dy}px)`
                           }
-                          const onUp = (ev: MouseEvent) => {
+                          function finish(dropY: number) {
+                            try { el.releasePointerCapture(pointerId) } catch {}
                             el.style.transform = ''
                             el.style.zIndex = ''
-                            el.style.pointerEvents = ''
+                            el.style.cursor = ''
+                            el.style.boxShadow = ''
+                            el.style.outline = ''
+                            el.style.willChange = ''
                             if (vTrack) vTrack.style.overflow = ''
                             if (lTrack) lTrack.style.overflow = ''
-                            document.removeEventListener('mousemove', onMove)
-                            document.removeEventListener('mouseup', onUp)
+                            document.removeEventListener('pointermove', onMove)
+                            document.removeEventListener('pointerup', onUp)
                             document.removeEventListener('pointercancel', onUp)
-                            window.removeEventListener('blur', onUp)
+                            window.removeEventListener('blur', onBlur)
                             const layoverRect = layoverTrackRef.current?.getBoundingClientRect()
                             // Drag up into the layover track parks the scene; otherwise
                             // persist the horizontal slide in the picture.
-                            if (didMove && layoverRect && ev.clientY >= layoverRect.top && ev.clientY < layoverRect.bottom) {
+                            if (didMove && layoverRect && dropY >= layoverRect.top && dropY < layoverRect.bottom) {
                               parkScene(scene.id)
                               persistScenes().catch(err => console.warn('[PARK]', err))
                             } else if (didMove) {
@@ -10345,12 +10425,51 @@ export function DubVerseEditor({
                               persistScenes().catch(err => console.warn('[SCENE-MOVE]', err))
                             }
                           }
-                          document.addEventListener('mousemove', onMove)
-                          document.addEventListener('mouseup', onUp)
+                          const onUp = (ev: PointerEvent) => finish(ev.clientY)
+                          // blur carries no pointer position; end it where it stands.
+                          const onBlur = () => finish(lastY)
+                          document.addEventListener('pointermove', onMove)
+                          document.addEventListener('pointerup', onUp)
                           document.addEventListener('pointercancel', onUp)
-                          window.addEventListener('blur', onUp)
+                          window.addEventListener('blur', onBlur)
                         }}
                       >
+                        {/* THE PICTURE BELONGS TO THE SCENE.
+                            The filmstrip used to be one continuous run of thumbnails
+                            tiled across the whole track, with no knowledge of scenes at
+                            all. Sliding a scene therefore moved an empty outline while
+                            the footage stayed exactly where it was — the picture could
+                            not actually be moved against the audio, which is the one
+                            thing this track exists to do.
+
+                            Each scene now draws the frames of its OWN source range,
+                            shifted by source_start and clipped to the block, so the
+                            footage travels with the clip and retimed scenes show what
+                            they will actually play. Gaps show black, which is what a gap
+                            renders as. */}
+                        {videoThumbnails.length > 0 && (
+                          <div
+                            className="absolute inset-0 flex pointer-events-none"
+                            style={{
+                              left: -((scene.source_start ?? scene.start) * PIXELS_PER_SECOND),
+                              width: videoDuration * PIXELS_PER_SECOND,
+                            }}
+                          >
+                            {videoThumbnails.map((thumb, ti) => (
+                              <div
+                                key={ti}
+                                className="h-full flex-shrink-0"
+                                style={{
+                                  width: `${(videoDuration / videoThumbnails.length) * PIXELS_PER_SECOND}px`,
+                                  backgroundImage: `url(${thumb})`,
+                                  backgroundSize: 'auto 100%',
+                                  backgroundPosition: '0% 50%',
+                                  backgroundRepeat: 'repeat-x',
+                                }}
+                              />
+                            ))}
+                          </div>
+                        )}
                         <div className={cn(
                           "absolute inset-0 pointer-events-none",
                           overlappingSceneIds.has(scene.id)
@@ -10577,7 +10696,11 @@ export function DubVerseEditor({
                   })}
                 </div>
 
-                {videoThumbnails.length > 0 ? (
+                {/* Fallback only. Once scenes exist they carry the picture themselves
+                    (see above); a continuous strip underneath them would show the wrong
+                    frames wherever a scene has been retimed or moved, and would paint
+                    footage across gaps that render as black. */}
+                {videoThumbnails.length > 0 && scenes.length === 0 ? (
                   <div className="absolute inset-y-1 left-1 right-1 rounded overflow-hidden border border-emerald-500/50 flex">
                     {videoThumbnails.map((thumb, idx) => {
                       const thumbDuration = videoDuration / videoThumbnails.length
