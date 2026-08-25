@@ -293,6 +293,9 @@ export interface Scene {
   /** Where it sat before being lifted, so it can be dropped straight back. */
   parked_from_start?: number
   parked_from_end?: number
+  /** Timeline time used to place the parked scene in the layover track, so it
+   *  stays directly above where it came from until the user drags it elsewhere. */
+  layover_time?: number
   video_fade_in?: number
   video_fade_out?: number
 }
@@ -435,20 +438,24 @@ export function normalizeScenes(scenes: Scene[], videoDuration: number): Scene[]
   const out: Scene[] = []
   for (let i = 0; i < sorted.length; i++) {
     const cur = { ...sorted[i] }
-    // GAPS ARE LEFT ALONE. Lifting a section to the layover track opens a hole on
-    // purpose: it is working space, held while the footage either side is adjusted,
-    // until the cut is dropped back in or discarded. Closing it automatically would
-    // undo the edit the moment anything persisted. Gaps render as black.
+    // A SCENE GOES WHERE IT IS PUT. Neither gaps nor overlaps are corrected here.
     //
-    // Overlaps are always wrong, though — two scenes claiming the same instant have
-    // no meaning, and their fade ramps draw stacked over each other. So a scene is
-    // only ever TRIMMED back to where the next one begins, never moved.
-    if (out.length > 0 && cur.start < out[out.length - 1].end) {
-      cur.start = out[out.length - 1].end
-    }
+    // Gaps are deliberate: lifting a section opens a hole as working space, held
+    // while the footage either side is adjusted, until the cut is dropped back in
+    // or discarded. Closing it would undo the edit the moment anything persisted.
+    //
+    // Overlaps used to be trimmed back to the next scene's start, on the reasoning
+    // that two scenes claiming the same instant have no meaning. The cost was that
+    // a clip could not be slid anywhere useful: the trim moved its NEIGHBOUR, so
+    // dragging one piece of picture dragged the rest of the film with it. Sliding
+    // picture against audio is how sync is found without a lipsync engine, so the
+    // clip has to win and everything else must hold still.
+    //
+    // Overlaps are therefore possible now and are surfaced in the UI rather than
+    // silently resolved. NOTE: the render still has to pick ONE source for an
+    // overlapped instant — that is unresolved, and is why they are flagged.
     cur.start = Math.max(0, cur.start)
-    const nextStart = i + 1 < sorted.length ? sorted[i + 1].start : videoDuration
-    cur.end = Math.max(cur.start, Math.min(cur.end, nextStart, videoDuration))
+    cur.end = Math.max(cur.start, Math.min(cur.end, videoDuration))
     if (cur.end - cur.start < 0.01) continue   // collapsed to nothing
     const dur = cur.end - cur.start
     if ((cur.video_fade_in ?? 0) > dur) cur.video_fade_in = 0
