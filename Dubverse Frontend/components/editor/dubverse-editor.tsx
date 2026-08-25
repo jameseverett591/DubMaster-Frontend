@@ -1014,7 +1014,6 @@ export function DubVerseEditor({
     mergeSceneWithNext,
     parkScene,
     restoreScene,
-    reorderParkedScenes,
     removeScene,
     activeSidebarTab,
     setActiveSidebarTab,
@@ -2056,11 +2055,27 @@ export function DubVerseEditor({
   /** Sections lifted out of the picture. Laid out by arrival, not by timeline
    *  position — a parked scene owns no position, which is the point of it. */
   const parkedScenes = useMemo(() => scenes.filter(sc => sc.parked), [scenes])
+  /** Scenes claiming the same instant as another scene.
+   *
+   *  Scenes may now be placed freely, so an overlap is a real possibility rather
+   *  than something the normaliser quietly removed. It is not necessarily a
+   *  mistake while work is in progress — but the render has to pick ONE source for
+   *  an overlapped instant, so it cannot go out unnoticed. Flagged, not corrected. */
+  const overlappingSceneIds = useMemo(() => {
+    const live = scenes.filter(sc => !sc.parked).sort((a, b) => a.start - b.start)
+    const bad = new Set<string>()
+    for (let i = 1; i < live.length; i++) {
+      if (live[i].start < live[i - 1].end - 0.001) {
+        bad.add(live[i].id)
+        bad.add(live[i - 1].id)
+      }
+    }
+    return bad
+  }, [scenes])
   const [parkedMenu, setParkedMenu] = useState<{ x: number; y: number; sceneId: string } | null>(null)
   // Drag state for reordering parked scenes or pulling one back to the picture.
   const [draggingParkedId, setDraggingParkedId] = useState<string | null>(null)
-  const [dragOffsetX, setDragOffsetX] = useState(0)
-  const [dragOffsetY, setDragOffsetY] = useState(0)
+
 
   /** Right-click target on the video strip. */
   /** Segment the timeline-wide context menu acts on. The selected one, or the
@@ -5017,6 +5032,9 @@ export function DubVerseEditor({
   // in a tooltip, which is undiscoverable. See renderWarnings below.
   const [confirmRender, setConfirmRender] = useState<null | {
     staged: number; unreviewed: number; failed: string[]
+    /** Sections still lifted to the layover track. They are excluded from the
+     *  render entirely, so anything left up there is footage cut from the film. */
+    parked: number; parkedSeconds: number
   }>(null)
 
   const handleRebuildVideo = useCallback(async () => {
@@ -5725,13 +5743,20 @@ export function DubVerseEditor({
                 const staged = Object.keys(stagedEdits).length
                 const unreviewed = allWindowsReviewed ? 0 : chunkCount - savedWindowCount
                 const failed = releasedForRender ? [] : Object.keys(failedSegments)
+                // The layover track is never rendered: the backend filters parked
+                // scenes out of both the cut and the fade filters. So a section left
+                // up there is footage being dropped from the film — deliberate while
+                // working, easy to forget by the time you press this.
+                const parked = parkedScenes.length
+                const parkedSeconds = parkedScenes.reduce(
+                  (t, sc) => t + ((sc.source_end ?? sc.end) - (sc.source_start ?? sc.start)), 0)
                 // Clean run: render straight away. A confirm on the happy path is
                 // just friction on the button the user came here to press.
-                if (staged === 0 && unreviewed === 0 && failed.length === 0) {
+                if (staged === 0 && unreviewed === 0 && failed.length === 0 && parked === 0) {
                   handleRebuildVideo()
                   return
                 }
-                setConfirmRender({ staged, unreviewed, failed })
+                setConfirmRender({ staged, unreviewed, failed, parked, parkedSeconds })
               }}
               // Blocked while any counted segment is still outstanding. A render
               // is expensive and slow, and it assembles from COMMITTED segments
@@ -8523,6 +8548,19 @@ export function DubVerseEditor({
                 </div>
               )}
 
+              {confirmRender.parked > 0 && (
+                <div className="rounded-md border border-cyan-500/50 bg-cyan-950/40 p-2.5">
+                  <div className="text-xs font-semibold text-cyan-200">
+                    {confirmRender.parked} section{confirmRender.parked === 1 ? '' : 's'} still lifted to the layover track
+                    {' '}({confirmRender.parkedSeconds.toFixed(1)}s of footage)
+                  </div>
+                  <div className="mt-1 text-[11px] leading-relaxed text-cyan-300/80">
+                    The layover track is never rendered. This footage will be CUT from
+                    the finished film, and the picture will hold a gap where it was.
+                    Drag a section back down into the picture to keep it.
+                  </div>
+                </div>
+              )}
               {confirmRender.unreviewed > 0 && (
                 <div className="rounded-md border border-slate-600 bg-slate-800/60 p-2.5">
                   <div className="text-xs font-semibold text-slate-200">
@@ -9992,9 +10030,8 @@ export function DubVerseEditor({
 {/* Video track with thumbnails - tiled background preserves aspect ratio */}
               {/* Layover track. Sits ABOVE the picture: a section that will not sync gets
                   lifted here, the surrounding footage closes up, and it can be dropped back
-                  or discarded once the sync around it is settled. Parked scenes take no
-                  time on the timeline, so they are laid out left to right by arrival
-                  rather than at a timeline position they no longer own. */}
+                  or discarded once the sync around it is settled. A parked scene is drawn
+                  directly above the hole it left so the relationship stays obvious. */}
               <div
                 ref={layoverTrackRef}
                 className="h-20 shrink-0 bg-cyan-950/20 border-b border-cyan-800/40 relative overflow-hidden"
@@ -10005,24 +10042,23 @@ export function DubVerseEditor({
                     Lift a scene here to take it out of the picture without losing it
                   </div>
                 )}
-                {parkedScenes.map((sc, pIdx) => {
+                {parkedScenes.map((sc) => {
                   const dur = (sc.source_end ?? sc.end) - (sc.source_start ?? sc.start)
                   const w = Math.max(60, dur * PIXELS_PER_SECOND)
-                  const left = parkedScenes.slice(0, pIdx).reduce((acc, s) =>
-                    acc + Math.max(60, ((s.source_end ?? s.end) - (s.source_start ?? s.start)) * PIXELS_PER_SECOND) + 6, 8)
+                  const left = (sc.layover_time ?? sc.parked_from_start ?? sc.start) * PIXELS_PER_SECOND
                   const isDragging = draggingParkedId === sc.id
                   return (
                     <div
                       key={sc.id}
-                      className="absolute top-2 bottom-2 rounded border-2 border-cyan-400/60 bg-cyan-500/15 flex items-center justify-center cursor-move hover:bg-cyan-500/25 select-none"
+                      draggable={false}
+                      className="absolute top-2 bottom-2 rounded border-2 border-cyan-400/70 hover:border-cyan-300 bg-neutral-950 overflow-hidden flex items-center justify-center cursor-move select-none shadow-lg shadow-black/60"
+                      onDragStart={(e) => { e.preventDefault() }}
                       style={{
                         left,
                         width: w,
-                        transform: isDragging ? `translate(${dragOffsetX}px, ${dragOffsetY}px)` : undefined,
                         zIndex: isDragging ? 50 : undefined,
-                        transition: isDragging ? 'none' : undefined,
                       }}
-                      title={`Parked — ${dur.toFixed(2)}s of footage. Drag down to the picture to restore, or drag left/right to reorder.`}
+                      title={`Parked — ${dur.toFixed(2)}s of footage. Drag down to the picture to restore, or drag left/right to move.`}
                       onContextMenu={(e) => {
                         e.preventDefault()
                         e.stopPropagation()
@@ -10033,14 +10069,33 @@ export function DubVerseEditor({
                         e.stopPropagation()
                         const startX = e.clientX
                         const startY = e.clientY
+                        // Move the clip by writing transform straight to the element.
+                        // Through state this re-rendered the whole editor on every
+                        // mousemove — the same mistake as the fade handles, the scene
+                        // fades, the overview thumb and the pan. During a drag, write
+                        // only; React finds out when the drag ends.
+                        const el = e.currentTarget as HTMLElement
+                        let dx = 0
+                        let dy = 0
+                        // Same clipping problem in reverse: dropping back into the
+                        // picture meant crossing a boundary both tracks clip, so the
+                        // clip vanished behind the edge on the way down.
+                        const vTrack = videoTrackRef.current
+                        const lTrack = layoverTrackRef.current
+                        if (vTrack) vTrack.style.overflow = 'visible'
+                        if (lTrack) lTrack.style.overflow = 'visible'
+                        el.style.pointerEvents = 'none'
                         setDraggingParkedId(sc.id)
-                        setDragOffsetX(0)
-                        setDragOffsetY(0)
                         const onMove = (ev: MouseEvent) => {
-                          setDragOffsetX(ev.clientX - startX)
-                          setDragOffsetY(ev.clientY - startY)
+                          dx = ev.clientX - startX
+                          dy = ev.clientY - startY
+                          el.style.transform = `translate(${dx}px, ${dy}px)`
                         }
                         const onUp = (ev: MouseEvent) => {
+                          el.style.transform = ''
+                          el.style.pointerEvents = ''
+                          if (vTrack) vTrack.style.overflow = ''
+                          if (lTrack) lTrack.style.overflow = ''
                           setDraggingParkedId(null)
                           document.removeEventListener('mousemove', onMove)
                           document.removeEventListener('mouseup', onUp)
@@ -10053,22 +10108,10 @@ export function DubVerseEditor({
                             persistScenes().catch(err => console.warn('[RESTORE]', err))
                             return
                           }
-                          // Still in the layover track: reorder by visual position.
-                          const finalCenterX = left + w / 2 + (ev.clientX - startX)
-                          const centers = parkedScenes.map((s, i) => {
-                            const sw = Math.max(60, ((s.source_end ?? s.end) - (s.source_start ?? s.start)) * PIXELS_PER_SECOND)
-                            const sleft = parkedScenes.slice(0, i).reduce((acc, prev) =>
-                              acc + Math.max(60, ((prev.source_end ?? prev.end) - (prev.source_start ?? prev.start)) * PIXELS_PER_SECOND) + 6, 8)
-                            return { id: s.id, center: sleft + sw / 2 }
-                          })
-                          const idx = centers.findIndex(c => c.id === sc.id)
-                          if (idx >= 0) centers[idx].center = finalCenterX
-                          const sorted = [...centers].sort((a, b) => a.center - b.center)
-                          const targetIndex = sorted.findIndex(c => c.id === sc.id)
-                          if (targetIndex !== pIdx && targetIndex >= 0) {
-                            reorderParkedScenes(pIdx, targetIndex)
-                            persistScenes().catch(err => console.warn('[PARK-REORDER]', err))
-                          }
+                          // Still in the layover track: remember where it was dropped.
+                          const newLeft = Math.max(0, left + dx)
+                          updateScene(sc.id, { layover_time: newLeft / PIXELS_PER_SECOND })
+                          persistScenes().catch(err => console.warn('[PARK-MOVE]', err))
                         }
                         document.addEventListener('mousemove', onMove)
                         document.addEventListener('mouseup', onUp)
@@ -10076,7 +10119,44 @@ export function DubVerseEditor({
                         window.addEventListener('blur', onUp)
                       }}
                     >
-                      <span className="text-[10px] text-cyan-200 font-medium px-1 truncate">{dur.toFixed(1)}s</span>
+                      {/* THE LIFTED FOOTAGE, CARRIED WITH THE CLIP.
+                          A translucent cyan wash showed nothing of what had been lifted,
+                          so a section in the layover track was indistinguishable from an
+                          empty slot — you could not see what you were holding. The clip
+                          now shows the frames it actually contains, over an opaque black
+                          bed so nothing of the track behind bleeds through.
+
+                          The strip is the SAME continuous filmstrip used by the picture
+                          row, shifted left by this scene's source start and clipped to
+                          the block, so the frames on the clip are the frames it came
+                          from. No second extraction, and it stays correct when the strip
+                          is regenerated. */}
+                      {videoThumbnails.length > 0 && (
+                        <div
+                          className="absolute inset-0 flex pointer-events-none"
+                          style={{
+                            left: -((sc.source_start ?? sc.start) * PIXELS_PER_SECOND),
+                            width: videoDuration * PIXELS_PER_SECOND,
+                          }}
+                        >
+                          {videoThumbnails.map((thumb, ti) => (
+                            <div
+                              key={ti}
+                              className="h-full flex-shrink-0"
+                              style={{
+                                width: `${(videoDuration / videoThumbnails.length) * PIXELS_PER_SECOND}px`,
+                                backgroundImage: `url(${thumb})`,
+                                backgroundSize: 'auto 100%',
+                                backgroundPosition: '0% 50%',
+                                backgroundRepeat: 'repeat-x',
+                              }}
+                            />
+                          ))}
+                        </div>
+                      )}
+                      <span className="relative z-10 text-[10px] text-cyan-100 font-semibold px-1.5 py-0.5 rounded bg-black/75 truncate pointer-events-none">
+                        {dur.toFixed(1)}s
+                      </span>
                     </div>
                   )
                 })}
@@ -10156,7 +10236,12 @@ export function DubVerseEditor({
                     )
                   })}
                 {/* Scene blocks + fade handles */}
-                <div className="absolute top-0 left-0 right-0 h-6 z-10">
+                {/* Full height, not a 24px strip at the top. The blocks are the
+                    handle for the picture — grabbing one only worked along its very
+                    top edge, which is why the move cursor appeared nowhere else. The
+                    block art is a 10% wash, so covering the track does not hide the
+                    filmstrip underneath. */}
+                <div className="absolute inset-0 z-10">
                   {scenes.map((scene, idx) => {
                     // A LIFTED SCENE IS NOT IN THE PICTURE. Without this it kept
                     // drawing its block here at the old position while also showing
@@ -10170,12 +10255,14 @@ export function DubVerseEditor({
                       <div
                         key={scene.id}
                         data-scene-block
-                        className="absolute top-0 h-full group cursor-move"
+                        draggable={false}
+                        className="absolute top-0 h-full group cursor-move select-none"
                         onContextMenu={(e) => {
                           e.preventDefault()
                           e.stopPropagation()
                           setSceneMenu({ x: e.clientX, y: e.clientY, sceneId: scene.id })
                         }}
+                        onDragStart={(e) => { e.preventDefault() }}
                         style={{
                           left: scene.start * PIXELS_PER_SECOND,
                           width: Math.max(4, sceneDuration * PIXELS_PER_SECOND),
@@ -10196,25 +10283,52 @@ export function DubVerseEditor({
                           // by trimming — quietly shortening footage the user was trying
                           // to move. A gap left by a lifted section is fair game: that is
                           // what it is for.
-                          const _others = scenes
-                            .filter(sc => sc.id !== scene.id && !sc.parked)
-                            .sort((a, b) => a.start - b.start)
-                          const _prevEnd = _others
-                            .filter(sc => sc.end <= startStart + 0.001)
-                            .reduce((m, sc) => Math.max(m, sc.end), 0)
-                          const _nextStart = _others
-                            .filter(sc => sc.start >= startEnd - 0.001)
-                            .reduce((m, sc) => Math.min(m, sc.start), videoDuration)
-                          const _minStart = _prevEnd
-                          const _maxStart = Math.max(_minStart, _nextStart - duration)
+                          // FREE TRAVEL, THE FULL LENGTH OF THE TRACK.
+                          //
+                          // This was clamped to the free space between the neighbours,
+                          // so a clip between two abutting scenes could not move at all:
+                          // minStart was the previous scene's end and maxStart worked
+                          // out to the same value. Sliding picture against audio is how
+                          // sync is found without a lipsync engine, so the clip has to
+                          // go where it needs to go and nothing else may move to make
+                          // room for it.
+                          const _minStart = 0
+                          const _maxStart = Math.max(0, videoDuration - duration)
                           let didMove = false
+                          let newStart = startStart
+                          // The clip has to be SEEN leaving the picture. This wrote the
+                          // new start to the store on every mousemove, which moved the
+                          // block horizontally only — there was no vertical movement at
+                          // all, so lifting gave no feedback until the drop. Now the
+                          // element is transformed directly (no re-render per move, the
+                          // rule this file keeps relearning) and the store is written
+                          // once, on drop.
+                          const el = e.currentTarget as HTMLElement
+                          const vTrack = videoTrackRef.current
+                          const lTrack = layoverTrackRef.current
+                          // Both tracks clip their contents, so a clip crossing between
+                          // them disappeared behind the boundary instead of rising out
+                          // of the picture. Lift the clipping for the duration of the drag.
+                          if (vTrack) vTrack.style.overflow = 'visible'
+                          if (lTrack) lTrack.style.overflow = 'visible'
+                          el.style.zIndex = '60'
+                          el.style.pointerEvents = 'none'
                           const onMove = (ev: MouseEvent) => {
                             didMove = true
                             const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
-                            const newStart = Math.min(_maxStart, Math.max(_minStart, startStart + delta))
-                            updateScene(scene.id, { start: newStart, end: newStart + duration })
+                            newStart = Math.min(_maxStart, Math.max(_minStart, startStart + delta))
+                            // Horizontal follows the clamp so it cannot be dragged
+                            // through a neighbour; vertical is free so the lift reads.
+                            const dx = (newStart - startStart) * PIXELS_PER_SECOND
+                            const dy = ev.clientY - startY
+                            el.style.transform = `translate(${dx}px, ${dy}px)`
                           }
                           const onUp = (ev: MouseEvent) => {
+                            el.style.transform = ''
+                            el.style.zIndex = ''
+                            el.style.pointerEvents = ''
+                            if (vTrack) vTrack.style.overflow = ''
+                            if (lTrack) lTrack.style.overflow = ''
                             document.removeEventListener('mousemove', onMove)
                             document.removeEventListener('mouseup', onUp)
                             document.removeEventListener('pointercancel', onUp)
@@ -10225,7 +10339,9 @@ export function DubVerseEditor({
                             if (didMove && layoverRect && ev.clientY >= layoverRect.top && ev.clientY < layoverRect.bottom) {
                               parkScene(scene.id)
                               persistScenes().catch(err => console.warn('[PARK]', err))
-                            } else {
+                            } else if (didMove) {
+                              // Commit the slide once, here, rather than per frame.
+                              updateScene(scene.id, { start: newStart, end: newStart + duration })
                               persistScenes().catch(err => console.warn('[SCENE-MOVE]', err))
                             }
                           }
@@ -10235,7 +10351,12 @@ export function DubVerseEditor({
                           window.addEventListener('blur', onUp)
                         }}
                       >
-                        <div className="absolute inset-0 bg-emerald-500/10 border-x border-emerald-500/30 pointer-events-none" />
+                        <div className={cn(
+                          "absolute inset-0 pointer-events-none",
+                          overlappingSceneIds.has(scene.id)
+                            ? "bg-amber-500/20 border-x-2 border-amber-400"
+                            : "bg-emerald-500/10 border-x border-emerald-500/30"
+                        )} />
                         <div className="absolute inset-0 flex items-center justify-center text-[9px] text-emerald-400/70 pointer-events-none">
                           Scene {idx + 1}
                         </div>

@@ -460,7 +460,7 @@ export const useEditorStore = create<EditorState>(
     // to exactly where it came from.
     return {
       scenes: state.scenes.map((s) => s.id === id
-        ? { ...s, parked: true, parked_from_start: s.start, parked_from_end: s.end }
+        ? { ...s, parked: true, parked_from_start: s.start, parked_from_end: s.end, layover_time: s.start }
         : s),
     }
   }),
@@ -479,7 +479,7 @@ export const useEditorStore = create<EditorState>(
     return {
       scenes: state.scenes.map((s) => s.id === id
         ? { ...s, parked: false, start, end: start + dur,
-            parked_from_start: undefined, parked_from_end: undefined }
+            parked_from_start: undefined, parked_from_end: undefined, layover_time: undefined }
         : s),
     }
   }),
