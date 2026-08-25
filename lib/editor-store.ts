@@ -196,11 +196,15 @@ interface EditorState {
   removeScene: (id: string) => void
   /** Undo a split: absorb this scene into the one before it. */
   mergeSceneWithPrevious: (id: string) => void
+  /** Remove a cut by absorbing the next scene into this one. */
+  mergeSceneWithNext: (id: string) => void
   /** Lift a scene out of the picture onto the layover track, closing the gap. */
   parkScene: (id: string) => void
   /** Drop a parked scene back in. Defaults to the gap it left; pass atTime to put
    *  it somewhere else instead. Nothing else moves either way. */
   restoreScene: (id: string, atTime?: number) => void
+  /** Reorder parked scenes on the layover track by their visual index. */
+  reorderParkedScenes: (fromIndex: number, toIndex: number) => void
   splitSceneAtTime: (time: number) => void
 
   // Segment actions
@@ -388,7 +392,9 @@ export const useEditorStore = create<EditorState>(
   // — both its timeline end and its source end, or the retimed footage would be
   // silently truncated.
   mergeSceneWithPrevious: (id) => set((state) => {
-    const sorted = [...state.scenes].sort((a, b) => a.start - b.start)
+    // Only scenes in the picture can be merged. Parked scenes are on the layover
+    // track and must not be treated as the previous neighbour.
+    const sorted = [...state.scenes].filter((s) => !s.parked).sort((a, b) => a.start - b.start)
     const idx = sorted.findIndex((s) => s.id === id)
     if (idx <= 0) return state   // nothing before it: this is the first scene
     const cur = sorted[idx]
@@ -401,16 +407,50 @@ export const useEditorStore = create<EditorState>(
               ...s,
               end: cur.end,
               source_end: cur.source_end ?? cur.end,
-              // The absorbed scene's fade-out becomes the merged scene's.
-              video_fade_out: cur.video_fade_out ?? s.video_fade_out,
+              // THE BOUNDARY FADES GO WITH THE BOUNDARY. The merged scene keeps
+              // its own fade-in (its outer left edge) and takes the absorbed
+              // scene's fade-out (the outer right edge). The two ramps that faced
+              // each other across the dissolved cut are dropped.
+              //
+              // This used to fall back to `?? s.video_fade_out`, so when the
+              // absorbed scene had no fade-out the previous scene kept the ramp
+              // the split had put there — the left side still showed handles and
+              // a ramp after an undo. Fades do not exist until a scene is split,
+              // so their disappearance is how you know the reverse actually took
+              // place. Leaving one behind makes the undo unverifiable.
+              video_fade_out: cur.video_fade_out,
+            }
+          : s),
+    }
+  }),
+  // Remove a cut by absorbing the next in-picture scene into this one. Mirrors
+  // mergeSceneWithPrevious: the left scene keeps its own start/source_start and
+  // takes the next scene's end/source_end and fade-out.
+  mergeSceneWithNext: (id) => set((state) => {
+    const sorted = [...state.scenes].filter((s) => !s.parked).sort((a, b) => a.start - b.start)
+    const idx = sorted.findIndex((s) => s.id === id)
+    if (idx < 0 || idx >= sorted.length - 1) return state
+    const cur = sorted[idx]
+    const next = sorted[idx + 1]
+    return {
+      scenes: state.scenes
+        .filter((s) => s.id !== next.id)
+        .map((s) => s.id === cur.id
+          ? {
+              ...s,
+              end: next.end,
+              source_end: next.source_end ?? next.end,
+              video_fade_out: next.video_fade_out,
             }
           : s),
     }
   }),
   // Lifting a section out is how a passage that will not sync gets removed while
-  // staying recoverable. The picture must close up behind it — a dub has no holes
-  // — so every later scene moves earlier by exactly the lifted duration. Source
-  // ranges are untouched: what the footage IS does not change, only when it plays.
+  // staying recoverable. The picture does NOT close up behind it: the hole is the
+  // point, held as working space while the footage on either side is adjusted,
+  // until the cut is dropped back in or discarded. Closing it automatically would
+  // undo the edit the moment anything persisted. Source ranges are untouched:
+  // what the footage IS does not change, only when it plays.
   parkScene: (id) => set((state) => {
     const target = state.scenes.find((s) => s.id === id)
     if (!target || target.parked) return state
@@ -442,6 +482,17 @@ export const useEditorStore = create<EditorState>(
             parked_from_start: undefined, parked_from_end: undefined }
         : s),
     }
+  }),
+
+  reorderParkedScenes: (fromIndex, toIndex) => set((state) => {
+    const parked = state.scenes.filter((s) => s.parked)
+    if (fromIndex < 0 || fromIndex >= parked.length || toIndex < 0 || toIndex >= parked.length) return state
+    if (fromIndex === toIndex) return state
+    const reordered = [...parked]
+    const [moved] = reordered.splice(fromIndex, 1)
+    reordered.splice(toIndex, 0, moved)
+    const others = state.scenes.filter((s) => !s.parked)
+    return { scenes: [...others, ...reordered] }
   }),
 
   splitSceneAtTime: (time) => set((state) => {

@@ -186,8 +186,7 @@ interface SegmentContextMenuProps {
   onTogglePair: (index: number) => void
   onRevert: (index: number) => void
   onUndoLastEdit: (index: number) => void
-  onUndoSplit: () => void
-  undoSplitLabel: string | null
+  onUndoSplit: (index: number) => void
   onCopyText: (index: number) => void
   onPasteText: (index: number) => void
   onClearSegment: (index: number) => void
@@ -222,7 +221,6 @@ function SegmentContextMenu({
   onRevert,
   onUndoLastEdit,
   onUndoSplit,
-  undoSplitLabel,
   onCopyText,
   onPasteText,
   onClearSegment,
@@ -273,10 +271,10 @@ function SegmentContextMenu({
           <ContextMenuShortcut>C</ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuItem
-          disabled={!undoSplitLabel}
-          onClick={(e) => { e.stopPropagation(); if (undoSplitLabel) onUndoSplit() }}
+          disabled={!canMergeNext}
+          onClick={(e) => { e.stopPropagation(); onUndoSplit(index) }}
           className="text-xs gap-2">
-          {undoSplitLabel ? `✂ Undo ${undoSplitLabel}` : '✂ Undo Split'}
+          ✂ Undo Segment Split
         </ContextMenuItem>
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onSplitAtWord(index) }} className="text-xs gap-2">
           ✂️ Split at Word…
@@ -923,6 +921,8 @@ export function DubVerseEditor({
   const videoRef = useRef<HTMLVideoElement>(null)
   const videoFadeOverlayRef = useRef<HTMLDivElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
+  const layoverTrackRef = useRef<HTMLDivElement>(null)
+  const videoTrackRef = useRef<HTMLDivElement>(null)
   const overviewBarRef = useRef<HTMLDivElement>(null)
   const overviewThumbRef = useRef<HTMLDivElement>(null)
   /** True while a pan drag owns the thumb, so the scroll listener does not also
@@ -1011,8 +1011,10 @@ export function DubVerseEditor({
     updateScene,
     splitSceneAtTime,
     mergeSceneWithPrevious,
+    mergeSceneWithNext,
     parkScene,
     restoreScene,
+    reorderParkedScenes,
     removeScene,
     activeSidebarTab,
     setActiveSidebarTab,
@@ -1541,10 +1543,13 @@ export function DubVerseEditor({
     }
     window.addEventListener('mouseup', handleInterrupt)
     window.addEventListener('blur', handleInterrupt)
+    // The browser fires this instead of mouseup when it takes over a gesture.
+    window.addEventListener('pointercancel', handleInterrupt)
     document.addEventListener('visibilitychange', handleInterrupt)
     return () => {
       window.removeEventListener('mouseup', handleInterrupt)
       window.removeEventListener('blur', handleInterrupt)
+      window.removeEventListener('pointercancel', handleInterrupt)
       document.removeEventListener('visibilitychange', handleInterrupt)
     }
   }, [jobId, updateSegment, commitSegmentChanges, setImportedSegments])
@@ -2052,6 +2057,10 @@ export function DubVerseEditor({
    *  position — a parked scene owns no position, which is the point of it. */
   const parkedScenes = useMemo(() => scenes.filter(sc => sc.parked), [scenes])
   const [parkedMenu, setParkedMenu] = useState<{ x: number; y: number; sceneId: string } | null>(null)
+  // Drag state for reordering parked scenes or pulling one back to the picture.
+  const [draggingParkedId, setDraggingParkedId] = useState<string | null>(null)
+  const [dragOffsetX, setDragOffsetX] = useState(0)
+  const [dragOffsetY, setDragOffsetY] = useState(0)
 
   /** Right-click target on the video strip. */
   /** Segment the timeline-wide context menu acts on. The selected one, or the
@@ -2085,7 +2094,7 @@ export function DubVerseEditor({
     // it so undo knows which boundary to dissolve — splitSceneAtTime mints the id
     // internally and does not hand it back.
     const created = updatedScenes.find(sc => Math.abs(sc.start - t) < 0.001)
-    if (created) { undoStack.current.push({ kind: 'scene-split', sceneId: created.id }); setUndoSplitLabel('Scene Split') }
+    if (created) { undoStack.current.push({ kind: 'scene-split', sceneId: created.id }); setUndoSplitLabel('Video Split') }
     persistScenes().catch(err => console.warn('[SCENE-SPLIT]', err))
   }, [splitSceneAtTime, videoDuration, jobId])
 
@@ -3638,6 +3647,8 @@ export function DubVerseEditor({
       setIsResizingPreview(false)
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
+      document.removeEventListener('pointercancel', handleMouseUp)
+      window.removeEventListener('blur', handleMouseUp)
       setPreviewWidth(finalWidth)
       if (!layoutLocked) {
         localStorage.setItem('dubverse.editor.previewWidth', finalWidth.toString())
@@ -3646,6 +3657,8 @@ export function DubVerseEditor({
 
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
+    document.addEventListener('pointercancel', handleMouseUp)
+    window.addEventListener('blur', handleMouseUp)
   }, [previewWidth, layoutLocked])
   
   // Handle timeline resize (vertical)
@@ -3672,6 +3685,8 @@ export function DubVerseEditor({
       setIsResizingTimeline(false)
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
+      document.removeEventListener('pointercancel', handleMouseUp)
+      window.removeEventListener('blur', handleMouseUp)
       setTimelineHeight(finalHeight)
       if (!layoutLocked) {
         localStorage.setItem('dubverse.editor.timelineHeight', finalHeight.toString())
@@ -3680,6 +3695,8 @@ export function DubVerseEditor({
 
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
+    document.addEventListener('pointercancel', handleMouseUp)
+    window.addEventListener('blur', handleMouseUp)
   }, [timelineHeight, layoutLocked])
   
   // Toggle layout lock
@@ -3787,6 +3804,8 @@ export function DubVerseEditor({
     const handleMouseUp = () => {
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
+      document.removeEventListener('pointercancel', handleMouseUp)
+      window.removeEventListener('blur', handleMouseUp)
       isDraggingNeedleRef.current = false
       if (playheadRef.current) playheadRef.current.style.transition = ''
       setCurrentTime(currentTimeRef.current)
@@ -3794,6 +3813,8 @@ export function DubVerseEditor({
 
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
+    document.addEventListener('pointercancel', handleMouseUp)
+    window.addEventListener('blur', handleMouseUp)
   }, [videoDuration, setCurrentTime, zoomLevel])
   
   // Handle drag start for suggestions (English translations)
@@ -3935,7 +3956,7 @@ export function DubVerseEditor({
   }, [setPreviewText, updateSegment])
 
   const _splitLabelOf = (e: UndoEntry): string | null =>
-    e.kind === 'scene-split' ? 'Scene Split'
+    e.kind === 'scene-split' ? 'Video Split'
       : e.kind === 'segment-split' ? (e.at === 'word' ? 'Word Split' : 'Segment Split')
       : null
 
@@ -4030,29 +4051,21 @@ export function DubVerseEditor({
    *  reading just "Undo Split" gives no way to tell whether it is about to
    *  dissolve a scene boundary or rejoin two lines of dialogue. */
   const [undoSplitLabel, setUndoSplitLabel] = useState<string | null>(null)
-  const handleUndoSplit = useCallback(() => {
+  const handleUndoSplit = useCallback((index: number) => {
+    // Segment context menu: undo the split at this segment by rejoining it with
+    // the next one. If the split is still on the undo stack, remove it so the
+    // global undo doesn't try to re-merge the same boundary again.
     const stack = undoStack.current
     for (let i = stack.length - 1; i >= 0; i--) {
       const e = stack[i]
-      if (e.kind === 'scene-split') {
+      if (e.kind === 'segment-split' && e.index === index) {
         stack.splice(i, 1)
-        mergeSceneWithPrevious(e.sceneId)
-        persistScenes()
-          .catch(err => console.warn('[UNDO-SPLIT]', err))
         _refreshUndoSplit()
-        return
-      }
-      if (e.kind === 'segment-split') {
-        stack.splice(i, 1)
-        // Both halves sit at index and index+1, so rejoining them is the same
-        // merge the context menu offers — no separate un-split path to maintain.
-        handleMergeWithNextRef.current?.(e.index)
-        _refreshUndoSplit()
-        return
+        break
       }
     }
-    setUndoSplitLabel(null)
-  }, [mergeSceneWithPrevious, jobId, _refreshUndoSplit])
+    handleMergeWithNextRef.current?.(index)
+  }, [jobId, _refreshUndoSplit])
 
   const handleClearSegment = useCallback((index: number) => {
     const original = initialSegments[index]
@@ -6416,7 +6429,6 @@ export function DubVerseEditor({
                   onRevert={() => handleRevert()}
                   onUndoLastEdit={handleUndoLastEdit}
                   onUndoSplit={handleUndoSplit}
-                  undoSplitLabel={undoSplitLabel}
                   onCopyText={handleCopyText}
                   onPasteText={handlePasteText}
                   onClearSegment={handleClearSegment}
@@ -6588,9 +6600,13 @@ export function DubVerseEditor({
                           handleRowDragEnd()
                           document.removeEventListener('mousemove', onMove)
                           document.removeEventListener('mouseup', onUp)
+                          document.removeEventListener('pointercancel', onUp)
+                          window.removeEventListener('blur', onUp)
                         }
                         document.addEventListener('mousemove', onMove)
                         document.addEventListener('mouseup', onUp)
+                        document.addEventListener('pointercancel', onUp)
+                        window.addEventListener('blur', onUp)
                       }}
                     >
                       <GripHorizontal className="h-4 w-4" />
@@ -8630,9 +8646,16 @@ export function DubVerseEditor({
                   const rect = panel.getBoundingClientRect()
                   const ox = e.clientX - rect.left, oy = e.clientY - rect.top
                   const onMove = (ev: MouseEvent) => setAskAiPos({ x: ev.clientX - ox, y: ev.clientY - oy })
-                  const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp) }
+                  const onUp = () => {
+                    document.removeEventListener('mousemove', onMove)
+                    document.removeEventListener('mouseup', onUp)
+                    document.removeEventListener('pointercancel', onUp)
+                    window.removeEventListener('blur', onUp)
+                  }
                   document.addEventListener('mousemove', onMove)
                   document.addEventListener('mouseup', onUp)
+                  document.addEventListener('pointercancel', onUp)
+                  window.addEventListener('blur', onUp)
                 }}
               >
                 <span className="text-sm font-semibold text-amber-400 flex items-center gap-2">
@@ -9033,6 +9056,9 @@ export function DubVerseEditor({
                     // pause position, not the last 1s snapshot.
                     setCurrentTime(currentTimeRef.current)
                   } else {
+                    // Clear any stuck scrub flag. It halts the rAF loop entirely, so
+                    // recovering by pressing play beats making the user reload.
+                    isDraggingNeedleRef.current = false
                     // Play from the PLAYHEAD, always. The playhead marks the spot.
                     //
                     // This used to snap to the selected segment whenever the playhead
@@ -9308,9 +9334,13 @@ export function DubVerseEditor({
                     localStorage.setItem('dubverse.editor.qcMonitorWidth', String(finalW))
                     document.removeEventListener('mousemove', onMove)
                     document.removeEventListener('mouseup', onUp)
+                    document.removeEventListener('pointercancel', onUp)
+                    window.removeEventListener('blur', onUp)
                   }
                   document.addEventListener('mousemove', onMove)
                   document.addEventListener('mouseup', onUp)
+                  document.addEventListener('pointercancel', onUp)
+                  window.addEventListener('blur', onUp)
                 }}
               >
                 <div className={cn(
@@ -9450,9 +9480,13 @@ export function DubVerseEditor({
                   localStorage.setItem('dubverse.editor.trackLabelWidth', String(finalW))
                   document.removeEventListener('mousemove', onMove)
                   document.removeEventListener('mouseup', onUp)
+                  document.removeEventListener('pointercancel', onUp)
+                  window.removeEventListener('blur', onUp)
                 }
                 document.addEventListener('mousemove', onMove)
                 document.addEventListener('mouseup', onUp)
+                document.addEventListener('pointercancel', onUp)
+                window.addEventListener('blur', onUp)
               }}
             >
               <div className={cn(
@@ -9636,7 +9670,6 @@ export function DubVerseEditor({
               onRevert={revertToOriginal}
               onUndoLastEdit={handleUndoLastEdit}
               onUndoSplit={handleUndoSplit}
-              undoSplitLabel={undoSplitLabel}
               onCopyText={handleCopyText}
               onPasteText={handlePasteText}
               onClearSegment={handleClearSegment}
@@ -9674,7 +9707,13 @@ export function DubVerseEditor({
                 // The needle scrubs when grabbed. Panning at the same time dragged
                 // the playhead and the view in opposite directions at once — the
                 // needle moving WITH a pan is fine, being dragged BY one is not.
-                if (tgt.closest('[data-playhead-handle], [data-fade-handle], [data-scene-handle], [data-segment-block]')) return
+                // Scene blocks and boundary handles drag on MOUSEDOWN, and this pan
+                // listens on POINTERDOWN — which fires first, so their
+                // stopPropagation on the mouse event cannot stop it. Both ran at
+                // once: the scene moved right by dx while the view panned left by
+                // dx, and the block looked welded in place. Exclusion by name is
+                // the only thing that separates them.
+                if (tgt.closest('[data-playhead-handle], [data-fade-handle], [data-scene-handle], [data-scene-block], [data-resize-handle], [data-segment-block]')) return
                 const tl = timelineRef.current
                 if (!tl) return
                 const startX = e.clientX
@@ -9858,10 +9897,16 @@ export function DubVerseEditor({
       )}
 
       {sceneMenu && (() => {
-        const _sorted = [...scenes].sort((a, b) => a.start - b.start)
+        // Parked scenes are on the layover track, not in the picture, so they
+        // don't count as a neighbour for undoing a split.
+        const _sorted = [...scenes].filter(sc => !sc.parked).sort((a, b) => a.start - b.start)
         const _idx = _sorted.findIndex(sc => sc.id === sceneMenu.sceneId)
-        // The first scene has no boundary before it to dissolve.
-        const _canMerge = _idx > 0
+        // Any in-picture scene that has at least one other in-picture neighbour
+        // can have a cut removed. If there is a scene before it, merge into that;
+        // otherwise merge the next scene into this one.
+        const _hasPrev = _idx > 0
+        const _hasNext = _idx >= 0 && _idx < _sorted.length - 1
+        const _canMerge = _hasPrev || _hasNext
         return (
           <div
             className="fixed z-[70] bg-slate-800 border border-slate-700 rounded-md shadow-lg overflow-hidden"
@@ -9872,7 +9917,11 @@ export function DubVerseEditor({
               type="button"
               disabled={!_canMerge}
               onClick={() => {
-                mergeSceneWithPrevious(sceneMenu.sceneId)
+                if (_hasPrev) {
+                  mergeSceneWithPrevious(sceneMenu.sceneId)
+                } else if (_hasNext) {
+                  mergeSceneWithNext(sceneMenu.sceneId)
+                }
                 persistScenes()
                   .catch(err => console.warn('[UNDO-SPLIT]', err))
                 // Drop any undo entry for this split — it has just been undone by
@@ -9885,18 +9934,7 @@ export function DubVerseEditor({
               className={cn('w-full text-left px-3 py-2 text-xs whitespace-nowrap',
                 _canMerge ? 'text-amber-300 hover:bg-slate-700' : 'text-slate-600 cursor-not-allowed')}
             >
-              ✂ Undo split — merge into previous
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                parkScene(sceneMenu.sceneId)
-                persistScenes().catch(err => console.warn('[PARK]', err))
-                setSceneMenu(null)
-              }}
-              className="w-full text-left px-3 py-2 text-xs text-cyan-300 hover:bg-slate-700 whitespace-nowrap"
-            >
-              ⬆ Lift to layover
+              ✂ Undo video split — {_hasPrev ? 'merge into previous' : 'merge next into this'}
             </button>
             <button
               type="button"
@@ -9958,6 +9996,7 @@ export function DubVerseEditor({
                   time on the timeline, so they are laid out left to right by arrival
                   rather than at a timeline position they no longer own. */}
               <div
+                ref={layoverTrackRef}
                 className="h-20 shrink-0 bg-cyan-950/20 border-b border-cyan-800/40 relative overflow-hidden"
                 data-timeline-track
               >
@@ -9971,26 +10010,70 @@ export function DubVerseEditor({
                   const w = Math.max(60, dur * PIXELS_PER_SECOND)
                   const left = parkedScenes.slice(0, pIdx).reduce((acc, s) =>
                     acc + Math.max(60, ((s.source_end ?? s.end) - (s.source_start ?? s.start)) * PIXELS_PER_SECOND) + 6, 8)
+                  const isDragging = draggingParkedId === sc.id
                   return (
                     <div
                       key={sc.id}
-                      className="absolute top-2 bottom-2 rounded border-2 border-cyan-400/60 bg-cyan-500/15 flex items-center justify-center cursor-pointer hover:bg-cyan-500/25"
-                      style={{ left, width: w }}
-                      title={`Parked — ${dur.toFixed(2)}s of footage. Right-click to put it back at the playhead or discard it.`}
+                      className="absolute top-2 bottom-2 rounded border-2 border-cyan-400/60 bg-cyan-500/15 flex items-center justify-center cursor-move hover:bg-cyan-500/25 select-none"
+                      style={{
+                        left,
+                        width: w,
+                        transform: isDragging ? `translate(${dragOffsetX}px, ${dragOffsetY}px)` : undefined,
+                        zIndex: isDragging ? 50 : undefined,
+                        transition: isDragging ? 'none' : undefined,
+                      }}
+                      title={`Parked — ${dur.toFixed(2)}s of footage. Drag down to the picture to restore, or drag left/right to reorder.`}
                       onContextMenu={(e) => {
                         e.preventDefault()
                         e.stopPropagation()
                         setParkedMenu({ x: e.clientX, y: e.clientY, sceneId: sc.id })
                       }}
-                      // Double-click puts it back at the playhead — the reverse of the
-                      // gesture that lifted it.
-                      onDoubleClick={(e) => {
+                      onMouseDown={(e) => {
                         e.preventDefault()
                         e.stopPropagation()
-                        // Straight back into the hole it left. The gap was held open
-                        // for exactly this, so no position needs choosing.
-                        restoreScene(sc.id)
-                        persistScenes().catch(err => console.warn('[RESTORE]', err))
+                        const startX = e.clientX
+                        const startY = e.clientY
+                        setDraggingParkedId(sc.id)
+                        setDragOffsetX(0)
+                        setDragOffsetY(0)
+                        const onMove = (ev: MouseEvent) => {
+                          setDragOffsetX(ev.clientX - startX)
+                          setDragOffsetY(ev.clientY - startY)
+                        }
+                        const onUp = (ev: MouseEvent) => {
+                          setDraggingParkedId(null)
+                          document.removeEventListener('mousemove', onMove)
+                          document.removeEventListener('mouseup', onUp)
+                          document.removeEventListener('pointercancel', onUp)
+                          window.removeEventListener('blur', onUp)
+                          const videoRect = videoTrackRef.current?.getBoundingClientRect()
+                          // Dragged down into the picture track: restore it to its hole.
+                          if (videoRect && ev.clientY >= videoRect.top && ev.clientY < videoRect.bottom) {
+                            restoreScene(sc.id)
+                            persistScenes().catch(err => console.warn('[RESTORE]', err))
+                            return
+                          }
+                          // Still in the layover track: reorder by visual position.
+                          const finalCenterX = left + w / 2 + (ev.clientX - startX)
+                          const centers = parkedScenes.map((s, i) => {
+                            const sw = Math.max(60, ((s.source_end ?? s.end) - (s.source_start ?? s.start)) * PIXELS_PER_SECOND)
+                            const sleft = parkedScenes.slice(0, i).reduce((acc, prev) =>
+                              acc + Math.max(60, ((prev.source_end ?? prev.end) - (prev.source_start ?? prev.start)) * PIXELS_PER_SECOND) + 6, 8)
+                            return { id: s.id, center: sleft + sw / 2 }
+                          })
+                          const idx = centers.findIndex(c => c.id === sc.id)
+                          if (idx >= 0) centers[idx].center = finalCenterX
+                          const sorted = [...centers].sort((a, b) => a.center - b.center)
+                          const targetIndex = sorted.findIndex(c => c.id === sc.id)
+                          if (targetIndex !== pIdx && targetIndex >= 0) {
+                            reorderParkedScenes(pIdx, targetIndex)
+                            persistScenes().catch(err => console.warn('[PARK-REORDER]', err))
+                          }
+                        }
+                        document.addEventListener('mousemove', onMove)
+                        document.addEventListener('mouseup', onUp)
+                        document.addEventListener('pointercancel', onUp)
+                        window.addEventListener('blur', onUp)
                       }}
                     >
                       <span className="text-[10px] text-cyan-200 font-medium px-1 truncate">{dur.toFixed(1)}s</span>
@@ -10003,15 +10086,90 @@ export function DubVerseEditor({
                   aligning a cut to a timecode means reading the scale next to the
                   footage rather than across two tracks. */}
               <TimeRuler durationSec={videoDuration} pps={PIXELS_PER_SECOND} variant="mid" />
-              <div className="h-20 shrink-0 bg-neutral-900/30 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+              <div ref={videoTrackRef} className="h-20 shrink-0 bg-neutral-900/30 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+                {/* THE HOLE A LIFTED SECTION LEAVES.
+                    The filmstrip is one continuous run of thumbnails across the whole
+                    duration — it is not built from scenes — so removing a scene block
+                    does not break the picture and lifting looked like it had done
+                    nothing. This masks the span the footage came from, which is what
+                    makes the gap legible as working space: the point of lifting is to
+                    open a hole and adjust the footage either side of it before the cut
+                    goes back in or is discarded. Sits above the strip, below the scene
+                    blocks, and takes no pointer events so the track still pans. */}
+                {parkedScenes.map(sc => {
+                  const gs = sc.parked_from_start ?? sc.start
+                  const ge = sc.parked_from_end ?? sc.end
+                  const gw = Math.max(2, (ge - gs) * PIXELS_PER_SECOND)
+                  return (
+                    <div
+                      key={`hole-${sc.id}`}
+                      className="absolute top-0 bottom-0 bg-black border-x-2 border-dashed border-cyan-500/70 z-[15] pointer-events-none flex items-center justify-center"
+                      style={{ left: gs * PIXELS_PER_SECOND, width: gw }}
+                      title={`Lifted — ${(ge - gs).toFixed(2)}s held in the layover track`}
+                    >
+                      <span className="text-[9px] text-cyan-400/80 uppercase tracking-widest whitespace-nowrap px-1">lifted</span>
+                    </div>
+                  )
+                })}
+                {/* THE CUT ITSELF. A splice is the most consequential edit on this
+                    track, and until now it was implied by two scene blocks happening
+                    to abut — nothing actually marked the frame it was made on. This
+                    runs the full height of the picture so it cannot be mistaken for a
+                    ruler tick or a block edge, and the black shadow keeps it readable
+                    over both bright and dark thumbnails. Above the blocks, and inert
+                    to the pointer so it never intercepts a drag. */}
+                {scenes
+                  .filter(sc => !sc.parked && sc.start > 0.01)
+                  .map(sc => {
+                    const sorted = [...scenes].filter(s => !s.parked).sort((a, b) => a.start - b.start)
+                    const idx = sorted.findIndex(s => s.id === sc.id)
+                    const prev = idx > 0 ? sorted[idx - 1] : null
+                    return (
+                      <div
+                        key={`cut-${sc.id}`}
+                        className="absolute top-0 bottom-0 w-[2px] z-[16] pointer-events-auto cursor-pointer hover:w-[4px] hover:bg-amber-400 transition-all"
+                        style={{
+                          left: sc.start * PIXELS_PER_SECOND - 1,
+                          backgroundColor: '#b45309',
+                          boxShadow: '0 0 0 1px rgba(0,0,0,0.95), 0 0 7px 2px rgba(0,0,0,0.85)',
+                        }}
+                        title={`Cut at ${formatTime(sc.start)} — click to undo`}
+                        onClick={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          // A click on the cut line itself removes the boundary. If there is a
+                          // previous scene, merge this scene into it; otherwise this is the first
+                          // cut and we merge the next scene into the first one.
+                          if (prev) {
+                            mergeSceneWithPrevious(sc.id)
+                          } else if (sorted.length > 1) {
+                            mergeSceneWithNext(sc.id)
+                          }
+                          persistScenes().catch(err => console.warn('[UNDO-CUT]', err))
+                        }}
+                        onContextMenu={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          setSceneMenu({ x: e.clientX, y: e.clientY, sceneId: sc.id })
+                        }}
+                      />
+                    )
+                  })}
                 {/* Scene blocks + fade handles */}
                 <div className="absolute top-0 left-0 right-0 h-6 z-10">
                   {scenes.map((scene, idx) => {
+                    // A LIFTED SCENE IS NOT IN THE PICTURE. Without this it kept
+                    // drawing its block here at the old position while also showing
+                    // in the layover track, so lifting looked like it had done
+                    // nothing — and the hole it is supposed to leave was covered by
+                    // the very block that was meant to have moved out of it.
+                    if (scene.parked) return null
                     const sceneDuration = scene.end - scene.start
                     if (sceneDuration <= 0) return null
                     return (
                       <div
                         key={scene.id}
+                        data-scene-block
                         className="absolute top-0 h-full group cursor-move"
                         onContextMenu={(e) => {
                           e.preventDefault()
@@ -10026,6 +10184,7 @@ export function DubVerseEditor({
                           e.preventDefault()
                           e.stopPropagation()
                           const startX = e.clientX
+                          const startY = e.clientY
                           const startStart = scene.start
                           const startEnd = scene.end
                           const duration = startEnd - startStart
@@ -10048,18 +10207,32 @@ export function DubVerseEditor({
                             .reduce((m, sc) => Math.min(m, sc.start), videoDuration)
                           const _minStart = _prevEnd
                           const _maxStart = Math.max(_minStart, _nextStart - duration)
+                          let didMove = false
                           const onMove = (ev: MouseEvent) => {
+                            didMove = true
                             const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
                             const newStart = Math.min(_maxStart, Math.max(_minStart, startStart + delta))
                             updateScene(scene.id, { start: newStart, end: newStart + duration })
                           }
-                          const onUp = () => {
-                            persistScenes().catch(err => console.warn('[SCENE-MOVE]', err))
+                          const onUp = (ev: MouseEvent) => {
                             document.removeEventListener('mousemove', onMove)
                             document.removeEventListener('mouseup', onUp)
+                            document.removeEventListener('pointercancel', onUp)
+                            window.removeEventListener('blur', onUp)
+                            const layoverRect = layoverTrackRef.current?.getBoundingClientRect()
+                            // Drag up into the layover track parks the scene; otherwise
+                            // persist the horizontal slide in the picture.
+                            if (didMove && layoverRect && ev.clientY >= layoverRect.top && ev.clientY < layoverRect.bottom) {
+                              parkScene(scene.id)
+                              persistScenes().catch(err => console.warn('[PARK]', err))
+                            } else {
+                              persistScenes().catch(err => console.warn('[SCENE-MOVE]', err))
+                            }
                           }
                           document.addEventListener('mousemove', onMove)
                           document.addEventListener('mouseup', onUp)
+                          document.addEventListener('pointercancel', onUp)
+                          window.addEventListener('blur', onUp)
                         }}
                       >
                         <div className="absolute inset-0 bg-emerald-500/10 border-x border-emerald-500/30 pointer-events-none" />
@@ -10102,9 +10275,13 @@ export function DubVerseEditor({
                               persistScenes().catch(err => console.warn('[SCENE-MOVE]', err))
                               document.removeEventListener('mousemove', onMove)
                               document.removeEventListener('mouseup', onUp)
+                              document.removeEventListener('pointercancel', onUp)
+                              window.removeEventListener('blur', onUp)
                             }
                             document.addEventListener('mousemove', onMove)
                             document.addEventListener('mouseup', onUp)
+                            document.addEventListener('pointercancel', onUp)
+                            window.addEventListener('blur', onUp)
                           }}
                         />
                         {/* Right boundary drag handle */}
@@ -10127,9 +10304,13 @@ export function DubVerseEditor({
                               persistScenes().catch(err => console.warn('[SCENE-MOVE]', err))
                               document.removeEventListener('mousemove', onMove)
                               document.removeEventListener('mouseup', onUp)
+                              document.removeEventListener('pointercancel', onUp)
+                              window.removeEventListener('blur', onUp)
                             }
                             document.addEventListener('mousemove', onMove)
                             document.addEventListener('mouseup', onUp)
+                            document.addEventListener('pointercancel', onUp)
+                            window.addEventListener('blur', onUp)
                           }}
                         />
                         {/* Fade in. Ramp and grip are SIBLINGS so the ramp can be zero-width
@@ -10164,6 +10345,7 @@ export function DubVerseEditor({
                             const grip = e.currentTarget as HTMLElement
                             const ramp = grip.parentElement?.querySelector('[data-scene-ramp="in"]') as HTMLElement | null
                             const startX = e.clientX
+                            const startY = e.clientY
                             const initialFade = scene.video_fade_in ?? 0
                             const maxFade = sceneDuration / 2
                             let latest = initialFade
@@ -10178,14 +10360,26 @@ export function DubVerseEditor({
                               if (ramp) ramp.style.width = `${px}px`
                               grip.style.left = `${px}px`
                             }
-                            const onPointerUp = () => {
+                            const onPointerUp = (ev: PointerEvent) => {
                               document.removeEventListener('pointermove', onPointerMove)
                               document.removeEventListener('pointerup', onPointerUp)
+                              document.removeEventListener('pointercancel', onPointerUp)
+                              window.removeEventListener('blur', onPointerUp)
+                              const dx = Math.abs(ev.clientX - startX)
+                              const dy = Math.abs(ev.clientY - startY)
+                              if (dx < 4 && dy < 4) {
+                                // Click: snap fade back to 0.
+                                latest = 0
+                                if (ramp) ramp.style.width = '0px'
+                                grip.style.left = '0px'
+                              }
                               updateScene(scene.id, { video_fade_in: latest })
                               persistScenes().catch(err => console.warn('[SCENE-FADE]', err))
                             }
                             document.addEventListener('pointermove', onPointerMove)
                             document.addEventListener('pointerup', onPointerUp)
+                            document.addEventListener('pointercancel', onPointerUp)
+                            window.addEventListener('blur', onPointerUp)
                           }}
                         />
                         {/* Fade out. Ramp and grip are SIBLINGS so the ramp can be zero-width
@@ -10220,6 +10414,7 @@ export function DubVerseEditor({
                             const grip = e.currentTarget as HTMLElement
                             const ramp = grip.parentElement?.querySelector('[data-scene-ramp="out"]') as HTMLElement | null
                             const startX = e.clientX
+                            const startY = e.clientY
                             const initialFade = scene.video_fade_out ?? 0
                             const maxFade = sceneDuration / 2
                             let latest = initialFade
@@ -10234,14 +10429,26 @@ export function DubVerseEditor({
                               if (ramp) ramp.style.width = `${px}px`
                               grip.style.right = `${px}px`
                             }
-                            const onPointerUp = () => {
+                            const onPointerUp = (ev: PointerEvent) => {
                               document.removeEventListener('pointermove', onPointerMove)
                               document.removeEventListener('pointerup', onPointerUp)
+                              document.removeEventListener('pointercancel', onPointerUp)
+                              window.removeEventListener('blur', onPointerUp)
+                              const dx = Math.abs(ev.clientX - startX)
+                              const dy = Math.abs(ev.clientY - startY)
+                              if (dx < 4 && dy < 4) {
+                                // Click: snap fade back to 0.
+                                latest = 0
+                                if (ramp) ramp.style.width = '0px'
+                                grip.style.right = '0px'
+                              }
                               updateScene(scene.id, { video_fade_out: latest })
                               persistScenes().catch(err => console.warn('[SCENE-FADE]', err))
                             }
                             document.addEventListener('pointermove', onPointerMove)
                             document.addEventListener('pointerup', onPointerUp)
+                            document.addEventListener('pointercancel', onPointerUp)
+                            window.addEventListener('blur', onPointerUp)
                           }}
                         />
                       </div>
@@ -10310,7 +10517,6 @@ export function DubVerseEditor({
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
                       onUndoSplit={handleUndoSplit}
-                      undoSplitLabel={undoSplitLabel}
                       onCopyText={handleCopyText}
                       onPasteText={handlePasteText}
                       onClearSegment={handleClearSegment}
@@ -10424,11 +10630,15 @@ export function DubVerseEditor({
                           setDraggingSegment(null)
                           document.removeEventListener('mousemove', onMouseMove)
                           document.removeEventListener('mouseup', onMouseUp)
+                          document.removeEventListener('pointercancel', onMouseUp)
+                          window.removeEventListener('blur', onMouseUp)
                           dragMoveListenerRef.current = null
                           dragUpListenerRef.current = null
                         }
                         document.addEventListener('mousemove', onMouseMove)
                         document.addEventListener('mouseup', onMouseUp)
+                        document.addEventListener('pointercancel', onMouseUp)
+                        window.addEventListener('blur', onMouseUp)
                         dragMoveListenerRef.current = onMouseMove
                         dragUpListenerRef.current = onMouseUp
                       }}
@@ -10465,9 +10675,13 @@ export function DubVerseEditor({
                             })
                             document.removeEventListener('mousemove', onMouseMove)
                             document.removeEventListener('mouseup', onMouseUp)
+                            document.removeEventListener('pointercancel', onMouseUp)
+                            window.removeEventListener('blur', onMouseUp)
                           }
                           document.addEventListener('mousemove', onMouseMove)
                           document.addEventListener('mouseup', onMouseUp)
+                          document.addEventListener('pointercancel', onMouseUp)
+                          window.addEventListener('blur', onMouseUp)
                         }}
                       >
                         <GripHorizontal className="h-3 w-3 rotate-90" />
@@ -10512,9 +10726,13 @@ export function DubVerseEditor({
                             })
                             document.removeEventListener('mousemove', onMouseMove)
                             document.removeEventListener('mouseup', onMouseUp)
+                            document.removeEventListener('pointercancel', onMouseUp)
+                            window.removeEventListener('blur', onMouseUp)
                           }
                           document.addEventListener('mousemove', onMouseMove)
                           document.addEventListener('mouseup', onMouseUp)
+                          document.addEventListener('pointercancel', onMouseUp)
+                          window.addEventListener('blur', onMouseUp)
                         }}
                       >
                         <GripHorizontal className="h-3 w-3 rotate-90" />
@@ -10598,7 +10816,6 @@ export function DubVerseEditor({
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
                       onUndoSplit={handleUndoSplit}
-                      undoSplitLabel={undoSplitLabel}
                       onCopyText={handleCopyText}
                       onPasteText={handlePasteText}
                       onClearSegment={handleClearSegment}
@@ -10779,11 +10996,15 @@ export function DubVerseEditor({
                           setDraggingSegment(null)
                           document.removeEventListener('mousemove', onMouseMove)
                           document.removeEventListener('mouseup', onMouseUp)
+                          document.removeEventListener('pointercancel', onMouseUp)
+                          window.removeEventListener('blur', onMouseUp)
                           dragMoveListenerRef.current = null
                           dragUpListenerRef.current = null
                         }
                         document.addEventListener('mousemove', onMouseMove)
                         document.addEventListener('mouseup', onMouseUp)
+                        document.addEventListener('pointercancel', onMouseUp)
+                        window.addEventListener('blur', onMouseUp)
                         dragMoveListenerRef.current = onMouseMove
                         dragUpListenerRef.current = onMouseUp
                       }}
@@ -10820,9 +11041,13 @@ export function DubVerseEditor({
                             })
                             document.removeEventListener('mousemove', onMouseMove)
                             document.removeEventListener('mouseup', onMouseUp)
+                            document.removeEventListener('pointercancel', onMouseUp)
+                            window.removeEventListener('blur', onMouseUp)
                           }
                           document.addEventListener('mousemove', onMouseMove)
                           document.addEventListener('mouseup', onMouseUp)
+                          document.addEventListener('pointercancel', onMouseUp)
+                          window.addEventListener('blur', onMouseUp)
                         }}
                       >
                         <GripHorizontal className="h-3 w-3 rotate-90" />
@@ -10893,9 +11118,13 @@ export function DubVerseEditor({
                             })
                             document.removeEventListener('mousemove', onMouseMove)
                             document.removeEventListener('mouseup', onMouseUp)
+                            document.removeEventListener('pointercancel', onMouseUp)
+                            window.removeEventListener('blur', onMouseUp)
                           }
                           document.addEventListener('mousemove', onMouseMove)
                           document.addEventListener('mouseup', onMouseUp)
+                          document.addEventListener('pointercancel', onMouseUp)
+                          window.addEventListener('blur', onMouseUp)
                         }}
                       >
                         <GripHorizontal className="h-3 w-3 rotate-90" />
@@ -10976,9 +11205,13 @@ export function DubVerseEditor({
                             })
                             document.removeEventListener('mousemove', onMouseMove)
                             document.removeEventListener('mouseup', onMouseUp)
+                            document.removeEventListener('pointercancel', onMouseUp)
+                            window.removeEventListener('blur', onMouseUp)
                           }
                           document.addEventListener('mousemove', onMouseMove)
                           document.addEventListener('mouseup', onMouseUp)
+                          document.addEventListener('pointercancel', onMouseUp)
+                          window.addEventListener('blur', onMouseUp)
                         }}
                       >
                         <GripHorizontal className="h-3 w-3 rotate-90" />
@@ -11007,9 +11240,13 @@ export function DubVerseEditor({
                             })
                             document.removeEventListener('mousemove', onMouseMove)
                             document.removeEventListener('mouseup', onMouseUp)
+                            document.removeEventListener('pointercancel', onMouseUp)
+                            window.removeEventListener('blur', onMouseUp)
                           }
                           document.addEventListener('mousemove', onMouseMove)
                           document.addEventListener('mouseup', onMouseUp)
+                          document.addEventListener('pointercancel', onMouseUp)
+                          window.addEventListener('blur', onMouseUp)
                         }}
                       >
                         <GripHorizontal className="h-3 w-3 rotate-90" />
@@ -11102,6 +11339,8 @@ export function DubVerseEditor({
                               const onPointerUp = () => {
                                 document.removeEventListener('pointermove', onPointerMove)
                                 document.removeEventListener('pointerup', onPointerUp)
+                                document.removeEventListener('pointercancel', onPointerUp)
+                                window.removeEventListener('blur', onPointerUp)
                                 const finalFade = latest
                                 updateSegment(i, { fade_in: finalFade })
                                 commitSegmentChanges(i, { fade_in: finalFade })
@@ -11117,6 +11356,8 @@ export function DubVerseEditor({
                               }
                               document.addEventListener('pointermove', onPointerMove)
                               document.addEventListener('pointerup', onPointerUp)
+                              document.addEventListener('pointercancel', onPointerUp)
+                              window.addEventListener('blur', onPointerUp)
                             }}
                           />
                           {/* Fade out — ramp and grip are SIBLINGS, not nested.
@@ -11174,6 +11415,8 @@ export function DubVerseEditor({
                               const onPointerUp = () => {
                                 document.removeEventListener('pointermove', onPointerMove)
                                 document.removeEventListener('pointerup', onPointerUp)
+                                document.removeEventListener('pointercancel', onPointerUp)
+                                window.removeEventListener('blur', onPointerUp)
                                 const finalFade = latest
                                 updateSegment(i, { fade_out: finalFade })
                                 commitSegmentChanges(i, { fade_out: finalFade })
@@ -11189,6 +11432,8 @@ export function DubVerseEditor({
                               }
                               document.addEventListener('pointermove', onPointerMove)
                               document.addEventListener('pointerup', onPointerUp)
+                              document.addEventListener('pointercancel', onPointerUp)
+                              window.addEventListener('blur', onPointerUp)
                             }}
                           />
                         </>
