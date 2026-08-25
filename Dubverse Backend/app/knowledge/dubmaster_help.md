@@ -534,6 +534,109 @@ The confirmation offers:
   that staged or failed segments will be missing.
 - **Cancel** — go back and fix things first.
 
+## The layover track — lifting a section out of the picture
+
+The **layover track** sits above the video track. Drag a scene up into it to lift
+that section out of the picture without deleting it. Drag it back down into the
+picture to put it back.
+
+Lifting is how a passage that will not sync gets taken out while staying
+recoverable. The hole it leaves is deliberate and is NOT closed up automatically:
+it is working space, held while the footage on either side is adjusted, until the
+cut is dropped back in or left out for good. Closing the gap automatically would
+undo the edit the moment anything was saved.
+
+**The layover track is never rendered.** Anything left up there is footage cut
+from the finished film, and the picture holds a gap where it was. Because that is
+easy to forget by the time you press Make Movie, the confirmation names how many
+sections are still lifted and how many seconds of footage that is. The advice is
+simple: **clear the layover track before rendering** — either drop each section
+back into the picture, or accept that it is gone.
+
+Lifted sections show the frames they contain, so you can see what you are
+holding, and each sits directly above the hole it came from until you drag it
+somewhere else along the track.
+
+## Cuts and undoing them
+
+A splice is marked by a dark amber line running the full height of the picture
+track. **Click that line to undo the cut** — the two halves rejoin. The fade
+handles either side of a cut disappear when it is undone, which is how you know
+the reverse actually took place: fades do not exist until a scene is split.
+
+Scenes slide freely along the track in either direction, and nothing else moves
+to make room. Two scenes overlapping is allowed while you are finding sync, and
+an overlapped scene is shown in amber — but the render can only use one source
+for any given instant, so overlaps should be resolved before the film goes out.
+
+## Fading scenes in and out
+
+Every scene on the video track has a fade handle at each end. They appear when
+you hover over the scene. Drag one inwards to lengthen the fade, outwards to
+shorten it.
+
+**The grip sits at the inner end of the ramp, not at the corner of the block.**
+That is deliberate: at the corner it could only ever be pushed outwards, and a
+fade could never be taken back off. From the inner end it goes both ways, so a
+fade can be reduced to nothing.
+
+**Video fades render as a fade to black** — in at the start of the scene, out at
+the end — and they are applied to the finished film, not just the preview. A fade
+longer than the scene it belongs to is dropped rather than applied, since it
+would have nothing to fade across.
+
+Fades do not exist until a scene has been split. That is why undoing a cut also
+removes the fade handles either side of it: their disappearance is how you know
+the two halves genuinely rejoined.
+
+### Why fade a scene at all
+
+Fades exist for the cuts that dubbing forces on you. When a passage will not sync
+and has to be shortened or lifted out, the join left behind can be abrupt. A
+short fade at the boundary gives a clean transition across the difficult section
+instead of a hard cut. This matters most where a lifted section leaves a gap: the
+picture holds black there, and fading into and out of that black reads as an
+intentional transition rather than a fault.
+
+### Audio fades and crossfades
+
+Segments have their own fade handles on the audio tracks, working the same way.
+In addition, wherever two segments overlap in time, DubMaster crossfades them
+automatically:
+
+- The crossfade is **equal-power** — one side follows a cosine curve down while
+  the other follows a sine curve up. Two different voices are uncorrelated, so a
+  straight linear blend would dip audibly in the middle. Equal-power holds the
+  loudness steady across the join.
+- Where you have set a fade by hand AND an overlap implies one, the **longer of
+  the two** is used for that side. Your setting is never quietly shortened.
+- **An overlap is a timing technique, not a fault.** Overlapping two lines
+  slightly is often exactly how a line is made to land against the picture. Short
+  overlaps pass without comment; an overlap beyond one second is badged in red,
+  because at that length it is more often a mistake than a choice.
+
+Audio fades and crossfades are applied to the exported film with the same
+equal-power curves used in the preview, so what you hear while editing is what
+the finished film contains.
+
+## Lip-Sync Tips
+
+DubMaster lets you create perfect lip-sync manually - no auto-sync engine needed.
+
+**Align the Start:** Match the first sound to the exact frame the actor's mouth
+opens.
+
+**Align the End:** Slide the clip so the final mouth movement matches the last
+phoneme.
+
+**Adjust Speed:** If the pacing feels off, fine-tune the audio speed by a small
+amount.
+
+**Why this works:**
+Manual alignment gives you frame-accurate control and avoids the common glitches
+of AI auto-sync. You keep the actor's natural timing, emotion, and performance
+while achieving a clean, professional lip-sync.
+
 ## The three edit counters: staged, reviewed, failed
 
 The segment header shows three counters. They mean different things and carry very
