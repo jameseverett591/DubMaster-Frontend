@@ -1257,8 +1257,17 @@ class DubVerseAPIClient {
   }
 
   getAudioFileUrl(jobId: string, filename: string, cacheBust = false): string {
+    // STRIP ANY QUERY THE CALLER BROUGHT WITH IT.
+    //
+    // Callers derive the filename with url.split('/').pop(), which keeps the
+    // query string when the stored URL already had one. Appending another buster
+    // then produced segment_0000.mp3?ts=A?ts=B?ts=C — three cache-busters joined
+    // by ? instead of &, which is a malformed URL and the same shape as the
+    // double-? that once corrupted the access token and made staged takes silent.
+    // Normalising here fixes every caller at once rather than each in turn.
+    const clean = filename.split('?')[0].split('#')[0]
     const bust = cacheBust ? `?ts=${Date.now()}` : ''
-    return this._mediaUrl(`/api/media/${jobId}/audio/${filename}${bust}`)
+    return this._mediaUrl(`/api/media/${jobId}/audio/${clean}${bust}`)
   }
 
   /** Rebuild a stored audio URL with the current token.

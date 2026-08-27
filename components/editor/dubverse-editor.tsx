@@ -3171,6 +3171,21 @@ export function DubVerseEditor({
     }
   }, [isPlaying])
 
+  /** Bumped whenever a stitch finishes.
+   *
+   *  A REF CANNOT WAKE AN EFFECT. The scheduler below starts a stitch when the
+   *  buffer is missing and then returns, because the stitch is async. Writing
+   *  rptBufferRef when it resolves changes no dependency, so nothing ever went
+   *  back and scheduled the audio — Play produced silence until some unrelated
+   *  render happened to re-run the effect. That was survivable while the buffer
+   *  outlived edits; now that any edit invalidates it, it is the common path.
+   *
+   *  This is state, so the effect re-runs and schedules the moment audio exists. */
+  const [stitchVersion, setStitchVersion] = useState(0)
+  /** One stitch at a time. A drag can invalidate the buffer many times in a
+   *  second, and each stitch decodes every segment in the window. */
+  const stitchInFlightRef = useRef(false)
+
   // RPT audio playback — separate effect to avoid hook rules violation
   useEffect(() => {
     const video = videoRef.current
@@ -3189,20 +3204,33 @@ export function DubVerseEditor({
 
     // On first switch to Preview, seed RPT manifest
     // from current dubbed segments if not yet seeded
-    if (!rptBufferRef.current) {
+    if (!rptBufferRef.current && !stitchInFlightRef.current) {
       initRPTFromSegments()
       // Trigger stitch immediately after seeding
       if (!audioContextRef.current) {
         audioContextRef.current = new AudioContext()
       }
       const ctx = audioContextRef.current
-      const resolved = segments.map(seg => ({
+      // THE LIVE LIST, NOT THE PROP. displaySegments is what the timeline draws;
+      // the prop holds the timings the job was LOADED with. Stitching from it played
+      // every line at its original position while the blocks sat where they had been
+      // moved to — audio at 2:40, block at 2:50 — so the user ends up dragging
+      // segments to match audio instead of placing audio against the picture.
+      const resolved = displaySegmentsRef.current.map(seg => ({
         ...seg,
         audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
         committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
       }))
+      stitchInFlightRef.current = true
       stitchWith(resolved, ctx).then(result => {
         if (result) rptBufferRef.current = result.buffer
+      }).catch(err => {
+        console.warn('[RPT] stitch failed', err)
+      }).finally(() => {
+        stitchInFlightRef.current = false
+        // Wake the effect so it schedules what was just built. Without this the
+        // audio exists and simply never plays.
+        setStitchVersion(v => v + 1)
       })
     }
 
@@ -3243,7 +3271,7 @@ export function DubVerseEditor({
     } else {
       stopAllRptAudio()
     }
-  }, [isPlaying, playbackMode, isMutedRPT, rptVolume, rptPlaybackRate])
+  }, [isPlaying, playbackMode, isMutedRPT, rptVolume, rptPlaybackRate, stitchVersion])
 
   // Initialize AudioContext and GainNode once on mount so they are ready
   // before the first stitch completes or the user presses Play.
@@ -3267,7 +3295,7 @@ export function DubVerseEditor({
     if (!segments.length || !videoDuration) return
     const ctx = audioContextRef.current
     if (!ctx) return
-    const resolved = segments.map(seg => ({
+    const resolved = displaySegmentsRef.current.map(seg => ({
       ...seg,
       audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
       committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
@@ -4438,6 +4466,12 @@ export function DubVerseEditor({
   const handleGenerateSpeechRef = useRef(handleGenerateSpeech)
   handleGenerateSpeechRef.current = handleGenerateSpeech
   const displaySegmentsRef = useRef(displaySegments)
+  // KEEP IT CURRENT. This was declared and never assigned, so it held the FIRST
+  // render's segments for the life of the editor — the timings the job was loaded
+  // with. Everything reading it (the preview stitch, the bulk voice apply) was
+  // working from the original arrangement while the timeline showed the edited
+  // one, which is why moving a block never moved its audio.
+  displaySegmentsRef.current = displaySegments
 
   // ── Chunk lens (long-video editing) ──────────────────────────────────────
   // Active for videos longer than two chunks (>10 min). One ~5-minute window is
@@ -5387,6 +5421,39 @@ export function DubVerseEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeChunk, chunkMode, chunkStart])
 
+  /** Timing and audio of the segments in play, as a cheap string.
+   *
+   *  THE PREVIEW MUST FOLLOW THE SEGMENTS. The stitched buffer was invalidated
+   *  only when the chunk changed, so after moving a segment Play replayed the
+   *  OLD arrangement: the audio stayed where it was while the block moved. That
+   *  inverts the whole method — you end up dragging segments to match audio that
+   *  cannot move, instead of placing audio against the picture.
+   *
+   *  Only the active window is measured (tens of segments, not hundreds), and
+   *  only the fields that change what you HEAR: where each segment starts and
+   *  ends, and which take is playing. */
+  const windowAudioSignature = useMemo(() => {
+    const inWindow = chunkMode && activeChunk !== null
+      ? displaySegments.filter(s => {
+          const st = s.committed_start_time ?? s.start_time ?? 0
+          return st >= chunkStart && st < chunkEnd
+        })
+      : displaySegments
+    return inWindow.map(s => [
+      s.committed_start_time ?? s.start_time ?? 0,
+      s.committed_end_time ?? s.end_time ?? 0,
+      s.committed_audio_url ?? s.audio_url ?? "",
+      s.committed_speed ?? "",
+    ].join(":")).join("|")
+  }, [displaySegments, chunkMode, activeChunk, chunkStart, chunkEnd])
+
+  // Drop the stitched preview whenever that signature moves, so the next Play
+  // rebuilds from what is on the timeline now. Cheaper than re-stitching here:
+  // a drag can fire this many times, and only the next Play needs the audio.
+  useEffect(() => {
+    rptBufferRef.current = null
+  }, [windowAudioSignature])
+
   // Segments belonging to the active window. This is the "how many are entered
   // in for editing" number — it has to track navigation, or the counter reads
   // as frozen while the window changes underneath it.
@@ -5460,9 +5527,24 @@ export function DubVerseEditor({
     if (videoRef.current) videoRef.current.currentTime = start
     const container = timelineRef.current
     if (container) {
-      // 30% in from the left, so the block lands in view rather than pinned to
-      // the edge with its neighbours cut off.
-      container.scrollLeft = Math.max(0, start * PIXELS_PER_SECOND - container.clientWidth * 0.3)
+      // ONLY IF IT IS NOT ALREADY ON SCREEN.
+      //
+      // This scrolled on every selection change, and dragging a segment selects
+      // it — so the view jumped out from under the very block being placed. When
+      // the work is lining audio up against picture frame by frame, a timeline
+      // that moves while you drag makes it impossible.
+      //
+      // Jumping is still right when the segment is somewhere else entirely: that
+      // is navigation, not interference.
+      const px = start * PIXELS_PER_SECOND
+      const viewLeft = container.scrollLeft
+      const viewRight = viewLeft + container.clientWidth
+      const margin = 40
+      if (px < viewLeft + margin || px > viewRight - margin) {
+        // 30% in from the left, so the block lands in view rather than pinned to
+        // the edge with its neighbours cut off.
+        container.scrollLeft = Math.max(0, px - container.clientWidth * 0.3)
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSegmentIndex])
@@ -7644,6 +7726,7 @@ export function DubVerseEditor({
                 src={activeVideoUrl}
                 className="absolute top-0 left-0 w-full h-full object-cover"
                 controls={false}
+                muted={playbackMode === 'preview'}
               />
               <div
                 ref={videoFadeOverlayRef}
@@ -9129,7 +9212,7 @@ export function DubVerseEditor({
                 if (playbackMode === 'preview' && !isPlaying && !rptBufferRef.current) {
                   lastStartPosRef.current = currentTime
                   const ctx = audioContextRef.current
-                  const resolved = segments.map(seg => ({
+                  const resolved = displaySegmentsRef.current.map(seg => ({
                     ...seg,
                     audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
                     committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
