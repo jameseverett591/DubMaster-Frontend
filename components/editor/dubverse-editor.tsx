@@ -1257,7 +1257,6 @@ export function DubVerseEditor({
     segmentIndex: number
   } | null>(null)
   const [addSegmentFeedback, setAddSegmentFeedback] = useState<'success' | 'error' | null>(null)
-  const [pendingOverwriteIndex, setPendingOverwriteIndex] = useState<number | null>(null)
   const [shareCopied, setShareCopied] = useState<'link' | 'video' | null>(null)
   const [askAiOpen, setAskAiOpen] = useState(false)
   const [askAiModel, setAskAiModel] = useState<'haiku' | 'sonnet' | 'opus'>('sonnet')
@@ -4183,17 +4182,24 @@ export function DubVerseEditor({
     const segment = displaySegments[activeIndex]
     if (!segment) { console.warn('[REGEN] aborted — no segment at index', activeIndex); return false }
 
-    // Guard: if the segment has committed audio AND the text has changed from
-    // what was last committed, require explicit confirmation before overwriting.
+    // KEEP THE OLD TAKE UNTIL THE NEW ONE LANDS.
+    //
+    // This used to clear audio_url and committed_audio_url the moment the text
+    // changed, so nothing could play the previous line. The cost was worse than
+    // the problem: if regeneration is slow, fails, or never fires, the segment
+    // is left pointing at nothing and is SILENT with no fallback — the exact
+    // state that made nine segments mute and took a day to trace.
+    //
+    // A stale take playing at the block's current position for a couple of
+    // seconds is a smaller fault than a hole in the film: it is wrong content,
+    // briefly, rather than no content at all. The regenerated take replaces it
+    // when it arrives.
+
     const incomingText = (activeIndex === selectedSegmentIndex && editingTextRef.current.trim())
       ? editingTextRef.current.trim()
       : (segment.preview_text ?? segment.active_text ?? segment.target_text)
     const committedText = segment.committed_adapted_text ?? segment.target_text
     const textChanged = incomingText !== committedText
-    if (segment.committed_audio_url && textChanged && voiceOverride === undefined && segIdx === undefined) {
-      setPendingOverwriteIndex(activeIndex)
-      return false
-    }
 
     // Lock freezes POSITION, not the segment. A locked scene still plays, still
     // takes a new voice, emotion or speed, and still regenerates — what it will
@@ -5232,10 +5238,12 @@ export function DubVerseEditor({
       commitOrStage(displaySegments[idx]?.transcript_index ?? idx, { committed_adapted_text: text, text_locked: true }).catch(err =>
         console.warn('[saveEditing] failed to persist text to disk:', err)
       )
-      // Auto-regen in Preview mode — 2 second debounce.
-      // Call via the ref (latest closure) and pass the edited text explicitly so
-      // the regen is immune to the stale displaySegments captured here, which
-      // still holds the pre-edit preview_text.
+      // Auto-regen in PREVIEW only — 2 second debounce.
+      //
+      // Preview is the editing mode: the blocks are the only audio source there,
+      // so re-voicing a rewritten line is what you want. Dubbed and Original are
+      // review modes — firing synthesis while someone is watching a render costs
+      // money on every one of 818 segments and can fire mid-keystroke.
       if (playbackMode === 'preview') {
         if (autoRegenTimerRef.current) clearTimeout(autoRegenTimerRef.current)
         autoRegenTimerRef.current = setTimeout(() => {
@@ -5244,7 +5252,7 @@ export function DubVerseEditor({
         }, 2000)
       }
     }
-  }, [editingSegmentIndex, setPreviewText, displaySegments])
+  }, [editingSegmentIndex, setPreviewText, displaySegments, playbackMode])
 
   // Cancel editing
   const cancelEditing = useCallback(() => {
@@ -5283,11 +5291,13 @@ export function DubVerseEditor({
         ? { ...seg, preview_text: text, committed_adapted_text: text, text_locked: true }
         : seg)
     })
+
     applyFlagOutcome(index, 'text')
     const ti = segs[index]?.transcript_index ?? index
     commitOrStage(ti, { committed_adapted_text: text, text_locked: true }).catch(err =>
       console.warn('[PASTE] failed to persist text:', err)
     )
+    // Auto-regen in PREVIEW only — see saveEditing for why.
     if (playbackMode === 'preview') {
       if (autoRegenTimerRef.current) clearTimeout(autoRegenTimerRef.current)
       autoRegenTimerRef.current = setTimeout(() => {
@@ -5450,8 +5460,22 @@ export function DubVerseEditor({
   // Drop the stitched preview whenever that signature moves, so the next Play
   // rebuilds from what is on the timeline now. Cheaper than re-stitching here:
   // a drag can fire this many times, and only the next Play needs the audio.
+  //
+  // AND SILENCE THE OLD ARRANGEMENT IF IT IS STILL PLAYING. Invalidating the
+  // buffer does nothing to the AudioBufferSourceNode already scheduled — it
+  // holds its own copy and plays on to the end regardless. So an edit made
+  // during playback left the blocks in one place and the sound in another,
+  // which is the whole complaint: the audio must come from the blocks.
+  //
+  // Bumping stitchVersion wakes the scheduler, which rebuilds from the current
+  // arrangement and resumes at the playhead. There is a brief silence while the
+  // stitch decodes; that is honest, and far better than hearing the old take.
   useEffect(() => {
     rptBufferRef.current = null
+    if (isPlayingRef.current) {
+      stopAllRptAudioRef.current()
+      setStitchVersion(v => v + 1)
+    }
   }, [windowAudioSignature])
 
   // Segments belonging to the active window. This is the "how many are entered
@@ -7520,23 +7544,6 @@ export function DubVerseEditor({
               <Trash2 className="h-4 w-4" />
             </Button>
           </div>
-          {pendingOverwriteIndex !== null && (
-            <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-950/50 border border-amber-500/30 rounded text-xs text-amber-300 mx-4 mb-2">
-              <span>This will replace the committed audio for this segment. Regenerate with the new text?</span>
-              <Button size="sm" className="h-6 text-xs bg-amber-600 hover:bg-amber-700 text-white px-2"
-                onClick={() => {
-                  const idx = pendingOverwriteIndex
-                  setPendingOverwriteIndex(null)
-                  handleGenerateSpeech(idx)
-                }}>
-                Regenerate
-              </Button>
-              <Button size="sm" variant="ghost" className="h-6 text-xs px-2"
-                onClick={() => setPendingOverwriteIndex(null)}>
-                Cancel
-              </Button>
-            </div>
-          )}
           {pendingDelete !== null && (
             <div className="flex items-center gap-2 px-3 py-1.5 bg-red-950/50 border border-red-500/30 rounded text-xs text-red-400 mx-4 mb-2">
               <span>Delete this segment?</span>
@@ -7726,6 +7733,12 @@ export function DubVerseEditor({
                 src={activeVideoUrl}
                 className="absolute top-0 left-0 w-full h-full object-cover"
                 controls={false}
+                // MUTED IN PREVIEW ONLY. Preview is the editing mode: the segment
+                // blocks are the audio there, and the video track would double it.
+                // But a bare muted attribute silenced every mode, which costs the
+                // two things those modes exist for — hearing the source performance
+                // to time against in Original, and hearing what actually rendered
+                // in Dubbed.
                 muted={playbackMode === 'preview'}
               />
               <div

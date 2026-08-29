@@ -361,13 +361,24 @@ export const useEditorStore = create<EditorState>(
   }),
   setSaveProgress: (progress) => set({ saveProgress: progress }),
   setChunkStatusMap: (map) => set({ chunkStatusMap: map }),
-  commitSegmentChanges: (index, changes) => set((state) => ({
-    segments: state.segments.map((seg, i) =>
-      i === index
-        ? { ...seg, ...changes, rpt_dirty: true, committed_at: new Date().toISOString() }
-        : seg
-    ),
-  })),
+  // MIRRORED. The block is the truth, and the block renders from
+  // importedSegments. Writing committed_start_time only into `segments` left
+  // the rendered and STITCHED copy holding the previous committed value —
+  // which still wins, because effStart is committed_start_time ?? start_time.
+  // So a drag moved the block and the audio stayed where it was.
+  //
+  // One timestamp for both arrays: minting it twice would leave the copies
+  // disagreeing about when the edit happened.
+  commitSegmentChanges: (index, changes) => set((state) => {
+    const committed_at = new Date().toISOString()
+    const patchFor = (): Partial<Segment> => ({ ...changes, rpt_dirty: true, committed_at })
+    return {
+      segments: state.segments.map((seg, i) =>
+        i === index ? { ...seg, ...patchFor() } : seg
+      ),
+      importedSegments: mirrorIntoImported(state.importedSegments, state.segments, index, patchFor),
+    }
+  }),
   markSegmentDirty: (index) => set((state) => ({
     segments: state.segments.map((seg, i) =>
       i === index ? { ...seg, rpt_dirty: true } : seg
@@ -606,13 +617,19 @@ export const useEditorStore = create<EditorState>(
     }
   }),
 
-  updateSegmentSpeaker: (index, speakerId, speakerLabel) => set((state) => ({
-    segments: state.segments.map((seg, i) =>
-      i === index
-        ? { ...seg, speaker_id: speakerId, speaker_label: speakerLabel || seg.speaker_label, status: seg.status === 'locked' ? 'locked' : 'edited' }
-        : seg
-    )
-  })),
+  updateSegmentSpeaker: (index, speakerId, speakerLabel) => set((state) => {
+    const patchFor = (seg: Segment): Partial<Segment> => ({
+      speaker_id: speakerId,
+      speaker_label: speakerLabel || seg.speaker_label,
+      status: seg.status === 'locked' ? 'locked' : 'edited',
+    })
+    return {
+      segments: state.segments.map((seg, i) =>
+        i === index ? { ...seg, ...patchFor(seg) } : seg
+      ),
+      importedSegments: mirrorIntoImported(state.importedSegments, state.segments, index, patchFor),
+    }
+  }),
 
   lockSegment: (index) => set((state) => ({
     segments: state.segments.map((seg, i) => 
@@ -647,17 +664,29 @@ export const useEditorStore = create<EditorState>(
     }
   }),
   
-  updateSegmentTiming: (index, startTime, endTime) => set((state) => ({
-    segments: state.segments.map((seg, i) => 
-      i === index ? { ...seg, start_time: startTime, end_time: endTime, status: seg.status === 'locked' ? 'locked' : 'edited' } : seg
-    )
-  })),
+  updateSegmentTiming: (index, startTime, endTime) => set((state) => {
+    const patchFor = (seg: Segment): Partial<Segment> => ({
+      start_time: startTime,
+      end_time: endTime,
+      status: seg.status === 'locked' ? 'locked' : 'edited',
+    })
+    return {
+      segments: state.segments.map((seg, i) =>
+        i === index ? { ...seg, ...patchFor(seg) } : seg
+      ),
+      importedSegments: mirrorIntoImported(state.importedSegments, state.segments, index, patchFor),
+    }
+  }),
 
-  setPreviewText: (index, text) => set((state) => ({
-    segments: state.segments.map((seg, i) =>
-      i === index ? { ...seg, preview_text: text, isPreviewing: true } : seg
-    )
-  })),
+  setPreviewText: (index, text) => set((state) => {
+    const patchFor = (): Partial<Segment> => ({ preview_text: text, isPreviewing: true })
+    return {
+      segments: state.segments.map((seg, i) =>
+        i === index ? { ...seg, ...patchFor() } : seg
+      ),
+      importedSegments: mirrorIntoImported(state.importedSegments, state.segments, index, patchFor),
+    }
+  }),
 
   commitPreview: (index) => set((state) => ({
     segments: state.segments.map((seg, i) =>

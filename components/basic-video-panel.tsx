@@ -18,7 +18,7 @@ type Phase = "transcribing" | "ready" | "reviewing" | "translating" | "reviewing
 function statusToPhase(status: JobStatusValue): Phase {
   if (status === "completed") return "complete"
   if (status === "failed" || status === "cancelled") return "error"
-  if (status === "ready_for_voice_selection" || status === "ready") return "ready"
+  if (status === "ready_for_voice_selection") return "ready"
   if (status === "ready_for_review") return "reviewing_translation"
   if (["translating", "synthesizing", "lip_syncing", "reassembling", "vozo_processing"].includes(status))
     return "dubbing"
