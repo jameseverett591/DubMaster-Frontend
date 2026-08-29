@@ -1410,8 +1410,7 @@ export function DubVerseEditor({
     if (videoRef.current) {
       videoRef.current.pause()
     }
-    stopAllRptAudioRef.current()
-    setIsPlaying(false)
+    playbackStop()
     const newStart = chunkBoundariesRef.current[target] ?? target * CHUNK_SECONDS
     setActiveChunk(target)
     setCurrentTime(newStart)
@@ -2379,6 +2378,34 @@ export function DubVerseEditor({
     rptSourceRef.current = null
   }, [])
   stopAllRptAudioRef.current = stopAllRptAudio
+
+  /** Stop playback. THE ONLY WAY playback should be stopped.
+   *
+   *  Five places did this by hand, in three different orders, and playback
+   *  state was being written from seven scattered points across an 11,000-line
+   *  component. That is how editing leaked into playback: not through any one
+   *  bad call, but because there was no single door to go through.
+   *
+   *  ORDER MATTERS. Audio sources die first, then isPlaying is synced, and only
+   *  then is the element paused. The video's `seeked` handler reads isPlayingRef
+   *  and restarts the stitch if it is still true — the "press Stop, it keeps
+   *  playing" bug. Callers that move currentTime must do so AFTER this returns.
+   */
+  const playbackStop = useCallback(() => {
+    stopAllRptAudioRef.current()
+    setIsPlaying(false)
+    if (videoRef.current) videoRef.current.pause()
+  }, [setIsPlaying])
+
+  /** Drop the stitched preview so the next play rebuilds it.
+   *
+   *  Deliberately does NOT stop anything: invalidating what will be built is a
+   *  different act from stopping what is sounding, and conflating them is what
+   *  made an edit halt playback.
+   */
+  const playbackInvalidate = useCallback(() => {
+    rptBufferRef.current = null
+  }, [])
 
   // Register a freshly-scheduled source so stopAllRptAudio can reach it.
   const registerRptSource = useCallback((src: AudioBufferSourceNode) => {
@@ -3469,9 +3496,7 @@ export function DubVerseEditor({
       // Chunk lens: playback stops at the window boundary — the user is
       // auditioning one window, not the whole film.
       if (chunkModeRef.current && videoRef.current.currentTime >= chunkEndRef.current - 0.05) {
-        stopAllRptAudio()
-        videoRef.current.pause()
-        setIsPlaying(false)
+        playbackStop()
         setCurrentTime(chunkEndRef.current)
         return
       }
@@ -3652,9 +3677,7 @@ export function DubVerseEditor({
       currentTimeRef.current = t
       // Chunk lens: stop at the window boundary.
       if (chunkModeRef.current && t >= chunkEndRef.current - 0.05) {
-        stopAllRptAudioRef.current()
-        video.pause()
-        setIsPlaying(false)
+        playbackStop()
         // Land just inside the window that was playing, not on its boundary.
         // chunkEnd is the NEXT window's start, so stopping exactly there made
         // the derived auto-follow advance the window — and windowed rendering
@@ -5558,10 +5581,8 @@ export function DubVerseEditor({
   // timeupdate handler during playback, so this effect only stops audio.
   useEffect(() => {
     if (!chunkMode || activeChunk === null) return
-    rptBufferRef.current = null
-    stopAllRptAudio()
-    if (videoRef.current) videoRef.current.pause()
-    setIsPlaying(false)
+    playbackInvalidate()
+    playbackStop()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeChunk, chunkMode, chunkStart])
 
@@ -5605,7 +5626,7 @@ export function DubVerseEditor({
   // arrangement and resumes at the playhead. There is a brief silence while the
   // stitch decodes; that is honest, and far better than hearing the old take.
   useEffect(() => {
-    rptBufferRef.current = null
+    playbackInvalidate()
     if (isPlayingRef.current) {
       stopAllRptAudioRef.current()
       setStitchVersion(v => v + 1)
@@ -9392,10 +9413,8 @@ export function DubVerseEditor({
                 // moving currentTime. Otherwise the video's 'seeked' handler (which
                 // reads isPlayingRef, still true until the next render) restarts the
                 // stitch — the "press Stop, it keeps playing" bug.
-                stopAllRptAudio()
-                setIsPlaying(false)
+                playbackStop()
                 if (videoRef.current) {
-                  videoRef.current.pause()
                   const sourceReturn = timelineToSourceTime(returnTo, scenesRef.current) ?? returnTo
                   videoRef.current.currentTime = sourceReturn
                 }
