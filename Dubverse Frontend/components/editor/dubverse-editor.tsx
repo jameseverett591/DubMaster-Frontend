@@ -4389,21 +4389,36 @@ export function DubVerseEditor({
           stagedAudioUrl: audio_url,
         })
       }
-      // If the backend GREW the segment into neighboring gaps to fit the audio,
-      // adopt its new committed timing so the timeline shows the bigger slot (and we
-      // don't then shrink it back). Otherwise keep the frontend's timing as the source
-      // of truth — backend timing can lag for split/added segments.
+      // THE SLOT MAY GROW. ITS POSITION IS THE USER'S.
+      //
+      // This is the snap-back. The old test was
+      //     bEnd > liveEnd || bStart < liveStart
+      // and on a match it adopted the backend's start AND end. That reads as
+      // "the backend grew the segment", but it is also true whenever the backend
+      // simply thinks the segment lives somewhere else — which is the case for
+      // every segment the user has dragged, because the backend computes from the
+      // original transcript timing and knows nothing about the move. So: place a
+      // line by hand, regenerate, and it jumped back to where it started.
+      //
+      // Only the DURATION is the backend's to decide: it knows how long the new
+      // audio is and whether the old slot could hold it. Where that slot sits is
+      // the whole act of dubbing without a lipsync engine, and must never be
+      // overwritten by a regeneration. Grow it in place, anchored to the start
+      // the user chose.
       const bStart = response.segment.start
       const bEnd = response.segment.end
-      const expanded = bEnd > liveEnd + 0.02 || bStart < liveStart - 0.02
-      if (expanded) {
-        updateSegment(activeIndex, { start_time: bStart, end_time: bEnd })
-        commitSegmentChanges(activeIndex, { committed_start_time: bStart, committed_end_time: bEnd })
+      const backendDur = bEnd - bStart
+      const liveDur = liveEnd - liveStart
+      const needsMoreRoom = backendDur > liveDur + 0.02
+      const grownEnd = liveStart + backendDur
+      if (needsMoreRoom) {
+        updateSegment(activeIndex, { start_time: liveStart, end_time: grownEnd })
+        commitSegmentChanges(activeIndex, { committed_start_time: liveStart, committed_end_time: grownEnd })
         commitOrStageRef.current!(segment.transcript_index ?? activeIndex, {
-          committed_start_time: bStart, committed_end_time: bEnd,
-        }).catch(err => console.warn('[REGEN-EXPAND]', err))
+          committed_start_time: liveStart, committed_end_time: grownEnd,
+        }).catch(err => console.warn('[REGEN-GROW]', err))
         setImportedSegments(prev => prev ? prev.map((seg, i) => i === activeIndex
-          ? { ...seg, start_time: bStart, end_time: bEnd, committed_start_time: bStart, committed_end_time: bEnd }
+          ? { ...seg, start_time: liveStart, end_time: grownEnd, committed_start_time: liveStart, committed_end_time: grownEnd }
           : seg) : prev)
       }
       updateSegment(activeIndex, {
@@ -4412,18 +4427,23 @@ export function DubVerseEditor({
         was_truncated: false,
       })
       const audioDur = response.segment.audio_duration
-      const slotDur = segment.end_time - segment.start_time
-      const shouldShrink = !expanded && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
-      let shrunkEnd = segment.end_time
+      // COMMITTED TIMING, NOT RAW. start_time/end_time are the ORIGINAL transcript
+      // values — a drag writes committed_start_time and leaves them untouched. So
+      // this whole block used to re-anchor the segment to where it was before the
+      // user ever moved it: the second half of the snap-back, and the half that
+      // survived fixing the grow path.
+      const slotDur = liveEnd - liveStart
+      const shouldShrink = !needsMoreRoom && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
+      let shrunkEnd = liveEnd
       if (shouldShrink) {
         const buffer = getTrailingBuffer(segment.preview_text ?? segment.active_text ?? segment.target_text ?? '')
-        shrunkEnd = segment.start_time + audioDur + buffer
-        shrunkEnd = Math.min(shrunkEnd, segment.end_time)
+        shrunkEnd = liveStart + audioDur + buffer
+        shrunkEnd = Math.min(shrunkEnd, liveEnd)
         const nextSeg = displaySegments[activeIndex + 1]
         if (nextSeg) {
-          shrunkEnd = Math.min(shrunkEnd, nextSeg.start_time - 0.05)
+          shrunkEnd = Math.min(shrunkEnd, effStart(nextSeg) - 0.05)
         }
-        shrunkEnd = Math.max(shrunkEnd, segment.start_time + 0.1)
+        shrunkEnd = Math.max(shrunkEnd, liveStart + 0.1)
         updateSegment(activeIndex, { end_time: shrunkEnd })
         commitSegmentChanges(activeIndex, { committed_end_time: shrunkEnd })
         commitOrStageRef.current!(segment.transcript_index ?? activeIndex, {
