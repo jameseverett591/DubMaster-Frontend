@@ -3750,8 +3750,7 @@ export function DubVerseEditor({
     selectSegment(index)
     const seg = displaySegmentsRef.current[index]
     if (seg) {
-      setCurrentTime(seg.start_time)
-      if (videoRef.current) videoRef.current.currentTime = seg.start_time
+      // No seek: selecting a block is not a request to move the playhead.
     }
   }, [selectSegment, groupSelectMode, handleGroupRangeClick, sceneLockMode, handleSceneRangeClick])
   
@@ -5659,8 +5658,14 @@ export function DubVerseEditor({
       chunk: findChunkForTime(start),
     }
 
-    setCurrentTime(start)
-    if (videoRef.current) videoRef.current.currentTime = start
+    // SELECTING IS NOT NAVIGATING. This used to seek the playhead to the
+    // segment start, and it runs on every selection change — including the
+    // selection a DRAG makes, and the one an edit or a commit makes. So working
+    // on a line moved the playhead out from under you, repeatedly.
+    //
+    // The playhead moves when the user says so: clicking the timeline, the skip
+    // buttons, a chunk button, or an explicit jump-to-segment from QC. Not as a
+    // side effect of touching a segment.
     const container = timelineRef.current
     if (container) {
       // ONLY IF IT IS NOT ALREADY ON SCREEN.
@@ -6711,8 +6716,6 @@ export function DubVerseEditor({
                   )}
                   onClick={() => {
                     selectSegment(index)
-                    setCurrentTime(displaySegments[index].start_time)
-                    if (videoRef.current) videoRef.current.currentTime = displaySegments[index].start_time
                     editorContainerRef.current?.focus()
                   }}
                   onDragEnter={(e) => {
@@ -6764,7 +6767,6 @@ export function DubVerseEditor({
                             })
                           }
                           selectSegment(index)
-                          setCurrentTime(displaySegments[index].start_time)
                           if (speakerId) {
                             applyVoiceToSpeaker(speakerId, parsed.voice_id)
                           } else {
@@ -6797,7 +6799,6 @@ export function DubVerseEditor({
                       })
                     }
                     selectSegment(index)
-                    setCurrentTime(displaySegments[index].start_time)
                     setPitchPopupPos({
                       x: Math.max(20, window.innerWidth / 2 - 160),
                       y: Math.max(20, window.innerHeight / 2 - 120),
