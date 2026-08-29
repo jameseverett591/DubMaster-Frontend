@@ -9839,6 +9839,12 @@ export function DubVerseEditor({
           <div 
             ref={timelineRef} 
             className="flex-1 overflow-x-auto overflow-y-auto flex flex-col"
+            // overflowAnchor none: the browser re-adjusts a scroll container to keep
+            // shifting content visually stable. On a timeline that is wrong — moving a
+            // segment made the whole view chase it, so the block never appeared to
+            // move relative to the ruler. The timeline is the fixed reference; only
+            // the segment moves within it.
+            style={{ overflowAnchor: 'none' }}
             // Track labels live in a SEPARATE column, so scrolling the tracks
             // vertically without moving the labels would slide every name out of
             // line with its track — the same desync that makes track heights have
