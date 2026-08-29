@@ -3439,7 +3439,11 @@ export function DubVerseEditor({
     const target = timelineToSourceTime(currentTime, scenesRef.current) ?? currentTime
     if (!Number.isFinite(target)) return
     const seek = () => {
-      if (Math.abs(video.currentTime - target) > 0.05) video.currentTime = target
+      if (Math.abs(video.currentTime - target) > 0.05) {
+        video.currentTime = target
+        // Give the element time to arrive before the drift corrector judges it.
+        seekSettleUntilRef.current = performance.now() + 500
+      }
     }
     // A seek issued before metadata exists is silently dropped, which leaves the
     // picture frozen on the last frame it managed to decode.
@@ -3505,6 +3509,12 @@ export function DubVerseEditor({
   /** When the audio was last dragged back onto the picture. Rate-limits the
    *  drift corrector: a reschedule is audible, so it must not chatter. */
   const rafLastResyncRef = useRef(0)
+  /** Last video position the corrector saw, so it can tell a picture that is
+   *  advancing from one that is stalled or mid-seek. */
+  const rafLastVideoPosRef = useRef(-1)
+  /** Set when something seeks the video. The element does not arrive instantly,
+   *  and correcting to a position it has not reached yet just fights the seek. */
+  const seekSettleUntilRef = useRef(0)
   useEffect(() => {
     let raf: number
     const loop = () => {
@@ -3557,8 +3567,21 @@ export function DubVerseEditor({
       // audio moves to it, never the reverse. Corrections are rate-limited: a
       // reschedule is audible, and one that chattered would be worse than the
       // drift it was fixing.
+      // ONLY CORRECT TO A PICTURE THAT IS ACTUALLY MOVING.
+      //
+      // t comes from the video element. If the picture is stalled, buffering or
+      // mid-seek, t is frozen while the audio keeps running — so the corrector
+      // drags the audio back to the frozen position, and does it again 1.5s
+      // later, and again. The same seconds of audio loop forever and the needle
+      // never moves, because nothing is advancing the thing being corrected TO.
+      // Correcting to a stopped clock can only loop.
+      const vPos = video.currentTime
+      const pictureAdvancing = !video.paused && vPos > rafLastVideoPosRef.current + 0.005
+      rafLastVideoPosRef.current = vPos
       if (
         isPlayingRef.current &&
+        pictureAdvancing &&
+        now > seekSettleUntilRef.current &&
         rptBufferRef.current &&
         audioContextRef.current &&
         audioStartTimeRef.current !== null &&
