@@ -2376,6 +2376,9 @@ export function DubVerseEditor({
   const [isMutedRPT, setIsMutedRPT] = useState(false)
   const [rptVolume, setRptVolume] = useState(80)
   const [rptPlaybackRate, setRptPlaybackRate] = useState(1.0)
+  // Read inside the rAF loop, which does not re-subscribe on rate changes.
+  const rptPlaybackRateRef = useRef(rptPlaybackRate)
+  rptPlaybackRateRef.current = rptPlaybackRate
   const [isMuted, setIsMuted] = useState(false)
   const [isMutedOriginal, setIsMutedOriginal] = useState(false)
   const [isMutedDubbed, setIsMutedDubbed] = useState(false)
@@ -3262,10 +3265,38 @@ export function DubVerseEditor({
           rptPlaybackRate
         ))
       }
-      if (ctx.state === 'suspended') {
-        ctx.resume().then(doSchedule)
+      // WAIT FOR THE PICTURE TO ACTUALLY START.
+      //
+      // play() only requests playback. The element still has to decode and, when
+      // muted, the browser may deprioritise it — so the audio was scheduled and
+      // running while the picture was still getting going. Everything you heard
+      // then sat ahead of the needle by however long that took: about 1.4s here,
+      // and not a constant, which is why it never looked like a timing-data bug.
+      //
+      // "playing" fires when playback genuinely begins. That is the starting gun.
+      const armed = () => {
+        if (ctx.state === 'suspended') ctx.resume().then(doSchedule)
+        else doSchedule()
+      }
+      const video = videoRef.current
+      if (video && video.paused) {
+        const onPlaying = () => {
+          // Re-pin to where the picture actually is now, not where it was when
+          // Play was pressed.
+          lastStartPosRef.current = useEditorStore.getState().currentTime
+          audioStartTimeRef.current = ctx.currentTime
+          armed()
+        }
+        video.addEventListener('playing', onPlaying, { once: true })
+        // If the element never reports playing (already running, or a source that
+        // will not start), do not hang silently.
+        setTimeout(() => {
+          if (audioStartTimeRef.current === ctx.currentTime) return
+          video.removeEventListener('playing', onPlaying)
+          armed()
+        }, 400)
       } else {
-        doSchedule()
+        armed()
       }
     } else {
       stopAllRptAudio()
@@ -3455,6 +3486,9 @@ export function DubVerseEditor({
   const rafLastStateUpdateRef = useRef(0)
   const rafLastScrollRef = useRef(0)
   const rafLastLogRef = useRef(0)
+  /** When the audio was last dragged back onto the picture. Rate-limits the
+   *  drift corrector: a reschedule is audible, so it must not chatter. */
+  const rafLastResyncRef = useRef(0)
   useEffect(() => {
     let raf: number
     const loop = () => {
@@ -3496,6 +3530,48 @@ export function DubVerseEditor({
       if (DEBUG_PLAYBACK && now - rafLastLogRef.current > 500) {
         rafLastLogRef.current = now
         console.log('[RAF]', { t, videoTime: video.currentTime, videoPaused: video.paused, isPlaying: isPlayingRef.current, isDragging: isDraggingNeedleRef.current, scrollLeft: container?.scrollLeft, clientWidth: container?.clientWidth, chunkStart: chunkStartRef.current, chunkEnd: chunkEndRef.current })
+      }
+      // KEEP THE AUDIO UNDER THE PICTURE.
+      //
+      // Two clocks run this: the needle follows the video element, the stitched
+      // audio free-runs on the AudioContext once scheduled. Nothing reconciled
+      // them, so they drifted apart and the sound played ahead of the blocks.
+      //
+      // The picture is the reference — it is what sync is judged against — so the
+      // audio moves to it, never the reverse. Corrections are rate-limited: a
+      // reschedule is audible, and one that chattered would be worse than the
+      // drift it was fixing.
+      if (
+        isPlayingRef.current &&
+        rptBufferRef.current &&
+        audioContextRef.current &&
+        audioStartTimeRef.current !== null &&
+        useEditorStore.getState().playbackMode === 'preview' &&
+        now - rafLastResyncRef.current > 1500
+      ) {
+        const actx = audioContextRef.current
+        const audioPos = lastStartPosRef.current + (actx.currentTime - audioStartTimeRef.current)
+        if (Math.abs(audioPos - t) > 0.15) {
+          rafLastResyncRef.current = now
+          rptSourcesRef.current.forEach(src => {
+            try { src.onended = null } catch {}
+            try { src.stop() } catch {}
+            try { src.disconnect() } catch {}
+          })
+          rptSourcesRef.current.clear()
+          rptSourceRef.current = null
+          lastStartPosRef.current = t
+          audioStartTimeRef.current = actx.currentTime
+          if (rptGainRef.current) {
+            registerRptSource(scheduleRPTPlayback(
+              rptBufferRef.current,
+              rptOffsetFor(t),
+              actx,
+              rptGainRef.current,
+              rptPlaybackRateRef.current,
+            ))
+          }
+        }
       }
       const pps = 40 * zoomLevel
       // Update the needle, time display, and active chunk fill directly in the DOM.
