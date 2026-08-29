@@ -752,7 +752,11 @@ function isDeliveryScript(draft: string): boolean {
  *  needle running through it would say its contents play at that moment, which
  *  is precisely what being parked means they do not.
  */
-const SEEK_HEADER_H = 24   // h-6
+// The seek header is gone; the playhead offset no longer includes it. Kept as a
+// named zero rather than deleted so PLAYHEAD_TOP still reads as the sum of the
+// rows above the picture — hard-coding the total is what put the head in the
+// wrong place twice before.
+const SEEK_HEADER_H = 0
 const LAYOVER_TRACK_H = 80 // h-20
 const MID_RULER_H = 20     // h-5, between the parking bay and the picture
 // The overhead ruler is gone: the scale that matters sits directly above the
@@ -968,13 +972,23 @@ export function DubVerseEditor({
       const last = tracks[tracks.length - 1] as HTMLElement | undefined
       if (!last) return false
       const bottom = last.getBoundingClientRect().bottom - container.getBoundingClientRect().top
-      const h = Math.max(0, bottom - PLAYHEAD_TOP)
+      let h = bottom - PLAYHEAD_TOP
+      if (h <= 0) {
+        // Fall back to the container rather than leave the needle with no body.
+        // A row above the picture being removed changes every offset below it,
+        // and a zero height here is invisible — the head still paints, so it
+        // reads as the needle losing its lower half rather than as a bad measure.
+        h = container.getBoundingClientRect().height - PLAYHEAD_TOP
+      }
       if (h <= 0) return false
       el.style.height = `${h}px`
-      // Only start observing once there is something real to observe.
+      // Watch the LAST TRACK as well as the container. Removing a row above the
+      // picture moves every track up without necessarily changing the
+      // container box, so observing the container alone can miss it.
       if (!ro) {
         ro = new ResizeObserver(() => { measure() })
         ro.observe(container)
+        ro.observe(last)
       }
       return true
     }
@@ -990,6 +1004,8 @@ export function DubVerseEditor({
     }
     tick()
     return () => { cancelAnimationFrame(raf); ro?.disconnect() }
+    // PLAYHEAD_TOP is a module constant, but naming it here means the measure is
+    // redone whenever the rows above the picture change during development.
   }, [])
   const timeDisplayRef = useRef<HTMLSpanElement>(null)
   const chunkBarRef = useRef<HTMLDivElement>(null)
@@ -9725,7 +9741,6 @@ export function DubVerseEditor({
               )} />
             </div>
             {/* Each spacer/label MUST match its track height exactly */}
-            <div className="h-6 shrink-0 border-b border-neutral-800 bg-neutral-900" />
             {/* Layover — where sections lifted out of the picture are parked. */}
             <div className="h-20 shrink-0 flex items-center px-2 text-xs text-cyan-400/80 border-b border-neutral-800 gap-1">
               <span className="truncate">Layover</span>
@@ -10076,20 +10091,10 @@ export function DubVerseEditor({
                   which is the one thing that has to stay clean when you are reading
                   frames for sync. The rulers carry the scale instead. */}
 
-              {/* Clickable seek header */}
-              <div
-                className="h-6 shrink-0 bg-neutral-800 border-b border-neutral-700 relative cursor-pointer hover:bg-neutral-750"
-                onClick={(e) => {
-                  const rect = timelineRef.current?.getBoundingClientRect()
-                  if (!rect) return
-                  const scrollLeft = timelineRef.current?.scrollLeft ?? 0
-                  const x = e.clientX - rect.left + scrollLeft
-                  const newTime = Math.max(0, Math.min(x / PIXELS_PER_SECOND, videoDuration))
-                  setCurrentTime(newTime)
-                  if (videoRef.current) videoRef.current.currentTime = newTime
-                }}
-              >
-              </div>
+              {/* No seek header. It was an empty 24px strip above the parking bay
+                  whose only job was click-to-seek, which the ruler and the timeline
+                  itself already do. Removing it buys 24px of vertical space on a
+                  timeline that is short of it. */}
 
 
       {parkedMenu && (
