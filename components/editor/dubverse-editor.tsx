@@ -63,7 +63,7 @@ import { TestClipsPanel } from '@/components/editor/test-clips-panel'
 import { EmotionLibraryPopup } from '@/components/editor/emotion-library-popup'
 import { CharacterProfilePopover } from '@/components/editor/character-profile-popover'
 import { useEditorStore, type SidebarTab, CHUNK_SECONDS } from '@/lib/editor-store'
-import type { Segment, Scene, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType, StagedEdit } from '@/lib/editor-types'
+import type { Segment, Scene, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType, StagedEdit, PlaybackMode } from '@/lib/editor-types'
 import { normalizeScenes } from '@/lib/editor-types'
 import { DEFAULT_NUANCES, NUANCE_MARKER_META, newSegmentId, newSceneId, getSegmentKey, defaultScenes, computeVideoFadeOpacity, timelineToSourceTime, sourceToTimelineTime } from '@/lib/editor-types'
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
@@ -882,6 +882,61 @@ const TimeRuler = memo(function TimeRuler({ durationSec, pps, variant }: TimeRul
           </div>
         )
       })}
+    </div>
+  )
+})
+
+type CaptionOverlayProps = {
+  playbackMode: PlaybackMode
+  selectedSegmentIndex: number | null
+  displaySegments: Segment[]
+  currentTimeRef: React.RefObject<number>
+}
+
+/**
+ * Render the video caption independently of the editor's throttled React state.
+ * In preview mode it follows the RAF-updated playhead so captions never lag the
+ * picture; in other modes it shows the selected segment for context.
+ */
+const CaptionOverlay = memo(function CaptionOverlay({
+  playbackMode,
+  selectedSegmentIndex,
+  displaySegments,
+  currentTimeRef,
+}: CaptionOverlayProps) {
+  const [liveText, setLiveText] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (playbackMode !== 'preview') {
+      setLiveText(null)
+      return
+    }
+    let raf: number
+    const tick = () => {
+      const t = currentTimeRef.current
+      const seg = displaySegments.find(s => t >= effStart(s) && t < effEnd(s))
+      const text = seg ? (seg.preview_text ?? seg.active_text ?? seg.target_text) : null
+      setLiveText(prev => (prev === text ? prev : text))
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [playbackMode, displaySegments, currentTimeRef])
+
+  let text: string | null = null
+  if (playbackMode === 'preview') {
+    text = liveText
+  } else {
+    const seg = selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null
+    text = seg ? (seg.preview_text ?? seg.active_text ?? seg.target_text) : null
+  }
+
+  if (!text) return null
+  return (
+    <div className="absolute bottom-8 left-0 right-0 text-center px-4">
+      <span className="bg-black/75 px-4 py-2 rounded text-white text-sm">
+        {text}
+      </span>
     </div>
   )
 })
@@ -3153,20 +3208,6 @@ export function DubVerseEditor({
     videoRetriedRef.current = false
   }, [activeVideoUrl])
 
-  // The caption to show over the video. In preview mode it follows the playhead (the segment
-  // being spoken right now), so subtitles are live and disappear during gaps — no stale baked
-  // pixels. In other modes it shows the selected segment for context.
-  const captionSegment = useMemo(() => {
-    if (playbackMode === 'preview') {
-      const t = currentTime
-      const live = displaySegments.find(s => t >= effStart(s) && t < effEnd(s))
-      if (live) return live
-      // paused between segments: keep the selected one visible for context; hide while playing
-      return isPlaying ? null : (selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null)
-    }
-    return selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null
-  }, [playbackMode, currentTime, isPlaying, displaySegments, selectedSegmentIndex])
-  
   // Track which URL we've already extracted thumbnails for
   const lastExtractedUrlRef = useRef<string | null>(null)
   
@@ -8117,13 +8158,12 @@ export function DubVerseEditor({
                 className="absolute top-0 left-0 w-full h-full bg-black pointer-events-none"
                 style={{ opacity: 0 }}
               />
-              {captionSegment && (
-                <div className="absolute bottom-8 left-0 right-0 text-center px-4">
-                  <span className="bg-black/75 px-4 py-2 rounded text-white text-sm">
-                    {captionSegment.preview_text ?? captionSegment.active_text ?? captionSegment.target_text}
-                  </span>
-                </div>
-              )}
+              <CaptionOverlay
+                playbackMode={playbackMode}
+                selectedSegmentIndex={selectedSegmentIndex}
+                displaySegments={displaySegments}
+                currentTimeRef={currentTimeRef}
+              />
               <div className="absolute bottom-2 right-2 flex items-center gap-1 text-xs text-slate-500">
                 <span>Video Translated by DubMaster</span>
               </div>
