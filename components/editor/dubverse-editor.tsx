@@ -1021,6 +1021,11 @@ export function DubVerseEditor({
   const peaksRef = useRef<{ left: Float32Array; right: Float32Array } | null>(null)
   const groupMoveStartXRef = useRef(0)
   const groupMoveActiveRef = useRef(false)
+  // Live group-move offset in a ref: the mousemove handler was setStating this
+  // 60x/sec, re-rendering the whole editor for every pixel. Blocks follow the
+  // cursor via direct DOM transform; React is told once, on release.
+  const groupMoveOffsetRef = useRef({ x: 0, y: 0 })
+  const groupDragElsRef = useRef<HTMLElement[]>([])
 
   const {
     setJobData,
@@ -1503,6 +1508,10 @@ export function DubVerseEditor({
   // read the current delta at interrupt time without re-subscribing on every move.
   const draggingSegmentRef = useRef(draggingSegment)
   draggingSegmentRef.current = draggingSegment
+  // The LIVE drag delta, written by the direct-DOM mousemove handlers. The drag
+  // no longer setStates per move, so draggingSegment.currentDelta stays 0 for the
+  // whole drag — the interrupt commit must read this ref instead.
+  const dragLiveDeltaRef = useRef(0)
   // Handles to the in-flight block-move document listeners, so the safety net can
   // tear them down if the normal mouseup is missed. Non-null === a block drag is
   // live and its normal onMouseUp has NOT yet run (used to avoid double-commit).
@@ -1543,8 +1552,9 @@ export function DubVerseEditor({
       // document BEFORE this window-level handler, so this guard prevents a
       // double-commit on a normal release.
       if (drag && dragUpListenerRef.current) {
-        const newStart = Math.max(0, drag.originalStart + drag.currentDelta)
-        const newEnd = Math.max(0, drag.originalEnd + drag.currentDelta)
+        const liveDelta = dragLiveDeltaRef.current
+        const newStart = Math.max(0, drag.originalStart + liveDelta)
+        const newEnd = Math.max(0, drag.originalEnd + liveDelta)
         updateSegment(drag.index, { start_time: newStart, end_time: newEnd })
         commitSegmentChanges(drag.index, {
           committed_start_time: newStart,
@@ -1575,6 +1585,11 @@ export function DubVerseEditor({
       setDraggingSegment(null)
       setDragReorder(null)
       setDragSpeedPreview(null)
+      dragLiveDeltaRef.current = 0
+      // Drag visuals are direct DOM transforms now — clear any left behind by an
+      // interrupted gesture or a block would float at its dragged offset forever.
+      timelineRef.current?.querySelectorAll<HTMLElement>('[data-drag-block]').forEach(el => { el.style.transform = ''; el.style.width = '' })
+      document.querySelectorAll<HTMLElement>('[data-group-frame]').forEach(el => { el.style.transform = '' })
     }
     window.addEventListener('mouseup', handleInterrupt)
     window.addEventListener('blur', handleInterrupt)
@@ -1952,7 +1967,31 @@ export function DubVerseEditor({
   // Every recorded Respeecher take across the job, flattened out of the segments.
   // Built here rather than inside the panel so the tab can be sized without
   // mounting it, and so it recomputes on the same input the timeline renders from.
-  const seedLibrary = useMemo(() => buildSeedLibrary(displaySegments), [displaySegments])
+  //
+  // INCREMENTAL: a drag commit gives displaySegments a new identity, but store
+  // updates are immutable spreads, so unchanged segments keep their object
+  // references. Their entries come straight from the WeakMap; only edited
+  // segments rebuild. A full rebuild walked all ~817 segments and their take
+  // histories on every single drag mouseup.
+  const seedCacheRef = useRef<WeakMap<Segment, ReturnType<typeof buildSeedLibrary>>>(new WeakMap())
+  const seedLibrary = useMemo(() => {
+    const cache = seedCacheRef.current
+    const out: ReturnType<typeof buildSeedLibrary> = []
+    displaySegments.forEach((seg, i) => {
+      let entries = cache.get(seg)
+      if (!entries) {
+        entries = buildSeedLibrary([seg])
+        cache.set(seg, entries)
+      }
+      // Index fields describe array position, not content — fix them up cheaply
+      // in case a split renumbered the array under an unchanged segment object.
+      const ti = seg.transcript_index ?? i
+      for (const e of entries) {
+        out.push(e.segmentIndex === i && e.transcriptIndex === ti ? e : { ...e, segmentIndex: i, transcriptIndex: ti })
+      }
+    })
+    return out
+  }, [displaySegments])
 
   /** Segments whose committed window collides with a neighbour's.
    *
@@ -3534,6 +3573,11 @@ export function DubVerseEditor({
 
   useEffect(() => { setPendingDelete(null) }, [selectedSegmentIndex])
 
+  // React state ticks throttled to 4Hz during playback: the needle, clock and
+  // scroll are all written straight to the DOM by the RAF loop at 50ms, so this
+  // state only feeds captions and a few UI bits — and every write re-renders the
+  // entire editor. At native timeupdate rate it rendered on every tick.
+  const lastTimeStateWriteRef = useRef(0)
   const handleVideoTimeUpdate = useCallback(() => {
     if (videoRef.current) {
       // Chunk lens: playback stops at the window boundary — the user is
@@ -3543,7 +3587,11 @@ export function DubVerseEditor({
         setCurrentTime(chunkEndRef.current)
         return
       }
-      setCurrentTime(videoRef.current.currentTime)
+      const now = performance.now()
+      if (now - lastTimeStateWriteRef.current >= 250) {
+        lastTimeStateWriteRef.current = now
+        setCurrentTime(videoRef.current.currentTime)
+      }
       if (timelineRef.current) {
         const container = timelineRef.current
         const pps = 40 * zoomLevel
@@ -4100,20 +4148,41 @@ export function DubVerseEditor({
     setDraggedTranslation(null)
   }, [updateSegmentText])
 
+  // Capture every block (all tracks) belonging to the selected group, plus the
+  // group frame, once at drag start. The move handler then only writes
+  // transforms to this list — no per-move render.
+  const captureGroupDragEls = useCallback(() => {
+    const tl = timelineRef.current
+    const els: HTMLElement[] = []
+    if (tl) {
+      groupSelectedSegments.forEach(idx => {
+        tl.querySelectorAll<HTMLElement>(`[data-drag-block="${idx}"]`).forEach(el => els.push(el))
+      })
+      const frame = tl.querySelector<HTMLElement>('[data-group-frame]')
+      if (frame) els.push(frame)
+    }
+    groupDragElsRef.current = els
+  }, [groupSelectedSegments])
+
   const handleTimelineMouseMove = useCallback((e: React.MouseEvent) => {
     // Group movement during the drag phase — offset all selected segments live.
+    // Direct DOM transform, NOT setState: a state write here re-rendered the
+    // whole editor on every mousemove (the "mouseup handler took 3444ms" storm).
     if (groupMoveActiveRef.current) {
-      setGroupMoveOffset({
-        x: e.clientX - groupMoveStartXRef.current,
-        y: 0
-      })
+      const x = e.clientX - groupMoveStartXRef.current
+      groupMoveOffsetRef.current = { x, y: 0 }
+      for (const el of groupDragElsRef.current) el.style.transform = `translateX(${x}px)`
     }
   }, [])
 
   const handleTimelineMouseUpWrapper = useCallback((e: React.MouseEvent) => {
     // Handle group movement end
     if (groupMoveActiveRef.current) {
-      const timeDelta = groupMoveOffset.x / PIXELS_PER_SECOND
+      const timeDelta = groupMoveOffsetRef.current.x / PIXELS_PER_SECOND
+      // Release the visual offset before the committed position renders.
+      for (const el of groupDragElsRef.current) el.style.transform = ''
+      groupDragElsRef.current = []
+      groupMoveOffsetRef.current = { x: 0, y: 0 }
 
       displaySegments.forEach((segment, index) => {
         if (groupSelectedSegments.has(index)) {
@@ -4150,7 +4219,7 @@ export function DubVerseEditor({
       setGroupMoveActive(false)
       groupMoveActiveRef.current = false
     }
-  }, [groupMoveOffset, groupSelectedSegments, displaySegments, commitSegmentChanges, jobId])
+  }, [groupSelectedSegments, displaySegments, commitSegmentChanges, jobId])
 
   // Global undo stack: each text edit pushes {index, prevText} so the top-bar
   // undo button can step backward through all edits in reverse order.
@@ -10149,6 +10218,7 @@ export function DubVerseEditor({
                 <ContextMenu>
                 <ContextMenuTrigger asChild>
                 <div
+                  data-group-frame
                   className="absolute bottom-0 cursor-move rounded-lg border-2 border-amber-400/80 bg-amber-400/10 hover:bg-amber-400/20 shadow-[0_0_16px_rgba(251,191,36,0.35)] z-30 transition-colors"
                   style={{
                     // Start at the top of the segment tracks: below the h-6 seek
@@ -10182,6 +10252,8 @@ export function DubVerseEditor({
                     e.stopPropagation()
                     groupMoveActiveRef.current = true
                     groupMoveStartXRef.current = e.clientX
+                    groupMoveOffsetRef.current = { x: 0, y: 0 }
+                    captureGroupDragEls()
                     setGroupMoveActive(true)
                     setGroupMoveOffset({ x: 0, y: 0 })
                   }}
@@ -10819,11 +10891,33 @@ export function DubVerseEditor({
                             const startX = e.clientX
                             const startStart = scene.start
                             const prev = scenes[idx - 1]
+                            // A SCENE'S SOURCE SPAN MUST EQUAL ITS TIMELINE SPAN.
+                            //
+                            // Moving a boundary used to change the timeline edge and
+                            // leave the source edge alone, which is not a trim — it is a
+                            // TIME WARP. The picture then has to play faster or slower
+                            // than 1x to fit, and since the element plays at 1x the
+                            // needle drifts away from the frame across that scene. Ip
+                            // Man 2 had accumulated 15.13s of skew this way, which is
+                            // what was bending sound against picture all week.
+                            //
+                            // Captured at pointer-down so a re-render mid-drag cannot
+                            // compound the offset.
+                            const startSrcStart = scene.source_start ?? scene.start
+                            const prevStartEnd = prev ? prev.end : 0
+                            const prevStartSrcEnd = prev ? (prev.source_end ?? prev.end) : 0
                             const onMove = (ev: MouseEvent) => {
                               const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
                               const newStart = Math.max(prev ? prev.start + 0.05 : 0, Math.min(scene.end - 0.1, startStart + delta))
-                              updateScene(scene.id, { start: newStart })
-                              if (prev) updateScene(prev.id, { end: newStart })
+                              // Trim the head: the footage start moves with the edge.
+                              updateScene(scene.id, {
+                                start: newStart,
+                                source_start: startSrcStart + (newStart - startStart),
+                              })
+                              if (prev) updateScene(prev.id, {
+                                end: newStart,
+                                source_end: prevStartSrcEnd + (newStart - prevStartEnd),
+                              })
                             }
                             const onUp = () => {
                               persistScenes().catch(err => console.warn('[SCENE-MOVE]', err))
@@ -11101,6 +11195,7 @@ export function DubVerseEditor({
                     <div
                       data-segment-drop-zone
                       data-index={index}
+                      data-drag-block={index}
                       className={cn(
                         'absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded group',
                         lockedSegments.has(keyAt(index)) && 'ring-1 ring-green-400/60',
@@ -11132,12 +11227,31 @@ export function DubVerseEditor({
                         if (layoutLocked) return
                         if (lockedSegments.has(keyAt(index))) return // locked — position frozen
                         setDraggingSegment({ index, track: 'original', startX, originalStart, originalEnd, currentDelta: 0 })
+                        // DIRECT DOM DRAG. setDraggingSegment on every mousemove
+                        // re-rendered the whole editor 60x/sec — the drag freeze.
+                        // The state write above is the only render for the whole
+                        // drag; blocks follow the cursor via transform, and the
+                        // store is written once, on release.
+                        const partnerIdx0 = lockedPairs.has(keyAt(index)) ? index + 1 : (lockedPairs.has(keyAt(index - 1)) ? index - 1 : null)
+                        const dragEls: HTMLElement[] = []
+                        const tl0 = timelineRef.current
+                        tl0?.querySelectorAll<HTMLElement>(`[data-drag-block="${index}"]`).forEach(el => dragEls.push(el))
+                        if (partnerIdx0 != null) tl0?.querySelectorAll<HTMLElement>(`[data-drag-block="${partnerIdx0}"]`).forEach(el => dragEls.push(el))
+                        dragLiveDeltaRef.current = 0
+                        let lastDeltaTime = 0
                         const onMouseMove = (ev: MouseEvent) => {
                           const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
-                          setDraggingSegment(prev => prev ? { ...prev, currentDelta: deltaTime } : null)
+                          lastDeltaTime = deltaTime
+                          dragLiveDeltaRef.current = deltaTime
+                          const px = deltaTime * PIXELS_PER_SECOND
+                          for (const el of dragEls) el.style.transform = px ? `translateX(${px}px)` : ''
                         }
                         const onMouseUp = (ev: MouseEvent) => {
-                          const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
+                          for (const el of dragEls) el.style.transform = ''
+                          dragLiveDeltaRef.current = 0
+                          // blur/pointercancel carry no clientX — fall back to the
+                          // last live delta rather than committing NaN.
+                          const deltaTime = Number.isFinite(ev.clientX) ? (ev.clientX - startX) / PIXELS_PER_SECOND : lastDeltaTime
                           updateSegment(index, {
                             start_time: Math.max(0, originalStart + deltaTime),
                             end_time: Math.max(0, originalEnd + deltaTime),
@@ -11400,6 +11514,7 @@ export function DubVerseEditor({
                     <div
                       data-segment-drop-zone
                       data-index={index}
+                      data-drag-block={index}
                       className={cn(
                         'absolute top-1 bottom-1 rounded group border transition-colors',
                         bgColor,
@@ -11454,6 +11569,8 @@ export function DubVerseEditor({
                           e.stopPropagation()
                           groupMoveActiveRef.current = true
                           groupMoveStartXRef.current = e.clientX
+                          groupMoveOffsetRef.current = { x: 0, y: 0 }
+                          captureGroupDragEls()
                           setGroupMoveActive(true)
                           setGroupMoveOffset({ x: 0, y: 0 })
                           return
@@ -11468,9 +11585,21 @@ export function DubVerseEditor({
                         if (layoutLocked) return
                         if (lockedSegments.has(keyAt(index))) return // locked — position frozen
                         setDraggingSegment({ index, track: 'dubbed', startX, originalStart, originalEnd, currentDelta: 0 })
+                        // DIRECT DOM DRAG — see the Original track handler. No
+                        // setState per mousemove; blocks follow via transform.
+                        const partnerIdx1 = lockedPairs.has(keyAt(index)) ? index + 1 : (lockedPairs.has(keyAt(index - 1)) ? index - 1 : null)
+                        const dragEls: HTMLElement[] = []
+                        const tl1 = timelineRef.current
+                        tl1?.querySelectorAll<HTMLElement>(`[data-drag-block="${index}"]`).forEach(el => dragEls.push(el))
+                        if (partnerIdx1 != null) tl1?.querySelectorAll<HTMLElement>(`[data-drag-block="${partnerIdx1}"]`).forEach(el => dragEls.push(el))
+                        dragLiveDeltaRef.current = 0
+                        let lastDeltaTime = 0
                         const onMouseMove = (ev: MouseEvent) => {
                           const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
-                          setDraggingSegment(prev => prev ? { ...prev, currentDelta: deltaTime } : null)
+                          lastDeltaTime = deltaTime
+                          dragLiveDeltaRef.current = deltaTime
+                          const px = deltaTime * PIXELS_PER_SECOND
+                          for (const el of dragEls) el.style.transform = px ? `translateX(${px}px)` : ''
                           // Auto-scroll when dragging near the right or left edge
                           const timelineEl = timelineRef.current
                           if (timelineEl) {
@@ -11487,7 +11616,9 @@ export function DubVerseEditor({
                           }
                         }
                         const onMouseUp = (ev: MouseEvent) => {
-                          const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
+                          for (const el of dragEls) el.style.transform = ''
+                          dragLiveDeltaRef.current = 0
+                          const deltaTime = Number.isFinite(ev.clientX) ? (ev.clientX - startX) / PIXELS_PER_SECOND : lastDeltaTime
                           updateSegment(index, {
                             start_time: Math.max(0, originalStart + deltaTime),
                             end_time: Math.max(0, originalEnd + deltaTime),
@@ -11619,7 +11750,7 @@ export function DubVerseEditor({
                       {/* Content */}
                       <div className="px-3 truncate text-[10px] h-full flex items-center text-white/80 gap-1">
                         {dragSpeedPreview?.index === index ? (
-                          <span className="text-amber-400 font-mono shrink-0">{dragSpeedPreview.speed.toFixed(2)}x</span>
+                          <span data-speed-label className="text-amber-400 font-mono shrink-0">{dragSpeedPreview.speed.toFixed(2)}x</span>
                         ) : stagedSpeeds[keyAt(index)] !== undefined ? (
                           <>
                             <span className="text-amber-400 font-mono shrink-0">{stagedSpeeds[keyAt(index)].toFixed(2)}x</span>
@@ -11708,6 +11839,7 @@ export function DubVerseEditor({
                       key={seg.id + '-rpt-audio'}
                       data-segment-drop-zone
                       data-index={i}
+                      data-drag-block={i}
                       className={cn(
                         'absolute top-1 bottom-1 rounded opacity-70 transition-colors group',
                         voiceDragOverIndex === i
@@ -11748,19 +11880,26 @@ export function DubVerseEditor({
                           e.stopPropagation()
                           const startX = e.clientX
                           const originalDuration = endT - startT
+                          // DIRECT DOM: resize this segment's blocks on every track
+                          // and update the live speed label without setState-per-move.
+                          const els: HTMLElement[] = []
+                          timelineRef.current?.querySelectorAll<HTMLElement>(`[data-drag-block="${i}"]`).forEach(el => els.push(el))
+                          const labelEl = timelineRef.current?.querySelector<HTMLElement>(`[data-drag-block="${i}"] [data-speed-label]`)
+                          let lastSpeed = stagedSpeeds[keyAt(i)] ?? 1.0
+                          setDragSpeedPreview({ index: i, speed: lastSpeed })
                           const onMouseMove = (ev: MouseEvent) => {
                             const dx = ev.clientX - startX
                             const newDuration = Math.max(0.1, originalDuration - dx / PIXELS_PER_SECOND)
                             const newSpeed = Math.min(2.0, Math.max(0.5, originalDuration / newDuration))
-                            setDragSpeedPreview({ index: i, speed: newSpeed })
+                            lastSpeed = newSpeed
+                            const w = Math.max((originalDuration / newSpeed) * PIXELS_PER_SECOND, 2)
+                            for (const el of els) el.style.width = `${w}px`
+                            if (labelEl) labelEl.textContent = `${newSpeed.toFixed(2)}x`
                           }
                           const onMouseUp = () => {
-                            setDragSpeedPreview(prev => {
-                              if (prev?.index === i) {
-                                setStagedSpeeds(s => ({ ...s, [keyAt(i)]: prev.speed }))
-                              }
-                              return null
-                            })
+                            const speed = lastSpeed
+                            setStagedSpeeds(s => ({ ...s, [keyAt(i)]: speed }))
+                            setDragSpeedPreview(null)
                             document.removeEventListener('mousemove', onMouseMove)
                             document.removeEventListener('mouseup', onMouseUp)
                             document.removeEventListener('pointercancel', onMouseUp)
@@ -11783,19 +11922,25 @@ export function DubVerseEditor({
                           e.stopPropagation()
                           const startX = e.clientX
                           const originalDuration = endT - startT
+                          // DIRECT DOM — same as the left handle: no setState per move.
+                          const els: HTMLElement[] = []
+                          timelineRef.current?.querySelectorAll<HTMLElement>(`[data-drag-block="${i}"]`).forEach(el => els.push(el))
+                          const labelEl = timelineRef.current?.querySelector<HTMLElement>(`[data-drag-block="${i}"] [data-speed-label]`)
+                          let lastSpeed = stagedSpeeds[keyAt(i)] ?? 1.0
+                          setDragSpeedPreview({ index: i, speed: lastSpeed })
                           const onMouseMove = (ev: MouseEvent) => {
                             const dx = ev.clientX - startX
                             const newDuration = Math.max(0.1, originalDuration + dx / PIXELS_PER_SECOND)
                             const newSpeed = Math.min(2.0, Math.max(0.5, originalDuration / newDuration))
-                            setDragSpeedPreview({ index: i, speed: newSpeed })
+                            lastSpeed = newSpeed
+                            const w = Math.max((originalDuration / newSpeed) * PIXELS_PER_SECOND, 2)
+                            for (const el of els) el.style.width = `${w}px`
+                            if (labelEl) labelEl.textContent = `${newSpeed.toFixed(2)}x`
                           }
                           const onMouseUp = () => {
-                            setDragSpeedPreview(prev => {
-                              if (prev?.index === i) {
-                                setStagedSpeeds(s => ({ ...s, [keyAt(i)]: prev.speed }))
-                              }
-                              return null
-                            })
+                            const speed = lastSpeed
+                            setStagedSpeeds(s => ({ ...s, [keyAt(i)]: speed }))
+                            setDragSpeedPreview(null)
                             document.removeEventListener('mousemove', onMouseMove)
                             document.removeEventListener('mouseup', onMouseUp)
                             document.removeEventListener('pointercancel', onMouseUp)
@@ -12016,6 +12161,7 @@ export function DubVerseEditor({
                       key={`emotion-${segment.id}`}
                       className="absolute top-0 bottom-0"
                       data-emotion-segment
+                      data-drag-block={index}
                       onDoubleClick={(e) => {
                         e.stopPropagation()
                         setAdvancedBrowserSegment(index)
