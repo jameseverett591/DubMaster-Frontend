@@ -1027,6 +1027,29 @@ export function DubVerseEditor({
   const groupMoveOffsetRef = useRef({ x: 0, y: 0 })
   const groupDragElsRef = useRef<HTMLElement[]>([])
 
+  /** THE ONLY WAY A GROUP DRAG ENDS.
+   *
+   *  A group drag leaves three things behind: inline transforms on the dragged
+   *  elements, the accumulated offset, and the active flag. There are four exits
+   *  — normal mouseup, Escape, clearing the selection, and the global interrupt —
+   *  and each one used to clean up a different subset.
+   *
+   *  Every combination has now bitten us. Escape left the blocks visually
+   *  displaced AND cleared the flag, so the interrupt handler then skipped its
+   *  own cleanup because the drag looked inactive. The interrupt left the offset
+   *  armed so a later mouseup committed an abandoned delta to every selected
+   *  segment.
+   *
+   *  So: one function, called from all four. Idempotent — calling it twice is
+   *  harmless, which matters because some paths legitimately overlap.
+   */
+  const endGroupDrag = useCallback(() => {
+    for (const el of groupDragElsRef.current) el.style.transform = ''
+    groupDragElsRef.current = []
+    groupMoveOffsetRef.current = { x: 0, y: 0 }
+    groupMoveActiveRef.current = false
+  }, [])
+
   const {
     setJobData,
     segments,
@@ -1600,11 +1623,7 @@ export function DubVerseEditor({
       // committed that stale delta to every selected segment. Losing an
       // interrupted move is acceptable; silently applying it later to the wrong
       // moment is not.
-      groupMoveOffsetRef.current = { x: 0, y: 0 }
-      groupDragElsRef.current = []
-      // Disarm the flag as well, or the guard above stays true and every later
-      // mouseup re-enters this handler for a gesture that ended long ago.
-      groupMoveActiveRef.current = false
+      endGroupDrag()
     }
     window.addEventListener('mouseup', handleInterrupt)
     window.addEventListener('blur', handleInterrupt)
@@ -2366,7 +2385,9 @@ export function DubVerseEditor({
       if (e.key === 'Escape') {
         setGroupSelectedSegments(new Set())
         setGroupMoveActive(false)
-        groupMoveActiveRef.current = false
+        // Was clearing the flag WITHOUT clearing the transforms, so the blocks
+        // stayed displaced and the interrupt handler then skipped its cleanup.
+        endGroupDrag()
         setGroupMoveOffset({ x: 0, y: 0 })
         setGroupSelectMode(false)
         setGroupAnchor(null)
@@ -3826,9 +3847,9 @@ export function DubVerseEditor({
     setGroupAnchor(null)
     setGroupSelectedSegments(new Set())
     setGroupMoveActive(false)
-    groupMoveActiveRef.current = false
+    endGroupDrag()
     setGroupMoveOffset({ x: 0, y: 0 })
-  }, [])
+  }, [endGroupDrag])
 
   /** Scene lock — pick a contiguous run and freeze it.
    *
@@ -4232,7 +4253,7 @@ export function DubVerseEditor({
       })
 
       setGroupMoveActive(false)
-      groupMoveActiveRef.current = false
+      endGroupDrag()
     }
   }, [groupSelectedSegments, displaySegments, commitSegmentChanges, jobId])
 
