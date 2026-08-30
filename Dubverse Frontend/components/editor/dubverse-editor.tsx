@@ -923,6 +923,8 @@ export function DubVerseEditor({
   retention: initialRetention,
 }: DubVerseEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
+  /** One retry per mount, so a genuinely broken source cannot loop. */
+  const videoRetriedRef = useRef(false)
   const videoFadeOverlayRef = useRef<HTMLDivElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const layoverTrackRef = useRef<HTMLDivElement>(null)
@@ -1211,6 +1213,25 @@ export function DubVerseEditor({
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (session?.access_token) {
         apiClient.setToken(session.access_token)
+        // AND REBUILD THE PICTURE. The <video> src carries the token in its
+        // query string because an element cannot send an Authorization header.
+        // Updating the API client alone left the element holding the dead token,
+        // so it 401d and the picture stopped loading — which stops the video
+        // clock, which freezes the needle while the audio plays on.
+        const v = videoRef.current
+        if (v && v.src && v.src.includes('access_token=')) {
+          const at = v.currentTime
+          const wasPlaying = !v.paused
+          v.src = apiClient.refreshMediaUrl(v.src)
+          v.load()
+          // Restore position once the new source is ready to accept a seek.
+          const restore = () => {
+            try { v.currentTime = at } catch {}
+            if (wasPlaying) v.play().catch(() => {})
+          }
+          if (v.readyState >= 1) restore()
+          else v.addEventListener('loadedmetadata', restore, { once: true })
+        }
       } else if (event === 'SIGNED_OUT') {
         apiClient.setToken(null)
       }
@@ -1911,9 +1932,21 @@ export function DubVerseEditor({
   // "unstamped" means the current session's edits where the jobId stamp never
   // landed (e.g. a missing store action), so a no-op stamp can't silently
   // discard live edits (Original resize handles, drag persistence).
-  const displaySegments: Segment[] = ((importedSegmentsJobId === jobId || importedSegmentsJobId === null) && Array.isArray(importedSegments))
-    ? importedSegments.filter(Boolean)
-    : (Array.isArray(segments) ? segments : []).filter(Boolean)
+  // MEMOISED, AND IT MATTERS ENORMOUSLY.
+  //
+  // .filter() builds a NEW ARRAY on every render, so this had a fresh identity
+  // every time. It is referenced ~175 times and is a dependency of several
+  // useMemos — buildSeedLibrary over all 818 segments, the overlap detector, the
+  // preview-audio signature. None of them ever hit their cache: every render
+  // rebuilt all of them from nothing. Click handlers were taking 4-11 SECONDS.
+  //
+  // The deps are the two arrays and the job guard, all of which change only when
+  // the data genuinely changes.
+  const displaySegments: Segment[] = useMemo(() => (
+    ((importedSegmentsJobId === jobId || importedSegmentsJobId === null) && Array.isArray(importedSegments))
+      ? importedSegments.filter(Boolean)
+      : (Array.isArray(segments) ? segments : []).filter(Boolean)
+  ), [importedSegments, importedSegmentsJobId, jobId, segments])
 
   // Every recorded Respeecher take across the job, flattened out of the segments.
   // Built here rather than inside the panel so the tab can be sized without
@@ -7888,6 +7921,21 @@ export function DubVerseEditor({
               <video
                 ref={videoRef}
                 src={activeVideoUrl}
+                // Safety net for the same failure. If the element errors — an
+                // expired token is the usual cause — retry ONCE with a freshly
+                // built URL rather than leaving the picture dead and every clock
+                // that depends on it stopped.
+                onError={() => {
+                  const v = videoRef.current
+                  if (!v || videoRetriedRef.current) return
+                  videoRetriedRef.current = true
+                  const at = v.currentTime
+                  v.src = apiClient.refreshMediaUrl(v.src || activeVideoUrl)
+                  v.load()
+                  v.addEventListener('loadedmetadata', () => {
+                    try { v.currentTime = at } catch {}
+                  }, { once: true })
+                }}
                 className="absolute top-0 left-0 w-full h-full object-cover"
                 controls={false}
                 // MUTED IN PREVIEW ONLY. Preview is the editing mode: the segment
