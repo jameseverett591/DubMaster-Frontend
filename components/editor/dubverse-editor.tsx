@@ -923,7 +923,8 @@ export function DubVerseEditor({
   retention: initialRetention,
 }: DubVerseEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
-  /** One retry per mount, so a genuinely broken source cannot loop. */
+  /** One retry per SOURCE, so a genuinely broken source cannot loop while a
+   *  new one still gets its own attempt. Reset by the effect below. */
   const videoRetriedRef = useRef(false)
   const videoFadeOverlayRef = useRef<HTMLDivElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
@@ -3111,6 +3112,15 @@ export function DubVerseEditor({
   // Only DUBBED mode shows the last rendered dubbed video (with its baked-in audio/subtitles);
   // that render is an export artifact and is intentionally not used for live editing.
   const activeVideoUrl = importedVideoUrl || (playbackMode === 'dubbed' && activeDubbedVideoUrl ? activeDubbedVideoUrl : videoUrl)
+
+  // A NEW SOURCE GETS A NEW RETRY. videoRetriedRef stops a broken source looping
+  // forever, but latched for the whole mount it also meant one early failure
+  // disabled recovery for every source after it — a chunk change, a token
+  // refresh, switching to the dubbed render — each of which would then fail
+  // silently with a dead picture and no second attempt.
+  useEffect(() => {
+    videoRetriedRef.current = false
+  }, [activeVideoUrl])
 
   // The caption to show over the video. In preview mode it follows the playhead (the segment
   // being spoken right now), so subtitles are live and disappear during gaps — no stale baked
@@ -7927,13 +7937,23 @@ export function DubVerseEditor({
                 // that depends on it stopped.
                 onError={() => {
                   const v = videoRef.current
+                  // One retry PER SOURCE, not per mount. The latch is reset by the
+                  // effect below whenever activeVideoUrl changes, so a failure on
+                  // one source cannot silently disable recovery for every later
+                  // one — a chunk change or a token refresh gets its own attempt.
                   if (!v || videoRetriedRef.current) return
                   videoRetriedRef.current = true
                   const at = v.currentTime
+                  // Reloading an element always pauses it. Playback has to be put
+                  // back, or a recoverable error leaves the picture stopped while
+                  // the editor carries on advancing — the exact split that made the
+                  // needle freeze while audio played on.
+                  const wasPlaying = !v.paused
                   v.src = apiClient.refreshMediaUrl(v.src || activeVideoUrl)
                   v.load()
                   v.addEventListener('loadedmetadata', () => {
                     try { v.currentTime = at } catch {}
+                    if (wasPlaying) v.play().catch(() => {})
                   }, { once: true })
                 }}
                 className="absolute top-0 left-0 w-full h-full object-cover"
