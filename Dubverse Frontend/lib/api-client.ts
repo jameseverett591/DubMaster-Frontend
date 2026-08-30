@@ -567,6 +567,36 @@ class DubVerseAPIClient {
    *  backend accepts `access_token` as an alternative on media routes. Every
    *  media/download URL must go through here — a plain URL now returns 401.
    */
+  /** Rebuild a media URL with the CURRENT token, keeping its other params.
+   *
+   *  toAbsoluteUrl bakes the token in once, at page load, and the result is
+   *  stored (the editor keeps it as videoUrl). Supabase rotates the token about
+   *  hourly, and from that moment the stored URL 401s — silently, because a
+   *  <video> element cannot report an auth failure any other way. The picture
+   *  then never loads, so video.paused stays true and every clock that depends
+   *  on it stops: the needle freezes while the audio graph plays on regardless.
+   *
+   *  refreshAudioUrl already does this for segment audio. Video needed the same.
+   */
+  refreshMediaUrl(url: string): string {
+    if (!url) return url
+    try {
+      const u = new URL(url, this.baseURL)
+      // ONLY OUR OWN MEDIA. The token is ours, so re-minting one is meaningless
+      // for anything else — and rebuilding the pathname against baseURL would
+      // point an externally hosted asset (R2, a CDN) at the API host and turn a
+      // recoverable error into a guaranteed 404. Anything off-origin is returned
+      // untouched.
+      const base = new URL(this.baseURL)
+      if (u.origin !== base.origin) return url
+      u.searchParams.delete('access_token')
+      const rest = u.searchParams.toString()
+      return this._mediaUrl(u.pathname + (rest ? `?${rest}` : ''))
+    } catch {
+      return url
+    }
+  }
+
   private _mediaUrl(path: string): string {
     const url = `${this.baseURL}${path}`
     if (!this._token) return url
