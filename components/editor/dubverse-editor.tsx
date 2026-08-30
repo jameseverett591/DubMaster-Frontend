@@ -1546,7 +1546,12 @@ export function DubVerseEditor({
     const handleInterrupt = () => {
       const drag = draggingSegmentRef.current
       // No-op on ordinary mouseups when nothing is in flight.
-      if (!drag && !dragUpListenerRef.current) return
+      //
+      // A GROUP DRAG SETS NEITHER of the two single-segment indicators, so this
+      // returned before reaching the cleanup below — the blocks stayed visually
+      // translated and the abandoned offset stayed armed for a later mouseup to
+      // commit. Group drags have to get past this guard to be cleaned up at all.
+      if (!drag && !dragUpListenerRef.current && !groupMoveActiveRef.current) return
       // Commit the block-move position — but only if the normal onMouseUp has not
       // already run. It nulls dragUpListenerRef synchronously and fires on the
       // document BEFORE this window-level handler, so this guard prevents a
@@ -1597,6 +1602,9 @@ export function DubVerseEditor({
       // moment is not.
       groupMoveOffsetRef.current = { x: 0, y: 0 }
       groupDragElsRef.current = []
+      // Disarm the flag as well, or the guard above stays true and every later
+      // mouseup re-enters this handler for a gesture that ended long ago.
+      groupMoveActiveRef.current = false
     }
     window.addEventListener('mouseup', handleInterrupt)
     window.addEventListener('blur', handleInterrupt)
