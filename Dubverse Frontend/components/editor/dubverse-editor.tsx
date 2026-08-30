@@ -3883,83 +3883,165 @@ export function DubVerseEditor({
     }
   }, [selectSegment, groupSelectMode, handleGroupRangeClick, sceneLockMode, handleSceneRangeClick])
   
+  // Shared resize drag helper: batches DOM writes in requestAnimationFrame,
+  // uses pointer capture so the cursor can leave the window, and only writes
+  // React state on pointer-up. This keeps the 12k-line editor from choking
+  // while a panel is being resized.
+  const startResizeDrag = useCallback(({
+    e,
+    axis,
+    min,
+    max,
+    startSize,
+    onStart,
+    setSize,
+    onEnd,
+  }: {
+    e: React.PointerEvent<HTMLElement>
+    axis: 'x' | 'y'
+    min: number
+    max: number
+    startSize: number
+    onStart?: () => void
+    setSize: (size: number) => void
+    onEnd: (size: number) => void
+  }) => {
+    // Frozen by the layout lock — the panes hold their size.
+    if (layoutLocked) return
+    e.preventDefault()
+    const target = e.currentTarget
+    try {
+      target.setPointerCapture(e.pointerId)
+    } catch {
+      // ignore
+    }
+    const prevBodyUserSelect = document.body.style.userSelect
+    document.body.style.userSelect = 'none'
+    onStart?.()
+    const startCoord = axis === 'x' ? e.clientX : e.clientY
+    let finalSize = startSize
+    let pendingSize = startSize
+    let rafId: number | null = null
+
+    const flush = () => {
+      rafId = null
+      setSize(pendingSize)
+    }
+
+    const onMove = (ev: PointerEvent) => {
+      const delta = (axis === 'x' ? ev.clientX : ev.clientY) - startCoord
+      const next = Math.min(Math.max(startSize + delta, min), max)
+      finalSize = next
+      if (pendingSize === next) return
+      pendingSize = next
+      if (!rafId) rafId = requestAnimationFrame(flush)
+    }
+
+    const onUp = () => {
+      if (rafId) cancelAnimationFrame(rafId)
+      setSize(finalSize)
+      onEnd(finalSize)
+      document.body.style.userSelect = prevBodyUserSelect
+      try {
+        target.releasePointerCapture(e.pointerId)
+      } catch {
+        // ignore
+      }
+      document.removeEventListener('pointermove', onMove)
+      document.removeEventListener('pointerup', onUp)
+      document.removeEventListener('pointercancel', onUp)
+      window.removeEventListener('blur', onUp)
+    }
+
+    document.addEventListener('pointermove', onMove)
+    document.addEventListener('pointerup', onUp)
+    document.addEventListener('pointercancel', onUp)
+    window.addEventListener('blur', onUp)
+  }, [layoutLocked])
+
   // Handle preview panel resize
-  const handlePreviewResizeStart = useCallback((e: React.MouseEvent) => {
-    // Frozen by the layout lock — the panes hold their size.
-    if (layoutLocked) return
-    e.preventDefault()
-    setIsResizingPreview(true)
+  const handlePreviewResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    startResizeDrag({
+      e,
+      axis: 'x',
+      min: 300,
+      max: 1100,
+      startSize: previewWidth,
+      onStart: () => setIsResizingPreview(true),
+      setSize: (width) => {
+        if (previewPanelRef.current) previewPanelRef.current.style.width = `${width}px`
+      },
+      onEnd: (width) => {
+        setIsResizingPreview(false)
+        setPreviewWidth(width)
+        if (!layoutLocked) {
+          localStorage.setItem('dubverse.editor.previewWidth', width.toString())
+        }
+      },
+    })
+  }, [startResizeDrag, previewWidth, layoutLocked])
 
-    const startX = e.clientX
-    const startWidth = previewWidth
-    let finalWidth = previewWidth
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const delta = startX - moveEvent.clientX
-      const newWidth = Math.min(Math.max(startWidth + delta, 300), 1100)
-      finalWidth = newWidth
-      // Update the DOM directly during the drag so the whole editor doesn't
-      // re-render on every mousemove — same fix that made the playhead smooth.
-      if (previewPanelRef.current) {
-        previewPanelRef.current.style.width = `${newWidth}px`
-      }
-    }
-
-    const handleMouseUp = () => {
-      setIsResizingPreview(false)
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-      document.removeEventListener('pointercancel', handleMouseUp)
-      window.removeEventListener('blur', handleMouseUp)
-      setPreviewWidth(finalWidth)
-      if (!layoutLocked) {
-        localStorage.setItem('dubverse.editor.previewWidth', finalWidth.toString())
-      }
-    }
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    document.addEventListener('pointercancel', handleMouseUp)
-    window.addEventListener('blur', handleMouseUp)
-  }, [previewWidth, layoutLocked])
-  
   // Handle timeline resize (vertical)
-  const handleTimelineResizeStart = useCallback((e: React.MouseEvent) => {
-    // Frozen by the layout lock — the panes hold their size.
-    if (layoutLocked) return
-    e.preventDefault()
-    setIsResizingTimeline(true)
-    
-    const startY = e.clientY
-    const startHeight = timelineHeight
-    let finalHeight = timelineHeight
-    
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const delta = startY - moveEvent.clientY
-      const newHeight = Math.min(Math.max(startHeight + delta, 150), 700)
-      finalHeight = newHeight
-      if (timelinePanelRef.current) {
-        timelinePanelRef.current.style.height = `${newHeight}px`
-      }
-    }
-    
-    const handleMouseUp = () => {
-      setIsResizingTimeline(false)
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-      document.removeEventListener('pointercancel', handleMouseUp)
-      window.removeEventListener('blur', handleMouseUp)
-      setTimelineHeight(finalHeight)
-      if (!layoutLocked) {
-        localStorage.setItem('dubverse.editor.timelineHeight', finalHeight.toString())
-      }
-    }
+  const handleTimelineResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    startResizeDrag({
+      e,
+      axis: 'y',
+      min: 150,
+      max: 700,
+      startSize: timelineHeight,
+      onStart: () => setIsResizingTimeline(true),
+      setSize: (height) => {
+        if (timelinePanelRef.current) timelinePanelRef.current.style.height = `${height}px`
+      },
+      onEnd: (height) => {
+        setIsResizingTimeline(false)
+        setTimelineHeight(height)
+        if (!layoutLocked) {
+          localStorage.setItem('dubverse.editor.timelineHeight', height.toString())
+        }
+      },
+    })
+  }, [startResizeDrag, timelineHeight, layoutLocked])
 
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    document.addEventListener('pointercancel', handleMouseUp)
-    window.addEventListener('blur', handleMouseUp)
-  }, [timelineHeight, layoutLocked])
+  // Handle QC monitor panel resize
+  const handleQcMonitorResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    startResizeDrag({
+      e,
+      axis: 'x',
+      min: 200,
+      max: 600,
+      startSize: qcMonitorWidth,
+      onStart: () => setIsResizingQcMonitor(true),
+      setSize: (width) => {
+        if (qcMonitorRef.current) qcMonitorRef.current.style.width = `${width}px`
+      },
+      onEnd: (width) => {
+        setIsResizingQcMonitor(false)
+        setQcMonitorWidth(width)
+        localStorage.setItem('dubverse.editor.qcMonitorWidth', width.toString())
+      },
+    })
+  }, [startResizeDrag, qcMonitorWidth])
+
+  // Handle track label column resize
+  const handleTrackLabelResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    startResizeDrag({
+      e,
+      axis: 'x',
+      min: 60,
+      max: 280,
+      startSize: trackLabelWidth,
+      onStart: () => setIsResizingTrackLabel(true),
+      setSize: (width) => {
+        if (trackLabelRef.current) trackLabelRef.current.style.width = `${width}px`
+      },
+      onEnd: (width) => {
+        setIsResizingTrackLabel(false)
+        setTrackLabelWidth(width)
+        localStorage.setItem('dubverse.editor.trackLabelWidth', width.toString())
+      },
+    })
+  }, [startResizeDrag, trackLabelWidth])
   
   // Toggle layout lock
   const toggleLayoutLock = useCallback(() => {
@@ -7880,12 +7962,12 @@ export function DubVerseEditor({
         <div
           ref={previewPanelRef}
           className="flex flex-col border-l border-neutral-800 bg-neutral-900/50 relative"
-          style={{ width: previewWidth }}
+          style={{ width: previewWidth, contain: 'layout' }}
         >
           {/* Resize handle */}
           <div
-            className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group"
-            onMouseDown={handlePreviewResizeStart}
+            className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group select-none touch-none"
+            onPointerDown={handlePreviewResizeStart}
           >
             <div className={cn(
               "absolute inset-y-0 left-0 w-0.5 bg-amber-500/30 group-hover:bg-amber-500",
@@ -9377,12 +9459,12 @@ export function DubVerseEditor({
       <div
         ref={timelinePanelRef}
         className="border-t border-neutral-800 bg-neutral-900 flex flex-col relative"
-        style={{ height: timelineHeight }}
+        style={{ height: timelineHeight, contain: 'layout' }}
       >
         {/* Resize handle at top */}
         <div
-          className="absolute top-0 left-0 right-0 h-1.5 cursor-ns-resize hover:bg-amber-500/50 transition-colors z-20 group"
-          onMouseDown={handleTimelineResizeStart}
+          className="absolute top-0 left-0 right-0 h-1.5 cursor-ns-resize hover:bg-amber-500/50 transition-colors z-20 group select-none touch-none"
+          onPointerDown={handleTimelineResizeStart}
         >
           <div className={cn(
             "absolute inset-x-0 top-0 h-0.5 bg-amber-500/30 group-hover:bg-amber-500",
@@ -9724,38 +9806,11 @@ export function DubVerseEditor({
         {/* Timeline tracks */}
         <div className="flex-1 flex overflow-hidden">
           {/* QC Monitor - permanent fixture left of timeline tracks */}
-          <div ref={qcMonitorRef} className="shrink-0 border-r border-neutral-700 bg-neutral-950 flex flex-col overflow-hidden relative" style={{ width: qcMonitorWidth }}>
+          <div ref={qcMonitorRef} className="shrink-0 border-r border-neutral-700 bg-neutral-950 flex flex-col overflow-hidden relative" style={{ width: qcMonitorWidth, contain: 'layout' }}>
               {/* Resize handle - right edge */}
               <div
-                className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group"
-                onMouseDown={(e) => {
-                  e.preventDefault()
-                  const startX = e.clientX
-                  const startW = qcMonitorWidth
-                  let finalW = qcMonitorWidth
-                  setIsResizingQcMonitor(true)
-                  const onMove = (ev: MouseEvent) => {
-                    const delta = ev.clientX - startX
-                    const next = Math.max(200, Math.min(600, startW + delta))
-                    finalW = next
-                    if (qcMonitorRef.current) {
-                      qcMonitorRef.current.style.width = `${next}px`
-                    }
-                  }
-                  const onUp = () => {
-                    setIsResizingQcMonitor(false)
-                    setQcMonitorWidth(finalW)
-                    localStorage.setItem('dubverse.editor.qcMonitorWidth', String(finalW))
-                    document.removeEventListener('mousemove', onMove)
-                    document.removeEventListener('mouseup', onUp)
-                    document.removeEventListener('pointercancel', onUp)
-                    window.removeEventListener('blur', onUp)
-                  }
-                  document.addEventListener('mousemove', onMove)
-                  document.addEventListener('mouseup', onUp)
-                  document.addEventListener('pointercancel', onUp)
-                  window.addEventListener('blur', onUp)
-                }}
+                className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group select-none touch-none"
+                onPointerDown={handleQcMonitorResizeStart}
               >
                 <div className={cn(
                   "absolute inset-y-0 right-0 w-0.5 bg-amber-500/30 group-hover:bg-amber-500",
@@ -9870,38 +9925,11 @@ export function DubVerseEditor({
               </div>
           </div>
           {/* Track labels - resizable left column */}
-          <div ref={trackLabelRef} className="shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col relative overflow-hidden" style={{ width: trackLabelWidth }}>
+          <div ref={trackLabelRef} className="shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col relative overflow-hidden" style={{ width: trackLabelWidth, contain: 'layout' }}>
             {/* Resize handle - right edge */}
             <div
-              className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group"
-              onMouseDown={(e) => {
-                e.preventDefault()
-                const startX = e.clientX
-                const startW = trackLabelWidth
-                let finalW = trackLabelWidth
-                setIsResizingTrackLabel(true)
-                const onMove = (ev: MouseEvent) => {
-                  const delta = ev.clientX - startX
-                  const next = Math.max(60, Math.min(280, startW + delta))
-                  finalW = next
-                  if (trackLabelRef.current) {
-                    trackLabelRef.current.style.width = `${next}px`
-                  }
-                }
-                const onUp = () => {
-                  setIsResizingTrackLabel(false)
-                  setTrackLabelWidth(finalW)
-                  localStorage.setItem('dubverse.editor.trackLabelWidth', String(finalW))
-                  document.removeEventListener('mousemove', onMove)
-                  document.removeEventListener('mouseup', onUp)
-                  document.removeEventListener('pointercancel', onUp)
-                  window.removeEventListener('blur', onUp)
-                }
-                document.addEventListener('mousemove', onMove)
-                document.addEventListener('mouseup', onUp)
-                document.addEventListener('pointercancel', onUp)
-                window.addEventListener('blur', onUp)
-              }}
+              className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group select-none touch-none"
+              onPointerDown={handleTrackLabelResizeStart}
             >
               <div className={cn(
                 "absolute inset-y-0 right-0 w-0.5 bg-amber-500/30 group-hover:bg-amber-500",
