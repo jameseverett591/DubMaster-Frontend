@@ -1590,6 +1590,13 @@ export function DubVerseEditor({
       // interrupted gesture or a block would float at its dragged offset forever.
       timelineRef.current?.querySelectorAll<HTMLElement>('[data-drag-block]').forEach(el => { el.style.transform = ''; el.style.width = '' })
       document.querySelectorAll<HTMLElement>('[data-group-frame]').forEach(el => { el.style.transform = '' })
+      // DISARM THE GROUP DRAG. These were left populated, so the offset from an
+      // ABANDONED gesture survived — and the next ordinary mouseup read it and
+      // committed that stale delta to every selected segment. Losing an
+      // interrupted move is acceptable; silently applying it later to the wrong
+      // moment is not.
+      groupMoveOffsetRef.current = { x: 0, y: 0 }
+      groupDragElsRef.current = []
     }
     window.addEventListener('mouseup', handleInterrupt)
     window.addEventListener('blur', handleInterrupt)
