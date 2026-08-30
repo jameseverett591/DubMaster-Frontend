@@ -3893,6 +3893,7 @@ export function DubVerseEditor({
     min,
     max,
     startSize,
+    invertDelta,
     onStart,
     setSize,
     onEnd,
@@ -3902,6 +3903,9 @@ export function DubVerseEditor({
     min: number
     max: number
     startSize: number
+    // Handles on the left/top edge of a panel need the delta inverted so the
+    // drag direction matches the user's cursor movement.
+    invertDelta?: boolean
     onStart?: () => void
     setSize: (size: number) => void
     onEnd: (size: number) => void
@@ -3929,7 +3933,8 @@ export function DubVerseEditor({
     }
 
     const onMove = (ev: PointerEvent) => {
-      const delta = (axis === 'x' ? ev.clientX : ev.clientY) - startCoord
+      let delta = (axis === 'x' ? ev.clientX : ev.clientY) - startCoord
+      if (invertDelta) delta = -delta
       const next = Math.min(Math.max(startSize + delta, min), max)
       finalSize = next
       if (pendingSize === next) return
@@ -3967,6 +3972,7 @@ export function DubVerseEditor({
       min: 300,
       max: 1100,
       startSize: previewWidth,
+      invertDelta: true,
       onStart: () => setIsResizingPreview(true),
       setSize: (width) => {
         if (previewPanelRef.current) previewPanelRef.current.style.width = `${width}px`
@@ -3989,6 +3995,7 @@ export function DubVerseEditor({
       min: 150,
       max: 700,
       startSize: timelineHeight,
+      invertDelta: true,
       onStart: () => setIsResizingTimeline(true),
       setSize: (height) => {
         if (timelinePanelRef.current) timelinePanelRef.current.style.height = `${height}px`
