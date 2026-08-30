@@ -7969,7 +7969,7 @@ export function DubVerseEditor({
         <div
           ref={previewPanelRef}
           className="flex flex-col border-l border-neutral-800 bg-neutral-900/50 relative"
-          style={{ width: previewWidth, contain: 'layout' }}
+          style={{ width: previewWidth }}
         >
           {/* Resize handle */}
           <div
@@ -9466,7 +9466,7 @@ export function DubVerseEditor({
       <div
         ref={timelinePanelRef}
         className="border-t border-neutral-800 bg-neutral-900 flex flex-col relative"
-        style={{ height: timelineHeight, contain: 'layout' }}
+        style={{ height: timelineHeight }}
       >
         {/* Resize handle at top */}
         <div
@@ -9813,7 +9813,7 @@ export function DubVerseEditor({
         {/* Timeline tracks */}
         <div className="flex-1 flex overflow-hidden">
           {/* QC Monitor - permanent fixture left of timeline tracks */}
-          <div ref={qcMonitorRef} className="shrink-0 border-r border-neutral-700 bg-neutral-950 flex flex-col overflow-hidden relative" style={{ width: qcMonitorWidth, contain: 'layout' }}>
+          <div ref={qcMonitorRef} className="shrink-0 border-r border-neutral-700 bg-neutral-950 flex flex-col overflow-hidden relative" style={{ width: qcMonitorWidth }}>
               {/* Resize handle - right edge */}
               <div
                 className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group select-none touch-none"
@@ -9932,7 +9932,7 @@ export function DubVerseEditor({
               </div>
           </div>
           {/* Track labels - resizable left column */}
-          <div ref={trackLabelRef} className="shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col relative overflow-hidden" style={{ width: trackLabelWidth, contain: 'layout' }}>
+          <div ref={trackLabelRef} className="shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col relative overflow-hidden" style={{ width: trackLabelWidth }}>
             {/* Resize handle - right edge */}
             <div
               className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group select-none touch-none"
