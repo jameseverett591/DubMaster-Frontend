@@ -182,6 +182,8 @@ interface SegmentContextMenuProps {
   onToggleLock: (index: number) => void
   onLockScene: (index: number) => void
   onUnlockScene: (index: number) => void
+  sceneLockMode: boolean
+  sceneAnchor: number | null
   onRevert: (index: number) => void
   onUndoLastEdit: (index: number) => void
   onUndoSplit: (index: number) => void
@@ -214,6 +216,8 @@ function SegmentContextMenu({
   onToggleLock,
   onLockScene,
   onUnlockScene,
+  sceneLockMode,
+  sceneAnchor,
   onRevert,
   onUndoLastEdit,
   onUndoSplit,
@@ -307,11 +311,22 @@ function SegmentContextMenu({
         <ContextMenuItem
           onClick={(e) => {
             e.stopPropagation()
-            if (lockedSegments.has(segmentKey)) onUnlockScene(index)
-            else onLockScene(index)
+            // Right-click "Lock Scene" is a two-step range workflow:
+            //   1. With no scene-lock armed, it starts the scene-lock mode at this segment.
+            //   2. With scene-lock armed, it locks the contiguous run from the anchor to
+            //      this segment (inclusive).
+            if (sceneLockMode) {
+              onLockScene(index)
+            } else if (lockedSegments.has(segmentKey)) {
+              onUnlockScene(index)
+            } else {
+              onLockScene(index)
+            }
           }}
           className="text-xs gap-2">
-          {lockedSegments.has(segmentKey) ? '🔓 Unlock Scene' : '🔒 Lock Scene…'}
+          {sceneLockMode
+            ? (sceneAnchor === index ? '🔒 Lock this scene' : '🔒 Lock Scene')
+            : (lockedSegments.has(segmentKey) ? '🔓 Unlock Scene' : '🔒 Lock Scene…')}
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onRevert(index) }} className="text-xs gap-2">
@@ -2418,10 +2433,12 @@ export function DubVerseEditor({
         return
       }
 
-      // Shift+L / Shift+U — lock / unlock the selected segment. A locked segment
-      // can't be dragged or resized, and its voice/emotion/speed are frozen (the
-      // regenerate guard in handleGenerateSpeech refuses locked segments, and those
-      // attachments only take effect on regenerate). Stays until Shift+U.
+      // Shift+L / Shift+U — lock / unlock a scene of contiguous segments.
+      // Locking freezes only position on the timeline; text edits and voice
+      // changes still work. Shift+L arms scene-lock mode on the selected segment,
+      // and a second Shift+L locks the run from that anchor to the new selected
+      // segment. Shift+U unlocks the contiguous locked run containing the selected
+      // segment.
       if (e.shiftKey && (e.code === 'KeyL' || e.code === 'KeyU')) {
         const target = e.target as HTMLElement
         if (
@@ -2438,7 +2455,21 @@ export function DubVerseEditor({
         // whether or not there is anything to act on.
         e.preventDefault()
         if (selectedSegmentIndex === null) return
-        setSegmentLocked(selectedSegmentIndex, e.code === 'KeyL')
+        if (e.code === 'KeyL') {
+          if (sceneLockModeRef.current && sceneAnchorRef.current !== null) {
+            const start = Math.min(sceneAnchorRef.current, selectedSegmentIndex)
+            const end = Math.max(sceneAnchorRef.current, selectedSegmentIndex)
+            lockSceneRef.current(start, end)
+          } else {
+            // First Shift+L arms the anchor; second locks the run.
+            setSceneLockModeRef.current(true)
+            setSceneAnchorRef.current(selectedSegmentIndex)
+            setSceneRangeRef.current({ start: selectedSegmentIndex, end: selectedSegmentIndex })
+          }
+        } else {
+          // Unlock the contiguous locked run containing the selected segment.
+          unlockSceneRef.current(selectedSegmentIndex)
+        }
         return
       }
 
@@ -3900,6 +3931,21 @@ export function DubVerseEditor({
     exitSceneLockMode()
   }, [exitSceneLockMode])
 
+  // Right-click / keyboard entry point for scene locking. First call arms the
+  // mode with the clicked segment as the anchor; subsequent calls lock the
+  // contiguous run from that anchor to the newly clicked segment.
+  const handleLockScene = useCallback((index: number) => {
+    if (!sceneLockMode) {
+      setSceneLockMode(true)
+      setSceneAnchor(index)
+      setSceneRange({ start: index, end: index })
+    } else if (sceneAnchor !== null) {
+      const start = Math.min(sceneAnchor, index)
+      const end = Math.max(sceneAnchor, index)
+      lockScene(start, end)
+    }
+  }, [sceneLockMode, sceneAnchor, setSceneLockMode, setSceneAnchor, setSceneRange, lockScene])
+
   /** Unlock the contiguous run of locked segments containing `index`. The scene IS
    *  the run, so there is no scene id to store, migrate, or keep in sync. */
   const unlockScene = useCallback((index: number) => {
@@ -3911,6 +3957,23 @@ export function DubVerseEditor({
     while (to + 1 < segs.length && isLocked(to + 1)) to++
     for (let i = from; i <= to; i++) setSegmentLockedRef.current?.(i, false)
   }, [keyAt])
+
+  // The keyboard shortcut effect is declared earlier than the scene-lock state,
+  // so read it through refs instead of pulling it into the dependency array.
+  const sceneLockModeRef = useRef(sceneLockMode)
+  sceneLockModeRef.current = sceneLockMode
+  const sceneAnchorRef = useRef(sceneAnchor)
+  sceneAnchorRef.current = sceneAnchor
+  const lockSceneRef = useRef(lockScene)
+  lockSceneRef.current = lockScene
+  const unlockSceneRef = useRef(unlockScene)
+  unlockSceneRef.current = unlockScene
+  const setSceneLockModeRef = useRef(setSceneLockMode)
+  setSceneLockModeRef.current = setSceneLockMode
+  const setSceneAnchorRef = useRef(setSceneAnchor)
+  setSceneAnchorRef.current = setSceneAnchor
+  const setSceneRangeRef = useRef(setSceneRange)
+  setSceneRangeRef.current = setSceneRange
 
   const handleSegmentClick = useCallback((index: number, e?: React.MouseEvent) => {
     // In group-selection mode a Ctrl+click builds the range instead of selecting
@@ -6962,7 +7025,9 @@ export function DubVerseEditor({
                   canMergeNext={canMergeWithNext(index)}
                   onDelete={(idx) => setPendingDelete(idx)}
                   onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
-                      onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+                      sceneLockMode={sceneLockMode}
+                      sceneAnchor={sceneAnchor}
+                      onLockScene={handleLockScene}
                       onUnlockScene={(idx) => unlockScene(idx)}
                   onRevert={() => handleRevert()}
                   onUndoLastEdit={handleUndoLastEdit}
@@ -10174,7 +10239,9 @@ export function DubVerseEditor({
               canMergeNext={canMergeWithNext(timelineCtxIndex)}
               onDelete={(idx) => setPendingDelete(idx)}
               onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
-              onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+              sceneLockMode={sceneLockMode}
+              sceneAnchor={sceneAnchor}
+              onLockScene={handleLockScene}
               onUnlockScene={(idx) => unlockScene(idx)}
               onRevert={revertToOriginal}
               onUndoLastEdit={handleUndoLastEdit}
@@ -11244,7 +11311,9 @@ export function DubVerseEditor({
                       canMergeNext={canMergeWithNext(index)}
                       onDelete={(idx) => setPendingDelete(idx)}
                       onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
-                      onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+                      sceneLockMode={sceneLockMode}
+                      sceneAnchor={sceneAnchor}
+                      onLockScene={handleLockScene}
                       onUnlockScene={(idx) => unlockScene(idx)}
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
@@ -11540,7 +11609,9 @@ export function DubVerseEditor({
                       canMergeNext={canMergeWithNext(index)}
                       onDelete={(idx) => setPendingDelete(idx)}
                       onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
-                      onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+                      sceneLockMode={sceneLockMode}
+                      sceneAnchor={sceneAnchor}
+                      onLockScene={handleLockScene}
                       onUnlockScene={(idx) => unlockScene(idx)}
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
