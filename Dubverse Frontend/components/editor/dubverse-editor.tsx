@@ -1763,19 +1763,8 @@ export function DubVerseEditor({
           const parsed = JSON.parse(payload) as { voice_id: string; name: string }
           console.log('[VOICE-DROP] parsed payload (native)', parsed)
           if (parsed.voice_id) {
-            const speakerId = displaySegmentsRef.current[hit.index]?.speaker_id
             const dropKey = displaySegmentsRef.current[hit.index]?.id ?? ''
             setStagedVoices(prev => ({ ...prev, [dropKey]: parsed.voice_id }))
-            if (speakerId) {
-              setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: parsed.voice_id }))
-              setStagedVoices(prev => {
-                const next = { ...prev }
-                displaySegmentsRef.current.forEach((seg, i) => {
-                  if (seg.speaker_id === speakerId && i !== hit.index) delete next[getSegmentKey(seg)]
-                })
-                return next
-              })
-            }
             selectSegment(hit.index)
             setCurrentTime(displaySegmentsRef.current[hit.index].start_time)
             console.log('[VOICE-DROP] calling handleGenerateSpeech (native)', { index: hit.index, voice_id: parsed.voice_id })
@@ -1784,24 +1773,15 @@ export function DubVerseEditor({
             // handled by this native listener rather than that one, so dropping
             // onto the Dubbed track fell through to the backend's unknown-voice
             // backstop instead of saying what it meant.
-            if (speakerId) {
-              // Same outcome as the transcript-row drop and the Assign to…
-              // dropdown: the voice belongs to the SPEAKER across this window,
-              // not just to the one line it was dropped on.
-              setVoiceAppliedFeedback({ segmentIndex: hit.index, voiceName: parsed.name })
-              setTimeout(() => setVoiceAppliedFeedback(null), 2200)
-              applyVoiceToSpeakerRef.current?.(speakerId, parsed.voice_id)
-            } else {
-              handleGenerateSpeechRef.current(hit.index, parsed.voice_id, undefined, undefined, 'fish-audio').then(ok => {
-                if (ok) {
-                  console.log('[VOICE-DROP] regen succeeded — showing applied chip (native)', { index: hit.index, voiceName: parsed.name })
-                  setVoiceAppliedFeedback({ segmentIndex: hit.index, voiceName: parsed.name })
-                  setTimeout(() => setVoiceAppliedFeedback(null), 2200)
-                } else {
-                  console.warn('[VOICE-DROP] regen failed — no confirmation chip (native)')
-                }
-              })
-            }
+            handleGenerateSpeechRef.current(hit.index, parsed.voice_id, undefined, undefined, 'fish-audio').then(ok => {
+              if (ok) {
+                console.log('[VOICE-DROP] regen succeeded — showing applied chip (native)', { index: hit.index, voiceName: parsed.name })
+                setVoiceAppliedFeedback({ segmentIndex: hit.index, voiceName: parsed.name })
+                setTimeout(() => setVoiceAppliedFeedback(null), 2200)
+              } else {
+                console.warn('[VOICE-DROP] regen failed — no confirmation chip (native)')
+              }
+            })
           }
         } catch (err) {
           console.error('[VOICE-DROP] payload parse failed (native)', err)
@@ -7111,27 +7091,17 @@ export function DubVerseEditor({
                         const parsed = JSON.parse(payload) as { voice_id: string; name: string }
                         console.log('[VOICE-DROP] parsed payload', parsed)
                         if (parsed.voice_id) {
-                          const speakerId = displaySegments[index]?.speaker_id
                           setStagedVoices(prev => ({ ...prev, [keyAt(index)]: parsed.voice_id }))
-                          if (speakerId) {
-                            setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: parsed.voice_id }))
-                            setStagedVoices(prev => {
-                              const next = { ...prev }
-                              displaySegments.forEach((seg, i) => {
-                                if (seg.speaker_id === speakerId && i !== index) delete next[getSegmentKey(seg)]
-                              })
-                              return next
-                            })
-                          }
                           selectSegment(index)
-                          if (speakerId) {
-                            applyVoiceToSpeaker(speakerId, parsed.voice_id)
-                          } else {
-                            // A Fish voice implies the Fish engine. Without this the
-                            // segment's stored engine wins and the Fish UUID is handed
-                            // to Respeecher, which 500s on an unknown voice id.
-                            handleGenerateSpeech(index, parsed.voice_id, undefined, undefined, 'fish-audio')
-                          }
+                          // A Fish voice implies the Fish engine. Without this the
+                          // segment's stored engine wins and the Fish UUID is handed
+                          // to Respeecher, which 500s on an unknown voice id.
+                          handleGenerateSpeech(index, parsed.voice_id, undefined, undefined, 'fish-audio').then(ok => {
+                            if (ok) {
+                              setVoiceAppliedFeedback({ segmentIndex: index, voiceName: parsed.name })
+                              setTimeout(() => setVoiceAppliedFeedback(null), 2200)
+                            }
+                          })
                         } else {
                           console.warn('[VOICE-DROP] payload missing voice_id', parsed)
                         }
@@ -7143,18 +7113,7 @@ export function DubVerseEditor({
                     const fallbackVoiceId = e.dataTransfer.getData('text/plain')
                     const vk = draggedVoice ?? e.dataTransfer.getData('voice_key') ?? fallbackVoiceId
                     if (!vk) return
-                    const speakerId = displaySegments[index]?.speaker_id
                     setStagedVoices(prev => ({ ...prev, [keyAt(index)]: vk }))
-                    if (speakerId) {
-                      setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: vk }))
-                      setStagedVoices(prev => {
-                        const next = { ...prev }
-                        displaySegments.forEach((seg, i) => {
-                          if (seg.speaker_id === speakerId && i !== index) delete next[getSegmentKey(seg)]
-                        })
-                        return next
-                      })
-                    }
                     selectSegment(index)
                     setPitchPopupPos({
                       x: Math.max(20, window.innerWidth / 2 - 160),
