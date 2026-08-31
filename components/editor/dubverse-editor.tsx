@@ -2429,9 +2429,16 @@ export function DubVerseEditor({
           target.tagName === 'TEXTAREA' ||
           target.contentEditable === 'true'
         ) return
+        // CLAIM THE KEY BEFORE ANY EARLY RETURN.
+        //
+        // preventDefault used to run only after a successful lock, so with no
+        // segment selected the handler returned and the keystroke reached the
+        // browser — where Shift+U opens view-source. The shortcut looked dead AND
+        // hijacked the window. Once we know the chord is ours it is ours,
+        // whether or not there is anything to act on.
+        e.preventDefault()
         if (selectedSegmentIndex === null) return
         setSegmentLocked(selectedSegmentIndex, e.code === 'KeyL')
-        e.preventDefault()
         return
       }
 
@@ -2617,7 +2624,10 @@ export function DubVerseEditor({
     commitOrStageRef.current?.(_ti, { locked: lock })
       ?.catch(err => console.warn('[LOCK] persist failed', err))
     setImportedSegments(prev => prev ? prev.map((seg, i) =>
-      i === index ? { ...seg, locked: lock, status: lock ? 'locked' as const : 'auto' as const } : seg
+      // Locking is a positional guard only; it must not overwrite the segment's
+      // edit status. Unlocking used to force status back to 'auto', which
+      // silently wiped an 'edited' state and made the segment look untouched.
+      i === index ? { ...seg, locked: lock } : seg
     ) : prev)
     if (lock) {
       setLockGlowIndices(prev => new Set(prev).add(key))
@@ -4273,18 +4283,21 @@ export function DubVerseEditor({
   // Capture every block (all tracks) belonging to the selected group, plus the
   // group frame, once at drag start. The move handler then only writes
   // transforms to this list — no per-move render.
+  // Locked segments are part of the selection for other operations, but their
+  // position is frozen, so they are not captured for a group move.
   const captureGroupDragEls = useCallback(() => {
     const tl = timelineRef.current
     const els: HTMLElement[] = []
     if (tl) {
       groupSelectedSegments.forEach(idx => {
+        if (lockedSegments.has(keyAt(idx))) return
         tl.querySelectorAll<HTMLElement>(`[data-drag-block="${idx}"]`).forEach(el => els.push(el))
       })
       const frame = tl.querySelector<HTMLElement>('[data-group-frame]')
       if (frame) els.push(frame)
     }
     groupDragElsRef.current = els
-  }, [groupSelectedSegments])
+  }, [groupSelectedSegments, lockedSegments, keyAt])
 
   const handleTimelineMouseMove = useCallback((e: React.MouseEvent) => {
     // Group movement during the drag phase — offset all selected segments live.
@@ -4307,7 +4320,9 @@ export function DubVerseEditor({
       groupMoveOffsetRef.current = { x: 0, y: 0 }
 
       displaySegments.forEach((segment, index) => {
-        if (groupSelectedSegments.has(index)) {
+        // A locked segment's position is frozen; it stays put even if it's part
+        // of the current group selection.
+        if (groupSelectedSegments.has(index) && !lockedSegments.has(keyAt(index))) {
           // Base on effStart/effEnd and write the committed fields (+ persist), the
           // same way the single-segment drag does — otherwise the group snaps back
           // to its pre-move position because the tracks render through effStart.
@@ -4341,7 +4356,7 @@ export function DubVerseEditor({
       setGroupMoveActive(false)
       endGroupDrag()
     }
-  }, [groupSelectedSegments, displaySegments, commitSegmentChanges, jobId])
+  }, [groupSelectedSegments, displaySegments, lockedSegments, keyAt, commitSegmentChanges, jobId])
 
   // Global undo stack: each text edit pushes {index, prevText} so the top-bar
   // undo button can step backward through all edits in reverse order.
@@ -7566,7 +7581,10 @@ export function DubVerseEditor({
                                   : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
                             )}
                             onDoubleClick={() => {
-                              if (lockedSegments.has(keyAt(index)) || segment.isPreviewing) return
+                              // Locking freezes position on the timeline, not
+                              // content edits. Preview-only segments still can't
+                              // be edited because there is nothing committed yet.
+                              if (segment.isPreviewing) return
                               // When the write-in box is open, double-clicking the line drops it
                               // into that field (Delivery Script) so you can add [tags]. Otherwise
                               // double-click edits the line inline as before.
@@ -7887,10 +7905,14 @@ export function DubVerseEditor({
                 size="sm"
                 className={cn(
                   "h-8 text-xs",
-                  selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex))
-                    ? "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30"
-                    : "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
+                  selectedSegmentIndex !== null
+                    ? "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
+                    : "bg-slate-700 text-slate-400 cursor-not-allowed"
                 )}
+                // Locking a segment freezes its position on the timeline; it does
+                // NOT prevent voice changes or text edits. The Generate Speech
+                // button is therefore unaffected by lock state — it should always
+                // offer to regenerate the selected segment.
                 onClick={() => handleGenerateSpeech()}
                 disabled={selectedSegmentIndex === null || isRegenerating}
               >
@@ -7898,11 +7920,6 @@ export function DubVerseEditor({
                   <>
                     <RefreshCw className="h-4 w-4 mr-1 animate-spin" />
                     Generating...
-                  </>
-                ) : selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex)) ? (
-                  <>
-                    <Lock className="h-4 w-4 mr-1" />
-                    Locked
                   </>
                 ) : (
                   <>
@@ -10309,6 +10326,10 @@ export function DubVerseEditor({
                     }
                     // Otherwise drag the box to move the whole group — the container's
                     // onMouseMove/onMouseUp drive the live offset and commit.
+                    // A locked segment's position is frozen, so a group selection that
+                    // includes any locked segment can't be moved as a whole.
+                    const selected = Array.from(groupSelectedSegments)
+                    if (selected.some(i => lockedSegments.has(keyAt(i)))) return
                     e.preventDefault()
                     e.stopPropagation()
                     groupMoveActiveRef.current = true
@@ -11255,6 +11276,11 @@ export function DubVerseEditor({
                       data-segment-drop-zone
                       data-index={index}
                       data-drag-block={index}
+                      // The pan excludes [data-segment-block]. Only the Dubbed track carried it,
+                      // so a press on this track was never recognised as a segment drag: the pan
+                      // claimed the gesture and the whole timeline moved with the block, instead
+                      // of the block moving within it.
+                      data-segment-block={true}
                       className={cn(
                         'absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded group',
                         lockedSegments.has(keyAt(index)) && 'ring-1 ring-green-400/60',
@@ -11265,7 +11291,7 @@ export function DubVerseEditor({
                         isDraggingThis ? 'cursor-grabbing' : 'cursor-grab'
                       )}
                       style={{
-                        left: (effStart(segment) + delta) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0),
+                        left: (effStart(segment) + delta) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index) && !lockedSegments.has(keyAt(index))) ? groupMoveOffset.x : 0),
                         width: (() => {
                           const dur = effEnd(segment) - effStart(segment)
                           const spd = dragSpeedPreview?.index === index ? dragSpeedPreview.speed : (stagedSpeeds[keyAt(index)] ?? 1.0)
@@ -11568,7 +11594,7 @@ export function DubVerseEditor({
                           // a paired neighbor (Shift+P) moves too.
                           const isDraggingPaired = movesWithDrag(index)
                           const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
-                          const groupDelta = (groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0
+                          const groupDelta = (groupMoveActive && groupSelectedSegments.has(index) && !lockedSegments.has(keyAt(index))) ? groupMoveOffset.x : 0
                           return (effStart(segment) + delta) * PIXELS_PER_SECOND + groupDelta
                         })(),
                         width: (() => {
@@ -11592,8 +11618,10 @@ export function DubVerseEditor({
                         // don't let it start a drag or group move.
                         if (groupSelectMode && (e.ctrlKey || e.metaKey)) return
 
-                        // Start group move if segment is selected and Shift is not pressed
+                        // Start group move if segment is selected and Shift is not pressed.
+                        // Locked segments are frozen in place, so they can't initiate a move.
                         if (groupSelectedSegments.has(index) && !e.shiftKey) {
+                          if (lockedSegments.has(keyAt(index))) return
                           e.preventDefault()
                           e.stopPropagation()
                           groupMoveActiveRef.current = true
@@ -11836,7 +11864,7 @@ export function DubVerseEditor({
                   const hasAudio = !!(seg.committed_audio_url ?? seg.audio_url)
                   const startT = effStart(seg)
                   const endT = effEnd(seg)
-                  const groupDelta = (groupMoveActive && groupSelectedSegments.has(i)) ? groupMoveOffset.x : 0
+                  const groupDelta = (groupMoveActive && groupSelectedSegments.has(i) && !lockedSegments.has(keyAt(i))) ? groupMoveOffset.x : 0
                   const dragDelta = movesWithDrag(i) && draggingSegment ? draggingSegment.currentDelta : 0
                   return (
                     <div
@@ -12166,6 +12194,11 @@ export function DubVerseEditor({
                       className="absolute top-0 bottom-0"
                       data-emotion-segment
                       data-drag-block={index}
+                      // The pan excludes [data-segment-block]. Only the Dubbed track carried it,
+                      // so a press on this track was never recognised as a segment drag: the pan
+                      // claimed the gesture and the whole timeline moved with the block, instead
+                      // of the block moving within it.
+                      data-segment-block={true}
                       onDoubleClick={(e) => {
                         e.stopPropagation()
                         setAdvancedBrowserSegment(index)
@@ -12174,7 +12207,7 @@ export function DubVerseEditor({
                         setVideoSubTab('chord')
                       }}
                       style={{
-                        left: (effStart(segment) + (movesWithDrag(index) && draggingSegment ? draggingSegment.currentDelta : 0)) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0),
+                        left: (effStart(segment) + (movesWithDrag(index) && draggingSegment ? draggingSegment.currentDelta : 0)) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index) && !lockedSegments.has(keyAt(index))) ? groupMoveOffset.x : 0),
                         width: segWidth,
                       }}
                     >
