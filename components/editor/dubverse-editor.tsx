@@ -4650,12 +4650,14 @@ export function DubVerseEditor({
     const committedText = segment.committed_adapted_text ?? segment.target_text
     const textChanged = incomingText !== committedText
 
-    // Lock freezes POSITION, not the segment. A locked scene still plays, still
-    // takes a new voice, emotion or speed, and still regenerates — what it will
-    // not do is move. This used to refuse regeneration outright, which made lock
-    // unusable for its actual purpose: pinning finished timing while continuing
-    // to work on the performance. Movement is blocked where movement happens —
-    // the drag handler and the merge guard — not here.
+    // The backend refuses to regenerate a locked segment (HTTP 423), so block
+    // every path — button, drag, popup, and queued drain — at the single point
+    // that calls regenerateSegment.
+    if (lockedSegments.has(keyAt(activeIndex))) {
+      console.warn('[REGEN] aborted — segment locked', { activeIndex })
+      setRegenError('Segment is locked — unlock it to regenerate')
+      return false
+    }
 
     selectSegment(activeIndex)
     setRegenError(null)
@@ -7970,21 +7972,24 @@ export function DubVerseEditor({
                 size="sm"
                 className={cn(
                   "h-8 text-xs",
-                  selectedSegmentIndex !== null
-                    ? "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
-                    : "bg-slate-700 text-slate-400 cursor-not-allowed"
+                  selectedSegmentIndex === null
+                    ? "bg-slate-700 text-slate-400 cursor-not-allowed"
+                    : lockedSegments.has(keyAt(selectedSegmentIndex))
+                      ? "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30"
+                      : "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
                 )}
-                // Locking a segment freezes its position on the timeline; it does
-                // NOT prevent voice changes or text edits. The Generate Speech
-                // button is therefore unaffected by lock state — it should always
-                // offer to regenerate the selected segment.
                 onClick={() => handleGenerateSpeech()}
-                disabled={selectedSegmentIndex === null || isRegenerating}
+                disabled={selectedSegmentIndex === null || isRegenerating || (selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex)))}
               >
                 {isRegenerating ? (
                   <>
                     <RefreshCw className="h-4 w-4 mr-1 animate-spin" />
                     Generating...
+                  </>
+                ) : selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex)) ? (
+                  <>
+                    <Lock className="h-4 w-4 mr-1" />
+                    Locked
                   </>
                 ) : (
                   <>
