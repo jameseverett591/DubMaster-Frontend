@@ -11073,11 +11073,31 @@ export function DubVerseEditor({
                             const startX = e.clientX
                             const startEnd = scene.end
                             const next = scenes[idx + 1]
+                            // A SCENE'S SOURCE SPAN MUST EQUAL ITS TIMELINE SPAN.
+                            // Same rule as the left handle. Moving a boundary without
+                            // its source edge is not a trim, it is a TIME WARP: the
+                            // picture then has to play faster or slower than 1x to fit,
+                            // and since the element plays at 1x the needle drifts away
+                            // from the frame across that scene. Ip Man 2 accumulated
+                            // 15.13s of skew this way before it was repaired.
+                            //
+                            // Captured at pointer-down so a re-render mid-drag cannot
+                            // compound the offset.
+                            const startSrcEnd = scene.source_end ?? scene.end
+                            const nextStartStart = next ? next.start : 0
+                            const nextStartSrcStart = next ? (next.source_start ?? next.start) : 0
                             const onMove = (ev: MouseEvent) => {
                               const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
                               const newEnd = Math.max(scene.start + 0.1, Math.min(next ? next.end - 0.05 : videoDuration, startEnd + delta))
-                              updateScene(scene.id, { end: newEnd })
-                              if (next) updateScene(next.id, { start: newEnd })
+                              // Trim the tail: the footage end moves with the edge.
+                              updateScene(scene.id, {
+                                end: newEnd,
+                                source_end: startSrcEnd + (newEnd - startEnd),
+                              })
+                              if (next) updateScene(next.id, {
+                                start: newEnd,
+                                source_start: nextStartSrcStart + (newEnd - nextStartStart),
+                              })
                             }
                             const onUp = () => {
                               persistScenes().catch(err => console.warn('[SCENE-MOVE]', err))
