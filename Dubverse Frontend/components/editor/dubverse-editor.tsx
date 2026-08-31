@@ -9622,6 +9622,24 @@ export function DubVerseEditor({
               <span ref={timeDisplayRef} className="ml-2 text-sm font-mono text-slate-400 tabular-nums">
                 {formatTime(currentTime)} / {formatTime(videoDuration)}
               </span>
+              {/* WHICH SEGMENTS ARE LOCKED, AND WHERE YOU CAN SEE IT.
+                  This used to be a green pill sitting ON the Generate Speech button,
+                  so a status read as a control — and it only ever described the
+                  SELECTED segment, which is no use when you are trying to find out
+                  what is protected before a bulk action. Here it is a standing
+                  readout of every locked segment, out of the way of any button. */}
+              {lockedSegments.size > 0 && (
+                <span
+                  className="ml-4 text-xs font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded px-2 py-0.5 whitespace-nowrap"
+                  title="Locked segments are skipped by Apply Voice. Right-click one, or select it and press Shift+U, to unlock."
+                >
+                  🔒 Locked SG {displaySegments
+                    .map((s, i) => lockedSegments.has(getSegmentKey(s)) ? (s.transcript_index ?? i) : null)
+                    .filter((n): n is number => n !== null)
+                    .sort((a, b) => a - b)
+                    .join(", ")}
+                </span>
+              )}
             </div>
           </div>
 

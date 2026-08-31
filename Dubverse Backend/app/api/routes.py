@@ -7724,15 +7724,20 @@ async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
     )
 
     regenerated, skipped_locked, failed = [], [], []
-    # Lock freezes a segment's POSITION, not its casting — a locked scene still
-    # takes a new voice. But the protection still has to mean something, so the
-    # rule is scoped: applying a voice inside the window under review is a
-    # deliberate act on work in front of you and includes locked segments, while
-    # a whole-film apply is a sweeping action that must not quietly rewrite audio
-    # in scenes already signed off.
-    _windowed = body.window_start is not None and body.window_end is not None
+    # A LOCKED SEGMENT IS SKIPPED, WINDOWED OR NOT.
+    #
+    # This used to include locked segments for a windowed apply, on the reasoning
+    # that work in front of you is fair game. But regenerate_segment refuses a
+    # locked segment unconditionally — it is the single choke point every regen
+    # path flows through — so those segments did not get a new voice, they threw
+    # and landed in . The editor then told the user "N segment(s) failed —
+    # try applying again", advice that could never work: a locked segment fails
+    # identically every time.
+    #
+    # Skipping them here makes the endpoint honest and produces the message that
+    # already existed for exactly this case.
     for t in targets:
-        if t["locked"] and not _windowed:
+        if t["locked"]:
             skipped_locked.append(t["ti"])
             continue
         try:
