@@ -4319,6 +4319,8 @@ class DubbingService:
 
         seg["path"] = final_path
         seg["voice_id"] = use_voice_id
+        if voice_id:
+            seg["committed_voice_id"] = use_voice_id
         seg["speed"] = use_speed
         seg["text"] = use_text
         seg["was_truncated"] = False
