@@ -11695,9 +11695,11 @@ export function DubVerseEditor({
                         if (groupSelectMode && (e.ctrlKey || e.metaKey)) return
 
                         // Start group move if segment is selected and Shift is not pressed.
-                        // Locked segments are frozen in place, so they can't initiate a move.
+                        // A locked segment's position is frozen, so a group selection that
+                        // includes any locked segment can't be moved as a whole.
                         if (groupSelectedSegments.has(index) && !e.shiftKey) {
-                          if (lockedSegments.has(keyAt(index))) return
+                          const selected = Array.from(groupSelectedSegments)
+                          if (selected.some(i => lockedSegments.has(keyAt(i)))) return
                           e.preventDefault()
                           e.stopPropagation()
                           groupMoveActiveRef.current = true
