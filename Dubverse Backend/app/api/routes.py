@@ -1169,7 +1169,13 @@ def _estimate_speakers_from_segments(raw_segments) -> int:
         return min(3, max_est)
     return min(3, max_est)
 
-async def _run_diarization_with_heartbeat(job_id: str, extract_result: dict, timeout_sec: int) -> dict:
+async def _run_diarization_with_heartbeat(
+    job_id: str,
+    extract_result: dict,
+    timeout_sec: int,
+    min_speakers: int = 1,
+    max_speakers: int = 6,
+) -> dict:
     """
     Run diarization in a worker thread while reporting smooth progress
     (86→89%) based on elapsed time vs expected duration.
@@ -1181,7 +1187,7 @@ async def _run_diarization_with_heartbeat(job_id: str, extract_result: dict, tim
     expected_sec = min(video_duration * 2, timeout_sec * 0.9)
 
     diarization_task = asyncio.create_task(
-        asyncio.to_thread(diarize_audio, extract_result, job_id)
+        asyncio.to_thread(diarize_audio, extract_result, job_id, min_speakers, max_speakers)
     )
 
     while True:
@@ -2551,6 +2557,7 @@ async def process_video_pipeline(job_id: str, video_path: str):
                             logger.warning(f"Job {job_id}: cloud diarization failed, falling back to local")
                             diarization_result = await _run_diarization_with_heartbeat(
                                 job_id, diarize_input, diarization_timeout_sec,
+                                min_speakers, max_speakers,
                             )
                     else:
                         logger.info(
@@ -2559,6 +2566,7 @@ async def process_video_pipeline(job_id: str, video_path: str):
                         )
                         diarization_result = await _run_diarization_with_heartbeat(
                             job_id, diarize_input, diarization_timeout_sec,
+                            min_speakers, max_speakers,
                         )
 
                     if diarization_result.get("status") == "ok":

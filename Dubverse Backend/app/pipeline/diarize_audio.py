@@ -135,7 +135,12 @@ def _get_pipeline(job_id: str | None = None):
     return _PIPELINE
 
 
-def diarize_audio(extract_result: Dict[str, Any], job_id: str | None = None) -> Dict[str, Any]:
+def diarize_audio(
+    extract_result: Dict[str, Any],
+    job_id: str | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+) -> Dict[str, Any]:
     """
     Perform speaker diarization on decoded audio.
 
@@ -189,11 +194,12 @@ def diarize_audio(extract_result: Dict[str, Any], job_id: str | None = None) -> 
 
         logger.info("[DIARIZE] Running pipeline inference...")
         # Constrain speaker count.  For known-N-speaker content set both
-        # DIARIZATION_MIN_SPEAKERS and DIARIZATION_MAX_SPEAKERS to N in .env
-        # (e.g. =3) so pyannote is forced to find exactly 3 clusters instead
-        # of collapsing similar-sounding speakers.
-        min_speakers = int(os.getenv("DIARIZATION_MIN_SPEAKERS", "1"))
-        max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "6"))
+        # min_speakers and max_speakers to N so pyannote is forced to find
+        # exactly N clusters instead of collapsing similar-sounding speakers.
+        if min_speakers is None:
+            min_speakers = int(os.getenv("DIARIZATION_MIN_SPEAKERS", "1"))
+        if max_speakers is None:
+            max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "6"))
 
         # Ensure audio is float32 mono [1, samples] as pyannote expects
         import torch
