@@ -182,6 +182,8 @@ interface SegmentContextMenuProps {
   onToggleLock: (index: number) => void
   onLockScene: (index: number) => void
   onUnlockScene: (index: number) => void
+  sceneLockMode: boolean
+  sceneAnchor: number | null
   onRevert: (index: number) => void
   onUndoLastEdit: (index: number) => void
   onUndoSplit: (index: number) => void
@@ -214,6 +216,8 @@ function SegmentContextMenu({
   onToggleLock,
   onLockScene,
   onUnlockScene,
+  sceneLockMode,
+  sceneAnchor,
   onRevert,
   onUndoLastEdit,
   onUndoSplit,
@@ -307,11 +311,22 @@ function SegmentContextMenu({
         <ContextMenuItem
           onClick={(e) => {
             e.stopPropagation()
-            if (lockedSegments.has(segmentKey)) onUnlockScene(index)
-            else onLockScene(index)
+            // Right-click "Lock Scene" is a two-step range workflow:
+            //   1. With no scene-lock armed, it starts the scene-lock mode at this segment.
+            //   2. With scene-lock armed, it locks the contiguous run from the anchor to
+            //      this segment (inclusive).
+            if (sceneLockMode) {
+              onLockScene(index)
+            } else if (lockedSegments.has(segmentKey)) {
+              onUnlockScene(index)
+            } else {
+              onLockScene(index)
+            }
           }}
           className="text-xs gap-2">
-          {lockedSegments.has(segmentKey) ? '🔓 Unlock Scene' : '🔒 Lock Scene…'}
+          {sceneLockMode
+            ? (sceneAnchor === index ? '🔒 Lock this scene' : '🔒 Lock Scene')
+            : (lockedSegments.has(segmentKey) ? '🔓 Unlock Scene' : '🔒 Lock Scene…')}
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onRevert(index) }} className="text-xs gap-2">
@@ -1748,19 +1763,8 @@ export function DubVerseEditor({
           const parsed = JSON.parse(payload) as { voice_id: string; name: string }
           console.log('[VOICE-DROP] parsed payload (native)', parsed)
           if (parsed.voice_id) {
-            const speakerId = displaySegmentsRef.current[hit.index]?.speaker_id
             const dropKey = displaySegmentsRef.current[hit.index]?.id ?? ''
             setStagedVoices(prev => ({ ...prev, [dropKey]: parsed.voice_id }))
-            if (speakerId) {
-              setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: parsed.voice_id }))
-              setStagedVoices(prev => {
-                const next = { ...prev }
-                displaySegmentsRef.current.forEach((seg, i) => {
-                  if (seg.speaker_id === speakerId && i !== hit.index) delete next[getSegmentKey(seg)]
-                })
-                return next
-              })
-            }
             selectSegment(hit.index)
             setCurrentTime(displaySegmentsRef.current[hit.index].start_time)
             console.log('[VOICE-DROP] calling handleGenerateSpeech (native)', { index: hit.index, voice_id: parsed.voice_id })
@@ -1769,24 +1773,15 @@ export function DubVerseEditor({
             // handled by this native listener rather than that one, so dropping
             // onto the Dubbed track fell through to the backend's unknown-voice
             // backstop instead of saying what it meant.
-            if (speakerId) {
-              // Same outcome as the transcript-row drop and the Assign to…
-              // dropdown: the voice belongs to the SPEAKER across this window,
-              // not just to the one line it was dropped on.
-              setVoiceAppliedFeedback({ segmentIndex: hit.index, voiceName: parsed.name })
-              setTimeout(() => setVoiceAppliedFeedback(null), 2200)
-              applyVoiceToSpeakerRef.current?.(speakerId, parsed.voice_id)
-            } else {
-              handleGenerateSpeechRef.current(hit.index, parsed.voice_id, undefined, undefined, 'fish-audio').then(ok => {
-                if (ok) {
-                  console.log('[VOICE-DROP] regen succeeded — showing applied chip (native)', { index: hit.index, voiceName: parsed.name })
-                  setVoiceAppliedFeedback({ segmentIndex: hit.index, voiceName: parsed.name })
-                  setTimeout(() => setVoiceAppliedFeedback(null), 2200)
-                } else {
-                  console.warn('[VOICE-DROP] regen failed — no confirmation chip (native)')
-                }
-              })
-            }
+            handleGenerateSpeechRef.current(hit.index, parsed.voice_id, undefined, undefined, 'fish-audio').then(ok => {
+              if (ok) {
+                console.log('[VOICE-DROP] regen succeeded — showing applied chip (native)', { index: hit.index, voiceName: parsed.name })
+                setVoiceAppliedFeedback({ segmentIndex: hit.index, voiceName: parsed.name })
+                setTimeout(() => setVoiceAppliedFeedback(null), 2200)
+              } else {
+                console.warn('[VOICE-DROP] regen failed — no confirmation chip (native)')
+              }
+            })
           }
         } catch (err) {
           console.error('[VOICE-DROP] payload parse failed (native)', err)
@@ -2418,10 +2413,12 @@ export function DubVerseEditor({
         return
       }
 
-      // Shift+L / Shift+U — lock / unlock the selected segment. A locked segment
-      // can't be dragged or resized, and its voice/emotion/speed are frozen (the
-      // regenerate guard in handleGenerateSpeech refuses locked segments, and those
-      // attachments only take effect on regenerate). Stays until Shift+U.
+      // Shift+L / Shift+U — lock / unlock a scene of contiguous segments.
+      // Locking freezes only position on the timeline; text edits and voice
+      // changes still work. Shift+L arms scene-lock mode on the selected segment,
+      // and a second Shift+L locks the run from that anchor to the new selected
+      // segment. Shift+U unlocks the contiguous locked run containing the selected
+      // segment.
       if (e.shiftKey && (e.code === 'KeyL' || e.code === 'KeyU')) {
         const target = e.target as HTMLElement
         if (
@@ -2429,9 +2426,30 @@ export function DubVerseEditor({
           target.tagName === 'TEXTAREA' ||
           target.contentEditable === 'true'
         ) return
-        if (selectedSegmentIndex === null) return
-        setSegmentLocked(selectedSegmentIndex, e.code === 'KeyL')
+        // CLAIM THE KEY BEFORE ANY EARLY RETURN.
+        //
+        // preventDefault used to run only after a successful lock, so with no
+        // segment selected the handler returned and the keystroke reached the
+        // browser — where Shift+U opens view-source. The shortcut looked dead AND
+        // hijacked the window. Once we know the chord is ours it is ours,
+        // whether or not there is anything to act on.
         e.preventDefault()
+        if (selectedSegmentIndex === null) return
+        if (e.code === 'KeyL') {
+          if (sceneLockModeRef.current && sceneAnchorRef.current !== null) {
+            const start = Math.min(sceneAnchorRef.current, selectedSegmentIndex)
+            const end = Math.max(sceneAnchorRef.current, selectedSegmentIndex)
+            lockSceneRef.current(start, end)
+          } else {
+            // First Shift+L arms the anchor; second locks the run.
+            setSceneLockModeRef.current(true)
+            setSceneAnchorRef.current(selectedSegmentIndex)
+            setSceneRangeRef.current({ start: selectedSegmentIndex, end: selectedSegmentIndex })
+          }
+        } else {
+          // Unlock the contiguous locked run containing the selected segment.
+          unlockSceneRef.current(selectedSegmentIndex)
+        }
         return
       }
 
@@ -2617,7 +2635,10 @@ export function DubVerseEditor({
     commitOrStageRef.current?.(_ti, { locked: lock })
       ?.catch(err => console.warn('[LOCK] persist failed', err))
     setImportedSegments(prev => prev ? prev.map((seg, i) =>
-      i === index ? { ...seg, locked: lock, status: lock ? 'locked' as const : 'auto' as const } : seg
+      // Locking is a positional guard only; it must not overwrite the segment's
+      // edit status. Unlocking used to force status back to 'auto', which
+      // silently wiped an 'edited' state and made the segment look untouched.
+      i === index ? { ...seg, locked: lock } : seg
     ) : prev)
     if (lock) {
       setLockGlowIndices(prev => new Set(prev).add(key))
@@ -3890,6 +3911,21 @@ export function DubVerseEditor({
     exitSceneLockMode()
   }, [exitSceneLockMode])
 
+  // Right-click / keyboard entry point for scene locking. First call arms the
+  // mode with the clicked segment as the anchor; subsequent calls lock the
+  // contiguous run from that anchor to the newly clicked segment.
+  const handleLockScene = useCallback((index: number) => {
+    if (!sceneLockMode) {
+      setSceneLockMode(true)
+      setSceneAnchor(index)
+      setSceneRange({ start: index, end: index })
+    } else if (sceneAnchor !== null) {
+      const start = Math.min(sceneAnchor, index)
+      const end = Math.max(sceneAnchor, index)
+      lockScene(start, end)
+    }
+  }, [sceneLockMode, sceneAnchor, setSceneLockMode, setSceneAnchor, setSceneRange, lockScene])
+
   /** Unlock the contiguous run of locked segments containing `index`. The scene IS
    *  the run, so there is no scene id to store, migrate, or keep in sync. */
   const unlockScene = useCallback((index: number) => {
@@ -3901,6 +3937,23 @@ export function DubVerseEditor({
     while (to + 1 < segs.length && isLocked(to + 1)) to++
     for (let i = from; i <= to; i++) setSegmentLockedRef.current?.(i, false)
   }, [keyAt])
+
+  // The keyboard shortcut effect is declared earlier than the scene-lock state,
+  // so read it through refs instead of pulling it into the dependency array.
+  const sceneLockModeRef = useRef(sceneLockMode)
+  sceneLockModeRef.current = sceneLockMode
+  const sceneAnchorRef = useRef(sceneAnchor)
+  sceneAnchorRef.current = sceneAnchor
+  const lockSceneRef = useRef(lockScene)
+  lockSceneRef.current = lockScene
+  const unlockSceneRef = useRef(unlockScene)
+  unlockSceneRef.current = unlockScene
+  const setSceneLockModeRef = useRef(setSceneLockMode)
+  setSceneLockModeRef.current = setSceneLockMode
+  const setSceneAnchorRef = useRef(setSceneAnchor)
+  setSceneAnchorRef.current = setSceneAnchor
+  const setSceneRangeRef = useRef(setSceneRange)
+  setSceneRangeRef.current = setSceneRange
 
   const handleSegmentClick = useCallback((index: number, e?: React.MouseEvent) => {
     // In group-selection mode a Ctrl+click builds the range instead of selecting
@@ -4273,18 +4326,21 @@ export function DubVerseEditor({
   // Capture every block (all tracks) belonging to the selected group, plus the
   // group frame, once at drag start. The move handler then only writes
   // transforms to this list — no per-move render.
+  // Locked segments are part of the selection for other operations, but their
+  // position is frozen, so they are not captured for a group move.
   const captureGroupDragEls = useCallback(() => {
     const tl = timelineRef.current
     const els: HTMLElement[] = []
     if (tl) {
       groupSelectedSegments.forEach(idx => {
+        if (lockedSegments.has(keyAt(idx))) return
         tl.querySelectorAll<HTMLElement>(`[data-drag-block="${idx}"]`).forEach(el => els.push(el))
       })
       const frame = tl.querySelector<HTMLElement>('[data-group-frame]')
       if (frame) els.push(frame)
     }
     groupDragElsRef.current = els
-  }, [groupSelectedSegments])
+  }, [groupSelectedSegments, lockedSegments, keyAt])
 
   const handleTimelineMouseMove = useCallback((e: React.MouseEvent) => {
     // Group movement during the drag phase — offset all selected segments live.
@@ -4307,7 +4363,9 @@ export function DubVerseEditor({
       groupMoveOffsetRef.current = { x: 0, y: 0 }
 
       displaySegments.forEach((segment, index) => {
-        if (groupSelectedSegments.has(index)) {
+        // A locked segment's position is frozen; it stays put even if it's part
+        // of the current group selection.
+        if (groupSelectedSegments.has(index) && !lockedSegments.has(keyAt(index))) {
           // Base on effStart/effEnd and write the committed fields (+ persist), the
           // same way the single-segment drag does — otherwise the group snaps back
           // to its pre-move position because the tracks render through effStart.
@@ -4341,7 +4399,7 @@ export function DubVerseEditor({
       setGroupMoveActive(false)
       endGroupDrag()
     }
-  }, [groupSelectedSegments, displaySegments, commitSegmentChanges, jobId])
+  }, [groupSelectedSegments, displaySegments, lockedSegments, keyAt, commitSegmentChanges, jobId])
 
   // Global undo stack: each text edit pushes {index, prevText} so the top-bar
   // undo button can step backward through all edits in reverse order.
@@ -4572,12 +4630,9 @@ export function DubVerseEditor({
     const committedText = segment.committed_adapted_text ?? segment.target_text
     const textChanged = incomingText !== committedText
 
-    // Lock freezes POSITION, not the segment. A locked scene still plays, still
-    // takes a new voice, emotion or speed, and still regenerates — what it will
-    // not do is move. This used to refuse regeneration outright, which made lock
-    // unusable for its actual purpose: pinning finished timing while continuing
-    // to work on the performance. Movement is blocked where movement happens —
-    // the drag handler and the merge guard — not here.
+    // Lock is positional: a locked segment can still be regenerated (voice,
+    // emotion, speed, text), but its timeline slot must not move.
+    const isLocked = lockedSegments.has(keyAt(activeIndex))
 
     selectSegment(activeIndex)
     setRegenError(null)
@@ -4704,7 +4759,7 @@ export function DubVerseEditor({
       const bEnd = response.segment.end
       const backendDur = bEnd - bStart
       const liveDur = liveEnd - liveStart
-      const needsMoreRoom = backendDur > liveDur + 0.02
+      const needsMoreRoom = !isLocked && backendDur > liveDur + 0.02
       const grownEnd = liveStart + backendDur
       if (needsMoreRoom) {
         updateSegment(activeIndex, { start_time: liveStart, end_time: grownEnd })
@@ -4728,7 +4783,7 @@ export function DubVerseEditor({
       // user ever moved it: the second half of the snap-back, and the half that
       // survived fixing the grow path.
       const slotDur = liveEnd - liveStart
-      const shouldShrink = !needsMoreRoom && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
+      const shouldShrink = !isLocked && !needsMoreRoom && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
       let shrunkEnd = liveEnd
       if (shouldShrink) {
         const buffer = getTrailingBuffer(segment.preview_text ?? segment.active_text ?? segment.target_text ?? '')
@@ -5608,8 +5663,9 @@ export function DubVerseEditor({
     if (editingSegmentIndex !== null) {
       const idx = editingSegmentIndex
       const text = editingTextRef.current
+      const previousDisplayText = displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? ''
       // Push pre-edit text onto the global undo stack before applying the change.
-      undoStack.current.push({ kind: 'text', index: idx, prevText: displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? '' })
+      undoStack.current.push({ kind: 'text', index: idx, prevText: previousDisplayText })
       emotionAutoFiredRef.current.delete(idx)
       setPreviewText(idx, text)
       setImportedSegments(prev => {
@@ -5635,10 +5691,13 @@ export function DubVerseEditor({
       // review modes — firing synthesis while someone is watching a render costs
       // money on every one of 818 segments and can fire mid-keystroke.
       if (playbackMode === 'preview') {
-        if (autoRegenTimerRef.current) clearTimeout(autoRegenTimerRef.current)
-        autoRegenTimerRef.current = setTimeout(() => {
-          handleGenerateSpeechRef.current(idx, undefined, text)
+        if (autoRegenTimerRef.current) {
+          clearTimeout(autoRegenTimerRef.current)
           autoRegenTimerRef.current = null
+        }
+        autoRegenTimerRef.current = setTimeout(() => {
+          autoRegenTimerRef.current = null
+          handleGenerateSpeechRef.current(idx, undefined, text)
         }, 2000)
       }
     }
@@ -5672,7 +5731,8 @@ export function DubVerseEditor({
     }
     if (text == null) return
     const segs = displaySegmentsRef.current
-    undoStack.current.push({ kind: 'text', index, prevText: segs[index]?.preview_text ?? segs[index]?.active_text ?? segs[index]?.target_text ?? '' })
+    const previousDisplayText = segs[index]?.preview_text ?? segs[index]?.active_text ?? segs[index]?.target_text ?? ''
+    undoStack.current.push({ kind: 'text', index, prevText: previousDisplayText })
     emotionAutoFiredRef.current.delete(index)
     setPreviewText(index, text)
     setImportedSegments(prev => {
@@ -5689,10 +5749,13 @@ export function DubVerseEditor({
     )
     // Auto-regen in PREVIEW only — see saveEditing for why.
     if (playbackMode === 'preview') {
-      if (autoRegenTimerRef.current) clearTimeout(autoRegenTimerRef.current)
-      autoRegenTimerRef.current = setTimeout(() => {
-        handleGenerateSpeechRef.current(index, undefined, text)
+      if (autoRegenTimerRef.current) {
+        clearTimeout(autoRegenTimerRef.current)
         autoRegenTimerRef.current = null
+      }
+      autoRegenTimerRef.current = setTimeout(() => {
+        autoRegenTimerRef.current = null
+        handleGenerateSpeechRef.current(index, undefined, text)
       }, 2000)
     }
   }, [setPreviewText, jobId, playbackMode])
@@ -6947,7 +7010,9 @@ export function DubVerseEditor({
                   canMergeNext={canMergeWithNext(index)}
                   onDelete={(idx) => setPendingDelete(idx)}
                   onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
-                      onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+                      sceneLockMode={sceneLockMode}
+                      sceneAnchor={sceneAnchor}
+                      onLockScene={handleLockScene}
                       onUnlockScene={(idx) => unlockScene(idx)}
                   onRevert={() => handleRevert()}
                   onUndoLastEdit={handleUndoLastEdit}
@@ -7029,27 +7094,17 @@ export function DubVerseEditor({
                         const parsed = JSON.parse(payload) as { voice_id: string; name: string }
                         console.log('[VOICE-DROP] parsed payload', parsed)
                         if (parsed.voice_id) {
-                          const speakerId = displaySegments[index]?.speaker_id
                           setStagedVoices(prev => ({ ...prev, [keyAt(index)]: parsed.voice_id }))
-                          if (speakerId) {
-                            setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: parsed.voice_id }))
-                            setStagedVoices(prev => {
-                              const next = { ...prev }
-                              displaySegments.forEach((seg, i) => {
-                                if (seg.speaker_id === speakerId && i !== index) delete next[getSegmentKey(seg)]
-                              })
-                              return next
-                            })
-                          }
                           selectSegment(index)
-                          if (speakerId) {
-                            applyVoiceToSpeaker(speakerId, parsed.voice_id)
-                          } else {
-                            // A Fish voice implies the Fish engine. Without this the
-                            // segment's stored engine wins and the Fish UUID is handed
-                            // to Respeecher, which 500s on an unknown voice id.
-                            handleGenerateSpeech(index, parsed.voice_id, undefined, undefined, 'fish-audio')
-                          }
+                          // A Fish voice implies the Fish engine. Without this the
+                          // segment's stored engine wins and the Fish UUID is handed
+                          // to Respeecher, which 500s on an unknown voice id.
+                          handleGenerateSpeech(index, parsed.voice_id, undefined, undefined, 'fish-audio').then(ok => {
+                            if (ok) {
+                              setVoiceAppliedFeedback({ segmentIndex: index, voiceName: parsed.name })
+                              setTimeout(() => setVoiceAppliedFeedback(null), 2200)
+                            }
+                          })
                         } else {
                           console.warn('[VOICE-DROP] payload missing voice_id', parsed)
                         }
@@ -7061,18 +7116,7 @@ export function DubVerseEditor({
                     const fallbackVoiceId = e.dataTransfer.getData('text/plain')
                     const vk = draggedVoice ?? e.dataTransfer.getData('voice_key') ?? fallbackVoiceId
                     if (!vk) return
-                    const speakerId = displaySegments[index]?.speaker_id
                     setStagedVoices(prev => ({ ...prev, [keyAt(index)]: vk }))
-                    if (speakerId) {
-                      setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: vk }))
-                      setStagedVoices(prev => {
-                        const next = { ...prev }
-                        displaySegments.forEach((seg, i) => {
-                          if (seg.speaker_id === speakerId && i !== index) delete next[getSegmentKey(seg)]
-                        })
-                        return next
-                      })
-                    }
                     selectSegment(index)
                     setPitchPopupPos({
                       x: Math.max(20, window.innerWidth / 2 - 160),
@@ -7566,7 +7610,12 @@ export function DubVerseEditor({
                                   : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
                             )}
                             onDoubleClick={() => {
-                              if (lockedSegments.has(keyAt(index)) || segment.isPreviewing) return
+                              // Locked segments are audio-frozen and cannot be
+                              // regenerated; editing their text would desync the
+                              // displayed line from the existing take. Preview-only
+                              // segments still can't be edited because there is
+                              // nothing committed yet.
+                              if (segment.isPreviewing) return
                               // When the write-in box is open, double-clicking the line drops it
                               // into that field (Delivery Script) so you can add [tags]. Otherwise
                               // double-click edits the line inline as before.
@@ -7887,8 +7936,8 @@ export function DubVerseEditor({
                 size="sm"
                 className={cn(
                   "h-8 text-xs",
-                  selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex))
-                    ? "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30"
+                  selectedSegmentIndex === null
+                    ? "bg-slate-700 text-slate-400 cursor-not-allowed"
                     : "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
                 )}
                 onClick={() => handleGenerateSpeech()}
@@ -7898,11 +7947,6 @@ export function DubVerseEditor({
                   <>
                     <RefreshCw className="h-4 w-4 mr-1 animate-spin" />
                     Generating...
-                  </>
-                ) : selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex)) ? (
-                  <>
-                    <Lock className="h-4 w-4 mr-1" />
-                    Locked
                   </>
                 ) : (
                   <>
@@ -9576,6 +9620,24 @@ export function DubVerseEditor({
               <span ref={timeDisplayRef} className="ml-2 text-sm font-mono text-slate-400 tabular-nums">
                 {formatTime(currentTime)} / {formatTime(videoDuration)}
               </span>
+              {/* WHICH SEGMENTS ARE LOCKED, AND WHERE YOU CAN SEE IT.
+                  This used to be a green pill sitting ON the Generate Speech button,
+                  so a status read as a control — and it only ever described the
+                  SELECTED segment, which is no use when you are trying to find out
+                  what is protected before a bulk action. Here it is a standing
+                  readout of every locked segment, out of the way of any button. */}
+              {lockedSegments.size > 0 && (
+                <span
+                  className="ml-4 text-xs font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded px-2 py-0.5 whitespace-nowrap"
+                  title="Locked segments are skipped by Apply Voice. Right-click one, or select it and press Shift+U, to unlock."
+                >
+                  🔒 Locked SG {displaySegments
+                    .map((s, i) => lockedSegments.has(getSegmentKey(s)) ? (s.transcript_index ?? i) : null)
+                    .filter((n): n is number => n !== null)
+                    .sort((a, b) => a - b)
+                    .join(", ")}
+                </span>
+              )}
             </div>
           </div>
 
@@ -10157,7 +10219,9 @@ export function DubVerseEditor({
               canMergeNext={canMergeWithNext(timelineCtxIndex)}
               onDelete={(idx) => setPendingDelete(idx)}
               onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
-              onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+              sceneLockMode={sceneLockMode}
+              sceneAnchor={sceneAnchor}
+              onLockScene={handleLockScene}
               onUnlockScene={(idx) => unlockScene(idx)}
               onRevert={revertToOriginal}
               onUndoLastEdit={handleUndoLastEdit}
@@ -10309,6 +10373,10 @@ export function DubVerseEditor({
                     }
                     // Otherwise drag the box to move the whole group — the container's
                     // onMouseMove/onMouseUp drive the live offset and commit.
+                    // A locked segment's position is frozen, so a group selection that
+                    // includes any locked segment can't be moved as a whole.
+                    const selected = Array.from(groupSelectedSegments)
+                    if (selected.some(i => lockedSegments.has(keyAt(i)))) return
                     e.preventDefault()
                     e.stopPropagation()
                     groupMoveActiveRef.current = true
@@ -11003,11 +11071,31 @@ export function DubVerseEditor({
                             const startX = e.clientX
                             const startEnd = scene.end
                             const next = scenes[idx + 1]
+                            // A SCENE'S SOURCE SPAN MUST EQUAL ITS TIMELINE SPAN.
+                            // Same rule as the left handle. Moving a boundary without
+                            // its source edge is not a trim, it is a TIME WARP: the
+                            // picture then has to play faster or slower than 1x to fit,
+                            // and since the element plays at 1x the needle drifts away
+                            // from the frame across that scene. Ip Man 2 accumulated
+                            // 15.13s of skew this way before it was repaired.
+                            //
+                            // Captured at pointer-down so a re-render mid-drag cannot
+                            // compound the offset.
+                            const startSrcEnd = scene.source_end ?? scene.end
+                            const nextStartStart = next ? next.start : 0
+                            const nextStartSrcStart = next ? (next.source_start ?? next.start) : 0
                             const onMove = (ev: MouseEvent) => {
                               const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
                               const newEnd = Math.max(scene.start + 0.1, Math.min(next ? next.end - 0.05 : videoDuration, startEnd + delta))
-                              updateScene(scene.id, { end: newEnd })
-                              if (next) updateScene(next.id, { start: newEnd })
+                              // Trim the tail: the footage end moves with the edge.
+                              updateScene(scene.id, {
+                                end: newEnd,
+                                source_end: startSrcEnd + (newEnd - startEnd),
+                              })
+                              if (next) updateScene(next.id, {
+                                start: newEnd,
+                                source_start: nextStartSrcStart + (newEnd - nextStartStart),
+                              })
                             }
                             const onUp = () => {
                               persistScenes().catch(err => console.warn('[SCENE-MOVE]', err))
@@ -11223,7 +11311,9 @@ export function DubVerseEditor({
                       canMergeNext={canMergeWithNext(index)}
                       onDelete={(idx) => setPendingDelete(idx)}
                       onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
-                      onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+                      sceneLockMode={sceneLockMode}
+                      sceneAnchor={sceneAnchor}
+                      onLockScene={handleLockScene}
                       onUnlockScene={(idx) => unlockScene(idx)}
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
@@ -11255,6 +11345,11 @@ export function DubVerseEditor({
                       data-segment-drop-zone
                       data-index={index}
                       data-drag-block={index}
+                      // The pan excludes [data-segment-block]. Only the Dubbed track carried it,
+                      // so a press on this track was never recognised as a segment drag: the pan
+                      // claimed the gesture and the whole timeline moved with the block, instead
+                      // of the block moving within it.
+                      data-segment-block={true}
                       className={cn(
                         'absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded group',
                         lockedSegments.has(keyAt(index)) && 'ring-1 ring-green-400/60',
@@ -11265,7 +11360,7 @@ export function DubVerseEditor({
                         isDraggingThis ? 'cursor-grabbing' : 'cursor-grab'
                       )}
                       style={{
-                        left: (effStart(segment) + delta) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0),
+                        left: (effStart(segment) + delta) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index) && !lockedSegments.has(keyAt(index))) ? groupMoveOffset.x : 0),
                         width: (() => {
                           const dur = effEnd(segment) - effStart(segment)
                           const spd = dragSpeedPreview?.index === index ? dragSpeedPreview.speed : (stagedSpeeds[keyAt(index)] ?? 1.0)
@@ -11275,6 +11370,28 @@ export function DubVerseEditor({
                       onMouseDown={(e) => {
                         const t = e.target as HTMLElement
                         if (t.closest('[data-resize-handle]')) return
+
+                        // In group-select mode a Ctrl press builds the range — don't
+                        // let it start a drag or group move.
+                        if (groupSelectMode && (e.ctrlKey || e.metaKey)) return
+
+                        // Start group move if segment is selected and Shift is not pressed.
+                        // A locked segment's position is frozen, so a group selection that
+                        // includes any locked segment can't be moved as a whole.
+                        if (groupSelectedSegments.has(index) && !e.shiftKey) {
+                          const selected = Array.from(groupSelectedSegments)
+                          if (selected.some(i => lockedSegments.has(keyAt(i)))) return
+                          e.preventDefault()
+                          e.stopPropagation()
+                          groupMoveActiveRef.current = true
+                          groupMoveStartXRef.current = e.clientX
+                          groupMoveOffsetRef.current = { x: 0, y: 0 }
+                          captureGroupDragEls()
+                          setGroupMoveActive(true)
+                          setGroupMoveOffset({ x: 0, y: 0 })
+                          return
+                        }
+
                         e.preventDefault()
                         e.stopPropagation()
                         const startX = e.clientX
@@ -11514,7 +11631,9 @@ export function DubVerseEditor({
                       canMergeNext={canMergeWithNext(index)}
                       onDelete={(idx) => setPendingDelete(idx)}
                       onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
-                      onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+                      sceneLockMode={sceneLockMode}
+                      sceneAnchor={sceneAnchor}
+                      onLockScene={handleLockScene}
                       onUnlockScene={(idx) => unlockScene(idx)}
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
@@ -11568,7 +11687,7 @@ export function DubVerseEditor({
                           // a paired neighbor (Shift+P) moves too.
                           const isDraggingPaired = movesWithDrag(index)
                           const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
-                          const groupDelta = (groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0
+                          const groupDelta = (groupMoveActive && groupSelectedSegments.has(index) && !lockedSegments.has(keyAt(index))) ? groupMoveOffset.x : 0
                           return (effStart(segment) + delta) * PIXELS_PER_SECOND + groupDelta
                         })(),
                         width: (() => {
@@ -11592,8 +11711,12 @@ export function DubVerseEditor({
                         // don't let it start a drag or group move.
                         if (groupSelectMode && (e.ctrlKey || e.metaKey)) return
 
-                        // Start group move if segment is selected and Shift is not pressed
+                        // Start group move if segment is selected and Shift is not pressed.
+                        // A locked segment's position is frozen, so a group selection that
+                        // includes any locked segment can't be moved as a whole.
                         if (groupSelectedSegments.has(index) && !e.shiftKey) {
+                          const selected = Array.from(groupSelectedSegments)
+                          if (selected.some(i => lockedSegments.has(keyAt(i)))) return
                           e.preventDefault()
                           e.stopPropagation()
                           groupMoveActiveRef.current = true
@@ -11836,7 +11959,7 @@ export function DubVerseEditor({
                   const hasAudio = !!(seg.committed_audio_url ?? seg.audio_url)
                   const startT = effStart(seg)
                   const endT = effEnd(seg)
-                  const groupDelta = (groupMoveActive && groupSelectedSegments.has(i)) ? groupMoveOffset.x : 0
+                  const groupDelta = (groupMoveActive && groupSelectedSegments.has(i) && !lockedSegments.has(keyAt(i))) ? groupMoveOffset.x : 0
                   const dragDelta = movesWithDrag(i) && draggingSegment ? draggingSegment.currentDelta : 0
                   return (
                     <div
@@ -12166,6 +12289,11 @@ export function DubVerseEditor({
                       className="absolute top-0 bottom-0"
                       data-emotion-segment
                       data-drag-block={index}
+                      // The pan excludes [data-segment-block]. Only the Dubbed track carried it,
+                      // so a press on this track was never recognised as a segment drag: the pan
+                      // claimed the gesture and the whole timeline moved with the block, instead
+                      // of the block moving within it.
+                      data-segment-block={true}
                       onDoubleClick={(e) => {
                         e.stopPropagation()
                         setAdvancedBrowserSegment(index)
@@ -12174,7 +12302,7 @@ export function DubVerseEditor({
                         setVideoSubTab('chord')
                       }}
                       style={{
-                        left: (effStart(segment) + (movesWithDrag(index) && draggingSegment ? draggingSegment.currentDelta : 0)) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0),
+                        left: (effStart(segment) + (movesWithDrag(index) && draggingSegment ? draggingSegment.currentDelta : 0)) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index) && !lockedSegments.has(keyAt(index))) ? groupMoveOffset.x : 0),
                         width: segWidth,
                       }}
                     >
@@ -12506,11 +12634,12 @@ export function DubVerseEditor({
               </button>
               <button
                 type="button"
-                className="px-4 py-2 rounded bg-amber-500 hover:bg-amber-600 text-black text-sm font-medium transition-colors"
+                className="px-4 py-2 rounded bg-amber-500 hover:bg-amber-600 text-black text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 onClick={async () => {
                   const idx = timingExclusion.segmentIndex
                   const seg = displaySegments[idx]
                   if (!seg) return
+                  const isLocked = lockedSegments.has(keyAt(idx))
                   setTimingExclusion(null)
                   setIsRegenerating(true)
                   setRegeneratingSegmentIndex(idx)
@@ -12526,7 +12655,7 @@ export function DubVerseEditor({
                     const audio_url = filename ? apiClient.getAudioFileUrl(jobId, filename, true) : seg.audio_url
                     const audioDur = response.segment.audio_duration
                     const slotDur = seg.end_time - seg.start_time
-                    const shouldShrink = audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
+                    const shouldShrink = !isLocked && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
                     let shrunkEnd = seg.end_time
                     if (shouldShrink) {
                       const buffer = getTrailingBuffer(seg.preview_text ?? seg.active_text ?? seg.target_text ?? '')

@@ -456,6 +456,69 @@ class DubbingService:
                 ordered.append(speaker)
         return ordered
 
+    def _load_disk_segments(self, job_id: str) -> List[Dict]:
+        """Load the previous segments.json for a job, if any."""
+        try:
+            path = os.path.join(self.dubbed_dir, job_id, "segments.json")
+            if not os.path.exists(path):
+                return []
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("segments", []) if isinstance(data, dict) else data
+        except Exception as e:
+            logger.warning(f"[VOICE-MAP] Failed to load disk segments for {job_id}: {e}")
+            return []
+
+    def _enrich_segment_voices(
+        self,
+        transcript: List[Dict],
+        disk_segments: List[Dict],
+    ) -> List[Dict]:
+        """Copy persisted voice ids onto new transcript segments by time overlap.
+
+        This makes the speaker->voice mapping survive re-diarization or any
+        other operation that renumbers speaker labels, because we match the
+        actual speech intervals rather than the labels.
+        """
+        if not disk_segments or not transcript:
+            return transcript
+
+        disk = []
+        for ds in disk_segments:
+            start = float(ds.get("start_time", ds.get("start", 0)) or 0)
+            end = float(ds.get("end_time", ds.get("end", 0)) or 0)
+            if end <= start:
+                continue
+            disk.append({
+                "start": start,
+                "end": end,
+                "voice_id": ds.get("voice_id"),
+                "committed_voice_id": ds.get("committed_voice_id"),
+            })
+
+        for seg in transcript:
+            seg_start = float(seg.get("start", 0) or 0)
+            seg_end = float(seg.get("end", 0) or 0)
+            if seg_end <= seg_start:
+                continue
+
+            best = None
+            best_overlap = 0.0
+            for ds in disk:
+                overlap = min(seg_end, ds["end"]) - max(seg_start, ds["start"])
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best = ds
+
+            # Require at least 100ms of overlap to avoid spurious matches.
+            if best and best_overlap > 0.1:
+                if best["voice_id"]:
+                    seg["voice_id"] = best["voice_id"]
+                if best["committed_voice_id"]:
+                    seg["committed_voice_id"] = best["committed_voice_id"]
+
+        return transcript
+
     @staticmethod
     def _speaker_index(speaker_id: str) -> Optional[int]:
         """Numeric index from a speaker label, or None if it isn't of that shape."""
@@ -519,11 +582,30 @@ class DubbingService:
         unique_speakers = self._stable_unique_speakers(transcript)
 
         # ------------------------------------------------------------------ #
+        # Pass 0: recover voices from the segments themselves.                  #
+        # Each segment may carry a voice_id / committed_voice_id from a          #
+        # previous dub. Picking the dominant voice per speaker makes the       #
+        # mapping survive re-diarization even when speaker labels change.      #
+        # ------------------------------------------------------------------ #
+        speaker_to_voice: Dict[str, str] = {}
+        for speaker in unique_speakers:
+            counts: Dict[str, int] = {}
+            for seg in transcript:
+                if (seg.get("speaker") or "speaker-1") != speaker:
+                    continue
+                voice = seg.get("committed_voice_id") or seg.get("voice_id")
+                if voice:
+                    counts[voice] = counts.get(voice, 0) + 1
+            if counts:
+                dominant = max(counts.items(), key=lambda kv: kv[1])[0]
+                speaker_to_voice[speaker] = dominant
+                logger.info(f"[VOICE MAP] {speaker} recovered from segment voices -> {dominant}")
+
+        # ------------------------------------------------------------------ #
         # Pass 1: match by explicit key from the frontend voice_mapping.      #
         # Tries multiple key formats so "voice-1", "speaker-1", "SPEAKER_00" #
         # etc. all resolve correctly regardless of which the frontend sends.  #
         # ------------------------------------------------------------------ #
-        speaker_to_voice: Dict[str, str] = {}
         if voice_mapping:
             for speaker in unique_speakers:
                 explicit = self._explicit_voice_for_speaker(speaker, voice_mapping)
@@ -734,6 +816,11 @@ class DubbingService:
         try:
             output_dir = os.path.join(self.dubbed_dir, job_id)
             os.makedirs(output_dir, exist_ok=True)
+
+            # --- Recover per-segment voice assignments from a previous dub ---
+            # This makes the speaker->voice mapping survive re-diarization or
+            # reprocessing even when speaker labels get renumbered.
+            self._enrich_segment_voices(transcript, self._load_disk_segments(job_id))
 
             # --- Reuse Demucs separation cached from the upload pipeline ---
             # separate_audio already ran during process_video_pipeline and wrote
@@ -1014,7 +1101,15 @@ class DubbingService:
                 # Resolve voice_key early so ADAPT-FIT can use a voice-calibrated
                 # natural_duration() — without this, slow voices under-trigger the
                 # shortener because the global 14 cps rate underestimates their time.
-                _voice_key = speaker_to_voice.get(speaker, "")
+                # Order: per-segment committed voice > explicit speaker mapping >
+                # per-segment rendered voice > speaker-level dominant/gender fallback.
+                _explicit_key = self._explicit_voice_for_speaker(speaker, voice_mapping)
+                _voice_key = (
+                    segment.get("committed_voice_id")
+                    or _explicit_key
+                    or segment.get("voice_id")
+                    or speaker_to_voice.get(speaker, "")
+                )
                 _adapted = adapted_map.get(seg_id)
                 if _adapted is not None:
                     _variant_type = (adaptation_selections or {}).get(seg_id, "performable")
@@ -1110,8 +1205,7 @@ class DubbingService:
                     logger.info(f"[PHONETIC] seg {i}: {text!r} -> {tts_text!r}")
 
                 tts_provider, provider_name = self._get_tts_provider()
-                default_voice = "pNInz6obpgDQGcFmaJgB" if provider_name == "elevenlabs" else ""
-                voice_key = speaker_to_voice.get(speaker, default_voice)
+                voice_key = _voice_key
                 voice_id = tts_provider.get_voice_id(voice_key)
                 model_id = tts_provider.get_model_for_language(target_norm)
 
@@ -1184,7 +1278,11 @@ class DubbingService:
                     # Must test against raw voice_mapping, NOT speaker_to_voice: the
                     # latter is gender-pool-filled for every speaker (Passes 2/3), so
                     # it reports "assigned" for everyone and would kill cloning.
-                    _explicit = self._explicit_voice_for_speaker(speaker, voice_mapping)
+                    # A per-segment committed_voice_id is also a deliberate assignment.
+                    _explicit = (
+                        segment.get("committed_voice_id")
+                        or self._explicit_voice_for_speaker(speaker, voice_mapping)
+                    )
                     _refs = speaker_voice_refs.get(speaker)
                     if _explicit:
                         # voice_id was already resolved from this same assignment at
@@ -3551,12 +3649,6 @@ class DubbingService:
         if seg is None:
             raise ValueError(f"Segment with transcript_index={segment_index} not found in job {job_id}")
 
-        # A locked segment is frozen — refuse to regenerate it here, the single
-        # choke point every regen path (HTTP endpoint, bulk/auto) flows through,
-        # so nothing but a manual unlock in the editor can overwrite it.
-        if seg.get("locked"):
-            raise PermissionError(f"Segment {segment_index} is locked — unlock it to regenerate")
-
         if stage:
             # Staged mode (chunk-lens editor): render and fit against a COPY of
             # the segment so the take is auditionable without touching committed
@@ -3980,7 +4072,7 @@ class DubbingService:
             # manually placed segment moves it to match the TTS duration.
             user_committed_timing = (
                 _pre_fit_committed[0] is not None and _pre_fit_committed[1] is not None
-            )
+            ) or seg.get("locked")
 
             if user_committed_timing and actual_dur > slot_dur + 0.05:
                 target = max(0.2, slot_dur)
@@ -4221,6 +4313,8 @@ class DubbingService:
 
         seg["path"] = final_path
         seg["voice_id"] = use_voice_id
+        if voice_id:
+            seg["committed_voice_id"] = use_voice_id
         seg["speed"] = use_speed
         seg["text"] = use_text
         seg["was_truncated"] = False

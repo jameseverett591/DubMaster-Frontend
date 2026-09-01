@@ -1169,7 +1169,13 @@ def _estimate_speakers_from_segments(raw_segments) -> int:
         return min(3, max_est)
     return min(3, max_est)
 
-async def _run_diarization_with_heartbeat(job_id: str, extract_result: dict, timeout_sec: int) -> dict:
+async def _run_diarization_with_heartbeat(
+    job_id: str,
+    extract_result: dict,
+    timeout_sec: int,
+    min_speakers: int = 1,
+    max_speakers: int = 6,
+) -> dict:
     """
     Run diarization in a worker thread while reporting smooth progress
     (86→89%) based on elapsed time vs expected duration.
@@ -1181,7 +1187,7 @@ async def _run_diarization_with_heartbeat(job_id: str, extract_result: dict, tim
     expected_sec = min(video_duration * 2, timeout_sec * 0.9)
 
     diarization_task = asyncio.create_task(
-        asyncio.to_thread(diarize_audio, extract_result, job_id)
+        asyncio.to_thread(diarize_audio, extract_result, job_id, min_speakers, max_speakers)
     )
 
     while True:
@@ -2551,6 +2557,7 @@ async def process_video_pipeline(job_id: str, video_path: str):
                             logger.warning(f"Job {job_id}: cloud diarization failed, falling back to local")
                             diarization_result = await _run_diarization_with_heartbeat(
                                 job_id, diarize_input, diarization_timeout_sec,
+                                min_speakers, max_speakers,
                             )
                     else:
                         logger.info(
@@ -2559,6 +2566,7 @@ async def process_video_pipeline(job_id: str, video_path: str):
                         )
                         diarization_result = await _run_diarization_with_heartbeat(
                             job_id, diarize_input, diarization_timeout_sec,
+                            min_speakers, max_speakers,
                         )
 
                     if diarization_result.get("status") == "ok":
@@ -7675,9 +7683,9 @@ async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
     The old client-side per-segment regen loop was unreliable (skipped locked
     segments, dropped failed calls, slow), so a speaker's segments drifted onto
     different voices. This regenerates all of a speaker's segments here with the
-    same voice while preserving each segment's own text/emotion/speed, so a voice
-    assignment is applied consistently and persisted in one call. Locked segments
-    are skipped (reported) so the lock still wins.
+    same voice while preserving each segment's own text/emotion/speed and its
+    position, so a voice assignment is applied consistently and persisted in
+    one call. Lock is positional, so locked segments are regenerated too.
     """
     voice_id = body.voice_id
     if body.voice_key and not voice_id:
@@ -7696,7 +7704,6 @@ async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
     targets = [
         {
             "ti": s.get("transcript_index"),
-            "locked": bool(s.get("locked")),
             "speed": s.get("speed"),
             "emotion": s.get("emotion"),
             "traits": s.get("attached_traits"),
@@ -7716,17 +7723,7 @@ async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
     )
 
     regenerated, skipped_locked, failed = [], [], []
-    # Lock freezes a segment's POSITION, not its casting — a locked scene still
-    # takes a new voice. But the protection still has to mean something, so the
-    # rule is scoped: applying a voice inside the window under review is a
-    # deliberate act on work in front of you and includes locked segments, while
-    # a whole-film apply is a sweeping action that must not quietly rewrite audio
-    # in scenes already signed off.
-    _windowed = body.window_start is not None and body.window_end is not None
     for t in targets:
-        if t["locked"] and not _windowed:
-            skipped_locked.append(t["ti"])
-            continue
         try:
             seg = await dubbing_service.regenerate_segment(
                 job_id=job_id,
@@ -7755,7 +7752,7 @@ async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
         "status": "ok",
         "voice_id": voice_id,
         "regenerated": regenerated,
-        "skipped_locked": skipped_locked,
+        "skipped_locked": [],
         "failed": failed,
     }
 

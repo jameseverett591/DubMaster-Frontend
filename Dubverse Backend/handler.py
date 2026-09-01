@@ -260,9 +260,6 @@ def handler(event):
     if "diarize" in steps:
         logger.info("[4/4] Running speaker diarization")
         t_di = time.time()
-        # diarize_audio reads min/max_speakers from env vars
-        os.environ["DIARIZATION_MIN_SPEAKERS"] = str(min_speakers)
-        os.environ["DIARIZATION_MAX_SPEAKERS"] = str(max_speakers)
         # Use separated vocals for diarization if available — cleaner signal for pyannote
         diarize_source = extract_result
         if vocals_audio_path and os.path.exists(vocals_audio_path):
@@ -270,7 +267,7 @@ def handler(event):
             if vocal_extract_for_diarize.get("status") == "ok":
                 diarize_source = vocal_extract_for_diarize
                 logger.info("[DIARIZE] Using separated vocals as diarization source")
-        diarize_result = diarize_audio(diarize_source, job_id=job_id)
+        diarize_result = diarize_audio(diarize_source, job_id=job_id, min_speakers=min_speakers, max_speakers=max_speakers)
         timings["diarize"] = round(time.time() - t_di, 2)
 
         if diarize_result.get("status") == "ok":
