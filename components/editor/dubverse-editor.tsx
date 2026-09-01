@@ -11370,6 +11370,28 @@ export function DubVerseEditor({
                       onMouseDown={(e) => {
                         const t = e.target as HTMLElement
                         if (t.closest('[data-resize-handle]')) return
+
+                        // In group-select mode a Ctrl press builds the range — don't
+                        // let it start a drag or group move.
+                        if (groupSelectMode && (e.ctrlKey || e.metaKey)) return
+
+                        // Start group move if segment is selected and Shift is not pressed.
+                        // A locked segment's position is frozen, so a group selection that
+                        // includes any locked segment can't be moved as a whole.
+                        if (groupSelectedSegments.has(index) && !e.shiftKey) {
+                          const selected = Array.from(groupSelectedSegments)
+                          if (selected.some(i => lockedSegments.has(keyAt(i)))) return
+                          e.preventDefault()
+                          e.stopPropagation()
+                          groupMoveActiveRef.current = true
+                          groupMoveStartXRef.current = e.clientX
+                          groupMoveOffsetRef.current = { x: 0, y: 0 }
+                          captureGroupDragEls()
+                          setGroupMoveActive(true)
+                          setGroupMoveOffset({ x: 0, y: 0 })
+                          return
+                        }
+
                         e.preventDefault()
                         e.stopPropagation()
                         const startX = e.clientX
