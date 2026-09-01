@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label"
 import { User, Baby, Play, Volume2, Square, Loader2 } from "lucide-react"
 import type { DetectedVoice } from "@/components/dashboard"
 import type { Voice } from "@/lib/api-client"
+import { useT } from '@/lib/use-t'
 
 interface VoiceSelectorProps {
   detectedVoices: DetectedVoice[]
@@ -81,6 +82,7 @@ export function VoiceSelector({
   isAnalyzing,
   availableVoices,
 }: VoiceSelectorProps) {
+  const t = useT()
   const [expandedVoice, setExpandedVoice] = useState<string | null>(null)
   const [voiceSettings, setVoiceSettings] = useState<Record<string, { pitch: number; speed: number }>>({})
   const [playingVoice, setPlayingVoice] = useState<string | null>(null)
@@ -199,9 +201,9 @@ export function VoiceSelector({
       <div className="space-y-4">
         <div className="rounded-lg border border-border bg-muted/50 p-6 text-center">
           <div className="mx-auto mb-4 h-10 w-10 animate-pulse rounded-full bg-primary/20" />
-          <p className="font-medium text-foreground">Analyzing Voices</p>
+          <p className="font-medium text-foreground">{t('Analyzing Voices')}</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            AI is detecting and classifying speakers in your video...
+            {t('AI is detecting and classifying speakers in your video...')}
           </p>
         </div>
         {[1, 2, 3].map((i) => (
@@ -222,7 +224,7 @@ export function VoiceSelector({
   return (
     <div className="space-y-4">
       <div>
-        <h3 className="font-semibold text-foreground">Detected Speakers</h3>
+        <h3 className="font-semibold text-foreground">{t('Detected Speakers')}</h3>
         <p className="mt-1 text-sm text-muted-foreground">
           {detectedVoices.length} voices detected. Select replacement voices for each speaker.
         </p>
@@ -283,10 +285,10 @@ export function VoiceSelector({
             {expandedVoice === voice.id && (
               <CardContent className="space-y-4 p-4 pt-2">
                 <div>
-                  <Label className="text-xs text-muted-foreground">Replacement Voice</Label>
+                  <Label className="text-xs text-muted-foreground">{t('Replacement Voice')}</Label>
                   <Select value={voice.selectedVoice} onValueChange={(value) => onVoiceChange(voice.id, value)}>
                     <SelectTrigger className="mt-1.5">
-                      <SelectValue placeholder="Select a voice" />
+                      <SelectValue placeholder={t('Select a voice')} />
                     </SelectTrigger>
                     <SelectContent>
                       {voiceOptions[voice.type].map((option) => (
@@ -343,7 +345,7 @@ export function VoiceSelector({
                 <div className="space-y-3">
                   <div>
                     <div className="flex items-center justify-between">
-                      <Label className="text-xs text-muted-foreground">Pitch</Label>
+                      <Label className="text-xs text-muted-foreground">{t('Pitch')}</Label>
                       <span className="text-xs text-muted-foreground">{voiceSettings[voice.id]?.pitch ?? 50}%</span>
                     </div>
                     <Slider
@@ -356,7 +358,7 @@ export function VoiceSelector({
                   </div>
                   <div>
                     <div className="flex items-center justify-between">
-                      <Label className="text-xs text-muted-foreground">Speed</Label>
+                      <Label className="text-xs text-muted-foreground">{t('Speed')}</Label>
                       <span className="text-xs text-muted-foreground">{voiceSettings[voice.id]?.speed ?? 50}%</span>
                     </div>
                     <Slider

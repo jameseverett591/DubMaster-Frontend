@@ -6,6 +6,7 @@ import { apiClient, JobNotFoundError, type JobStatusValue } from "@/lib/api-clie
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { InlineTranscriptEditor, type InlineSegment } from "@/components/inline-editor"
+import { useT } from '@/lib/use-t'
 
 interface BasicVideoPanelProps {
   jobId: string
@@ -55,6 +56,7 @@ const TARGET_LANGUAGES = [
 ]
 
 export function BasicVideoPanel({ jobId, onStale, onReviewingChange }: BasicVideoPanelProps) {
+  const t = useT()
   const [phase, setPhase]             = useState<Phase>("transcribing")
   const [progress, setProgress]       = useState(0)
   const [stageLabel, setStageLabel]   = useState("Preparing your video...")
@@ -356,7 +358,7 @@ export function BasicVideoPanel({ jobId, onStale, onReviewingChange }: BasicVide
                 download
               >
                 <Download className="mr-2 h-4 w-4" />
-                Download Dubbed Video
+                {t('Download Dubbed Video')}
               </a>
             </Button>
           </div>
@@ -380,13 +382,13 @@ export function BasicVideoPanel({ jobId, onStale, onReviewingChange }: BasicVide
             </div>
 
             <div className="text-center">
-              <p className="text-sm font-semibold text-white mb-1">Transcription complete</p>
-              <p className="text-xs text-[#64748B]">Choose a target language to translate and review before rendering</p>
+              <p className="text-sm font-semibold text-white mb-1">{t('Transcription complete')}</p>
+              <p className="text-xs text-[#64748B]">{t('Choose a target language to translate and review before rendering')}</p>
             </div>
 
             <div className="w-full space-y-3">
               <label className="text-xs font-medium text-[#94A3B8] uppercase tracking-wider">
-                Target Language
+                {t('Target Language')}
               </label>
               <Select value={targetLang} onValueChange={setTargetLang}>
                 <SelectTrigger className="w-full h-10 bg-[#0F172A]/60 border-[#A855F7]/30 text-white">
@@ -407,7 +409,7 @@ export function BasicVideoPanel({ jobId, onStale, onReviewingChange }: BasicVide
                 className="w-full bg-gradient-to-r from-[#A855F7] to-[#22D3EE] text-white font-semibold hover:opacity-90 transition-opacity shadow-[0_0_20px_rgba(168,85,247,0.4)]"
               >
                 {launching ? (
-                  <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Translating...</>
+                  <><Loader2 className="mr-2 h-4 w-4 animate-spin" />{t('Translating...')}</>
                 ) : (
                   <><Play className="mr-2 h-4 w-4" />Translate &amp; Review</>
                 )}
@@ -421,7 +423,7 @@ export function BasicVideoPanel({ jobId, onStale, onReviewingChange }: BasicVide
           <div>
             <div className="flex items-center justify-between mb-3">
               <p className="text-sm text-[#94A3B8]">
-                Double-click text to edit. Reject bad segments before dubbing.
+                {t('Double-click text to edit. Reject bad segments before dubbing.')}
               </p>
               <div className="flex items-center gap-3">
                 <span className="text-xs text-[#64748B]">Target:</span>
@@ -462,7 +464,7 @@ export function BasicVideoPanel({ jobId, onStale, onReviewingChange }: BasicVide
           <div>
             <div className="flex items-center justify-between mb-3">
               <p className="text-sm text-[#94A3B8]">
-                Review the translated text. Edit or reject segments before rendering.
+                {t('Review the translated text. Edit or reject segments before rendering.')}
               </p>
             </div>
             <InlineTranscriptEditor

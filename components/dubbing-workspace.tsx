@@ -58,6 +58,7 @@ import {
 } from "@/lib/api-client"
 import { useEditorStore } from "@/lib/editor-store"
 import { usePlan } from "@/lib/use-plan"
+import { useT } from '@/lib/use-t'
 
 interface DubbingWorkspaceProps {
   video: VideoSource
@@ -170,6 +171,7 @@ function buildDetectedVoices(
 // ── Component ──────────────────────────────────────────────────────────────
 
 export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
+  const t = useT()
   const { hasFeature } = usePlan()
   const [targetLanguage, setTargetLanguage] = useState("en")
   const [isPlaying, setIsPlaying] = useState(false)
@@ -676,7 +678,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
           <Select value={targetLanguage} onValueChange={setTargetLanguage}>
             <SelectTrigger className="w-[160px] h-8 text-sm">
               <Languages className="mr-2 h-3.5 w-3.5" />
-              <SelectValue placeholder="Target Language" />
+              <SelectValue placeholder={t('Target Language')} />
             </SelectTrigger>
             <SelectContent>
               {LANGUAGES.map((lang) => (
@@ -694,7 +696,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
-              <DropdownMenuLabel>Dubbing Engine</DropdownMenuLabel>
+              <DropdownMenuLabel>{t('Dubbing Engine')}</DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuRadioGroup value={dubbingEngine} onValueChange={(v) => setDubbingEngine(v as 'dubmaster' | 'vozo')}>
                 <DropdownMenuRadioItem value="dubmaster">
@@ -707,11 +709,11 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
               {dubbingEngine === "dubmaster" && (
                 <>
                   <DropdownMenuSeparator />
-                  <DropdownMenuLabel>TTS Engine</DropdownMenuLabel>
+                  <DropdownMenuLabel>{t('TTS Engine')}</DropdownMenuLabel>
                   <DropdownMenuSeparator />
                   <DropdownMenuRadioGroup value={ttsProvider} onValueChange={handleSwitchProvider}>
                     <DropdownMenuRadioItem value="elevenlabs" disabled={!providerInfo.elevenlabs?.available}>
-                      ElevenLabs
+                      {t('ElevenLabs')}
                     </DropdownMenuRadioItem>
                     <DropdownMenuRadioItem value="fish-audio" disabled={!providerInfo["fish-audio"]?.available}>
                       Fish Audio S1 {providerInfo["fish-audio"]?.voice_cloning && "(Voice Clone)"}
@@ -724,7 +726,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
           <Badge variant="outline" className={`text-xs h-6 font-normal ${switchingProvider ? "animate-pulse" : ""}`}>
             {dubbingEngine === "vozo"
               ? "Vozo AI"
-              : ttsProvider === "fish-audio" ? "Fish Audio S1" : "ElevenLabs"}
+              : ttsProvider === "fish-audio" ? t('Fish Audio S1') : t('ElevenLabs')}
           </Badge>
           <Button
             onClick={handleStartDubbing}
@@ -758,7 +760,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
             onClick={() => { if (dubbedVideoUrl) window.open(dubbedVideoUrl, '_blank') }}
           >
             <Download className="h-3.5 w-3.5" />
-            Export
+            {t('Export')}
           </Button>
         </div>
       </div>
@@ -797,25 +799,24 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                 <div className="flex flex-col items-center gap-4 text-white">
                   <Waveform className="h-16 w-16 animate-pulse text-primary" />
                   <div className="text-center">
-                    <p className="text-lg font-medium">Analyzing Audio</p>
+                    <p className="text-lg font-medium">{t('Analyzing Audio')}</p>
                     <p className="text-sm text-gray-400">
                       {video.jobId
-                        ? "Waiting for transcription to complete..."
-                        : "Detecting voices and identifying speakers..."}
+                        ? t('Waiting for transcription to complete...') : t('Detecting voices and identifying speakers...')}
                     </p>
                   </div>
                   <div className="flex items-center gap-6 text-sm">
                     <div className="flex items-center gap-2">
                       <User className="h-4 w-4 text-blue-400" />
-                      <span>Male voices</span>
+                      <span>{t('Male voices')}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <User className="h-4 w-4 text-pink-400" />
-                      <span>Female voices</span>
+                      <span>{t('Female voices')}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <Baby className="h-4 w-4 text-green-400" />
-                      <span>Children</span>
+                      <span>{t('Children')}</span>
                     </div>
                   </div>
                 </div>
@@ -839,7 +840,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                   onClick={() => setShowOriginal(false)}
                   className="text-xs h-7"
                 >
-                  Dubbed
+                  {t('Dubbed')}
                 </Button>
                 <Button
                   size="sm"
@@ -847,7 +848,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                   onClick={() => setShowOriginal(true)}
                   className="text-xs h-7"
                 >
-                  Original
+                  {t('Original')}
                 </Button>
               </div>
             )}
@@ -901,19 +902,19 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
               <TabsList className="grid w-full grid-cols-4">
                 <TabsTrigger value="pipeline" className="gap-1 text-xs px-1">
                   <Activity className="h-3.5 w-3.5" />
-                  Pipeline
+                  {t('Pipeline')}
                 </TabsTrigger>
                 <TabsTrigger value="voices" className="gap-1 text-xs px-1">
                   <Mic2 className="h-3.5 w-3.5" />
-                  Voices
+                  {t('Voices')}
                 </TabsTrigger>
                 <TabsTrigger value="transcript" className="gap-1 text-xs px-1">
                   <Waveform className="h-3.5 w-3.5" />
-                  Script
+                  {t('Script')}
                 </TabsTrigger>
                 <TabsTrigger value="timeline" className="gap-1 text-xs px-1">
                   <Settings2 className="h-3.5 w-3.5" />
-                  Timeline
+                  {t('Timeline')}
                 </TabsTrigger>
               </TabsList>
               <TabsList className="grid w-full grid-cols-3">
@@ -924,11 +925,11 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                 </TabsTrigger>
                 <TabsTrigger value="quality" className="gap-1 text-xs px-1">
                   <BarChart3 className="h-3.5 w-3.5" />
-                  Quality
+                  {t('Quality')}
                 </TabsTrigger>
                 <TabsTrigger value="studio" className="gap-1 text-xs px-1 relative">
                   <Film className="h-3.5 w-3.5" />
-                  Studio
+                  {t('Studio')}
                   <Crown className="absolute -right-1 -top-1 h-2.5 w-2.5 text-amber-400" />
                 </TabsTrigger>
               </TabsList>
@@ -990,14 +991,14 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                     <div className="rounded-full bg-muted p-4 mb-4">
                       <Sparkles className="h-8 w-8 text-muted-foreground" />
                     </div>
-                    <h3 className="font-semibold text-foreground text-sm">No Dubbed Video Yet</h3>
+                    <h3 className="font-semibold text-foreground text-sm">{t('No Dubbed Video Yet')}</h3>
                     <p className="mt-2 text-xs text-muted-foreground max-w-xs">
                       Select your target language, configure voice settings, then click &quot;Generate Dub&quot; to create your
                       dubbed video.
                     </p>
                     <Button className="mt-4 gap-2 text-sm h-8" onClick={handleStartDubbing} disabled={isAnalyzing}>
                       <Sparkles className="h-3.5 w-3.5" />
-                      Generate Dub
+                      {t('Generate Dub')}
                     </Button>
                   </div>
                 )}
@@ -1019,17 +1020,17 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                   <div className="rounded-lg border border-amber-500/30 bg-gradient-to-br from-amber-500/10 to-orange-500/5 p-4">
                     <div className="flex items-center gap-2 mb-2">
                       <Crown className="h-5 w-5 text-amber-400" />
-                      <h3 className="font-semibold text-sm text-foreground">Studio Editor</h3>
+                      <h3 className="font-semibold text-sm text-foreground">{t('Studio Editor')}</h3>
                       <Badge className="bg-amber-500/15 text-amber-400 border-amber-500/30 text-[10px]">PRO</Badge>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      Professional video editor with timeline, lip-sync adjustment, and frame-by-frame control.
+                      {t('Professional video editor with timeline, lip-sync adjustment, and frame-by-frame control.')}
                     </p>
                   </div>
 
                   {/* Features List */}
                   <div className="rounded-lg border border-border bg-card p-3 space-y-3">
-                    <h4 className="text-xs font-medium text-foreground">Studio Features</h4>
+                    <h4 className="text-xs font-medium text-foreground">{t('Studio Features')}</h4>
                     {[
                       { icon: Film, label: "Multi-track timeline editor", desc: "Edit audio & video tracks independently" },
                       { icon: Mic2, label: "Per-segment voice tuning", desc: "Adjust pitch, speed & emotion per line" },
@@ -1061,7 +1062,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                       disabled={!video.jobId}
                     >
                       <Film className="h-3.5 w-3.5" />
-                      Open in Editor
+                      {t('Open in Editor')}
                     </Button>
                   ) : (
                     <div className="space-y-2">
@@ -1071,10 +1072,10 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                         disabled
                       >
                         <Lock className="h-3.5 w-3.5" />
-                        Complete Dubbing to Unlock
+                        {t('Complete Dubbing to Unlock')}
                       </Button>
                       <p className="text-[10px] text-center text-muted-foreground">
-                        Generate a dub first, then open it in the Studio Editor for fine-tuning.
+                        {t('Generate a dub first, then open it in the Studio Editor for fine-tuning.')}
                       </p>
                     </div>
                   )}
@@ -1082,7 +1083,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                   {/* Subscription CTA */}
                   <div className="rounded-lg bg-muted/50 p-3 text-center">
                     <p className="text-[10px] text-muted-foreground">
-                      Studio Editor is available on <span className="text-amber-400 font-medium">Professional</span> and <span className="text-amber-400 font-medium">Enterprise</span> plans.
+                      {t('Studio Editor is available on')} <span className="text-amber-400 font-medium">{t('Professional')}</span> and <span className="text-amber-400 font-medium">{t('Enterprise')}</span> plans.
                     </p>
                   </div>
                 </div>

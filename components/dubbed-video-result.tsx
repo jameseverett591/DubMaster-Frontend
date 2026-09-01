@@ -18,6 +18,7 @@ import {
   Pencil,
 } from "lucide-react"
 import type { VideoSource, DetectedVoice } from "@/components/dashboard"
+import { useT } from '@/lib/use-t'
 
 interface DubbedVideoResultProps {
   originalVideo: VideoSource
@@ -57,6 +58,7 @@ export function DubbedVideoResult({
   dubbingError,
   onRegenerate,
 }: DubbedVideoResultProps) {
+  const t = useT()
   const isComplete = !isDubbing && dubbingProgress >= 100
 
   const handleDownload = () => {
@@ -100,7 +102,7 @@ export function DubbedVideoResult({
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-sm">
             <RefreshCw className="h-4 w-4 animate-spin text-primary" />
-            Generating Dubbed Video
+            {t('Generating Dubbed Video')}
           </CardTitle>
           <CardDescription className="text-xs">{currentStage}</CardDescription>
         </CardHeader>
@@ -114,7 +116,7 @@ export function DubbedVideoResult({
 
           <div>
             <div className="mb-1.5 flex items-center justify-between text-xs">
-              <span className="text-muted-foreground">Overall Progress</span>
+              <span className="text-muted-foreground">{t('Overall Progress')}</span>
               <span className="font-medium text-foreground">{Math.round(dubbingProgress)}%</span>
             </div>
             <Progress value={dubbingProgress} className="h-2.5" />
@@ -124,16 +126,16 @@ export function DubbedVideoResult({
             <div className="rounded-lg border border-border bg-card p-2.5">
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <Mic2 className="h-3.5 w-3.5" />
-                Voice Synthesis
+                {t('Voice Synthesis')}
               </div>
               <p className="mt-0.5 text-xs font-medium text-foreground">
-                {dubbingProgress < 35 ? "Preparing..." : dubbingProgress < 70 ? "In Progress" : "Finalizing"}
+                {dubbingProgress < 35 ? "Preparing..." : dubbingProgress < 70 ? t('In Progress') : t('Finalizing')}
               </p>
             </div>
             <div className="rounded-lg border border-border bg-card p-2.5">
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <Languages className="h-3.5 w-3.5" />
-                Target Language
+                {t('Target Language')}
               </div>
               <p className="mt-0.5 text-xs font-medium text-foreground">{LANGUAGE_NAMES[targetLanguage]}</p>
             </div>
@@ -180,37 +182,37 @@ export function DubbedVideoResult({
           <div>
             <CardTitle className="flex items-center gap-2 text-sm">
               <CheckCircle2 className="h-4 w-4 text-green-500" />
-              Dubbing Complete!
+              {t('Dubbing Complete!')}
             </CardTitle>
             <CardDescription className="text-xs">
               Dubbed into {LANGUAGE_NAMES[targetLanguage]}
             </CardDescription>
           </div>
-          <Badge className="bg-green-500/10 text-green-500 border-green-500/20 text-xs">Ready</Badge>
+          <Badge className="bg-green-500/10 text-green-500 border-green-500/20 text-xs">{t('Ready')}</Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="text-xs text-muted-foreground">
-          Use the Original/Dubbed toggle on the video player to compare.
+          {t('Use the Original/Dubbed toggle on the video player to compare.')}
         </p>
 
         {/* Video Info */}
         <div className="grid grid-cols-2 gap-2">
           <div className="rounded-lg border border-border bg-card p-2.5 text-center">
             <Clock className="mx-auto h-4 w-4 text-muted-foreground" />
-            <p className="mt-0.5 text-xs text-muted-foreground">Duration</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">{t('Duration')}</p>
             <p className="text-xs font-medium text-foreground">{originalVideo.duration}</p>
           </div>
           <div className="rounded-lg border border-border bg-card p-2.5 text-center">
             <Mic2 className="mx-auto h-4 w-4 text-muted-foreground" />
-            <p className="mt-0.5 text-xs text-muted-foreground">Voices</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">{t('Voices')}</p>
             <p className="text-xs font-medium text-foreground">{detectedVoices.length} speakers</p>
           </div>
         </div>
 
         {/* Voice Summary */}
         <div className="rounded-lg border border-border bg-card p-3">
-          <h4 className="text-xs font-medium text-foreground">Voice Mapping</h4>
+          <h4 className="text-xs font-medium text-foreground">{t('Voice Mapping')}</h4>
           <div className="mt-2 space-y-1.5">
             {detectedVoices.map((voice) => (
               <div key={voice.id} className="flex items-center justify-between text-xs">
@@ -228,14 +230,14 @@ export function DubbedVideoResult({
           <Button asChild className="w-full gap-1.5 h-8 text-xs">
             <Link href={`/editor/${originalVideo.jobId}`}>
               <Pencil className="h-3.5 w-3.5" />
-              Open in Editor
+              {t('Open in Editor')}
             </Link>
           </Button>
         )}
         <div className="flex gap-2">
           <Button className="flex-1 gap-1.5 h-8 text-xs" onClick={handleDownload} disabled={!dubbedVideoUrl}>
             <Download className="h-3.5 w-3.5" />
-            Download
+            {t('Download')}
           </Button>
           <Button variant="outline" className="gap-1.5 h-8 text-xs bg-transparent" onClick={handleShare}>
             <Share2 className="h-3.5 w-3.5" />
@@ -247,7 +249,7 @@ export function DubbedVideoResult({
 
         {/* Export Formats */}
         <div className="rounded-lg bg-muted/50 p-3">
-          <h4 className="text-xs font-medium text-foreground">Export Formats</h4>
+          <h4 className="text-xs font-medium text-foreground">{t('Export Formats')}</h4>
           <div className="mt-2 flex flex-wrap gap-1.5">
             <Button variant="outline" size="sm" className="gap-1 text-[10px] h-6 bg-transparent" onClick={handleDownload} disabled={!dubbedVideoUrl}>
               <FileVideo className="h-3 w-3" />
@@ -255,7 +257,7 @@ export function DubbedVideoResult({
             </Button>
             <Button variant="outline" size="sm" className="gap-1 text-[10px] h-6 bg-transparent" disabled>
               <FileVideo className="h-3 w-3" />
-              WebM
+              {t('WebM')}
             </Button>
             <Button variant="outline" size="sm" className="gap-1 text-[10px] h-6 bg-transparent" disabled>
               <FileVideo className="h-3 w-3" />

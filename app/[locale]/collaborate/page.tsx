@@ -12,6 +12,7 @@ import {
   Users, UserPlus, Send, Globe, Lock, Clock, Check,
   Film, MoreHorizontal, Mail, Trash2, Crown, Eye, Pencil,
 } from 'lucide-react'
+import { useT } from '@/lib/use-t'
 
 type Role = 'owner' | 'editor' | 'reviewer' | 'viewer'
 type Member = { id: string; name: string; email: string; role: Role; initials: string; color: string; online: boolean }
@@ -44,6 +45,7 @@ const STATUS_COLORS = {
 }
 
 export default function CollaboratePage() {
+  const t = useT()
   const router = useRouter()
   const [members, setMembers] = useState<Member[]>(DEMO_MEMBERS)
   const [inviteEmail, setInviteEmail] = useState('')
@@ -82,9 +84,9 @@ export default function CollaboratePage() {
           <div>
             <h1 className="text-2xl font-bold text-white flex items-center gap-3">
               <Users className="h-6 w-6 text-purple-400" />
-              Collaborate
+              {t('Collaborate')}
             </h1>
-            <p className="text-slate-400 text-sm mt-1">Invite your team and work on dubbing projects together.</p>
+            <p className="text-slate-400 text-sm mt-1">{t('Invite your team and work on dubbing projects together.')}</p>
           </div>
           <Button
             variant="outline"
@@ -98,9 +100,9 @@ export default function CollaboratePage() {
 
         <Tabs defaultValue="team" className="w-full">
           <TabsList className="bg-slate-900 border border-slate-800 p-1 h-auto">
-            <TabsTrigger value="team"     className="text-xs data-[state=active]:bg-slate-800 data-[state=active]:text-white">Team Members</TabsTrigger>
-            <TabsTrigger value="projects" className="text-xs data-[state=active]:bg-slate-800 data-[state=active]:text-white">Shared Projects</TabsTrigger>
-            <TabsTrigger value="invite"   className="text-xs data-[state=active]:bg-slate-800 data-[state=active]:text-white">Invite</TabsTrigger>
+            <TabsTrigger value="team"     className="text-xs data-[state=active]:bg-slate-800 data-[state=active]:text-white">{t('Team Members')}</TabsTrigger>
+            <TabsTrigger value="projects" className="text-xs data-[state=active]:bg-slate-800 data-[state=active]:text-white">{t('Shared Projects')}</TabsTrigger>
+            <TabsTrigger value="invite"   className="text-xs data-[state=active]:bg-slate-800 data-[state=active]:text-white">{t('Invite')}</TabsTrigger>
           </TabsList>
 
           {/* ── TEAM MEMBERS ── */}
@@ -135,20 +137,20 @@ export default function CollaboratePage() {
                       </span>
                     ) : (
                       <select
-                        title="Change role"
+                        title={t('Change role')}
                         value={member.role}
                         onChange={e => changeRole(member.id, e.target.value as Role)}
                         className="text-[11px] bg-slate-800 border border-slate-700 rounded-full px-2 py-0.5 text-slate-300 focus:outline-none focus:border-purple-500/50"
                       >
-                        <option value="editor">Editor</option>
-                        <option value="reviewer">Reviewer</option>
-                        <option value="viewer">Viewer</option>
+                        <option value="editor">{t('Editor')}</option>
+                        <option value="reviewer">{t('Reviewer')}</option>
+                        <option value="viewer">{t('Viewer')}</option>
                       </select>
                     )}
                     {member.role !== 'owner' && (
                       <button
                         type="button"
-                        title="Remove member"
+                        title={t('Remove member')}
                         onClick={() => removeMember(member.id)}
                         className="text-slate-600 hover:text-red-400 transition-colors"
                       >
@@ -214,9 +216,9 @@ export default function CollaboratePage() {
               <div>
                 <h3 className="text-sm font-semibold text-white flex items-center gap-2 mb-1">
                   <Mail className="h-4 w-4 text-purple-400" />
-                  Invite by Email
+                  {t('Invite by Email')}
                 </h3>
-                <p className="text-xs text-slate-500">They'll receive an email with a link to join your workspace.</p>
+                <p className="text-xs text-slate-500">{t("They'll receive an email with a link to join your workspace.")}</p>
               </div>
               <div className="flex gap-2">
                 <Input
@@ -228,21 +230,21 @@ export default function CollaboratePage() {
                   className="flex-1 bg-slate-800 border-slate-700 text-white placeholder-slate-500 focus:border-purple-500/50"
                 />
                 <select
-                  title="Invite role"
+                  title={t('Invite role')}
                   value={inviteRole}
                   onChange={e => setInviteRole(e.target.value as Role)}
                   className="bg-slate-800 border border-slate-700 rounded-md px-3 text-sm text-slate-300 focus:outline-none focus:border-purple-500/50"
                 >
-                  <option value="editor">Editor</option>
-                  <option value="reviewer">Reviewer</option>
-                  <option value="viewer">Viewer</option>
+                  <option value="editor">{t('Editor')}</option>
+                  <option value="reviewer">{t('Reviewer')}</option>
+                  <option value="viewer">{t('Viewer')}</option>
                 </select>
                 <Button
                   className={inviteSent ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-purple-600 hover:bg-purple-700'}
                   onClick={handleInvite}
                   disabled={!inviteEmail.trim()}
                 >
-                  {inviteSent ? <><Check className="h-4 w-4 mr-1" /> Sent!</> : <><Send className="h-4 w-4 mr-1" /> Send</>}
+                  {inviteSent ? <><Check className="h-4 w-4 mr-1" /> {t('Sent!')}</> : <><Send className="h-4 w-4 mr-1" /> {t('Send')}</>}
                 </Button>
               </div>
             </div>
@@ -252,14 +254,14 @@ export default function CollaboratePage() {
               <div>
                 <h3 className="text-sm font-semibold text-white flex items-center gap-2 mb-1">
                   <Lock className="h-4 w-4 text-slate-400" />
-                  Invite Link
+                  {t('Invite Link')}
                 </h3>
-                <p className="text-xs text-slate-500">Share this link — anyone with it can request to join your workspace.</p>
+                <p className="text-xs text-slate-500">{t('Share this link — anyone with it can request to join your workspace.')}</p>
               </div>
               <div className="flex gap-2">
                 <Input
                   readOnly
-                  aria-label="Invite link"
+                  aria-label={t('Invite link')}
                   value="dubmaster.app/collaborate/join?team=dubmaster"
                   className="flex-1 bg-slate-800 border-slate-700 text-slate-400 text-xs"
                 />
@@ -268,7 +270,7 @@ export default function CollaboratePage() {
                   className={`border-slate-700 shrink-0 transition-colors ${copiedLink ? 'text-emerald-400 border-emerald-500/40' : 'text-slate-300'}`}
                   onClick={handleCopyLink}
                 >
-                  {copiedLink ? <><Check className="h-4 w-4 mr-1" /> Copied</> : 'Copy Link'}
+                  {copiedLink ? <><Check className="h-4 w-4 mr-1" /> {t('Copied')}</> : 'Copy Link'}
                 </Button>
               </div>
             </div>

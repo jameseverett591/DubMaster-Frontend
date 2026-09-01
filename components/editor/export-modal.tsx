@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { Download, Loader2, X, Folder, CheckCircle2, AlertCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { apiClient } from '@/lib/api-client'
+import { useT } from '@/lib/use-t'
 
 type Resolution = '720p' | '1080p' | '4k'
 type Aspect     = 'widescreen' | 'fill'
@@ -49,6 +50,7 @@ const STATUS_LABEL: Record<string, string> = {
 }
 
 export function ExportModal({ jobId, title, onClose }: ExportModalProps) {
+  const t = useT()
   const [resolution, setResolution] = useState<Resolution>('1080p')
   const [aspect,     setAspect]     = useState<Aspect>('widescreen')
   const [format,     setFormat]     = useState<Format>('mp4')
@@ -180,14 +182,14 @@ export function ExportModal({ jobId, title, onClose }: ExportModalProps) {
               <Download className="h-3.5 w-3.5 text-white" strokeWidth={2.5} />
             </div>
             <div>
-              <div className="text-[13.5px] font-semibold text-white leading-tight">Export Video</div>
+              <div className="text-[13.5px] font-semibold text-white leading-tight">{t('Export Video')}</div>
               <div className="text-[11px] text-neutral-500 leading-tight mt-0.5 font-mono truncate max-w-[200px]">
                 {title ?? jobId.slice(0, 8) + '…'} · {format.toUpperCase()}
               </div>
             </div>
           </div>
           <button type="button" onClick={stage === 'exporting' ? handleCancel : onClose}
-            aria-label="Close export dialog"
+            aria-label={t('Close export dialog')}
             className="w-6 h-6 rounded-md flex items-center justify-center text-neutral-500 hover:text-white hover:bg-white/8 transition-colors">
             <X className="h-3.5 w-3.5" />
           </button>
@@ -198,7 +200,7 @@ export function ExportModal({ jobId, title, onClose }: ExportModalProps) {
           <div className="px-5 py-4 flex flex-col gap-4">
             {/* Resolution */}
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-500 mb-2">Resolution</p>
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-500 mb-2">{t('Resolution')}</p>
               <div className="flex gap-1.5">
                 {RESOLUTIONS.map(r => (
                   <button type="button" key={r.value} onClick={() => setResolution(r.value)}
@@ -214,7 +216,7 @@ export function ExportModal({ jobId, title, onClose }: ExportModalProps) {
             </div>
             {/* Aspect */}
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-500 mb-2">Aspect Ratio</p>
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-500 mb-2">{t('Aspect Ratio')}</p>
               <div className="flex gap-1.5">
                 {ASPECTS.map(a => (
                   <button type="button" key={a.value} onClick={() => setAspect(a.value)}
@@ -230,7 +232,7 @@ export function ExportModal({ jobId, title, onClose }: ExportModalProps) {
             </div>
             {/* Format */}
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-500 mb-2">Format</p>
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-500 mb-2">{t('Format')}</p>
               <div className="flex gap-1.5">
                 {FORMATS.map(f => (
                   <button type="button" key={f.value} onClick={() => setFormat(f.value)}
@@ -245,7 +247,7 @@ export function ExportModal({ jobId, title, onClose }: ExportModalProps) {
             </div>
             {/* Destination */}
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-500 mb-2">Destination</p>
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-500 mb-2">{t('Destination')}</p>
               <div className="flex gap-1.5">
                 <div className="flex-1 relative">
                   <Folder className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-neutral-500 pointer-events-none" />
@@ -260,7 +262,7 @@ export function ExportModal({ jobId, title, onClose }: ExportModalProps) {
                 {hasSavePicker && (
                   <button type="button" onClick={handleBrowse}
                     className="px-3 rounded-lg border border-white/[0.07] bg-[#1E1E24] text-[12px] font-medium text-neutral-400 hover:text-white hover:border-white/[0.13] transition-colors flex items-center gap-1.5 whitespace-nowrap">
-                    <Folder className="h-3 w-3" /> Browse
+                    <Folder className="h-3 w-3" /> {t('Browse')}
                   </button>
                 )}
               </div>
@@ -312,7 +314,7 @@ export function ExportModal({ jobId, title, onClose }: ExportModalProps) {
 
             <div className="flex gap-2 text-[10.5px] text-neutral-600">
               <span className="flex-1">{EST_SIZES[resolution][format]} · {resolution} {format.toUpperCase()}</span>
-              {stage === 'done' && <span className="text-green-400 font-medium">Download started</span>}
+              {stage === 'done' && <span className="text-green-400 font-medium">{t('Download started')}</span>}
             </div>
           </div>
         )}
@@ -325,7 +327,7 @@ export function ExportModal({ jobId, title, onClose }: ExportModalProps) {
                 <AlertCircle className="h-5 w-5 text-red-400" />
               </div>
               <div>
-                <div className="text-[13px] font-semibold text-white">Export failed</div>
+                <div className="text-[13px] font-semibold text-white">{t('Export failed')}</div>
                 <div className="text-[11px] text-neutral-500 mt-0.5">{error}</div>
               </div>
             </div>
@@ -340,11 +342,11 @@ export function ExportModal({ jobId, title, onClose }: ExportModalProps) {
             <>
               <button type="button" onClick={onClose}
                 className="px-4 py-2 rounded-lg border border-white/[0.07] text-[13px] text-neutral-400 hover:text-white hover:border-white/[0.13] transition-colors">
-                Cancel
+                {t('Cancel')}
               </button>
               <button type="button" onClick={handleExport}
                 className="flex-1 py-2 rounded-lg bg-[#F5A623] hover:bg-amber-400 text-[13px] font-bold text-black flex items-center justify-center gap-2 transition-colors">
-                <Download className="h-4 w-4" /> Export Now
+                <Download className="h-4 w-4" /> {t('Export Now')}
               </button>
               <div className="text-right flex-shrink-0">
                 <div className="text-[11px] font-semibold text-white">{EST_SIZES[resolution][format]}</div>
@@ -355,24 +357,24 @@ export function ExportModal({ jobId, title, onClose }: ExportModalProps) {
           {stage === 'exporting' && (
             <button type="button" onClick={handleCancel}
               className="flex-1 py-2 rounded-lg border border-white/[0.07] text-[13px] text-neutral-400 hover:text-red-400 hover:border-red-500/30 transition-colors">
-              Cancel Export
+              {t('Cancel Export')}
             </button>
           )}
           {stage === 'done' && (
             <button type="button" onClick={onClose}
               className="flex-1 py-2 rounded-lg bg-green-500 hover:bg-green-400 text-[13px] font-bold text-black flex items-center justify-center gap-2 transition-colors">
-              <CheckCircle2 className="h-4 w-4" /> Done
+              <CheckCircle2 className="h-4 w-4" /> {t('Done')}
             </button>
           )}
           {stage === 'error' && (
             <>
               <button type="button" onClick={onClose}
                 className="px-4 py-2 rounded-lg border border-white/[0.07] text-[13px] text-neutral-400 hover:text-white transition-colors">
-                Close
+                {t('Close')}
               </button>
               <button type="button" onClick={() => { setStage('config'); setError(null) }}
                 className="flex-1 py-2 rounded-lg bg-[#F5A623] text-[13px] font-bold text-black transition-colors">
-                Try Again
+                {t('Try Again')}
               </button>
             </>
           )}

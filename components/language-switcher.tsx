@@ -13,8 +13,10 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Globe } from "lucide-react"
 import { locales, localeNames, localeFlags, type Locale } from '@/i18n'
+import { useT } from '@/lib/use-t'
 
 export function LanguageSwitcher() {
+  const t = useT()
   const locale = useLocale() as Locale
   const pathname = usePathname()
 
@@ -46,7 +48,7 @@ export function LanguageSwitcher() {
         <Button
           variant="ghost"
           className="flex items-center gap-2 px-3 py-2 h-auto text-[#94A3B8] hover:text-[#C084FC] hover:bg-[#A855F7]/10 border border-[#A855F7]/20 hover:border-[#A855F7]/50 rounded-lg transition-all duration-200"
-          aria-label="Change language"
+          aria-label={t('Change language')}
         >
           <Globe className="h-5 w-5 text-[#22D3EE]" strokeWidth={1.5} />
           <span className="text-sm font-medium hidden sm:inline">
@@ -58,7 +60,7 @@ export function LanguageSwitcher() {
       <DropdownMenuContent align="end" className="w-52 bg-[#0F172A] border-[#A855F7]/30 max-h-[70vh] overflow-y-auto">
         <DropdownMenuLabel className="text-[#94A3B8] text-xs font-normal flex items-center gap-2 pb-1">
           <Globe className="h-3.5 w-3.5 text-[#22D3EE]" strokeWidth={1.5} />
-          Select your language
+          {t('Select your language')}
         </DropdownMenuLabel>
         <DropdownMenuSeparator className="bg-[#A855F7]/20" />
         {locales.map((loc) => (

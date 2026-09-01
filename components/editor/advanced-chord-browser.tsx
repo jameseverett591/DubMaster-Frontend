@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useState } from 'react'
+import { useT } from '@/lib/use-t'
 
 interface Chord { emotion: string; state: string; trait: string }
 
@@ -106,6 +107,7 @@ function BrowserBody({
   segment, segmentIndex, embedded, selected, stack,
   onClose, onSelectChord, onAddToStack, onRemoveFromStack, onClearStack, onApply,
 }: BrowserBodyProps) {
+  const t = useT()
   return (
     <div
       className={embedded ? 'flex flex-col w-full h-full' : 'flex flex-col rounded-xl overflow-hidden shadow-2xl'}
@@ -116,7 +118,7 @@ function BrowserBody({
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-white/8">
         <div className="flex items-center gap-2">
-          <span className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold">Advanced</span>
+          <span className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold">{t('Advanced')}</span>
           <span className="text-slate-700 text-xs">·</span>
           <span className="text-xs text-slate-400">Segment {segmentIndex + 1}</span>
           {segment.velma_emotion && (
@@ -142,7 +144,7 @@ function BrowserBody({
                 className="px-3 py-2 text-[9px] uppercase tracking-widest font-semibold border-r border-white/6 last:border-r-0"
                 style={{ color: tier === 'emotion' ? '#f87171' : tier === 'state' ? '#fbbf24' : '#818cf8' }}
               >
-                {tier === 'emotion' ? 'Emotion' : tier === 'state' ? 'Mindstate' : 'Character Trait'}
+                {tier === 'emotion' ? 'Emotion' : tier === 'state' ? t('Mindstate') : t('Character Trait')}
               </div>
             ))}
           </div>
@@ -200,7 +202,7 @@ function BrowserBody({
           <div className="flex-1 overflow-y-auto px-2 py-2 flex flex-col gap-1.5">
             {stack.length === 0 && (
               <p className="text-slate-600 text-[10px] text-center mt-4 leading-relaxed">
-                Click any cell<br />to add it to<br />your stack
+                {t('Click any cell')}<br />to add it to<br />your stack
               </p>
             )}
             {stack.map((item, i) => (
@@ -234,14 +236,14 @@ function BrowserBody({
                 cursor: stack.length > 0 ? 'pointer' : 'not-allowed',
               }}
             >
-              Apply to Segment
+              {t('Apply to Segment')}
             </button>
             <button
               onClick={onClearStack}
               disabled={stack.length === 0}
               className="w-full py-1 rounded text-[9px] text-slate-600 hover:text-slate-400 transition-colors"
             >
-              Clear stack
+              {t('Clear stack')}
             </button>
           </div>
         </div>
@@ -251,6 +253,7 @@ function BrowserBody({
 }
 
 export function AdvancedChordBrowser({ segment, segmentIndex, embedded, onClose, onApply }: Props) {
+  const t = useT()
   const [selected, setSelected] = useState<Chord | null>(null)
   const [stack, setStack] = useState<StackItem[]>([])
 

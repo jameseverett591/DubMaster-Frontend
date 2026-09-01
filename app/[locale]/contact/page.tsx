@@ -16,6 +16,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Mic2, Mail, Send, Loader2, CheckCircle, ArrowLeft } from "lucide-react"
+import { useT } from '@/lib/use-t'
 
 const SUBJECT_OPTIONS = [
   "General Inquiry",
@@ -27,6 +28,7 @@ const SUBJECT_OPTIONS = [
 ]
 
 export default function ContactPage() {
+  const t = useT()
   const router = useRouter()
 
   const [name, setName] = useState("")
@@ -102,7 +104,7 @@ export default function ContactPage() {
             className="flex items-center gap-2 text-[#94A3B8] hover:text-white transition-colors text-sm"
           >
             <ArrowLeft className="w-4 h-4" />
-            Back to Home
+            {t('Back to Home')}
           </Link>
         </div>
       </header>
@@ -111,7 +113,7 @@ export default function ContactPage() {
       <main className="relative z-10 max-w-2xl mx-auto px-6 py-16">
         {/* Page title */}
         <div className="mb-10 text-center">
-          <h1 className="text-4xl font-bold text-white mb-3">Contact Us</h1>
+          <h1 className="text-4xl font-bold text-white mb-3">{t('Contact Us')}</h1>
           <p className="text-[#94A3B8]">
             Have a question or need help? We&apos;d love to hear from you.
           </p>
@@ -123,7 +125,7 @@ export default function ContactPage() {
             <div className="h-1 w-full bg-gradient-to-r from-[#A855F7] to-[#22D3EE]" />
             <CardContent className="flex flex-col items-center gap-4 py-14 px-6 text-center">
               <CheckCircle className="w-16 h-16 text-[#A855F7]" />
-              <CardTitle className="text-2xl font-bold text-white">Message Sent!</CardTitle>
+              <CardTitle className="text-2xl font-bold text-white">{t('Message Sent!')}</CardTitle>
               <CardDescription className="text-[#94A3B8] text-base">
                 We&apos;ll get back to you within 24 hours.
               </CardDescription>
@@ -131,7 +133,7 @@ export default function ContactPage() {
                 onClick={resetForm}
                 className="mt-4 bg-gradient-to-r from-[#A855F7] to-[#22D3EE] text-white font-semibold px-6"
               >
-                Send Another Message
+                {t('Send Another Message')}
               </Button>
             </CardContent>
           </Card>
@@ -140,7 +142,7 @@ export default function ContactPage() {
           <Card className="bg-[#0F172A]/80 border-[#A855F7]/30 backdrop-blur-sm overflow-hidden">
             <div className="h-1 w-full bg-gradient-to-r from-[#A855F7] to-[#22D3EE]" />
             <CardHeader className="px-6 pt-6 pb-2">
-              <CardTitle className="text-white text-xl">Send a Message</CardTitle>
+              <CardTitle className="text-white text-xl">{t('Send a Message')}</CardTitle>
               <CardDescription className="text-[#94A3B8]">
                 Fill out the form below and we&apos;ll respond as soon as possible.
               </CardDescription>
@@ -150,12 +152,12 @@ export default function ContactPage() {
                 {/* Name */}
                 <div className="space-y-2">
                   <Label htmlFor="name" className="text-[#94A3B8]">
-                    Name
+                    {t('Name')}
                   </Label>
                   <Input
                     id="name"
                     type="text"
-                    placeholder="Your full name"
+                    placeholder={t('Your full name')}
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     required
@@ -166,7 +168,7 @@ export default function ContactPage() {
                 {/* Email */}
                 <div className="space-y-2">
                   <Label htmlFor="email" className="text-[#94A3B8]">
-                    Email
+                    {t('Email')}
                   </Label>
                   <Input
                     id="email"
@@ -182,14 +184,14 @@ export default function ContactPage() {
                 {/* Subject */}
                 <div className="space-y-2">
                   <Label htmlFor="subject" className="text-[#94A3B8]">
-                    Subject
+                    {t('Subject')}
                   </Label>
                   <Select value={subject} onValueChange={setSubject} required>
                     <SelectTrigger
                       id="subject"
                       className="bg-[#020817] border-[#334155] text-white focus:border-[#A855F7] focus:ring-0 data-[placeholder]:text-[#475569]"
                     >
-                      <SelectValue placeholder="Select a subject" />
+                      <SelectValue placeholder={t('Select a subject')} />
                     </SelectTrigger>
                     <SelectContent className="bg-[#0F172A] border-[#334155] text-white">
                       {SUBJECT_OPTIONS.map((option) => (
@@ -208,11 +210,11 @@ export default function ContactPage() {
                 {/* Message */}
                 <div className="space-y-2">
                   <Label htmlFor="message" className="text-[#94A3B8]">
-                    Message
+                    {t('Message')}
                   </Label>
                   <Textarea
                     id="message"
-                    placeholder="Write your message here..."
+                    placeholder={t('Write your message here...')}
                     value={message}
                     onChange={(e) => setMessage(e.target.value)}
                     required
@@ -235,12 +237,12 @@ export default function ContactPage() {
                   {loading ? (
                     <>
                       <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      Sending...
+                      {t('Sending...')}
                     </>
                   ) : (
                     <>
                       <Send className="w-4 h-4 mr-2" />
-                      Send Message
+                      {t('Send Message')}
                     </>
                   )}
                 </Button>
@@ -261,7 +263,7 @@ export default function ContactPage() {
             </a>
           </div>
           <p className="text-[#475569] text-xs">
-            We typically respond within 24 hours
+            {t('We typically respond within 24 hours')}
           </p>
         </div>
       </main>

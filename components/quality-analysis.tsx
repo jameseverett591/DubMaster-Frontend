@@ -28,6 +28,7 @@ import {
   type QualityAnalysis,
   type AnalysisStatus,
 } from "@/lib/api-client"
+import { useT } from '@/lib/use-t'
 
 interface QualityAnalysisProps {
   jobId: string
@@ -50,6 +51,7 @@ function formatTime(seconds: number): string {
 }
 
 export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: QualityAnalysisProps) {
+  const t = useT()
   const [status, setStatus] = useState<AnalysisStatus>("idle")
   const [analysis, setAnalysis] = useState<QualityAnalysis | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -116,7 +118,7 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
     return (
       <div className="flex flex-col items-center justify-center p-6 text-center text-muted-foreground">
         <BarChart3 className="h-8 w-8 mb-2 opacity-40" />
-        <p className="text-xs">Complete dubbing first to run quality analysis</p>
+        <p className="text-xs">{t('Complete dubbing first to run quality analysis')}</p>
       </div>
     )
   }
@@ -126,14 +128,14 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
       <div className="flex flex-col items-center justify-center p-6 text-center gap-3">
         <BarChart3 className="h-8 w-8 text-muted-foreground opacity-60" />
         <div>
-          <p className="text-xs font-medium text-foreground">Quality Analysis</p>
+          <p className="text-xs font-medium text-foreground">{t('Quality Analysis')}</p>
           <p className="text-[10px] text-muted-foreground mt-0.5">
-            Evaluate timing, speed, loudness, and more
+            {t('Evaluate timing, speed, loudness, and more')}
           </p>
         </div>
         <Button size="sm" className="h-7 text-xs gap-1.5" onClick={handleAnalyze}>
           <Activity className="h-3 w-3" />
-          Analyze Dub Quality
+          {t('Analyze Dub Quality')}
         </Button>
       </div>
     )
@@ -145,10 +147,10 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
         <CardHeader className="pb-2">
           <CardTitle className="flex items-center gap-2 text-xs">
             <RefreshCw className="h-3.5 w-3.5 animate-spin text-primary" />
-            Analyzing...
+            {t('Analyzing...')}
           </CardTitle>
           <CardDescription className="text-[10px]">
-            Re-transcribing, measuring timing, loudness, speed...
+            {t('Re-transcribing, measuring timing, loudness, speed...')}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -164,7 +166,7 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
         <AlertCircle className="h-6 w-6 text-destructive" />
         <p className="text-xs text-destructive">{error}</p>
         <Button size="sm" variant="outline" className="h-7 text-xs bg-transparent" onClick={handleAnalyze}>
-          Retry
+          {t('Retry')}
         </Button>
       </div>
     )
@@ -180,13 +182,13 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
         <Card>
           <CardHeader className="pb-2">
             <div className="flex items-center justify-between">
-              <CardTitle className="text-xs">Quality Score</CardTitle>
+              <CardTitle className="text-xs">{t('Quality Score')}</CardTitle>
               <Button
                 size="sm"
                 variant="ghost"
                 className="h-6 w-6 p-0"
                 onClick={handleAnalyze}
-                title="Re-analyze"
+                title={t('Re-analyze')}
               >
                 <RefreshCw className="h-3 w-3" />
               </Button>
@@ -219,25 +221,25 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
                   {summary.services_available?.hume && (
                     <Badge className="text-[9px] h-4 bg-purple-500/10 text-purple-500 border-purple-500/20">
                       <Heart className="h-2.5 w-2.5 mr-0.5" />
-                      Hume
+                      {t('Hume')}
                     </Badge>
                   )}
                   {summary.services_available?.azure_speech && (
                     <Badge className="text-[9px] h-4 bg-cyan-500/10 text-cyan-500 border-cyan-500/20">
                       <Mic className="h-2.5 w-2.5 mr-0.5" />
-                      Azure Speech
+                      {t('Azure Speech')}
                     </Badge>
                   )}
                   {summary.services_available?.azure_openai && (
                     <Badge className="text-[9px] h-4 bg-emerald-500/10 text-emerald-500 border-emerald-500/20">
                       <Languages className="h-2.5 w-2.5 mr-0.5" />
-                      Azure OpenAI
+                      {t('Azure OpenAI')}
                     </Badge>
                   )}
                   {(summary.screenapp_available || summary.services_available?.screenapp) && (
                     <Badge className="text-[9px] h-4 bg-blue-500/10 text-blue-500 border-blue-500/20">
                       <Eye className="h-2.5 w-2.5 mr-0.5" />
-                      ScreenApp
+                      {t('ScreenApp')}
                     </Badge>
                   )}
                 </div>
@@ -343,7 +345,7 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
             <CardHeader className="pb-1.5">
               <CardTitle className="flex items-center gap-1.5 text-xs">
                 <VolumeX className="h-3.5 w-3.5" />
-                Silence Gaps
+                {t('Silence Gaps')}
                 <Badge variant="outline" className="ml-auto text-[9px] h-4 border-red-500/30 text-red-600">
                   {analysis.silences.unexpected_silences} unexpected
                 </Badge>
@@ -376,11 +378,11 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
                 Loudness
                 {analysis.loudness.within_spec ? (
                   <Badge variant="outline" className="ml-auto text-[9px] h-4 border-green-500/30 text-green-600">
-                    Within spec
+                    {t('Within spec')}
                   </Badge>
                 ) : (
                   <Badge variant="outline" className="ml-auto text-[9px] h-4 border-red-500/30 text-red-600">
-                    Out of spec
+                    {t('Out of spec')}
                   </Badge>
                 )}
               </CardTitle>
@@ -392,11 +394,11 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
                   <p className="text-xs font-medium">{analysis.loudness.integrated_loudness_lufs}</p>
                 </div>
                 <div className="rounded border border-border p-1.5">
-                  <p className="text-[9px] text-muted-foreground">Peak</p>
+                  <p className="text-[9px] text-muted-foreground">{t('Peak')}</p>
                   <p className="text-xs font-medium">{analysis.loudness.true_peak_dbfs} dB</p>
                 </div>
                 <div className="rounded border border-border p-1.5">
-                  <p className="text-[9px] text-muted-foreground">Range</p>
+                  <p className="text-[9px] text-muted-foreground">{t('Range')}</p>
                   <p className="text-xs font-medium">{analysis.loudness.loudness_range_lu} LU</p>
                 </div>
               </div>
@@ -410,7 +412,7 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
             <CardHeader className="pb-1.5">
               <CardTitle className="flex items-center gap-1.5 text-xs">
                 <Eye className="h-3.5 w-3.5 text-blue-500" />
-                ScreenApp Insights
+                {t('ScreenApp Insights')}
               </CardTitle>
             </CardHeader>
             <CardContent className="pt-0">
@@ -421,7 +423,7 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
               )}
               {analysis.screenapp_dubbed.key_moments && analysis.screenapp_dubbed.key_moments.length > 0 && (
                 <div className="space-y-1">
-                  <p className="text-[10px] font-medium text-foreground">Key Moments</p>
+                  <p className="text-[10px] font-medium text-foreground">{t('Key Moments')}</p>
                   {analysis.screenapp_dubbed.key_moments.slice(0, 5).map((m, i) => (
                     <div key={i} className="flex gap-1.5 text-[10px]">
                       <span className="shrink-0 font-mono text-muted-foreground">
@@ -453,7 +455,7 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
             <CardHeader className="pb-1.5">
               <CardTitle className="flex items-center gap-1.5 text-xs">
                 <Mic className="h-3.5 w-3.5 text-cyan-500" />
-                Pronunciation
+                {t('Pronunciation')}
                 <Badge
                   variant="outline"
                   className={`ml-auto text-[9px] h-4 ${
@@ -514,7 +516,7 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
             <CardHeader className="pb-1.5">
               <CardTitle className="flex items-center gap-1.5 text-xs">
                 <Languages className="h-3.5 w-3.5 text-emerald-500" />
-                Translation Quality
+                {t('Translation Quality')}
                 <Badge
                   variant="outline"
                   className={`ml-auto text-[9px] h-4 ${
@@ -537,7 +539,7 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
             <CardContent className="pt-0 space-y-2">
               <div className="grid grid-cols-2 gap-1.5 text-center">
                 <div className="rounded border border-border p-1.5">
-                  <p className="text-[9px] text-muted-foreground">Accuracy</p>
+                  <p className="text-[9px] text-muted-foreground">{t('Accuracy')}</p>
                   <p className={`text-xs font-medium ${
                     (analysis.translation.translation_score ?? 0) >= 80 ? "text-green-500"
                     : (analysis.translation.translation_score ?? 0) >= 60 ? "text-yellow-500"
@@ -547,7 +549,7 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
                   </p>
                 </div>
                 <div className="rounded border border-border p-1.5">
-                  <p className="text-[9px] text-muted-foreground">Coverage</p>
+                  <p className="text-[9px] text-muted-foreground">{t('Coverage')}</p>
                   <p className={`text-xs font-medium ${
                     (analysis.translation.coverage_percent ?? 0) >= 90 ? "text-green-500"
                     : (analysis.translation.coverage_percent ?? 0) >= 70 ? "text-yellow-500"
@@ -561,7 +563,7 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
               {/* Translation errors */}
               {analysis.translation.errors && analysis.translation.errors.length > 0 && (
                 <div>
-                  <p className="text-[10px] font-medium text-foreground mb-1">Translation Issues</p>
+                  <p className="text-[10px] font-medium text-foreground mb-1">{t('Translation Issues')}</p>
                   <div className="space-y-1">
                     {analysis.translation.errors.slice(0, 6).map((err, i) => (
                       <div key={i} className="flex items-start gap-1 text-[10px] py-0.5 border-b border-border/50 last:border-0">
@@ -587,7 +589,7 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
               {/* Missing dialogue */}
               {analysis.translation.missing_dialogue && analysis.translation.missing_dialogue.length > 0 && (
                 <div>
-                  <p className="text-[10px] font-medium text-foreground mb-1">Missing Dialogue</p>
+                  <p className="text-[10px] font-medium text-foreground mb-1">{t('Missing Dialogue')}</p>
                   <div className="space-y-1">
                     {analysis.translation.missing_dialogue.slice(0, 5).map((m, i) => (
                       <div key={i} className="flex items-center justify-between text-[10px] py-0.5 border-b border-border/50 last:border-0">
@@ -622,7 +624,7 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
                 Re-transcription ({analysis.retranscription.segment_count} segments)
               </CardTitle>
               <CardDescription className="text-[10px]">
-                What Whisper heard in the dubbed audio
+                {t('What Whisper heard in the dubbed audio')}
               </CardDescription>
             </CardHeader>
             <CardContent className="pt-0">

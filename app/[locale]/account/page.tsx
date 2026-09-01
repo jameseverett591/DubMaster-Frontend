@@ -26,6 +26,7 @@ import {
 import { Header } from "@/components/header"
 import type { Database } from "@/lib/supabase/types"
 import { PLAN_MINUTES, PLAN_MINUTES_DEFAULT, type PlanType } from "@/lib/plan-features"
+import { useT } from '@/lib/use-t'
 
 type Profile = Database["public"]["Tables"]["profiles"]["Row"]
 type Subscription = Database["public"]["Tables"]["subscriptions"]["Row"]
@@ -40,6 +41,7 @@ const PLAN_COLORS: Record<string, string> = {
 }
 
 export default function AccountPage() {
+  const t = useT()
   const [profile, setProfile] = useState<Profile | null>(null)
   const [subscription, setSubscription] = useState<Subscription | null>(null)
   const [usage, setUsage] = useState<Usage | null>(null)
@@ -148,25 +150,25 @@ export default function AccountPage() {
       <Header />
 
       <div className="relative z-10 max-w-4xl mx-auto px-4 py-8">
-        <h1 className="text-2xl font-bold text-white mb-6">Account Settings</h1>
+        <h1 className="text-2xl font-bold text-white mb-6">{t('Account Settings')}</h1>
 
         <Tabs defaultValue="profile" className="space-y-6">
           <TabsList className="bg-[#0F172A] border border-[#1E293B]">
             <TabsTrigger value="profile" className="data-[state=active]:bg-[#1E293B] cursor-pointer">
               <User className="h-4 w-4 mr-2" />
-              Profile
+              {t('Profile')}
             </TabsTrigger>
             <TabsTrigger value="subscription" className="data-[state=active]:bg-[#1E293B] cursor-pointer">
               <Crown className="h-4 w-4 mr-2" />
-              Subscription
+              {t('Subscription')}
             </TabsTrigger>
             <TabsTrigger value="billing" className="data-[state=active]:bg-[#1E293B] cursor-pointer">
               <CreditCard className="h-4 w-4 mr-2" />
-              Billing
+              {t('Billing')}
             </TabsTrigger>
             <TabsTrigger value="settings" className="data-[state=active]:bg-[#1E293B] cursor-pointer">
               <Settings className="h-4 w-4 mr-2" />
-              Settings
+              {t('Settings')}
             </TabsTrigger>
           </TabsList>
 
@@ -174,14 +176,14 @@ export default function AccountPage() {
           <TabsContent value="profile">
             <Card className="bg-[#0F172A]/80 border-[#1E293B]">
               <CardHeader>
-                <CardTitle className="text-white">Profile Information</CardTitle>
+                <CardTitle className="text-white">{t('Profile Information')}</CardTitle>
                 <CardDescription className="text-[#94A3B8]">
-                  Update your personal details
+                  {t('Update your personal details')}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
-                  <Label className="text-[#94A3B8]">Email</Label>
+                  <Label className="text-[#94A3B8]">{t('Email')}</Label>
                   <Input
                     value={email}
                     disabled
@@ -189,7 +191,7 @@ export default function AccountPage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label className="text-[#94A3B8]">Full Name</Label>
+                  <Label className="text-[#94A3B8]">{t('Full Name')}</Label>
                   <Input
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
@@ -201,7 +203,7 @@ export default function AccountPage() {
                   disabled={saving}
                   className="bg-gradient-to-r from-[#A855F7] to-[#7C3AED] text-white cursor-pointer disabled:opacity-50"
                 >
-                  {saving ? "Saving..." : "Save Changes"}
+                  {saving ? t('Saving...') : t('Save Changes')}
                 </Button>
               </CardContent>
             </Card>
@@ -213,9 +215,9 @@ export default function AccountPage() {
               <CardHeader>
                 <div className="flex items-center justify-between">
                   <div>
-                    <CardTitle className="text-white">Current Plan</CardTitle>
+                    <CardTitle className="text-white">{t('Current Plan')}</CardTitle>
                     <CardDescription className="text-[#94A3B8]">
-                      Manage your subscription
+                      {t('Manage your subscription')}
                     </CardDescription>
                   </div>
                   {subscription && (
@@ -237,11 +239,11 @@ export default function AccountPage() {
                   <>
                     <div className="grid grid-cols-2 gap-4">
                       <div>
-                        <p className="text-xs text-[#64748B] uppercase tracking-wider">Status</p>
+                        <p className="text-xs text-[#64748B] uppercase tracking-wider">{t('Status')}</p>
                         <p className="text-white capitalize mt-1">{subscription.status}</p>
                       </div>
                       <div>
-                        <p className="text-xs text-[#64748B] uppercase tracking-wider">Renews</p>
+                        <p className="text-xs text-[#64748B] uppercase tracking-wider">{t('Renews')}</p>
                         <p className="text-white mt-1">
                           {subscription.current_period_end
                             ? new Date(subscription.current_period_end).toLocaleDateString()
@@ -261,7 +263,7 @@ export default function AccountPage() {
                     {planLimit > 0 && (
                       <div className="space-y-2">
                         <div className="flex items-center justify-between text-sm">
-                          <span className="text-[#94A3B8]">Monthly Usage</span>
+                          <span className="text-[#94A3B8]">{t('Monthly Usage')}</span>
                           <span className="text-white font-medium">
                             {minutesUsed} / {planLimit} minutes
                           </span>
@@ -270,8 +272,7 @@ export default function AccountPage() {
                         {usagePercent >= 80 && (
                           <p className="text-yellow-400 text-xs">
                             {usagePercent >= 100
-                              ? "Usage limit reached. Upgrade for more minutes."
-                              : "Approaching usage limit."}
+                              ? t('Usage limit reached. Upgrade for more minutes.') : t('Approaching usage limit.')}
                           </p>
                         )}
                       </div>
@@ -279,7 +280,7 @@ export default function AccountPage() {
 
                     {planLimit < 0 && (
                       <p className="text-[#10B981] text-sm font-medium">
-                        Unlimited usage on Professional plan
+                        {t('Unlimited usage on Professional plan')}
                       </p>
                     )}
 
@@ -288,12 +289,12 @@ export default function AccountPage() {
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <Clock className="h-4 w-4 text-[#22D3EE]" />
-                          <span className="text-[#94A3B8] text-sm">Bonus Minutes Banked</span>
+                          <span className="text-[#94A3B8] text-sm">{t('Bonus Minutes Banked')}</span>
                         </div>
                         <span className="text-[#22D3EE] font-semibold">{bonusBalance} minutes</span>
                       </div>
                       <p className="text-[#64748B] text-xs">
-                        Bonus minutes never expire and carry over month-to-month. Used after your plan minutes.
+                        {t('Bonus minutes never expire and carry over month-to-month. Used after your plan minutes.')}
                       </p>
                       <Button
                         onClick={() => setBonusDialogOpen(true)}
@@ -302,7 +303,7 @@ export default function AccountPage() {
                         className="border-[#22D3EE]/30 text-[#22D3EE] hover:bg-[#22D3EE]/10 cursor-pointer mt-1"
                       >
                         <Plus className="h-3 w-3 mr-1" />
-                        Buy More Minutes
+                        {t('Buy More Minutes')}
                       </Button>
                     </div>
 
@@ -312,20 +313,20 @@ export default function AccountPage() {
                         variant="outline"
                         className="border-[#334155] text-[#E2E8F0] hover:bg-[#1E293B] cursor-pointer"
                       >
-                        Manage Subscription
+                        {t('Manage Subscription')}
                       </Button>
                       {subscription.plan_type !== "professional" && (
                         <Button asChild className="bg-gradient-to-r from-[#A855F7] to-[#7C3AED] text-white">
-                          <Link href="/subscribe?upgrade=true">Upgrade Plan</Link>
+                          <Link href="/subscribe?upgrade=true">{t('Upgrade Plan')}</Link>
                         </Button>
                       )}
                     </div>
                   </>
                 ) : (
                   <div className="text-center py-8">
-                    <p className="text-[#94A3B8] mb-4">No active subscription</p>
+                    <p className="text-[#94A3B8] mb-4">{t('No active subscription')}</p>
                     <Button asChild className="bg-gradient-to-r from-[#A855F7] to-[#22D3EE] text-white">
-                      <Link href="/subscribe">Choose a Plan</Link>
+                      <Link href="/subscribe">{t('Choose a Plan')}</Link>
                     </Button>
                   </div>
                 )}
@@ -337,9 +338,9 @@ export default function AccountPage() {
           <TabsContent value="billing">
             <Card className="bg-[#0F172A]/80 border-[#1E293B]">
               <CardHeader>
-                <CardTitle className="text-white">Billing History</CardTitle>
+                <CardTitle className="text-white">{t('Billing History')}</CardTitle>
                 <CardDescription className="text-[#94A3B8]">
-                  View your invoices and payment history
+                  {t('View your invoices and payment history')}
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -385,7 +386,7 @@ export default function AccountPage() {
                     ))}
                   </div>
                 ) : (
-                  <p className="text-[#64748B] text-center py-8">No payments yet</p>
+                  <p className="text-[#64748B] text-center py-8">{t('No payments yet')}</p>
                 )}
 
                 {subscription?.stripe_customer_id && (
@@ -395,7 +396,7 @@ export default function AccountPage() {
                     className="mt-4 border-[#334155] text-[#E2E8F0] hover:bg-[#1E293B] cursor-pointer"
                   >
                     <CreditCard className="h-4 w-4 mr-2" />
-                    Update Payment Method
+                    {t('Update Payment Method')}
                   </Button>
                 )}
               </CardContent>
@@ -406,28 +407,28 @@ export default function AccountPage() {
           <TabsContent value="settings">
             <Card className="bg-[#0F172A]/80 border-[#1E293B]">
               <CardHeader>
-                <CardTitle className="text-white">Preferences</CardTitle>
+                <CardTitle className="text-white">{t('Preferences')}</CardTitle>
                 <CardDescription className="text-[#94A3B8]">
-                  Configure your account settings
+                  {t('Configure your account settings')}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
                 <div className="flex items-center justify-between py-3 border-b border-[#1E293B]">
                   <div>
-                    <p className="text-white text-sm">Default target language</p>
-                    <p className="text-[#64748B] text-xs">Language to dub videos into</p>
+                    <p className="text-white text-sm">{t('Default target language')}</p>
+                    <p className="text-[#64748B] text-xs">{t('Language to dub videos into')}</p>
                   </div>
                   <Badge variant="outline" className="border-[#334155] text-[#94A3B8]">
-                    English
+                    {t('English')}
                   </Badge>
                 </div>
                 <div className="flex items-center justify-between py-3 border-b border-[#1E293B]">
                   <div>
-                    <p className="text-white text-sm">Email notifications</p>
-                    <p className="text-[#64748B] text-xs">Receive emails when dubbing completes</p>
+                    <p className="text-white text-sm">{t('Email notifications')}</p>
+                    <p className="text-[#64748B] text-xs">{t('Receive emails when dubbing completes')}</p>
                   </div>
                   <Badge variant="outline" className="border-green-500/30 text-green-400">
-                    Enabled
+                    {t('Enabled')}
                   </Badge>
                 </div>
               </CardContent>
@@ -438,18 +439,18 @@ export default function AccountPage() {
               <CardHeader>
                 <div className="flex items-center gap-2">
                   <AlertTriangle className="h-5 w-5 text-red-400" />
-                  <CardTitle className="text-red-400">Danger Zone</CardTitle>
+                  <CardTitle className="text-red-400">{t('Danger Zone')}</CardTitle>
                 </div>
                 <CardDescription className="text-[#94A3B8]">
-                  Irreversible and destructive actions
+                  {t('Irreversible and destructive actions')}
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="flex items-center justify-between py-3">
                   <div>
-                    <p className="text-white text-sm font-medium">Delete Account</p>
+                    <p className="text-white text-sm font-medium">{t('Delete Account')}</p>
                     <p className="text-[#64748B] text-xs mt-0.5">
-                      Permanently delete your account and all associated data. This cannot be undone.
+                      {t('Permanently delete your account and all associated data. This cannot be undone.')}
                     </p>
                   </div>
                   <Button
@@ -458,7 +459,7 @@ export default function AccountPage() {
                     className="border-red-500/50 text-red-400 hover:bg-red-500/10 hover:border-red-500 cursor-pointer ml-4 shrink-0"
                   >
                     <Trash2 className="h-4 w-4 mr-2" />
-                    Delete Account
+                    {t('Delete Account')}
                   </Button>
                 </div>
               </CardContent>
@@ -473,7 +474,7 @@ export default function AccountPage() {
           <DialogHeader>
             <div className="flex items-center gap-2 mb-1">
               <AlertTriangle className="h-5 w-5 text-red-400" />
-              <DialogTitle className="text-white">Delete Account</DialogTitle>
+              <DialogTitle className="text-white">{t('Delete Account')}</DialogTitle>
             </div>
             <DialogDescription className="text-[#94A3B8]">
               This action is permanent and cannot be undone. All your data including projects, dubbing history, and subscription will be permanently deleted.
@@ -481,11 +482,11 @@ export default function AccountPage() {
           </DialogHeader>
           <div className="space-y-4 pt-2">
             <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-sm text-red-400">
-              You will lose all your projects, dubbing history, and remaining subscription minutes.
+              {t('You will lose all your projects, dubbing history, and remaining subscription minutes.')}
             </div>
             <div className="space-y-2">
               <Label className="text-[#94A3B8] text-sm">
-                Type <span className="text-white font-mono font-semibold">DELETE</span> to confirm
+                {t('Type')} <span className="text-white font-mono font-semibold">DELETE</span> to confirm
               </Label>
               <Input
                 value={deleteConfirmText}
@@ -500,7 +501,7 @@ export default function AccountPage() {
                 onClick={() => { setDeleteConfirmOpen(false); setDeleteConfirmText("") }}
                 className="flex-1 border-[#334155] text-[#94A3B8] hover:bg-[#1E293B] cursor-pointer"
               >
-                Cancel
+                {t('Cancel')}
               </Button>
               <Button
                 onClick={handleDeleteAccount}

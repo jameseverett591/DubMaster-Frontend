@@ -13,6 +13,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Loader2, Clock, Sparkles, ArrowUpRight } from "lucide-react"
 import Link from "next/link"
+import { useT } from '@/lib/use-t'
 
 const BONUS_PACKS = [
   { minutes: 10, price: 5, priceId: "price_1T95pVRvIweJqT6RkIuvs57O" },
@@ -37,6 +38,7 @@ export function BonusMinutesDialog({
   bonusBalance,
   planType,
 }: BonusMinutesDialogProps) {
+  const t = useT()
   const [loadingPack, setLoadingPack] = useState<string | null>(null)
   const supabase = createClient()
 
@@ -80,10 +82,10 @@ export function BonusMinutesDialog({
         <DialogHeader>
           <DialogTitle className="text-white flex items-center gap-2">
             <Clock className="h-5 w-5 text-[#A855F7]" />
-            {planExhausted ? "Monthly Minutes Used Up" : "Purchase Bonus Minutes"}
+            {planExhausted ? t('Monthly Minutes Used Up') : t('Purchase Bonus Minutes')}
           </DialogTitle>
           <DialogDescription className="text-[#94A3B8]">
-            Bonus minutes never expire and carry over month-to-month.
+            {t('Bonus minutes never expire and carry over month-to-month.')}
           </DialogDescription>
         </DialogHeader>
 
@@ -99,12 +101,12 @@ export function BonusMinutesDialog({
           </div>
           {bonusBalance > 0 && (
             <div className="flex items-center justify-between text-sm">
-              <span className="text-[#94A3B8]">Bonus Minutes</span>
+              <span className="text-[#94A3B8]">{t('Bonus Minutes')}</span>
               <span className="text-[#22D3EE] font-medium">{bonusBalance} minutes banked</span>
             </div>
           )}
           <div className="flex items-center justify-between text-sm border-t border-[#1E293B] pt-2">
-            <span className="text-[#94A3B8]">Total Available</span>
+            <span className="text-[#94A3B8]">{t('Total Available')}</span>
             <span className="text-white font-semibold">{totalAvailable} minutes remaining</span>
           </div>
         </div>
@@ -127,7 +129,7 @@ export function BonusMinutesDialog({
                 {pack.bestValue && (
                   <Badge className="absolute -top-2 right-3 bg-gradient-to-r from-[#A855F7] to-[#7C3AED] text-white text-[10px] px-2 py-0.5">
                     <Sparkles className="h-3 w-3 mr-1" />
-                    Best Value
+                    {t('Best Value')}
                   </Badge>
                 )}
                 <div className="flex items-center gap-3">
@@ -164,10 +166,10 @@ export function BonusMinutesDialog({
         {/* Upgrade CTA */}
         {planType && planType !== "professional" && (
           <div className="text-center pt-2">
-            <p className="text-[#64748B] text-xs mb-2">Or upgrade for more monthly minutes</p>
+            <p className="text-[#64748B] text-xs mb-2">{t('Or upgrade for more monthly minutes')}</p>
             <Button asChild variant="outline" size="sm" className="border-[#334155] text-[#E2E8F0] hover:bg-[#1E293B]">
               <Link href="/subscribe?upgrade=true">
-                Upgrade Plan
+                {t('Upgrade Plan')}
                 <ArrowUpRight className="h-3 w-3 ml-1" />
               </Link>
             </Button>

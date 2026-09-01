@@ -4,6 +4,7 @@ import React, { useState, useRef, useCallback, useMemo, useEffect } from 'react'
 import { Lock, Unlock, RotateCcw } from 'lucide-react'
 import type { EmotionalCurve, EmotionalCurvePoint, Segment } from '@/lib/editor-types'
 import { cn } from '@/lib/utils'
+import { useT } from '@/lib/use-t'
 
 interface EmotionalCurveTrackProps {
   segment: Segment
@@ -90,6 +91,7 @@ function EmotionalCurveTrackComponent({
   onToggleLock,
   onResetCurve,
 }: EmotionalCurveTrackProps) {
+  const t = useT()
   const curve = segment.emotionalCurve
   const locked = curve?.locked ?? false
   const combined = curve?.combined ?? []
@@ -253,10 +255,10 @@ function EmotionalCurveTrackComponent({
         <button
           className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 transition-colors"
           onClick={() => onResetCurve(segmentIndex)}
-          title="Reset curve to default"
+          title={t('Reset curve to default')}
         >
           <RotateCcw className="h-3 w-3" />
-          Reset
+          {t('Reset')}
         </button>
       </div>
 

@@ -5,6 +5,7 @@ import { Mic2, Search, Loader2, Upload, AlertTriangle, Play, Pause, X, RefreshCw
 import { apiClient } from '@/lib/api-client'
 import type { Segment } from '@/lib/editor-types'
 import { cn } from '@/lib/utils'
+import { useT } from '@/lib/use-t'
 
 interface ElevenVoice {
   id: string
@@ -35,6 +36,7 @@ function fmt(s: number): string {
  *  is browser chrome and cannot be themed, and its light bar reads as a bright
  *  slab against this panel. */
 function ClipPlayer({ src, accent, label }: { src: string; accent: boolean; label: string }) {
+  const t = useT()
   const ref = useRef<HTMLAudioElement | null>(null)
   const [playing, setPlaying] = useState(false)
   const [at, setAt] = useState(0)
@@ -115,6 +117,7 @@ export default function PerformPanel({
   /** Called with the backend's updated segment so the editor can merge it. */
   onPerformed: (updated: Record<string, unknown>) => void
 }) {
+  const t = useT()
   const [voices, setVoices] = useState<ElevenVoice[]>([])
   const [loading, setLoading] = useState(true)
   const [enabled, setEnabled] = useState(true)
@@ -245,7 +248,7 @@ export default function PerformPanel({
   if (!segment) {
     return (
       <div className="flex items-center justify-center h-full text-slate-500 text-xs px-4 text-center">
-        Select a segment to drive it with a recording.
+        {t('Select a segment to drive it with a recording.')}
       </div>
     )
   }
@@ -266,7 +269,7 @@ export default function PerformPanel({
       <div className="flex items-center justify-between shrink-0">
         <div className="flex items-center gap-1.5 text-slate-200 font-medium">
           <Mic2 className="h-3.5 w-3.5 text-violet-400" />
-          Perform
+          {t('Perform')}
         </div>
         {segment.engine && (
           <span className={cn(
@@ -324,7 +327,7 @@ export default function PerformPanel({
               <button
                 type="button"
                 onClick={() => setFile(null)}
-                title="Remove this recording"
+                title={t('Remove this recording')}
                 className="shrink-0 h-4 w-4 rounded flex items-center justify-center text-slate-500 hover:text-red-300"
               >
                 <X className="h-2.5 w-2.5" />
@@ -336,7 +339,7 @@ export default function PerformPanel({
           <label className="cursor-pointer block">
             <Upload className="h-4 w-4 mx-auto text-slate-500 mb-1" />
             <span className="text-[10px] text-slate-400">
-              Drop a recording here, or <span className="text-violet-300 underline">choose a file</span>
+              {t('Drop a recording here, or')} <span className="text-violet-300 underline">choose a file</span>
             </span>
             <input
               type="file"
@@ -393,7 +396,7 @@ export default function PerformPanel({
               type="button"
               onClick={() => void loadVoices(true)}
               disabled={loading}
-              title="Re-fetch from ElevenLabs — use after adding a voice there"
+              title={t('Re-fetch from ElevenLabs — use after adding a voice there')}
               className="shrink-0 h-6 w-6 rounded-md border border-slate-800 bg-slate-900/60
                          text-slate-400 hover:text-violet-200 hover:border-violet-500/60
                          disabled:opacity-40 flex items-center justify-center transition-colors"
@@ -472,7 +475,7 @@ export default function PerformPanel({
               onChange={(e) => setDenoise(e.target.checked)}
               className="accent-violet-500"
             />
-            <span className="text-[10px] text-slate-300">Remove background noise</span>
+            <span className="text-[10px] text-slate-300">{t('Remove background noise')}</span>
           </label>
           <p className="text-[9px] text-slate-500 leading-snug -mt-1">
             On by default: phone and laptop recordings carry room tone that would
@@ -480,7 +483,7 @@ export default function PerformPanel({
           </p>
 
           <div className="space-y-1">
-            <span className="text-[9px] text-slate-500 uppercase tracking-wide">Model</span>
+            <span className="text-[9px] text-slate-500 uppercase tracking-wide">{t('Model')}</span>
             <div className="flex rounded-md border border-slate-800 overflow-hidden">
               {MODELS.map((m) => (
                 <button
@@ -506,7 +509,7 @@ export default function PerformPanel({
             type="button"
             disabled={!file || !selected || working || !enabled}
             onClick={preview}
-            title="Convert and listen without changing the segment"
+            title={t('Convert and listen without changing the segment')}
             className="mt-auto w-full rounded-md border border-violet-400/60 bg-violet-500/10
                        hover:bg-violet-500/20 disabled:opacity-40 disabled:hover:bg-violet-500/10
                        text-violet-100 text-[11px] py-1.5 font-medium transition-colors

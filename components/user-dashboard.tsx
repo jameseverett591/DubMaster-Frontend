@@ -29,6 +29,7 @@ import {
   Mail,
   Clock,
 } from "lucide-react"
+import { useT } from '@/lib/use-t'
 
 const STATUS_CONFIG: Record<string, { label: string; classes: string }> = {
   completed:                { label: "Completed",   classes: "text-green-400  border-green-400/30  bg-green-400/10"  },
@@ -48,6 +49,7 @@ const STATUS_CONFIG: Record<string, { label: string; classes: string }> = {
 }
 
 function StatusBadge({ status }: { status: string }) {
+  const t = useT()
   const cfg = STATUS_CONFIG[status] ?? {
     label: status,
     classes: "text-gray-400 border-gray-400/30 bg-gray-400/10",
@@ -90,6 +92,7 @@ const PLAN_LABELS: Record<string, string> = {
 }
 
 export function UserDashboard() {
+  const t = useT()
   const supabase = createClient()
 
   const [token, setToken] = useState<string | null>(null)
@@ -238,9 +241,9 @@ export function UserDashboard() {
 
         <main className="max-w-5xl mx-auto px-4 py-10">
           <div className="mb-8">
-            <h1 className="text-3xl font-bold text-white">Dashboard</h1>
+            <h1 className="text-3xl font-bold text-white">{t('Dashboard')}</h1>
             <p className="text-[#94A3B8] mt-1 text-sm">
-              Your dubbing history and account settings
+              {t('Your dubbing history and account settings')}
             </p>
           </div>
 
@@ -251,14 +254,14 @@ export function UserDashboard() {
                 className="gap-2 data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] rounded-lg"
               >
                 <Activity className="h-4 w-4" />
-                Activity
+                {t('Activity')}
               </TabsTrigger>
               <TabsTrigger
                 value="account"
                 className="gap-2 data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] rounded-lg"
               >
                 <User className="h-4 w-4" />
-                Account
+                {t('Account')}
               </TabsTrigger>
             </TabsList>
 
@@ -267,7 +270,7 @@ export function UserDashboard() {
                 <div className="flex items-center justify-between mb-6">
                   <div className="flex items-center gap-2">
                     <Film className="h-5 w-5 text-[#A855F7]" />
-                    <h2 className="text-white font-semibold text-lg">Dubbing History</h2>
+                    <h2 className="text-white font-semibold text-lg">{t('Dubbing History')}</h2>
                     {!jobsLoading && (
                       <span className="text-xs text-[#64748B] ml-1">
                         ({jobs.length} job{jobs.length !== 1 ? "s" : ""})
@@ -283,7 +286,7 @@ export function UserDashboard() {
                       className="text-[#94A3B8] hover:text-[#C084FC] hover:bg-[#A855F7]/10 h-8 px-3"
                     >
                       <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${jobsLoading ? "animate-spin" : ""}`} />
-                      Refresh
+                      {t('Refresh')}
                     </Button>
                     {jobs.length > 0 && (
                       <Button
@@ -293,7 +296,7 @@ export function UserDashboard() {
                         className="text-red-400 hover:text-red-300 hover:bg-red-500/10 h-8 px-3"
                       >
                         <Trash2 className="h-3.5 w-3.5 mr-1.5" />
-                        Delete All
+                        {t('Delete All')}
                       </Button>
                     )}
                   </div>
@@ -315,7 +318,7 @@ export function UserDashboard() {
                       onClick={loadJobs}
                       className="text-[#94A3B8] hover:text-white"
                     >
-                      Try again
+                      {t('Try again')}
                     </Button>
                   </div>
                 )}
@@ -323,9 +326,9 @@ export function UserDashboard() {
                 {!jobsLoading && !jobsError && jobs.length === 0 && (
                   <div className="flex flex-col items-center justify-center py-16 gap-3">
                     <Film className="h-10 w-10 text-[#334155]" />
-                    <p className="text-[#64748B] text-sm">No dubbing jobs yet</p>
+                    <p className="text-[#64748B] text-sm">{t('No dubbing jobs yet')}</p>
                     <p className="text-[#475569] text-xs">
-                      Upload a video in DubMaster Studio to get started
+                      {t('Upload a video in DubMaster Studio to get started')}
                     </p>
                   </div>
                 )}
@@ -379,7 +382,7 @@ export function UserDashboard() {
                               {job.status === "completed" && (
                                 <span className="text-green-400 flex items-center gap-1">
                                   <CheckCircle2 className="h-3 w-3" />
-                                  Done
+                                  {t('Done')}
                                 </span>
                               )}
                               {job.status === "failed" && (
@@ -396,7 +399,7 @@ export function UserDashboard() {
                           <div className="flex-shrink-0">
                             {confirmDeleteId === job.job_id ? (
                               <div className="flex items-center gap-2">
-                                <span className="text-xs text-[#94A3B8]">Delete?</span>
+                                <span className="text-xs text-[#94A3B8]">{t('Delete?')}</span>
                                 <Button
                                   size="sm"
                                   variant="ghost"
@@ -425,7 +428,7 @@ export function UserDashboard() {
                                 variant="ghost"
                                 onClick={() => setConfirmDeleteId(job.job_id)}
                                 className="h-8 w-8 p-0 text-[#334155] hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition-opacity"
-                                aria-label="Delete job"
+                                aria-label={t('Delete job')}
                               >
                                 <Trash2 className="h-3.5 w-3.5" />
                               </Button>
@@ -444,19 +447,19 @@ export function UserDashboard() {
                 <div className="relative bg-gradient-to-br from-[#0F172A]/60 to-[#1E293B]/60 backdrop-blur-xl border border-[#A855F7]/20 rounded-2xl p-6">
                   <div className="flex items-center gap-2 mb-5">
                     <User className="h-5 w-5 text-[#A855F7]" />
-                    <h2 className="text-white font-semibold text-lg">Profile</h2>
+                    <h2 className="text-white font-semibold text-lg">{t('Profile')}</h2>
                   </div>
 
                   <div className="space-y-1">
                     <div className="flex items-center justify-between py-3 border-b border-[#1E293B]">
-                      <span className="text-[#94A3B8] text-sm">Plan</span>
+                      <span className="text-[#94A3B8] text-sm">{t('Plan')}</span>
                       <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold border border-[#A855F7]/40 bg-[#A855F7]/10 text-[#C084FC]">
                         {PLAN_LABELS[planType] ?? planType}
                       </span>
                     </div>
 
                     <div className="flex items-center justify-between py-3 border-b border-[#1E293B]">
-                      <span className="text-[#94A3B8] text-sm">Email</span>
+                      <span className="text-[#94A3B8] text-sm">{t('Email')}</span>
                       <span className="text-white text-sm font-medium flex items-center gap-2">
                         <Mail className="h-3.5 w-3.5 text-[#64748B]" />
                         {userEmail || "—"}
@@ -465,10 +468,10 @@ export function UserDashboard() {
 
                     <div className="py-3 border-b border-[#1E293B]">
                       <div className="flex items-center justify-between mb-2">
-                        <span className="text-[#94A3B8] text-sm">Display name</span>
+                        <span className="text-[#94A3B8] text-sm">{t('Display name')}</span>
                         {displayNameSaved && (
                           <span className="text-green-400 text-xs flex items-center gap-1">
-                            <CheckCircle2 className="h-3 w-3" /> Saved
+                            <CheckCircle2 className="h-3 w-3" /> {t('Saved')}
                           </span>
                         )}
                       </div>
@@ -477,7 +480,7 @@ export function UserDashboard() {
                           type="text"
                           value={displayName}
                           onChange={e => setDisplayName(e.target.value)}
-                          placeholder="Your display name"
+                          placeholder={t('Your display name')}
                           className="flex-1 bg-[#0F172A] border border-[#334155] focus:border-[#A855F7]/60 rounded-lg px-3 py-2 text-sm text-white placeholder-[#475569] outline-none transition-colors"
                         />
                         <Button
@@ -500,12 +503,12 @@ export function UserDashboard() {
                 <div className="relative bg-gradient-to-br from-[#0F172A]/60 to-[#1E293B]/60 backdrop-blur-xl border border-[#A855F7]/20 rounded-2xl p-6">
                   <div className="flex items-center gap-2 mb-5">
                     <Shield className="h-5 w-5 text-[#A855F7]" />
-                    <h2 className="text-white font-semibold text-lg">Security</h2>
+                    <h2 className="text-white font-semibold text-lg">{t('Security')}</h2>
                   </div>
 
                   <div className="flex items-center justify-between py-3">
                     <div>
-                      <p className="text-[#94A3B8] text-sm">Password</p>
+                      <p className="text-[#94A3B8] text-sm">{t('Password')}</p>
                       <p className="text-white text-base tracking-[0.25em] mt-0.5">
                         ••••••••
                       </p>
@@ -514,7 +517,7 @@ export function UserDashboard() {
                       {passwordResetSent ? (
                         <div className="text-green-400 text-sm flex items-center gap-1.5">
                           <CheckCircle2 className="h-4 w-4" />
-                          Reset email sent
+                          {t('Reset email sent')}
                         </div>
                       ) : (
                         <Button
@@ -544,7 +547,7 @@ export function UserDashboard() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-white">
               <AlertTriangle className="h-5 w-5 text-red-400" />
-              Delete All Jobs
+              {t('Delete All Jobs')}
             </DialogTitle>
             <DialogDescription className="text-[#94A3B8]">
               This will permanently delete all {jobs.length} job
@@ -559,7 +562,7 @@ export function UserDashboard() {
               disabled={clearingAll}
               className="text-[#94A3B8] hover:text-white"
             >
-              Cancel
+              {t('Cancel')}
             </Button>
             <Button
               onClick={handleClearAll}

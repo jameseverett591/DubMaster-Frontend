@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Mic2, Trash2, Loader2, Upload, Check, Wand2 } from 'lucide-react'
 import { apiClient, type CustomVoice } from '@/lib/api-client'
+import { useT } from '@/lib/use-t'
 
 interface CustomVoicesModalProps {
   open: boolean
@@ -17,6 +18,7 @@ interface CustomVoicesModalProps {
 }
 
 export function CustomVoicesModal({ open, onOpenChange, onChanged }: CustomVoicesModalProps) {
+  const t = useT()
   const [voices, setVoices] = useState<CustomVoice[]>([])
   const [loading, setLoading] = useState(false)
   const [file, setFile] = useState<File | null>(null)
@@ -67,7 +69,7 @@ export function CustomVoicesModal({ open, onOpenChange, onChanged }: CustomVoice
       <DialogContent className="max-w-lg bg-[#0B1220] border-slate-700 text-slate-200">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-amber-400">
-            <Mic2 className="h-5 w-5" /> Custom Voices
+            <Mic2 className="h-5 w-5" /> {t('Custom Voices')}
           </DialogTitle>
           <DialogDescription className="text-slate-400">
             Add your own voice — just upload a short clip. DubMaster clones it for you
@@ -109,7 +111,7 @@ export function CustomVoicesModal({ open, onOpenChange, onChanged }: CustomVoice
           >
             {cloning
               ? <><Loader2 className="h-4 w-4 animate-spin mr-1.5" /> Cloning your voice…</>
-              : <><Wand2 className="h-4 w-4 mr-1.5" /> Create voice</>}
+              : <><Wand2 className="h-4 w-4 mr-1.5" /> {t('Create voice')}</>}
           </Button>
         </div>
 
@@ -121,7 +123,7 @@ export function CustomVoicesModal({ open, onOpenChange, onChanged }: CustomVoice
             </div>
           ) : voices.length === 0 ? (
             <p className="text-center text-xs text-slate-500 py-6">
-              No custom voices yet. Upload a clip above to create one.
+              {t('No custom voices yet. Upload a clip above to create one.')}
             </p>
           ) : (
             voices.map(v => (
@@ -140,7 +142,7 @@ export function CustomVoicesModal({ open, onOpenChange, onChanged }: CustomVoice
                   type="button"
                   onClick={() => handleDelete(v)}
                   className="text-slate-500 hover:text-red-400 transition-colors shrink-0"
-                  aria-label="Remove voice"
+                  aria-label={t('Remove voice')}
                 >
                   <Trash2 className="h-4 w-4" />
                 </button>

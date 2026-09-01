@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { EMOTION_LIBRARY, libraryEmotionValue, EMOTION_LIBRARY_COUNT } from '@/lib/emotion-catalog'
+import { useT } from '@/lib/use-t'
 
 /**
  * Floating Emotion Library — a searchable, categorized chart of ~194 delivery
@@ -17,6 +18,7 @@ export function EmotionLibraryPopup({
   onClose: () => void
   onSelect: (value: string, name: string) => void
 }) {
+  const t = useT()
   const [query, setQuery] = useState('')
   if (!open) return null
 
@@ -49,7 +51,7 @@ export function EmotionLibraryPopup({
             placeholder="Search emotions…"
             className="ml-auto w-64 text-xs px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-violet-500/60"
           />
-          <button onClick={onClose} className="text-slate-500 hover:text-white text-lg leading-none px-1" title="Close">
+          <button onClick={onClose} className="text-slate-500 hover:text-white text-lg leading-none px-1" title={t('Close')}>
             ✕
           </button>
         </div>

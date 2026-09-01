@@ -6,6 +6,7 @@ import { Loader2, Film } from "lucide-react"
 import { apiClient } from "@/lib/api-client"
 import { createClient } from "@/lib/supabase/client"
 import { expiryLevel, daysUntil } from "@/lib/plan-features"
+import { useT } from '@/lib/use-t'
 
 type Project = {
   project_id: string
@@ -28,6 +29,7 @@ interface RecentProjectsProps {
 }
 
 export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
+  const t = useT()
   const router = useRouter()
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
@@ -69,8 +71,8 @@ export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
     return (
       <div className="flex flex-col items-center justify-center py-20 gap-3 text-center">
         <Film className="h-10 w-10 text-slate-600" />
-        <p className="text-slate-400 font-medium">No saved projects yet</p>
-        <p className="text-slate-600 text-sm">Open a job in the editor and click Save to add it here.</p>
+        <p className="text-slate-400 font-medium">{t('No saved projects yet')}</p>
+        <p className="text-slate-600 text-sm">{t('Open a job in the editor and click Save to add it here.')}</p>
       </div>
     )
   }
@@ -78,7 +80,7 @@ export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold text-foreground">My Projects</h2>
+        <h2 className="text-xl font-semibold text-foreground">{t('My Projects')}</h2>
         <span className="text-sm text-slate-500">{projects.length} project{projects.length !== 1 ? 's' : ''}</span>
       </div>
       <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
@@ -146,7 +148,7 @@ export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
                   stopPropagation so it doesn't also open the project. */}
               <button
                 type="button"
-                title="Click to copy job ID"
+                title={t('Click to copy job ID')}
                 onClick={(e) => {
                   e.stopPropagation()
                   void navigator.clipboard?.writeText(project.job_id)

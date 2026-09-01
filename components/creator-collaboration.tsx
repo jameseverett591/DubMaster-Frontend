@@ -9,6 +9,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { Users, MessageSquare, Share2, UserPlus, Globe, Lock, Clock, Send, Plus } from "lucide-react"
+import { useT } from '@/lib/use-t'
 
 type Project = {
   id: string
@@ -91,6 +92,7 @@ const SAMPLE_MESSAGES: Message[] = [
 ]
 
 export function CreatorCollaboration() {
+  const t = useT()
   const [activeTab, setActiveTab] = useState("projects")
   const [newMessage, setNewMessage] = useState("")
   const [messages, setMessages] = useState(SAMPLE_MESSAGES)
@@ -113,11 +115,11 @@ export function CreatorCollaboration() {
   const getStatusBadge = (status: Project["status"]) => {
     switch (status) {
       case "active":
-        return <Badge className="bg-green-500/10 text-green-500">Active</Badge>
+        return <Badge className="bg-green-500/10 text-green-500">{t('Active')}</Badge>
       case "review":
-        return <Badge className="bg-amber-500/10 text-amber-500">In Review</Badge>
+        return <Badge className="bg-amber-500/10 text-amber-500">{t('In Review')}</Badge>
       case "completed":
-        return <Badge className="bg-blue-500/10 text-blue-500">Completed</Badge>
+        return <Badge className="bg-blue-500/10 text-blue-500">{t('Completed')}</Badge>
     }
   }
 
@@ -126,12 +128,12 @@ export function CreatorCollaboration() {
       {/* Header */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-foreground">Creator Collaboration</h2>
-          <p className="mt-1 text-muted-foreground">Work together with other creators on dubbing projects</p>
+          <h2 className="text-2xl font-bold text-foreground">{t('Creator Collaboration')}</h2>
+          <p className="mt-1 text-muted-foreground">{t('Work together with other creators on dubbing projects')}</p>
         </div>
         <Button className="gap-2">
           <Plus className="h-4 w-4" />
-          New Project
+          {t('New Project')}
         </Button>
       </div>
 
@@ -139,15 +141,15 @@ export function CreatorCollaboration() {
         <TabsList className="bg-background/50 backdrop-blur-md">
           <TabsTrigger value="projects" className="gap-2">
             <Share2 className="h-4 w-4" />
-            Projects
+            {t('Projects')}
           </TabsTrigger>
           <TabsTrigger value="team" className="gap-2">
             <Users className="h-4 w-4" />
-            Team
+            {t('Team')}
           </TabsTrigger>
           <TabsTrigger value="chat" className="gap-2">
             <MessageSquare className="h-4 w-4" />
-            Chat
+            {t('Chat')}
           </TabsTrigger>
         </TabsList>
 
@@ -184,7 +186,7 @@ export function CreatorCollaboration() {
                     </div>
                     <div>
                       <div className="mb-1 flex justify-between text-sm">
-                        <span className="text-muted-foreground">Progress</span>
+                        <span className="text-muted-foreground">{t('Progress')}</span>
                         <span className="font-medium text-foreground">{project.progress}%</span>
                       </div>
                       <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
@@ -200,7 +202,7 @@ export function CreatorCollaboration() {
                         {project.lastActivity}
                       </span>
                       <Button variant="outline" size="sm">
-                        Open Project
+                        {t('Open Project')}
                       </Button>
                     </div>
                   </div>
@@ -214,8 +216,8 @@ export function CreatorCollaboration() {
           <div className="grid gap-6 md:grid-cols-2">
             <Card className="backdrop-blur-md bg-card/50 border-border/50">
               <CardHeader>
-                <CardTitle>Team Members</CardTitle>
-                <CardDescription>People you collaborate with frequently</CardDescription>
+                <CardTitle>{t('Team Members')}</CardTitle>
+                <CardDescription>{t('People you collaborate with frequently')}</CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
@@ -244,24 +246,24 @@ export function CreatorCollaboration() {
                 </div>
                 <Button variant="outline" className="mt-4 w-full gap-2 bg-transparent">
                   <UserPlus className="h-4 w-4" />
-                  Invite Team Member
+                  {t('Invite Team Member')}
                 </Button>
               </CardContent>
             </Card>
 
             <Card className="backdrop-blur-md bg-card/50 border-border/50">
               <CardHeader>
-                <CardTitle>Invite Collaborators</CardTitle>
-                <CardDescription>Add people to your current project</CardDescription>
+                <CardTitle>{t('Invite Collaborators')}</CardTitle>
+                <CardDescription>{t('Add people to your current project')}</CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
                   <div>
-                    <label className="text-sm font-medium text-foreground">Email Address</label>
+                    <label className="text-sm font-medium text-foreground">{t('Email Address')}</label>
                     <Input placeholder="colleague@example.com" className="mt-1.5" />
                   </div>
                   <div>
-                    <label className="text-sm font-medium text-foreground">Role</label>
+                    <label className="text-sm font-medium text-foreground">{t('Role')}</label>
                     <Input placeholder="e.g., Translator, Voice Actor" className="mt-1.5" />
                   </div>
                   <div className="flex items-center gap-3 rounded-lg border border-border p-3">
@@ -269,11 +271,11 @@ export function CreatorCollaboration() {
                       <Lock className="h-5 w-5 text-muted-foreground" />
                     </div>
                     <div className="flex-1">
-                      <p className="font-medium text-foreground">Private Project</p>
-                      <p className="text-sm text-muted-foreground">Only invited members can access</p>
+                      <p className="font-medium text-foreground">{t('Private Project')}</p>
+                      <p className="text-sm text-muted-foreground">{t('Only invited members can access')}</p>
                     </div>
                   </div>
-                  <Button className="w-full">Send Invitation</Button>
+                  <Button className="w-full">{t('Send Invitation')}</Button>
                 </div>
               </CardContent>
             </Card>
@@ -285,8 +287,8 @@ export function CreatorCollaboration() {
             <CardHeader className="border-b border-border">
               <div className="flex items-center justify-between">
                 <div>
-                  <CardTitle>Project Chat</CardTitle>
-                  <CardDescription>Product Demo - Spanish Version</CardDescription>
+                  <CardTitle>{t('Project Chat')}</CardTitle>
+                  <CardDescription>{t('Product Demo - Spanish Version')}</CardDescription>
                 </div>
                 <Badge variant="outline" className="gap-1">
                   <span className="h-2 w-2 rounded-full bg-green-500" />4 online
@@ -315,7 +317,7 @@ export function CreatorCollaboration() {
             <div className="border-t border-border p-4">
               <div className="flex gap-2">
                 <Textarea
-                  placeholder="Type your message..."
+                  placeholder={t('Type your message...')}
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
                   className="min-h-[44px] resize-none"

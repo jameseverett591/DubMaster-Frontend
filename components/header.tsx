@@ -20,6 +20,7 @@ import { LanguageSwitcher } from "@/components/language-switcher"
 import { VoiceLibraryModal } from "@/components/voice-library-modal"
 
 import type { EditorMode } from "@/components/dashboard"
+import { useT } from '@/lib/use-t'
 
 interface HeaderProps {
   activeTab?: string
@@ -29,6 +30,7 @@ interface HeaderProps {
 }
 
 export function Header({ activeTab = "upload", onNavigate, editorMode = "automatic", onEditorModeChange }: HeaderProps) {
+  const tUi = useT()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [voiceLibraryOpen, setVoiceLibraryOpen] = useState(false)
   const [userEmail, setUserEmail] = useState<string | null>(null)
@@ -91,7 +93,7 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
               onClick={() => handleNavClick("studio")}
               className={`text-sm font-medium transition-colors ${activeTab === "studio" || activeTab === "upload" ? "text-[#C084FC]" : "text-[#94A3B8] hover:text-[#C084FC]"}`}
             >
-              Studio
+              {tUi('Studio')}
             </button>
             <button
               onClick={() => handleNavClick("projects")}
@@ -183,7 +185,7 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
                 onClick={() => handleNavClick("studio")}
                 className={`text-sm font-medium text-left ${activeTab === "studio" || activeTab === "upload" ? "text-[#C084FC]" : "text-[#94A3B8]"}`}
               >
-                Studio
+                {tUi('Studio')}
               </button>
               <button
                 onClick={() => handleNavClick("projects")}

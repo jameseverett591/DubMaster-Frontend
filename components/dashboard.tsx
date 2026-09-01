@@ -18,6 +18,7 @@ import { createClient } from "@/lib/supabase/client"
 import { apiClient } from "@/lib/api-client"
 import { usePlan } from "@/lib/use-plan"
 import { PLAN_MINUTES, PLAN_MINUTES_DEFAULT, type PlanType } from "@/lib/plan-features"
+import { useT } from '@/lib/use-t'
 
 export type VideoSource = {
   id: string
@@ -50,6 +51,7 @@ const tabBackgrounds: Record<string, string> = {
 }
 
 export function Dashboard() {
+  const t = useT()
   const router = useRouter()
   const searchParams = useSearchParams()
   const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') ?? "upload")
@@ -194,7 +196,7 @@ export function Dashboard() {
                   <div className="relative grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
                     {/* Plan Info */}
                     <div>
-                      <p className="text-[#94A3B8] text-xs mb-1">Your Plan</p>
+                      <p className="text-[#94A3B8] text-xs mb-1">{t('Your Plan')}</p>
                       <p className="text-white text-xl font-bold bg-gradient-to-r from-[#A855F7] to-[#FDB022] bg-clip-text text-transparent capitalize">
                         {loadingUsage ? "..." : (plan ?? 'basic')}
                       </p>
@@ -212,7 +214,7 @@ export function Dashboard() {
                         return (
                           <>
                             <div className="flex justify-between items-center mb-1.5">
-                              <p className="text-[#94A3B8] text-xs">Monthly Usage</p>
+                              <p className="text-[#94A3B8] text-xs">{t('Monthly Usage')}</p>
                               <p className="text-white text-sm font-bold">
                                 <span className={isExhausted ? "text-red-400" : isLowUsage ? "text-[#FDB022]" : "text-[#22D3EE]"}>
                                   {planLimit > 0 ? minutesUsed : "Unlimited"}
@@ -247,7 +249,7 @@ export function Dashboard() {
                                     {isExhausted ? (
                                       <span className="text-red-400 font-semibold flex items-center gap-1">
                                         <AlertTriangle className="h-3 w-3" />
-                                        Quota exceeded
+                                        {t('Quota exceeded')}
                                       </span>
                                     ) : isLowUsage ? (
                                       <span className="text-[#FDB022] font-semibold flex items-center gap-1">
@@ -281,15 +283,15 @@ export function Dashboard() {
               {/* CINEMATIC TITLE - Compact */}
               <div className="text-center mb-6">
                 <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-[#A855F7] via-[#FDB022] to-[#22D3EE] bg-clip-text text-transparent drop-shadow-[0_0_30px_rgba(168,85,247,0.8)] mb-2">
-                  DubMaster Studio
+                  {t('DubMaster Studio')}
                 </h1>
                 {plan === 'basic' && (
                   <span className="inline-block text-xs font-semibold uppercase tracking-wide text-[#22D3EE] border border-[#22D3EE]/40 rounded-full px-2 py-0.5 mb-2">
-                    Basic
+                    {t('Basic')}
                   </span>
                 )}
                 <p className="text-[#94A3B8] text-base md:text-lg italic">
-                  Transform Your Content. Reach The World.
+                  {t('Transform Your Content. Reach The World.')}
                 </p>
               </div>
 
@@ -301,35 +303,35 @@ export function Dashboard() {
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
                   >
                     <Upload className="h-4 w-4" />
-                    <span className="hidden sm:inline">Upload</span>
+                    <span className="hidden sm:inline">{t('Upload')}</span>
                   </TabsTrigger>
                   <TabsTrigger
                     value="youtube"
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
                   >
                     <Youtube className="h-4 w-4" />
-                    <span className="hidden sm:inline">YouTube</span>
+                    <span className="hidden sm:inline">{t('YouTube')}</span>
                   </TabsTrigger>
                   <TabsTrigger
                     value="library"
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
                   >
                     <Film className="h-4 w-4" />
-                    <span className="hidden sm:inline">Library</span>
+                    <span className="hidden sm:inline">{t('Library')}</span>
                   </TabsTrigger>
                   <TabsTrigger
                     value="studio"
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
                   >
                     <Sparkles className="h-4 w-4" />
-                    <span className="hidden sm:inline">Upgrade</span>
+                    <span className="hidden sm:inline">{t('Upgrade')}</span>
                   </TabsTrigger>
                   <TabsTrigger
                     value="projects"
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
                   >
                     <Mic2 className="h-4 w-4" />
-                    <span className="hidden sm:inline">Projects</span>
+                    <span className="hidden sm:inline">{t('Projects')}</span>
                   </TabsTrigger>
                 </TabsList>
 

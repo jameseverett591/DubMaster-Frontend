@@ -16,6 +16,7 @@ import { BasicVideoPanel } from "@/components/basic-video-panel"
 import { VideoRecorder } from "@/components/video-recorder"
 import { usePlan } from "@/lib/use-plan"
 import { formatDurationLimit, MAX_UPLOAD_BYTES, MAX_UPLOAD_GB } from "@/lib/plan-features"
+import { useT } from '@/lib/use-t'
 
 const STORAGE_KEY = "dubverse_uploaded_files"
 const SOURCE_LANG_STORAGE_KEY = "dubverse_source_language"
@@ -92,6 +93,7 @@ export function VideoUpload({
   remainingMinutes = 0,
   onBuyMore
 }: VideoUploadProps) {
+  const tUi = useT()
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
   // Defaults to Cantonese, not auto-detect. Whisper reliably tags Cantonese
   // audio as "zh" because the SCRIPT is Chinese — which silently produces
@@ -613,7 +615,7 @@ export function VideoUpload({
             <Select value={sourceLanguage} onValueChange={setSourceLanguage}>
               <SelectTrigger className="w-[180px] h-9 text-sm bg-[#0F172A]/60 border-[#A855F7]/30">
                 <Languages className="mr-2 h-3.5 w-3.5 text-[#A855F7]" />
-                <SelectValue placeholder="Auto-detect" />
+                <SelectValue placeholder={tUi('Auto-detect')} />
               </SelectTrigger>
               <SelectContent>
                 {SOURCE_LANGUAGES.map((lang) => (
@@ -633,7 +635,7 @@ export function VideoUpload({
             <Select value={targetLanguage} onValueChange={setTargetLanguage}>
               <SelectTrigger className="w-[180px] h-9 text-sm bg-[#0F172A]/60 border-[#A855F7]/30">
                 <Languages className="mr-2 h-3.5 w-3.5 text-[#A855F7]" />
-                <SelectValue placeholder="English" />
+                <SelectValue placeholder={tUi('English')} />
               </SelectTrigger>
               <SelectContent>
                 {TARGET_LANGUAGES.map((lang) => (
@@ -653,10 +655,10 @@ export function VideoUpload({
             <Select value={numSpeakers} onValueChange={setNumSpeakers}>
               <SelectTrigger className="w-[140px] h-9 text-sm bg-[#0F172A]/60 border-[#A855F7]/30">
                 <Users className="mr-2 h-3.5 w-3.5 text-[#A855F7]" />
-                <SelectValue placeholder="Auto-detect" />
+                <SelectValue placeholder={tUi('Auto-detect')} />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="auto">Auto-detect</SelectItem>
+                <SelectItem value="auto">{tUi('Auto-detect')}</SelectItem>
                 <SelectItem value="1">1 speaker</SelectItem>
                 <SelectItem value="2">2 speakers</SelectItem>
                 <SelectItem value="3">3 speakers</SelectItem>
@@ -675,7 +677,7 @@ export function VideoUpload({
             className="flex items-center gap-2 h-9 px-3 rounded-md border border-red-500/50 bg-red-600/10 text-sm text-red-400 hover:border-red-500 hover:bg-red-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Mic className="h-3.5 w-3.5" />
-            Record
+            {tUi('Record')}
           </button>
         </div>
 
@@ -777,7 +779,7 @@ export function VideoUpload({
               <div className="flex items-center justify-between px-4 py-3 border-b border-[#1E293B]">
                 <div className="flex items-center gap-2">
                   <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
-                  <span className="text-sm font-semibold text-white">Recording in Progress</span>
+                  <span className="text-sm font-semibold text-white">{tUi('Recording in Progress')}</span>
                 </div>
                 <span className="font-mono text-xs text-red-400">
                   {fmtTime(recordingElapsed)}
@@ -799,7 +801,7 @@ export function VideoUpload({
                   className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-sm font-medium transition-colors"
                 >
                   <Square className="h-3.5 w-3.5 fill-current" />
-                  Stop & Save
+                  {tUi('Stop & Save')}
                 </button>
               </div>
             </div>
@@ -808,7 +810,7 @@ export function VideoUpload({
           {recordingState === 'done' && recordedUrl && (
             <div className="rounded-2xl border border-[#A855F7]/30 bg-[#0F172A]/80 overflow-hidden">
               <div className="px-4 py-3 border-b border-[#1E293B]">
-                <span className="text-sm font-semibold text-white">DubMaster Video Player</span>
+                <span className="text-sm font-semibold text-white">{tUi('DubMaster Video Player')}</span>
               </div>
               <video
                 src={recordedUrl}
@@ -821,21 +823,21 @@ export function VideoUpload({
                   onClick={handleUseRecording}
                   className="px-4 py-2 rounded-lg bg-gradient-to-r from-[#A855F7] to-[#22D3EE] text-white text-sm font-medium hover:opacity-90 transition-opacity"
                 >
-                  Use This Video
+                  {tUi('Use This Video')}
                 </button>
                 <a
                   href={recordedUrl}
                   download="dubmaster-recording.webm"
                   className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#1E293B] border border-slate-700 text-slate-300 text-sm hover:bg-slate-800 transition-colors"
                 >
-                  Download
+                  {tUi('Download')}
                 </a>
                 <button
                   type="button"
                   onClick={() => { setRecordingState('idle'); setRecordedUrl(null); setRecordedFile(null) }}
                   className="px-3 py-2 rounded-lg bg-[#1E293B] border border-slate-700 text-slate-400 text-sm hover:text-white transition-colors"
                 >
-                  Discard
+                  {tUi('Discard')}
                 </button>
               </div>
             </div>
@@ -977,7 +979,7 @@ export function VideoUpload({
               }}
             >
               <X className="h-3.5 w-3.5 mr-1" />
-              Clear All
+              {tUi('Clear All')}
             </Button>
           </div>
         </div>

@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react'
 import { Library, Trash2, Search, Lock, Unlock } from 'lucide-react'
 import type { Segment } from '@/lib/editor-types'
 import { cn } from '@/lib/utils'
+import { useT } from '@/lib/use-t'
 
 /** One recallable take.
  *
@@ -78,6 +79,7 @@ export default function SeedLibraryPanel({
   /** Toggle the entry's exemption from the history cap. */
   onToggleKept: (entry: SeedLibraryEntry, kept: boolean) => void
 }) {
+  const t = useT()
   const [q, setQ] = useState('')
   const [mineOnly, setMineOnly] = useState(false)
 
@@ -100,7 +102,7 @@ export default function SeedLibraryPanel({
       <div className="flex items-center justify-between shrink-0">
         <div className="flex items-center gap-1.5 text-slate-200 font-medium">
           <Library className="h-3.5 w-3.5 text-teal-400" />
-          Seed Library
+          {t('Seed Library')}
         </div>
         <span className="text-[9px] font-mono text-teal-400/80">
           {shown.length}/{entries.length}
@@ -108,7 +110,7 @@ export default function SeedLibraryPanel({
       </div>
 
       <p className="text-[10px] text-teal-300/70 leading-snug shrink-0">
-        Every take Respeecher has raced, as seeds. <span className="text-teal-200">Use</span> re-renders
+        {t('Every take Respeecher has raced, as seeds.')} <span className="text-teal-200">{t('Use')}</span> re-renders
         that exact read in one request. A seed only reproduces its own line — the text is
         part of the take.
       </p>
@@ -129,7 +131,7 @@ export default function SeedLibraryPanel({
         <button
           type="button"
           onClick={() => setMineOnly((v) => !v)}
-          title="Show only takes for the selected segment"
+          title={t('Show only takes for the selected segment')}
           className={cn(
             'shrink-0 text-[9px] px-2 py-1 rounded-md border transition-colors',
             mineOnly
@@ -145,13 +147,12 @@ export default function SeedLibraryPanel({
       {entries.length === 0 ? (
         <div className="flex-1 flex items-center justify-center text-center px-6">
           <p className="text-[10px] text-teal-300/60 leading-snug">
-            No takes recorded yet. Generate a segment with Respeecher and every seed it
-            races is kept here.
+            {t('No takes recorded yet. Generate a segment with Respeecher and every seed it races is kept here.')}
           </p>
         </div>
       ) : shown.length === 0 ? (
         <div className="flex-1 flex items-center justify-center">
-          <p className="text-[10px] text-teal-300/50">Nothing matches that filter.</p>
+          <p className="text-[10px] text-teal-300/50">{t('Nothing matches that filter.')}</p>
         </div>
       ) : (
         <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-0.5">
@@ -168,7 +169,7 @@ export default function SeedLibraryPanel({
               <button
                 type="button"
                 onClick={() => onJumpToSegment(e.segmentIndex)}
-                title="Jump to this segment"
+                title={t('Jump to this segment')}
                 className="text-[9px] font-mono text-teal-600/70 hover:text-teal-200 shrink-0 w-7 text-left"
               >
                 #{e.transcriptIndex}
@@ -230,7 +231,7 @@ export default function SeedLibraryPanel({
               <button
                 type="button"
                 onClick={() => onDelete(e)}
-                title="Forget this take. Removes the entry only — the segment's current audio is untouched."
+                title={t("Forget this take. Removes the entry only — the segment's current audio is untouched.")}
                 className="shrink-0 h-4 w-4 rounded flex items-center justify-center
                            text-red-500 hover:text-red-300 hover:bg-red-500/15 transition-colors"
               >
