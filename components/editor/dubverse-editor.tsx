@@ -1951,13 +1951,6 @@ export function DubVerseEditor({
   } | null>(null)
   const autoRegenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingAutoRegenRef = useRef<number | null>(null)
-  const pendingTextEditRef = useRef<{
-    index: number
-    previousDisplayText: string
-    previousCommittedText?: string
-    previousTextLocked: boolean
-  } | null>(null)
-  const cancelPendingTextEditRef = useRef<((index: number) => void) | null>(null)
   const [editingText, setEditingText] = useState('')
   // Live value of the edit box. The Input is UNCONTROLLED: a controlled input
   // here re-rendered the whole editor on every keystroke — timeline, QC monitor,
@@ -2634,12 +2627,6 @@ export function DubVerseEditor({
       else next.delete(key)
       return next
     })
-    // If a text edit is waiting to be regenerated, locking now would leave the
-    // new text paired with the old audio. Cancel the pending edit and roll the
-    // text back before the lock is persisted.
-    if (lock && pendingTextEditRef.current?.index === index) {
-      cancelPendingTextEditRef.current?.(index)
-    }
     // Persist immediately. Locking used to live only in component state until the
     // next Save, so a lock set to protect finished work was gone after a refresh —
     // exactly the case where you most expect it to hold. The backend has always
@@ -4643,14 +4630,9 @@ export function DubVerseEditor({
     const committedText = segment.committed_adapted_text ?? segment.target_text
     const textChanged = incomingText !== committedText
 
-    // The backend refuses to regenerate a locked segment (HTTP 423), so block
-    // every path — button, drag, popup, and queued drain — at the single point
-    // that calls regenerateSegment.
-    if (lockedSegments.has(keyAt(activeIndex))) {
-      console.warn('[REGEN] aborted — segment locked', { activeIndex })
-      setRegenError('Segment is locked — unlock it to regenerate')
-      return false
-    }
+    // Lock is positional: a locked segment can still be regenerated (voice,
+    // emotion, speed, text), but its timeline slot must not move.
+    const isLocked = lockedSegments.has(keyAt(activeIndex))
 
     selectSegment(activeIndex)
     setRegenError(null)
@@ -4777,7 +4759,7 @@ export function DubVerseEditor({
       const bEnd = response.segment.end
       const backendDur = bEnd - bStart
       const liveDur = liveEnd - liveStart
-      const needsMoreRoom = backendDur > liveDur + 0.02
+      const needsMoreRoom = !isLocked && backendDur > liveDur + 0.02
       const grownEnd = liveStart + backendDur
       if (needsMoreRoom) {
         updateSegment(activeIndex, { start_time: liveStart, end_time: grownEnd })
@@ -4801,7 +4783,7 @@ export function DubVerseEditor({
       // user ever moved it: the second half of the snap-back, and the half that
       // survived fixing the grow path.
       const slotDur = liveEnd - liveStart
-      const shouldShrink = !needsMoreRoom && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
+      const shouldShrink = !isLocked && !needsMoreRoom && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
       let shrunkEnd = liveEnd
       if (shouldShrink) {
         const buffer = getTrailingBuffer(segment.preview_text ?? segment.active_text ?? segment.target_text ?? '')
@@ -5188,47 +5170,6 @@ export function DubVerseEditor({
   }, [jobId, stageEdit])
   commitOrStageRef.current = commitOrStage
   displaySegmentsRef.current = displaySegments
-
-  // If the user edits a segment and then locks it before the debounced auto-regen
-  // fires, the edited text would otherwise be paired with the old audio. Revert
-  // the pending edit to the pre-edit text and clear its timer.
-  const cancelPendingTextEdit = useCallback((index: number) => {
-    const pending = pendingTextEditRef.current
-    if (!pending || pending.index !== index) return
-    pendingTextEditRef.current = null
-    if (autoRegenTimerRef.current) {
-      clearTimeout(autoRegenTimerRef.current)
-      autoRegenTimerRef.current = null
-    }
-    const revertCommittedText = pending.previousCommittedText ?? pending.previousDisplayText
-    setPreviewText(index, pending.previousDisplayText)
-    updateSegment(index, {
-      preview_text: pending.previousDisplayText,
-      active_text: pending.previousDisplayText,
-      committed_adapted_text: revertCommittedText,
-      text_locked: pending.previousTextLocked,
-    })
-    setImportedSegments(prev => {
-      if (!prev) return prev
-      return prev.map((seg, i) =>
-        i === index
-          ? {
-              ...seg,
-              preview_text: pending.previousDisplayText,
-              active_text: pending.previousDisplayText,
-              committed_adapted_text: revertCommittedText,
-              text_locked: pending.previousTextLocked,
-            }
-          : seg
-      )
-    })
-    const ti = displaySegmentsRef.current[index]?.transcript_index ?? index
-    commitOrStageRef.current?.(ti, {
-      committed_adapted_text: revertCommittedText,
-      text_locked: pending.previousTextLocked,
-    })?.catch((err: any) => console.warn('[CANCEL-PENDING-TEXT] revert failed:', err))
-  }, [setPreviewText, updateSegment, setImportedSegments])
-  cancelPendingTextEditRef.current = cancelPendingTextEdit
 
   // Manual "make room" for a segment whose audio won't fit even after the automatic
   // expand-into-gaps. Grows this segment's slot and RIPPLES every later segment right
@@ -5690,9 +5631,6 @@ export function DubVerseEditor({
   
   // Start editing a segment — immediately enters preview mode
   const startEditing = useCallback((index: number) => {
-    // Locked segments keep their current audio; editing their text would desync
-    // the visible line from the take that can't be regenerated.
-    if (lockedSegments.has(keyAt(index))) return
     const currentText = displaySegments[index]?.preview_text ?? displaySegments[index]?.committed_adapted_text ?? displaySegments[index]?.active_text ?? displaySegments[index]?.target_text ?? ''
     setEditingSegmentIndex(index)
     setEditingText(currentText); editingTextRef.current = currentText
@@ -5704,7 +5642,7 @@ export function DubVerseEditor({
         i === index ? { ...seg, preview_text: currentText, isPreviewing: true } : seg
       )
     })
-  }, [displaySegments, setPreviewText, lockedSegments, keyAt])
+  }, [displaySegments, setPreviewText])
 
   // Freeze speaker traits onto segment when editing starts
   useEffect(() => {
@@ -5725,24 +5663,7 @@ export function DubVerseEditor({
     if (editingSegmentIndex !== null) {
       const idx = editingSegmentIndex
       const text = editingTextRef.current
-      // Locked segments cannot be regenerated, so don't persist a text edit that
-      // would outlive the existing audio.
-      if (lockedSegments.has(keyAt(idx))) {
-        setRegenError('Segment is locked — unlock it to edit')
-        setEditingText(''); editingTextRef.current = ''
-        setEditingSegmentIndex(null)
-        return
-      }
-      const seg = displaySegments[idx]
-      const previousDisplayText = seg?.preview_text ?? seg?.active_text ?? seg?.target_text ?? ''
-      const previousCommittedText = seg?.committed_adapted_text
-      const previousTextLocked = seg?.text_locked ?? false
-      pendingTextEditRef.current = {
-        index: idx,
-        previousDisplayText,
-        previousCommittedText,
-        previousTextLocked,
-      }
+      const previousDisplayText = displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? ''
       // Push pre-edit text onto the global undo stack before applying the change.
       undoStack.current.push({ kind: 'text', index: idx, prevText: previousDisplayText })
       emotionAutoFiredRef.current.delete(idx)
@@ -5773,26 +5694,14 @@ export function DubVerseEditor({
         if (autoRegenTimerRef.current) {
           clearTimeout(autoRegenTimerRef.current)
           autoRegenTimerRef.current = null
-          const previousPending = pendingTextEditRef.current
-          if (previousPending && previousPending.index !== idx) {
-            cancelPendingTextEditRef.current?.(previousPending.index)
-          }
         }
         autoRegenTimerRef.current = setTimeout(() => {
           autoRegenTimerRef.current = null
-          const pending = pendingTextEditRef.current
-          if (pending && pending.index === idx) {
-            if (lockedSegments.has(keyAt(idx))) {
-              cancelPendingTextEditRef.current?.(idx)
-              return
-            }
-            pendingTextEditRef.current = null
-          }
           handleGenerateSpeechRef.current(idx, undefined, text)
         }, 2000)
       }
     }
-  }, [editingSegmentIndex, setPreviewText, displaySegments, playbackMode, lockedSegments, keyAt])
+  }, [editingSegmentIndex, setPreviewText, displaySegments, playbackMode])
 
   // Cancel editing
   const cancelEditing = useCallback(() => {
@@ -5812,8 +5721,6 @@ export function DubVerseEditor({
   // contents, applied exactly like an inline text edit (preview_text + persisted
   // committed_adapted_text, undo entry, and a debounced auto-regen in Preview mode).
   const handlePasteText = useCallback(async (index: number) => {
-    // Locked segments cannot be regenerated; don't overwrite their text.
-    if (lockedSegments.has(keyAt(index))) { setRegenError('Segment is locked — unlock it to paste'); return }
     if (!navigator.clipboard) { console.warn('[PASTE] clipboard API unavailable'); return }
     let text: string
     try {
@@ -5825,14 +5732,6 @@ export function DubVerseEditor({
     if (text == null) return
     const segs = displaySegmentsRef.current
     const previousDisplayText = segs[index]?.preview_text ?? segs[index]?.active_text ?? segs[index]?.target_text ?? ''
-    const previousCommittedText = segs[index]?.committed_adapted_text
-    const previousTextLocked = segs[index]?.text_locked ?? false
-    pendingTextEditRef.current = {
-      index,
-      previousDisplayText,
-      previousCommittedText,
-      previousTextLocked,
-    }
     undoStack.current.push({ kind: 'text', index, prevText: previousDisplayText })
     emotionAutoFiredRef.current.delete(index)
     setPreviewText(index, text)
@@ -5853,25 +5752,13 @@ export function DubVerseEditor({
       if (autoRegenTimerRef.current) {
         clearTimeout(autoRegenTimerRef.current)
         autoRegenTimerRef.current = null
-        const previousPending = pendingTextEditRef.current
-        if (previousPending && previousPending.index !== index) {
-          cancelPendingTextEditRef.current?.(previousPending.index)
-        }
       }
       autoRegenTimerRef.current = setTimeout(() => {
         autoRegenTimerRef.current = null
-        const pending = pendingTextEditRef.current
-        if (pending && pending.index === index) {
-          if (lockedSegments.has(keyAt(index))) {
-            cancelPendingTextEditRef.current?.(index)
-            return
-          }
-          pendingTextEditRef.current = null
-        }
         handleGenerateSpeechRef.current(index, undefined, text)
       }, 2000)
     }
-  }, [setPreviewText, jobId, playbackMode, lockedSegments, keyAt])
+  }, [setPreviewText, jobId, playbackMode])
 
   // Drag-to-reorder refs to avoid stale closures in mousemove
   const dragReorderRef = useRef<{ fromIndex: number; toIndex: number | null; isDragging: boolean } | null>(null)
@@ -7774,10 +7661,6 @@ export function DubVerseEditor({
                           className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors pointer-events-auto cursor-pointer select-none"
                           onClick={(e) => {
                             e.stopPropagation()
-                            if (lockedSegments.has(keyAt(index))) {
-                              setRegenError('Segment is locked — unlock it to commit')
-                              return
-                            }
                             // The edit box is uncontrolled, so while a row is being
                             // edited the typed value exists ONLY in editingTextRef.
                             // preview_text is written by saveEditing(), which runs on
@@ -8055,22 +7938,15 @@ export function DubVerseEditor({
                   "h-8 text-xs",
                   selectedSegmentIndex === null
                     ? "bg-slate-700 text-slate-400 cursor-not-allowed"
-                    : lockedSegments.has(keyAt(selectedSegmentIndex))
-                      ? "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30"
-                      : "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
+                    : "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
                 )}
                 onClick={() => handleGenerateSpeech()}
-                disabled={selectedSegmentIndex === null || isRegenerating || (selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex)))}
+                disabled={selectedSegmentIndex === null || isRegenerating}
               >
                 {isRegenerating ? (
                   <>
                     <RefreshCw className="h-4 w-4 mr-1 animate-spin" />
                     Generating...
-                  </>
-                ) : selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex)) ? (
-                  <>
-                    <Lock className="h-4 w-4 mr-1" />
-                    Locked
                   </>
                 ) : (
                   <>
@@ -12737,16 +12613,11 @@ export function DubVerseEditor({
               <button
                 type="button"
                 className="px-4 py-2 rounded bg-amber-500 hover:bg-amber-600 text-black text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                disabled={lockedSegments.has(keyAt(timingExclusion.segmentIndex))}
                 onClick={async () => {
                   const idx = timingExclusion.segmentIndex
                   const seg = displaySegments[idx]
                   if (!seg) return
-                  if (lockedSegments.has(keyAt(idx))) {
-                    setRegenError('Segment is locked — unlock it to regenerate')
-                    setTimingExclusion(null)
-                    return
-                  }
+                  const isLocked = lockedSegments.has(keyAt(idx))
                   setTimingExclusion(null)
                   setIsRegenerating(true)
                   setRegeneratingSegmentIndex(idx)
@@ -12762,7 +12633,7 @@ export function DubVerseEditor({
                     const audio_url = filename ? apiClient.getAudioFileUrl(jobId, filename, true) : seg.audio_url
                     const audioDur = response.segment.audio_duration
                     const slotDur = seg.end_time - seg.start_time
-                    const shouldShrink = audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
+                    const shouldShrink = !isLocked && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
                     let shrunkEnd = seg.end_time
                     if (shouldShrink) {
                       const buffer = getTrailingBuffer(seg.preview_text ?? seg.active_text ?? seg.target_text ?? '')
@@ -12793,7 +12664,7 @@ export function DubVerseEditor({
                   }
                 }}
               >
-                {lockedSegments.has(keyAt(timingExclusion.segmentIndex)) ? 'Locked' : 'Generate Anyway'}
+                Generate Anyway
               </button>
             </div>
           </div>
