@@ -5636,6 +5636,9 @@ export function DubVerseEditor({
   
   // Start editing a segment — immediately enters preview mode
   const startEditing = useCallback((index: number) => {
+    // Locked segments keep their current audio; editing their text would desync
+    // the visible line from the take that can't be regenerated.
+    if (lockedSegments.has(keyAt(index))) return
     const currentText = displaySegments[index]?.preview_text ?? displaySegments[index]?.committed_adapted_text ?? displaySegments[index]?.active_text ?? displaySegments[index]?.target_text ?? ''
     setEditingSegmentIndex(index)
     setEditingText(currentText); editingTextRef.current = currentText
@@ -5647,7 +5650,7 @@ export function DubVerseEditor({
         i === index ? { ...seg, preview_text: currentText, isPreviewing: true } : seg
       )
     })
-  }, [displaySegments, setPreviewText])
+  }, [displaySegments, setPreviewText, lockedSegments, keyAt])
 
   // Freeze speaker traits onto segment when editing starts
   useEffect(() => {
@@ -5668,6 +5671,14 @@ export function DubVerseEditor({
     if (editingSegmentIndex !== null) {
       const idx = editingSegmentIndex
       const text = editingTextRef.current
+      // Locked segments cannot be regenerated, so don't persist a text edit that
+      // would outlive the existing audio.
+      if (lockedSegments.has(keyAt(idx))) {
+        setRegenError('Segment is locked — unlock it to edit')
+        setEditingText(''); editingTextRef.current = ''
+        setEditingSegmentIndex(null)
+        return
+      }
       // Push pre-edit text onto the global undo stack before applying the change.
       undoStack.current.push({ kind: 'text', index: idx, prevText: displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? '' })
       emotionAutoFiredRef.current.delete(idx)
@@ -5702,7 +5713,7 @@ export function DubVerseEditor({
         }, 2000)
       }
     }
-  }, [editingSegmentIndex, setPreviewText, displaySegments, playbackMode])
+  }, [editingSegmentIndex, setPreviewText, displaySegments, playbackMode, lockedSegments, keyAt])
 
   // Cancel editing
   const cancelEditing = useCallback(() => {
@@ -5722,6 +5733,8 @@ export function DubVerseEditor({
   // contents, applied exactly like an inline text edit (preview_text + persisted
   // committed_adapted_text, undo entry, and a debounced auto-regen in Preview mode).
   const handlePasteText = useCallback(async (index: number) => {
+    // Locked segments cannot be regenerated; don't overwrite their text.
+    if (lockedSegments.has(keyAt(index))) { setRegenError('Segment is locked — unlock it to paste'); return }
     if (!navigator.clipboard) { console.warn('[PASTE] clipboard API unavailable'); return }
     let text: string
     try {
@@ -5755,7 +5768,7 @@ export function DubVerseEditor({
         autoRegenTimerRef.current = null
       }, 2000)
     }
-  }, [setPreviewText, jobId, playbackMode])
+  }, [setPreviewText, jobId, playbackMode, lockedSegments, keyAt])
 
   // Drag-to-reorder refs to avoid stale closures in mousemove
   const dragReorderRef = useRef<{ fromIndex: number; toIndex: number | null; isDragging: boolean } | null>(null)
@@ -7607,9 +7620,11 @@ export function DubVerseEditor({
                                   : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
                             )}
                             onDoubleClick={() => {
-                              // Locking freezes position on the timeline, not
-                              // content edits. Preview-only segments still can't
-                              // be edited because there is nothing committed yet.
+                              // Locked segments are audio-frozen and cannot be
+                              // regenerated; editing their text would desync the
+                              // displayed line from the existing take. Preview-only
+                              // segments still can't be edited because there is
+                              // nothing committed yet.
                               if (segment.isPreviewing) return
                               // When the write-in box is open, double-clicking the line drops it
                               // into that field (Delivery Script) so you can add [tags]. Otherwise
@@ -7656,6 +7671,10 @@ export function DubVerseEditor({
                           className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors pointer-events-auto cursor-pointer select-none"
                           onClick={(e) => {
                             e.stopPropagation()
+                            if (lockedSegments.has(keyAt(index))) {
+                              setRegenError('Segment is locked — unlock it to commit')
+                              return
+                            }
                             // The edit box is uncontrolled, so while a row is being
                             // edited the typed value exists ONLY in editingTextRef.
                             // preview_text is written by saveEditing(), which runs on
