@@ -13,12 +13,14 @@ import {
   type AdaptedSegment,
   type VariantType,
 } from '@/lib/adaptation-types'
+import { useT } from '@/lib/use-t'
 
 // ---------------------------------------------------------------------------
 // AdaptationPanel
 // ---------------------------------------------------------------------------
 
 export function AdaptationPanel() {
+  const t = useT()
   const {
     selectedSegmentIndex,
     segments,
@@ -128,12 +130,12 @@ export function AdaptationPanel() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-          Adaptation Variants
+          {t('Adaptation Variants')}
         </span>
         <div className="flex items-center gap-2">
           {segment.isPreviewing && (
             <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-orange-500/20 text-orange-400 border border-orange-500/30 font-medium">
-              Previewing
+              {t('Previewing')}
             </span>
           )}
           {(segment.isUserEdited || segment.isPreviewing) && (
@@ -189,7 +191,7 @@ export function AdaptationPanel() {
           onClick={applyRecommendedToAll}
           className="w-full rounded-md border border-slate-600 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700 transition-colors"
         >
-          Apply recommended to all unapproved segments
+          {t('Apply recommended to all unapproved segments')}
         </button>
       </div>
     </div>
@@ -215,6 +217,7 @@ function VariantCard({
   isPreviewing: boolean
   onSelect: () => void
 }) {
+  const t = useT()
   const meta = VARIANT_LABELS[variant.type]
 
   return (
@@ -232,7 +235,7 @@ function VariantCard({
         <span className={`text-xs font-semibold ${meta.color}`}>{meta.label}</span>
         {isRecommended && (
           <span className="rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400">
-            Recommended
+            {t('Recommended')}
           </span>
         )}
         {isSelected && (
@@ -244,7 +247,7 @@ function VariantCard({
                 ? 'bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/30'
                 : 'bg-blue-500/20 text-blue-400'
           )}>
-            Active
+            {t('Active')}
           </span>
         )}
       </div>
@@ -271,6 +274,7 @@ function VariantCard({
 // ---------------------------------------------------------------------------
 
 function FitBar({ ratio }: { ratio: number }) {
+  const t = useT()
   const pct = Math.min(100, Math.round(ratio * 100))
   const barColor = fitRatioColor(ratio)
   const label = fitRatioLabel(ratio)
@@ -297,6 +301,7 @@ function FitBar({ ratio }: { ratio: number }) {
 // ---------------------------------------------------------------------------
 
 function EmptyState({ message }: { message: string }) {
+  const t = useT()
   return (
     <div className="flex items-center justify-center h-32 px-4">
       <p className="text-sm text-slate-500 text-center">{message}</p>
@@ -305,6 +310,7 @@ function EmptyState({ message }: { message: string }) {
 }
 
 function LoadingSkeleton() {
+  const t = useT()
   return (
     <div className="flex flex-col gap-3 p-3 animate-pulse">
       <div className="h-3 w-32 rounded bg-slate-700" />

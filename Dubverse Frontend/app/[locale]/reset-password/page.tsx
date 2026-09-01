@@ -22,8 +22,10 @@ import {
   Loader2,
 } from "lucide-react";
 import Link from "next/link";
+import { useT } from '@/lib/use-t'
 
 function ResetPasswordContent() {
+  const t = useT()
   const router = useRouter();
   const supabase = createClient();
 
@@ -105,7 +107,7 @@ function ResetPasswordContent() {
           <CardContent className="flex flex-col items-center gap-4 pt-10 pb-8">
             <CheckCircle className="w-16 h-16 text-green-400" />
             <CardTitle className="text-white text-2xl font-bold">
-              Password Updated!
+              {t('Password Updated!')}
             </CardTitle>
             <CardDescription className="text-slate-400 text-center">
               You&apos;ll be redirected to the studio shortly.
@@ -114,7 +116,7 @@ function ResetPasswordContent() {
               href="/studio"
               className="text-[#A855F7] hover:text-[#22D3EE] transition-colors text-sm underline underline-offset-4"
             >
-              Go to Studio now
+              {t('Go to Studio now')}
             </Link>
           </CardContent>
         </Card>
@@ -166,10 +168,10 @@ function ResetPasswordContent() {
           </Link>
 
           <CardTitle className="text-2xl font-bold text-white">
-            Set New Password
+            {t('Set New Password')}
           </CardTitle>
           <CardDescription className="text-slate-400">
-            Enter your new password below.
+            {t('Enter your new password below.')}
           </CardDescription>
         </CardHeader>
 
@@ -181,7 +183,7 @@ function ResetPasswordContent() {
                 href="/signin"
                 className="text-[#A855F7] hover:text-[#22D3EE] transition-colors text-sm underline underline-offset-4"
               >
-                Back to Sign In
+                {t('Back to Sign In')}
               </Link>
             </div>
           ) : (
@@ -189,14 +191,14 @@ function ResetPasswordContent() {
               {/* New Password */}
               <div className="space-y-2">
                 <Label htmlFor="new-password" className="text-slate-300 text-sm">
-                  New Password
+                  {t('New Password')}
                 </Label>
                 <div className="relative">
                   <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                   <Input
                     id="new-password"
                     type={showPassword ? "text" : "password"}
-                    placeholder="Min. 6 characters"
+                    placeholder={t('Min. 6 characters')}
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
                     required
@@ -222,14 +224,14 @@ function ResetPasswordContent() {
               {/* Confirm Password */}
               <div className="space-y-2">
                 <Label htmlFor="confirm-password" className="text-slate-300 text-sm">
-                  Confirm Password
+                  {t('Confirm Password')}
                 </Label>
                 <div className="relative">
                   <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                   <Input
                     id="confirm-password"
                     type={showConfirm ? "text" : "password"}
-                    placeholder="Repeat your new password"
+                    placeholder={t('Repeat your new password')}
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     required
@@ -275,7 +277,7 @@ function ResetPasswordContent() {
                   href="/signin"
                   className="text-[#A855F7] hover:text-[#22D3EE] transition-colors underline underline-offset-4"
                 >
-                  Sign in
+                  {t('Sign in')}
                 </Link>
               </p>
             </form>
@@ -287,6 +289,7 @@ function ResetPasswordContent() {
 }
 
 export default function ResetPasswordPage() {
+  const t = useT()
   return (
     <Suspense
       fallback={

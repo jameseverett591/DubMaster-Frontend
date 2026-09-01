@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { User, Baby } from "lucide-react"
 import type { DetectedVoice } from "@/components/dashboard"
+import { useT } from '@/lib/use-t'
 
 interface TimelineEditorProps {
   detectedVoices: DetectedVoice[]
@@ -12,6 +13,7 @@ interface TimelineEditorProps {
 }
 
 export function TimelineEditor({ detectedVoices, currentTime, duration }: TimelineEditorProps) {
+  const t = useT()
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
     const secs = Math.floor(seconds % 60)
@@ -45,14 +47,14 @@ export function TimelineEditor({ detectedVoices, currentTime, duration }: Timeli
   return (
     <div className="space-y-4">
       <div>
-        <h3 className="font-semibold text-foreground">Voice Timeline</h3>
-        <p className="mt-1 text-sm text-muted-foreground">Visual overview of detected speakers throughout the video</p>
+        <h3 className="font-semibold text-foreground">{t('Voice Timeline')}</h3>
+        <p className="mt-1 text-sm text-muted-foreground">{t('Visual overview of detected speakers throughout the video')}</p>
       </div>
 
       {/* Timeline visualization */}
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm">Audio Waveform</CardTitle>
+          <CardTitle className="text-sm">{t('Audio Waveform')}</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="relative h-24 rounded-lg bg-muted/50">
@@ -103,7 +105,7 @@ export function TimelineEditor({ detectedVoices, currentTime, duration }: Timeli
 
       {/* Voice segment details */}
       <div className="space-y-3">
-        <h4 className="text-sm font-medium text-foreground">Segment Details</h4>
+        <h4 className="text-sm font-medium text-foreground">{t('Segment Details')}</h4>
         {detectedVoices.map((voice) => (
           <Card key={voice.id} className={`border ${getVoiceBorderColor(voice.type)}`}>
             <CardHeader className="p-3 pb-2">

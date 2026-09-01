@@ -6,8 +6,10 @@ import { createClient } from "@/lib/supabase/client"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Loader2, Mic2 } from "lucide-react"
 import Link from "next/link"
+import { useT } from '@/lib/use-t'
 
 export default function CheckoutPage() {
+  const t = useT()
   return (
     <Suspense>
       <CheckoutContent />
@@ -16,6 +18,7 @@ export default function CheckoutPage() {
 }
 
 function CheckoutContent() {
+  const t = useT()
   const router = useRouter()
   const searchParams = useSearchParams()
   const [error, setError] = useState<string | null>(null)
@@ -89,7 +92,7 @@ function CheckoutContent() {
 
           {error ? (
             <>
-              <CardTitle className="text-2xl text-white">Oops! Something went wrong</CardTitle>
+              <CardTitle className="text-2xl text-white">{t('Oops! Something went wrong')}</CardTitle>
               <CardDescription className="text-red-400 mt-4">
                 {error}
               </CardDescription>
@@ -98,16 +101,16 @@ function CheckoutContent() {
                   href="/subscribe"
                   className="text-[#A855F7] hover:text-[#C084FC] underline underline-offset-2"
                 >
-                  Try again
+                  {t('Try again')}
                 </Link>
               </div>
             </>
           ) : (
             <>
               <Loader2 className="h-12 w-12 animate-spin text-[#A855F7] mx-auto mb-4" />
-              <CardTitle className="text-2xl text-white">Redirecting to checkout...</CardTitle>
+              <CardTitle className="text-2xl text-white">{t('Redirecting to checkout...')}</CardTitle>
               <CardDescription className="text-[#94A3B8] mt-2">
-                Please wait while we prepare your payment page
+                {t('Please wait while we prepare your payment page')}
               </CardDescription>
             </>
           )}

@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils'
 import type { QCReport, QCFinding, Segment } from '@/lib/editor-types'
 import { usePlan } from '@/lib/use-plan'
 import { findingIsAutoFixable } from '@/lib/qc-fixes'
+import { useT } from '@/lib/use-t'
 
 interface QCQualityPanelProps {
   report: QCReport | null
@@ -54,14 +55,15 @@ function statusBadge(status: 'ok' | 'warn' | 'fail') {
 }
 
 export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding, onSelectSegment, onApplyFix, selectedRetranscriptionIndex }: QCQualityPanelProps) {
+  const t = useT()
   const { hasFeature } = usePlan()
 
   if (!report) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-slate-500 text-sm p-6 gap-2">
         <Gauge className="h-8 w-8 opacity-40" />
-        <p>Not yet analyzed.</p>
-        <p className="text-xs text-slate-600">Quality analysis runs after the dub is rebuilt.</p>
+        <p>{t('Not yet analyzed.')}</p>
+        <p className="text-xs text-slate-600">{t('Quality analysis runs after the dub is rebuilt.')}</p>
       </div>
     )
   }
@@ -80,7 +82,7 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
       {/* Score header */}
       <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-4">
         <div className="flex items-center justify-between mb-3">
-          <div className="text-sm font-semibold text-white">Overall Quality Score</div>
+          <div className="text-sm font-semibold text-white">{t('Overall Quality Score')}</div>
           {report.emotion_provider === 'emotion2vec' && (
             <span className="text-[10px] px-2 py-0.5 rounded-full border border-blue-500/40 text-blue-300 bg-blue-500/10">
               ⟁ emotion2vec
@@ -115,12 +117,12 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
       </div>
 
       {/* Timing */}
-      <SectionCard icon={<Clock className="h-4 w-4" />} title="Timing" trailing={statusBadge(report.timing.status)} />
+      <SectionCard icon={<Clock className="h-4 w-4" />} title={t('Timing')} trailing={statusBadge(report.timing.status)} />
 
       {/* Speed */}
       <SectionCard
         icon={<Gauge className="h-4 w-4" />}
-        title="Speed"
+        title={t('Speed')}
         trailing={statusBadge(report.speed.status)}
       >
         <div className="text-xs text-slate-400">
@@ -131,7 +133,7 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
       {/* Silence Gaps */}
       <SectionCard
         icon={<VolumeX className="h-4 w-4" />}
-        title="Silence Gaps"
+        title={t('Silence Gaps')}
         trailing={
           <span
             className={cn(
@@ -172,7 +174,7 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
       {/* Loudness */}
       <SectionCard
         icon={<Volume2 className="h-4 w-4" />}
-        title="Loudness"
+        title={t('Loudness')}
         trailing={
           <span
             className={cn(
@@ -182,7 +184,7 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
                 : 'border-yellow-500/40 text-yellow-300 bg-yellow-500/10'
             )}
           >
-            {report.loudness.within_spec ? 'Within spec' : 'Out of spec'}
+            {report.loudness.within_spec ? t('Within spec') : t('Out of spec')}
           </span>
         }
       >
@@ -196,7 +198,7 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
       {/* Emotion Analysis */}
       <SectionCard
         icon={<Heart className="h-4 w-4 text-purple-400" />}
-        title="Emotion Analysis"
+        title={t('Emotion Analysis')}
         trailing={
           <span className="text-[10px] px-2 py-0.5 rounded-full border border-yellow-500/40 text-yellow-300 bg-yellow-500/10">
             {report.emotion.label}
@@ -226,7 +228,7 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
 
           {segment.velma_emotion && (
             <div className="flex items-center justify-between mb-1">
-              <span className="text-slate-400 text-xs">Emotion</span>
+              <span className="text-slate-400 text-xs">{t('Emotion')}</span>
               <span className="px-2 py-0.5 text-xs rounded bg-slate-800 text-slate-200">
                 {segment.velma_emotion}
               </span>
@@ -235,7 +237,7 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
 
           {segment.velma_accent && (
             <div className="flex items-center justify-between mb-1">
-              <span className="text-slate-400 text-xs">Accent</span>
+              <span className="text-slate-400 text-xs">{t('Accent')}</span>
               <span className="px-2 py-0.5 text-xs rounded bg-slate-700 text-slate-300">
                 {segment.velma_accent}
               </span>
@@ -244,7 +246,7 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
 
           {typeof segment.velma_deepfake_score === 'number' && (
             <div className="flex items-center justify-between mt-2">
-              <span className="text-slate-400 text-xs">Deepfake Score</span>
+              <span className="text-slate-400 text-xs">{t('Deepfake Score')}</span>
               <span
                 className={`px-2 py-0.5 text-xs rounded ${
                   segment.velma_deepfake_score > 0.55
@@ -261,7 +263,7 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
 
           {typeof segment.velma_deepfake_score === 'number' && segment.velma_deepfake_score > 0.55 && (
             <div className="mt-3 p-2 rounded bg-red-900 text-red-100 text-xs">
-              This dub sounds synthetic. Consider regenerating the audio.
+              {t('This dub sounds synthetic. Consider regenerating the audio.')}
             </div>
           )}
         </div>
@@ -367,7 +369,7 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
                       className="shrink-0 self-center flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-emerald-700/30 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-600/30 transition-colors"
                     >
                       <Wrench className="h-2.5 w-2.5" />
-                      Fix
+                      {t('Fix')}
                     </button>
                   )}
                 </div>
@@ -389,6 +391,7 @@ interface SectionCardProps {
 }
 
 function SectionCard({ icon, title, subtitle, trailing, children }: SectionCardProps) {
+  const t = useT()
   return (
     <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-3">
       <div className="flex items-center justify-between mb-2">
@@ -405,6 +408,7 @@ function SectionCard({ icon, title, subtitle, trailing, children }: SectionCardP
 }
 
 function Stat({ label, value, accent }: { label: string; value: string; accent?: string }) {
+  const t = useT()
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-950 p-2">
       <div className="text-[10px] text-slate-500 mb-0.5">{label}</div>

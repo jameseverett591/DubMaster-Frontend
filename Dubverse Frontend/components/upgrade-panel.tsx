@@ -8,8 +8,10 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Check, Loader2 } from "lucide-react"
+import { useT } from '@/lib/use-t'
 
 export function UpgradePanel() {
+  const t = useT()
   const [yearlyTiers, setYearlyTiers] = useState<Record<string, boolean>>({})
   const [loadingPlan, setLoadingPlan] = useState<string | null>(null)
   const [user, setUser] = useState<{ id: string; email: string } | null>(null)
@@ -131,8 +133,8 @@ export function UpgradePanel() {
   return (
     <div className="py-6">
       <div className="text-center mb-8">
-        <h2 className="text-2xl font-bold text-white mb-2">Choose Your Plan</h2>
-        <p className="text-slate-400">Unlock more minutes, advanced editing, and professional tools.</p>
+        <h2 className="text-2xl font-bold text-white mb-2">{t('Choose Your Plan')}</h2>
+        <p className="text-slate-400">{t('Unlock more minutes, advanced editing, and professional tools.')}</p>
       </div>
 
       <div className="grid md:grid-cols-3 gap-6 items-stretch" style={{ isolation: 'isolate' }}>
@@ -151,7 +153,7 @@ export function UpgradePanel() {
               {isPremium && layoutReady && (
                 <div className="absolute -top-4 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
                   <Badge className="bg-gradient-to-r from-[#FDB022] to-[#F59E0B] text-black font-bold px-4 py-1 text-sm shadow-[0_0_20px_rgba(253,176,34,0.4)]">
-                    Most Popular
+                    {t('Most Popular')}
                   </Badge>
                 </div>
               )}
@@ -166,7 +168,7 @@ export function UpgradePanel() {
                   <CardTitle className="text-2xl text-white">{tier.name}</CardTitle>
                   <div className="mt-4 min-h-[100px]">
                     <div className="flex items-center gap-2.5 mb-3">
-                      <span className={`text-xs font-medium ${!yearly ? "text-white" : "text-slate-500"}`}>Monthly</span>
+                      <span className={`text-xs font-medium ${!yearly ? "text-white" : "text-slate-500"}`}>{t('Monthly')}</span>
                       <button
                         onClick={() => toggleYearly(tier.key)}
                         className="relative w-10 h-5 rounded-full transition-all duration-300"
@@ -174,7 +176,7 @@ export function UpgradePanel() {
                       >
                         <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform duration-300 shadow-sm ${yearly ? "translate-x-5" : "translate-x-0"}`} />
                       </button>
-                      <span className={`text-xs font-medium ${yearly ? "text-white" : "text-slate-500"}`}>Yearly</span>
+                      <span className={`text-xs font-medium ${yearly ? "text-white" : "text-slate-500"}`}>{t('Yearly')}</span>
                     </div>
                     <div className="flex items-baseline gap-1">
                       <span className="text-4xl font-bold" style={{ color: tier.color }}>

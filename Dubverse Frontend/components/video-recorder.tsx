@@ -3,6 +3,7 @@
 import { useRef, useState, useCallback, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Video, X, Circle, Square, AlertCircle, Loader2 } from "lucide-react"
+import { useT } from '@/lib/use-t'
 
 // Ordered preference: VP9 webm → VP8 webm → plain webm → MP4 (Safari 14.1+)
 const MIME_CANDIDATES = [
@@ -40,6 +41,7 @@ interface VideoRecorderProps {
 }
 
 export function VideoRecorder({ onFileCaptured, maxSeconds, remainingSeconds, triggerClassName, triggerLabel }: VideoRecorderProps) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const [phase, setPhase] = useState<Phase>("idle")
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
@@ -180,7 +182,7 @@ export function VideoRecorder({ onFileCaptured, maxSeconds, remainingSeconds, tr
             <div className="flex items-center justify-between px-5 py-4 border-b border-[#1E293B]">
               <div className="flex items-center gap-2">
                 <Video className="h-4 w-4 text-[#A855F7]" />
-                <span className="text-sm font-semibold text-white">Record Video</span>
+                <span className="text-sm font-semibold text-white">{t('Record Video')}</span>
                 {phase === "recording" && (
                   <span className="flex items-center gap-1.5 ml-2">
                     <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
@@ -195,7 +197,7 @@ export function VideoRecorder({ onFileCaptured, maxSeconds, remainingSeconds, tr
               </div>
               <button
                 type="button"
-                aria-label="Close recorder"
+                aria-label={t('Close recorder')}
                 onClick={handleClose}
                 className="text-[#64748B] hover:text-white transition-colors"
               >
@@ -251,7 +253,7 @@ export function VideoRecorder({ onFileCaptured, maxSeconds, remainingSeconds, tr
                       className="bg-red-600 hover:bg-red-700 text-white gap-2"
                     >
                       <Circle className="h-3.5 w-3.5 fill-current" />
-                      Start Recording
+                      {t('Start Recording')}
                     </Button>
                   </>
                 )}
@@ -262,7 +264,7 @@ export function VideoRecorder({ onFileCaptured, maxSeconds, remainingSeconds, tr
                     className="bg-red-600 hover:bg-red-700 text-white gap-2"
                   >
                     <Square className="h-3.5 w-3.5 fill-current" />
-                    Stop & Upload
+                    {t('Stop & Upload')}
                   </Button>
                 )}
 

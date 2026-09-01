@@ -4,6 +4,7 @@ import { useMemo } from 'react'
 import { Gauge, AlertCircle, Wrench, RotateCcw, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { Segment, QCReport, QCFinding } from '@/lib/editor-types'
+import { useT } from '@/lib/use-t'
 
 interface SegmentQCPanelProps {
   segment: Segment | null
@@ -54,6 +55,7 @@ function gradeColor(grade: QCReport['grade']) {
 }
 
 export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix, onRegenerateDub }: SegmentQCPanelProps) {
+  const t = useT()
   const segmentFindings = useMemo(() => {
     if (!segment) return []
     return segment.qc_findings
@@ -63,7 +65,7 @@ export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix, onRe
     return (
       <div className="flex flex-col items-center justify-center h-full text-slate-500 text-sm p-6">
         <Gauge className="h-8 w-8 mb-2 opacity-40" />
-        <p>Select a segment to view QC details.</p>
+        <p>{t('Select a segment to view QC details.')}</p>
       </div>
     )
   }
@@ -73,7 +75,7 @@ export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix, onRe
       {/* Score header */}
       <div className="rounded-xl border border-slate-800 bg-slate-800/50 p-4">
         <div className="flex items-center justify-between mb-3">
-          <div className="text-sm font-semibold text-white">Segment QC</div>
+          <div className="text-sm font-semibold text-white">{t('Segment QC')}</div>
           {report && (
             <span className={cn('text-[10px] px-2 py-0.5 rounded-full border font-medium', gradeColor(report.grade))}>
               Grade {report.grade} · {report.overall}/100
@@ -96,7 +98,7 @@ export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix, onRe
             {segment.qc_score ?? '—'}
           </div>
           <div>
-            <div className="text-xs text-slate-400">Score</div>
+            <div className="text-xs text-slate-400">{t('Score')}</div>
             <div className="text-xs text-slate-500">/100</div>
           </div>
         </div>
@@ -107,7 +109,7 @@ export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix, onRe
         <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3">
           <div className="flex items-center gap-2 mb-1.5">
             <AlertCircle className="h-3.5 w-3.5 text-red-400" />
-            <span className="text-xs font-semibold text-red-300 uppercase tracking-wider">Problem</span>
+            <span className="text-xs font-semibold text-red-300 uppercase tracking-wider">{t('Problem')}</span>
           </div>
           <p className="text-sm text-slate-200 leading-relaxed">{segment.qc_problem}</p>
         </div>
@@ -118,7 +120,7 @@ export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix, onRe
         <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3">
           <div className="flex items-center gap-2 mb-1.5">
             <Wrench className="h-3.5 w-3.5 text-emerald-400" />
-            <span className="text-xs font-semibold text-emerald-300 uppercase tracking-wider">Suggested Fix</span>
+            <span className="text-xs font-semibold text-emerald-300 uppercase tracking-wider">{t('Suggested Fix')}</span>
           </div>
           <p className="text-sm text-emerald-200 leading-relaxed">{segment.qc_fix}</p>
         </div>
@@ -164,7 +166,7 @@ export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix, onRe
 
           {segment.velma_emotion && (
             <div className="flex items-center justify-between mb-1">
-              <span className="text-slate-400 text-xs">Emotion</span>
+              <span className="text-slate-400 text-xs">{t('Emotion')}</span>
               <span className="px-2 py-0.5 text-xs rounded bg-slate-800 text-slate-200">
                 {segment.velma_emotion}
               </span>
@@ -173,7 +175,7 @@ export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix, onRe
 
           {segment.velma_accent && (
             <div className="flex items-center justify-between mb-1">
-              <span className="text-slate-400 text-xs">Accent</span>
+              <span className="text-slate-400 text-xs">{t('Accent')}</span>
               <span className="px-2 py-0.5 text-xs rounded bg-slate-700 text-slate-300">
                 {segment.velma_accent}
               </span>
@@ -182,7 +184,7 @@ export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix, onRe
 
           {typeof segment.velma_deepfake_score === 'number' && (
             <div className="flex items-center justify-between mt-2">
-              <span className="text-slate-400 text-xs">Deepfake Score</span>
+              <span className="text-slate-400 text-xs">{t('Deepfake Score')}</span>
               <span
                 className={`px-2 py-0.5 text-xs rounded ${
                   segment.velma_deepfake_score > 0.55
@@ -200,14 +202,14 @@ export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix, onRe
           {typeof segment.velma_deepfake_score === 'number' && segment.velma_deepfake_score > 0.55 && (
             <>
               <div className="mt-3 p-2 rounded bg-red-900 text-red-100 text-xs">
-                This dub sounds synthetic. Consider regenerating the audio.
+                {t('This dub sounds synthetic. Consider regenerating the audio.')}
               </div>
               <button
                 type="button"
                 onClick={onRegenerateDub}
                 className="mt-2 w-full px-3 py-1.5 text-xs rounded bg-red-700 hover:bg-red-600 text-white transition-colors"
               >
-                Regenerate Dub
+                {t('Regenerate Dub')}
               </button>
             </>
           )}
@@ -221,7 +223,7 @@ export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix, onRe
           className="w-full flex items-center justify-center gap-2 rounded-md border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-700 transition-colors"
         >
           <RotateCcw className="h-3.5 w-3.5" />
-          Recalculate QC
+          {t('Recalculate QC')}
         </button>
         {segment.qc_fix && (
           <button
@@ -229,7 +231,7 @@ export function SegmentQCPanel({ segment, report, onRecalculate, onAutoFix, onRe
             className="w-full flex items-center justify-center gap-2 rounded-md bg-emerald-600 hover:bg-emerald-700 px-3 py-2 text-xs text-white transition-colors"
           >
             <Wrench className="h-3.5 w-3.5" />
-            Auto-Fix
+            {t('Auto-Fix')}
           </button>
         )}
       </div>

@@ -127,6 +127,7 @@ import {
 import { LayoutList, AudioLines, Zap, GitBranch, Sliders, MessageCircle, ArrowUp, AlertCircle } from 'lucide-react'
 import { usePlan } from '@/lib/use-plan'
 import { useUsage } from '@/hooks/use-usage'
+import { useT } from '@/lib/use-t'
 
 // QC Tab definitions - main navigation tabs + QC-specific tabs
 type QCCategory = 'speech' | 'lip-sync' | 'pipeline' | 'voices' | 'script' | 'timeline-tab' | 'timing' | 'pronunciation' | 'translation' | 'delivery' | 'sync'
@@ -233,6 +234,7 @@ function SegmentContextMenu({
   onClearGroup,
   groupSelectActive,
 }: SegmentContextMenuProps) {
+  const t = useT()
   const [showEmotions, setShowEmotions] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const confirmClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -395,7 +397,7 @@ function SegmentContextMenu({
               onClick={(e) => { e.stopPropagation(); onClearEmotion(index) }}
               className="text-center text-xs text-slate-400 hover:text-slate-200 py-1.5 mt-1 rounded hover:bg-neutral-800 transition-colors cursor-pointer select-none"
             >
-              Clear Emotion
+              {t('Clear Emotion')}
             </div>
           </>
         )}
@@ -439,6 +441,7 @@ type AskAiMessage = { role: 'user' | 'assistant'; content: string; displayed?: s
 
 // Ask DubMaster AI's bot icon — outlined, brand-gradient linework. `id` must be unique per instance (SVG gradient ids can't repeat on a page).
 function AskAiBotIcon({ id, size = 20 }: { id: string; size?: number }) {
+  const t = useT()
   return (
     <svg width={size} height={size} viewBox="0 0 24 24">
       <defs>
@@ -984,6 +987,7 @@ export function DubVerseEditor({
   chunkStatus: initialChunkStatus,
   retention: initialRetention,
 }: DubVerseEditorProps) {
+  const t = useT()
   const videoRef = useRef<HTMLVideoElement>(null)
   /** One retry per SOURCE, so a genuinely broken source cannot loop while a
    *  new one still gets its own attempt. Reset by the effect below. */
@@ -6089,7 +6093,7 @@ export function DubVerseEditor({
                 </Button>
               ) : (
                 <span className="flex-1 text-xs text-slate-400">
-                  Download or export the film before this date to keep it.
+                  {t('Download or export the film before this date to keep it.')}
                 </span>
               )}
               <Button
@@ -6097,7 +6101,7 @@ export function DubVerseEditor({
                 className="border-slate-700 hover:bg-slate-800"
                 onClick={() => setRetentionDismissed(true)}
               >
-                Dismiss
+                {t('Dismiss')}
               </Button>
             </div>
 
@@ -6163,7 +6167,7 @@ export function DubVerseEditor({
                 onClick={() => resolveChunkSwitch('stay')}
                 disabled={chunkSwitchBusy !== null}
               >
-                Stay
+                {t('Stay')}
               </Button>
             </div>
           </div>
@@ -6192,7 +6196,7 @@ export function DubVerseEditor({
           {rebuildStatus !== 'processing' && (
             <button
               type="button"
-              aria-label="Dismiss"
+              aria-label={t('Dismiss')}
               onClick={() => setRebuildStatus('idle')}
               className="absolute right-5 opacity-70 hover:opacity-100 transition-opacity"
             >
@@ -6219,7 +6223,7 @@ export function DubVerseEditor({
               <span className="font-bold text-lg text-white">DubMaster</span>
               {(isProfessional || isPremium) && (
                 <span className="text-xs font-semibold uppercase tracking-wide text-cyan-400">
-                  {isProfessional ? 'Professional' : 'Premium'}
+                  {isProfessional ? t('Professional') : t('Premium')}
                 </span>
               )}
             </div>
@@ -6227,9 +6231,9 @@ export function DubVerseEditor({
           
           {/* Nav */}
           <nav className="hidden md:flex items-center gap-1 ml-4">
-            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/dashboard')}>Dashboard</Button>
-            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/studio?tab=projects')}>My Projects</Button>
-            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/collaborate')}>Collaborate</Button>
+            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/dashboard')}>{t('Dashboard')}</Button>
+            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/studio?tab=projects')}>{t('My Projects')}</Button>
+            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/collaborate')}>{t('Collaborate')}</Button>
             <Button
               variant="ghost"
               size="sm"
@@ -6239,9 +6243,9 @@ export function DubVerseEditor({
               )}
               onClick={() => setRightPanelTab('library')}
             >
-              Voice Library
+              {t('Voice Library')}
             </Button>
-            <Button variant="ghost" size="sm" className="bg-slate-800 text-white">Editor</Button>
+            <Button variant="ghost" size="sm" className="bg-slate-800 text-white">{t('Editor')}</Button>
 
             {/* Edit counters, in the top bar beside MAKE MOVIE — the place the
                 user looks before committing to a render.
@@ -6363,19 +6367,19 @@ export function DubVerseEditor({
             {layoutLocked ? (
               <>
                 <Lock className="h-3.5 w-3.5" />
-                <span>Locked</span>
+                <span>{t('Locked')}</span>
               </>
             ) : (
               <>
                 <Unlock className="h-3.5 w-3.5" />
-                <span>Lock Editor</span>
+                <span>{t('Lock Editor')}</span>
               </>
             )}
           </Button>
           {/* Language selector */}
           <LanguageSwitcher />
           <Bell className="h-5 w-5 text-slate-400" />
-          <Link href="/account" className="w-8 h-8 rounded-full bg-amber-500 flex items-center justify-center hover:opacity-80 transition-opacity" title="Account">
+          <Link href="/account" className="w-8 h-8 rounded-full bg-amber-500 flex items-center justify-center hover:opacity-80 transition-opacity" title={t('Account')}>
             <span className="text-sm font-medium text-white">{userInitials}</span>
           </Link>
         </div>
@@ -6421,7 +6425,7 @@ export function DubVerseEditor({
               </>
             )}
           </div>
-          <Button variant="ghost" size="sm" className="h-8" onClick={handleGlobalUndo} title="Undo last edit">
+          <Button variant="ghost" size="sm" className="h-8" onClick={handleGlobalUndo} title={t('Undo last edit')}>
             <RotateCcw className="h-4 w-4" />
           </Button>
           <Popover onOpenChange={() => setShareCopied(null)}>
@@ -6433,16 +6437,16 @@ export function DubVerseEditor({
             <PopoverContent align="end" className="w-80 bg-slate-900 border-slate-700 p-4 space-y-4">
               <p className="text-sm font-semibold text-white flex items-center gap-2">
                 <Share2 className="h-4 w-4 text-amber-400" />
-                Share Project
+                {t('Share Project')}
               </p>
 
               {/* Editor link */}
               <div className="space-y-1.5">
-                <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">Editor link</p>
+                <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Editor link')}</p>
                 <div className="flex gap-2">
                   <input
                     readOnly
-                    aria-label="Editor link"
+                    aria-label={t('Editor link')}
                     value={typeof window !== 'undefined' ? window.location.href : ''}
                     className="flex-1 text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 truncate focus:outline-none"
                   />
@@ -6467,11 +6471,11 @@ export function DubVerseEditor({
               {/* Dubbed video */}
               {activeDubbedVideoUrl ? (
                 <div className="space-y-1.5">
-                  <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">Dubbed video</p>
+                  <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Dubbed video')}</p>
                   <div className="flex gap-2">
                     <input
                       readOnly
-                      aria-label="Dubbed video link"
+                      aria-label={t('Dubbed video link')}
                       value={activeDubbedVideoUrl}
                       className="flex-1 text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 truncate focus:outline-none"
                     />
@@ -6496,29 +6500,29 @@ export function DubVerseEditor({
                       className="h-7 px-2 text-xs border-slate-700 text-slate-300 shrink-0"
                       asChild
                     >
-                      <a href={activeDubbedVideoUrl} download title="Download dubbed video" target="_blank" rel="noreferrer">
+                      <a href={activeDubbedVideoUrl} download title={t('Download dubbed video')} target="_blank" rel="noreferrer">
                         <Download className="h-3 w-3" />
                       </a>
                     </Button>
                   </div>
                 </div>
               ) : (
-                <p className="text-xs text-slate-600 italic">No dubbed video yet — rebuild to generate one.</p>
+                <p className="text-xs text-slate-600 italic">{t('No dubbed video yet — rebuild to generate one.')}</p>
               )}
 
               {/* Social share */}
               <div className="space-y-1.5 pt-1 border-t border-slate-800">
-                <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">Share to</p>
+                <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Share to')}</p>
                 <div className="flex gap-2">
                   {/* Facebook */}
                   <button
                     type="button"
-                    title="Share to Facebook"
+                    title={t('Share to Facebook')}
                     className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#1877F2] hover:bg-[#1565C0] text-white transition-colors"
                     onClick={() => window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}`, '_blank', 'width=600,height=400')}
                   >
                     <Facebook className="h-4 w-4" />
-                    <span className="text-[9px] font-medium">Facebook</span>
+                    <span className="text-[9px] font-medium">{t('Facebook')}</span>
                   </button>
                   {/* Twitter / X */}
                   <button
@@ -6528,12 +6532,12 @@ export function DubVerseEditor({
                     onClick={() => window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}&text=${encodeURIComponent(`Check out my dubbed video — ${title}`)}`, '_blank', 'width=600,height=400')}
                   >
                     <Twitter className="h-4 w-4" />
-                    <span className="text-[9px] font-medium">X / Twitter</span>
+                    <span className="text-[9px] font-medium">{t('X / Twitter')}</span>
                   </button>
                   {/* YouTube — download video then open YouTube Studio */}
                   <button
                     type="button"
-                    title="Download for YouTube"
+                    title={t('Download for YouTube')}
                     className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#FF0000] hover:bg-[#CC0000] text-white transition-colors"
                     onClick={() => {
                       if (activeDubbedVideoUrl) {
@@ -6546,12 +6550,12 @@ export function DubVerseEditor({
                     }}
                   >
                     <Youtube className="h-4 w-4" />
-                    <span className="text-[9px] font-medium">YouTube</span>
+                    <span className="text-[9px] font-medium">{t('YouTube')}</span>
                   </button>
                   {/* Instagram — download video (no web upload API) */}
                   <button
                     type="button"
-                    title="Download for Instagram"
+                    title={t('Download for Instagram')}
                     className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-gradient-to-br from-[#833AB4] via-[#E1306C] to-[#F77737] hover:opacity-90 text-white transition-opacity"
                     onClick={() => {
                       if (activeDubbedVideoUrl) {
@@ -6563,7 +6567,7 @@ export function DubVerseEditor({
                     }}
                   >
                     <Instagram className="h-4 w-4" />
-                    <span className="text-[9px] font-medium">Instagram</span>
+                    <span className="text-[9px] font-medium">{t('Instagram')}</span>
                   </button>
                 </div>
               </div>
@@ -6576,7 +6580,7 @@ export function DubVerseEditor({
             onClick={() => videoInputRef.current?.click()}
           >
             <Upload className="h-4 w-4 mr-1" />
-            Import Video
+            {t('Import Video')}
           </Button>
           <input
             ref={videoInputRef}
@@ -6594,7 +6598,7 @@ export function DubVerseEditor({
                 className="h-8 border-slate-700 hover:bg-slate-800"
               >
                 <Settings className="h-4 w-4 mr-1" />
-                Advanced
+                {t('Advanced')}
                 <ChevronDown className="h-3 w-3 ml-1" />
               </Button>
             </DropdownMenuTrigger>
@@ -6607,7 +6611,7 @@ export function DubVerseEditor({
                     className="cursor-pointer hover:bg-slate-800"
                   >
                     <AlertTriangle className="h-4 w-4 mr-2 text-amber-400" />
-                    <span className="flex-1">Review Queue</span>
+                    <span className="flex-1">{t('Review Queue')}</span>
                     {unreviewedCount > 0 && (
                       <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">
                         {unreviewedCount}
@@ -6671,7 +6675,7 @@ export function DubVerseEditor({
                   : releasedForRender
                     ? <Check className="h-4 w-4 mr-2 text-emerald-400" />
                     : <AlertCircle className="h-4 w-4 mr-2 text-red-400" />}
-                <span className="flex-1">Release for render</span>
+                <span className="flex-1">{t('Release for render')}</span>
                 <span
                   className={cn(
                     "text-[10px] font-medium px-1.5 py-0.5 rounded tabular-nums",
@@ -6688,7 +6692,7 @@ export function DubVerseEditor({
                 className="cursor-pointer hover:bg-slate-800"
               >
                 <FileText className="h-4 w-4 mr-2" />
-                Import Transcript
+                {t('Import Transcript')}
               </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => {
@@ -6703,14 +6707,14 @@ export function DubVerseEditor({
                 className="cursor-pointer hover:bg-slate-800"
               >
                 <Download className="h-4 w-4 mr-2" />
-                Download Transcript
+                {t('Download Transcript')}
               </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => setShowAddSegment(true)}
                 className="cursor-pointer hover:bg-slate-800"
               >
                 <Plus className="h-4 w-4 mr-2" />
-                Add Segment
+                {t('Add Segment')}
               </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={handleRetranslate}
@@ -6725,7 +6729,7 @@ export function DubVerseEditor({
                 className="cursor-pointer hover:bg-red-950/50 text-red-400"
               >
                 <Trash2 className="h-4 w-4 mr-2" />
-                Clear Editor
+                {t('Clear Editor')}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -6764,7 +6768,7 @@ export function DubVerseEditor({
             onClick={() => router.push('/subscribe')}
           >
             <Sparkles className="h-4 w-4 mr-1" />
-            Upgrade
+            {t('Upgrade')}
           </Button>
           {/* Hidden for Professional: Make Movie already rebuilds AND exports,
               opening this same modal when it finishes, so a separate Download
@@ -6777,11 +6781,11 @@ export function DubVerseEditor({
               onClick={() => setShowExportModal(true)}
             >
               <Download className="h-4 w-4 mr-1" />
-              Download
+              {t('Download')}
             </Button>
           )}
           <Link href="/profile">
-            <Button variant="ghost" size="sm" className="h-8" title="Profile">
+            <Button variant="ghost" size="sm" className="h-8" title={t('Profile')}>
               <User className="h-4 w-4" />
             </Button>
           </Link>
@@ -6796,12 +6800,12 @@ export function DubVerseEditor({
           <div className="flex items-center gap-4 px-4 py-3 border-b border-slate-800">
             <Select defaultValue="all">
               <SelectTrigger className="w-16 h-8 bg-slate-800 border-slate-700">
-                <SelectValue placeholder="All" />
+                <SelectValue placeholder={t('All')} />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All</SelectItem>
-                <SelectItem value="errors">Errors</SelectItem>
-                <SelectItem value="warnings">Warnings</SelectItem>
+                <SelectItem value="all">{t('All')}</SelectItem>
+                <SelectItem value="errors">{t('Errors')}</SelectItem>
+                <SelectItem value="warnings">{t('Warnings')}</SelectItem>
               </SelectContent>
             </Select>
             {/* Source language selector */}
@@ -6841,7 +6845,7 @@ export function DubVerseEditor({
                     digits are the reading. Only the count changes, so only the
                     count needs to catch the eye. */}
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400">
-                  Segment Counter
+                  {t('Segment Counter')}
                 </span>
                 {saveProgress ? (
                   <span className="text-xs font-semibold text-emerald-400">
@@ -6878,7 +6882,7 @@ export function DubVerseEditor({
                             bar's green dots come from, so the two can't disagree. */}
                         <span
                           className="text-xs font-semibold text-emerald-400"
-                          title="Windows saved out of the whole film"
+                          title={t('Windows saved out of the whole film')}
                         >
                           <span className="text-amber-300 tabular-nums">
                             {String(
@@ -6896,7 +6900,7 @@ export function DubVerseEditor({
                     <span className="text-slate-700">|</span>
                     <span
                       className="text-xs font-semibold text-emerald-400"
-                      title="Auditioned edits not yet committed — press Save to keep them"
+                      title={t('Auditioned edits not yet committed — press Save to keep them')}
                     >
                       <span className="text-amber-300 tabular-nums">
                         {String(stagedEditCount).padStart(2, '0')}
@@ -6906,7 +6910,7 @@ export function DubVerseEditor({
                     <span className="text-slate-700">|</span>
                     <span
                       className="text-xs font-semibold text-emerald-400"
-                      title="Segments whose save failed — they remain staged for re-editing"
+                      title={t('Segments whose save failed — they remain staged for re-editing')}
                     >
                       <span
                         className={cn(
@@ -6946,8 +6950,8 @@ export function DubVerseEditor({
             <div className="flex-1 flex flex-col items-center justify-center gap-4 p-8">
               <div className="w-12 h-12 border-4 border-amber-500/30 border-t-amber-500 rounded-full animate-spin" />
               <div className="text-center">
-                <p className="text-lg font-medium text-white">Transcribing video...</p>
-                <p className="text-sm text-neutral-400 mt-1">This may take a few moments depending on video length</p>
+                <p className="text-lg font-medium text-white">{t('Transcribing video...')}</p>
+                <p className="text-sm text-neutral-400 mt-1">{t('This may take a few moments depending on video length')}</p>
               </div>
             </div>
           )}
@@ -6968,8 +6972,8 @@ export function DubVerseEditor({
             >
               <Upload className="h-12 w-12 text-[#A855F7]" />
               <div>
-                <p className="text-lg font-medium text-neutral-300">Click to upload a video</p>
-                <p className="text-sm text-neutral-500 mt-1">Select a video file to upload and automatically transcribe it</p>
+                <p className="text-lg font-medium text-neutral-300">{t('Click to upload a video')}</p>
+                <p className="text-sm text-neutral-500 mt-1">{t('Select a video file to upload and automatically transcribe it')}</p>
               </div>
             </div>
           )}
@@ -7150,7 +7154,7 @@ export function DubVerseEditor({
                         "cursor-grab active:cursor-grabbing text-slate-600 hover:text-slate-400",
                         dragReorder?.fromIndex === index && "text-amber-400"
                       )}
-                      title="Drag to reorder speaker"
+                      title={t('Drag to reorder speaker')}
                       onMouseDown={(e) => {
                         e.preventDefault()
                         e.stopPropagation()
@@ -7194,7 +7198,7 @@ export function DubVerseEditor({
                           <div
                             className={cn('flex items-center px-5 py-2 rounded-full border text-sm font-semibold shrink-0 cursor-pointer', speakerColor.bg, speakerColor.text, speakerColor.border)}
                             onClick={(e) => e.stopPropagation()}
-                            title="Click to reassign speaker"
+                            title={t('Click to reassign speaker')}
                           >
                             <span>{segment.speaker_label && !/^\d+$/.test(segment.speaker_label) ? segment.speaker_label : `speaker-${speakerNumberMap[segment.speaker_id] ?? 1}`}</span>
                           </div>
@@ -7320,7 +7324,7 @@ export function DubVerseEditor({
                         })() : (
                           <span
                             className="inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full text-slate-600 border border-slate-800 hover:text-violet-400 hover:border-violet-500/30 transition-colors cursor-pointer select-none"
-                            title="Set emotion for this segment"
+                            title={t('Set emotion for this segment')}
                             onClick={(e) => {
                               e.stopPropagation()
                               selectSegment(null)
@@ -7407,7 +7411,7 @@ export function DubVerseEditor({
                               ))}
                               {/* Open the full Emotion Library (~194 states) */}
                               <span
-                                title="Open the Emotion Library — 194 delivery states"
+                                title={t('Open the Emotion Library — 194 delivery states')}
                                 className="text-[9px] px-1.5 py-0.5 rounded-full cursor-pointer border border-violet-400/50 bg-violet-500/15 text-violet-200 hover:bg-violet-500/30 hover:text-white transition-colors select-none font-mono"
                                 onClick={() => setEmotionLibraryTarget({ index, mode: 'stage' })}
                               >
@@ -7543,7 +7547,7 @@ export function DubVerseEditor({
                               ? 'bg-orange-500/20 text-orange-300 border-orange-500/40 hover:bg-red-500/20 hover:text-red-300'
                               : 'text-slate-600 border-slate-800 hover:text-orange-400 hover:border-orange-500/30'
                           )}
-                          title="Adjust segment speed"
+                          title={t('Adjust segment speed')}
                           onClick={(e) => {
                             e.stopPropagation()
                             const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -7626,7 +7630,7 @@ export function DubVerseEditor({
                             {segment.engine === 'elevenlabs-sts' && (
                               <Mic2
                                 className="h-3 w-3 shrink-0 text-violet-300"
-                                aria-label="Audio comes from a recording"
+                                aria-label={t('Audio comes from a recording')}
                               />
                             )}
                             {(segment.preview_text ?? segment.active_text ?? segment.target_text)
@@ -7637,7 +7641,7 @@ export function DubVerseEditor({
                         {hasQCFindings && (
                           <button
                             className="opacity-0 group-hover:opacity-100 transition-opacity ml-1 text-slate-500 hover:text-amber-400"
-                            title="View QC details"
+                            title={t('View QC details')}
                             onClick={(e) => {
                               e.stopPropagation()
                               selectSegment(index)
@@ -7715,15 +7719,15 @@ export function DubVerseEditor({
                             handleGenerateSpeech(index, undefined, _liveText)
                           }}
                         >
-                          Commit
+                          {t('Commit')}
                         </button>
                         <button
                           type="button"
                           className="text-[10px] px-2 py-0.5 rounded bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30 hover:text-red-300 transition-colors pointer-events-auto cursor-pointer select-none"
-                          title="Reset segment to pipeline-original — wipes all edits, emotion, voice, speed, and audio"
+                          title={t('Reset segment to pipeline-original — wipes all edits, emotion, voice, speed, and audio')}
                           onClick={(e) => { e.stopPropagation(); handleClearSegment(index) }}
                         >
-                          Clear
+                          {t('Clear')}
                         </button>
                       </div>
                     )}
@@ -7748,7 +7752,7 @@ export function DubVerseEditor({
               }}
             >
               <MessageCircle className="h-4 w-4 mr-1" />
-              Ask DubMaster AI
+              {t('Ask DubMaster AI')}
             </Button>
             {/* Change Voice — click to reveal draggable chips, drag onto a segment */}
             <Button
@@ -7758,7 +7762,7 @@ export function DubVerseEditor({
               onClick={() => setVoicePaletteOpen(p => !p)}
             >
               <Mic2 className="h-4 w-4 mr-1" />
-              Change Voice
+              {t('Change Voice')}
             </Button>
             {voicePaletteOpen && (
               <div className="flex items-center gap-1.5">
@@ -7820,7 +7824,7 @@ export function DubVerseEditor({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-48 bg-[#0F172A] border-slate-700 max-h-80 overflow-y-auto">
                 {selectedSegmentIndex === null && (
-                  <div className="px-2 py-1.5 text-[10px] text-slate-500">Select a segment first</div>
+                  <div className="px-2 py-1.5 text-[10px] text-slate-500">{t('Select a segment first')}</div>
                 )}
                 {EMOTIONS.map((emotion) => (
                   <DropdownMenuItem
@@ -7888,14 +7892,14 @@ export function DubVerseEditor({
                     }
                   }}
                 >
-                  Clear this segment
+                  {t('Clear this segment')}
                 </DropdownMenuItem>
                 {Object.keys(stagedEmotions).length > 1 && (
                   <DropdownMenuItem
                     className="text-slate-500 hover:text-red-400 hover:bg-slate-700 cursor-pointer text-xs"
                     onClick={() => setStagedEmotions({})}
                   >
-                    Clear all emotions
+                    {t('Clear all emotions')}
                   </DropdownMenuItem>
                 )}
               </DropdownMenuContent>
@@ -7907,7 +7911,7 @@ export function DubVerseEditor({
               onClick={() => setRightPanelTab('nuances')}
             >
               <Sliders className="h-4 w-4 mr-1" />
-              Nuances
+              {t('Nuances')}
             </Button>
             <Button
               variant="ghost"
@@ -7924,7 +7928,7 @@ export function DubVerseEditor({
               }}
             >
               <Sparkles className="h-4 w-4 mr-1" />
-              Ask AI
+              {t('Ask AI')}
             </Button>
             <div className="ml-auto flex flex-col items-end gap-1">
               <Button
@@ -7943,17 +7947,17 @@ export function DubVerseEditor({
                 {isRegenerating ? (
                   <>
                     <RefreshCw className="h-4 w-4 mr-1 animate-spin" />
-                    Generating...
+                    {t('Generating...')}
                   </>
                 ) : selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex)) ? (
                   <>
                     <Lock className="h-4 w-4 mr-1" />
-                    Locked
+                    {t('Locked')}
                   </>
                 ) : (
                   <>
                     <Sparkles className="h-4 w-4 mr-1" />
-                    Generate Speech
+                    {t('Generate Speech')}
                   </>
                 )}
               </Button>
@@ -7962,7 +7966,7 @@ export function DubVerseEditor({
               )}
               {addSegmentFeedback === 'error' && (
                 <p className="text-xs text-red-400 font-medium">
-                  Add Segment failed — please try again or reload the page.
+                  {t('Add Segment failed — please try again or reload the page.')}
                 </p>
               )}
               {addSegmentFeedback === 'success' && (
@@ -7980,7 +7984,7 @@ export function DubVerseEditor({
           </div>
           {pendingDelete !== null && (
             <div className="flex items-center gap-2 px-3 py-1.5 bg-red-950/50 border border-red-500/30 rounded text-xs text-red-400 mx-4 mb-2">
-              <span>Delete this segment?</span>
+              <span>{t('Delete this segment?')}</span>
               <Button size="sm" className="h-6 text-xs bg-red-600 hover:bg-red-700 text-white px-2"
                 onClick={() => {
                   const idx = pendingDelete
@@ -8001,17 +8005,17 @@ export function DubVerseEditor({
                   selectSegment(null)
                   setPendingDelete(null)
                 }}>
-                Delete
+                {t('Delete')}
               </Button>
               <Button size="sm" variant="ghost" className="h-6 text-xs px-2"
                 onClick={() => setPendingDelete(null)}>
-                Cancel
+                {t('Cancel')}
               </Button>
             </div>
           )}
           {showRevertAllConfirm && (
             <div className="flex items-center gap-2 px-3 py-1.5 bg-red-950/50 border border-red-500/30 rounded text-xs text-red-400 mx-4 mb-2">
-              <span>This will clear all editor changes and return to the original pipeline output. Are you sure?</span>
+              <span>{t('This will clear all editor changes and return to the original pipeline output. Are you sure?')}</span>
               <Button size="sm" className="h-6 text-xs bg-red-600 hover:bg-red-700 text-white px-2"
                 onClick={() => {
                   // Wipe all store state (job, video, segments, speakers, QC)
@@ -8042,11 +8046,11 @@ export function DubVerseEditor({
                   }
                   setShowRevertAllConfirm(false)
                 }}>
-                Clear Editor
+                {t('Clear Editor')}
               </Button>
               <Button size="sm" variant="ghost" className="h-6 text-xs px-2"
                 onClick={() => setShowRevertAllConfirm(false)}>
-                Cancel
+                {t('Cancel')}
               </Button>
             </div>
           )}
@@ -8121,7 +8125,7 @@ export function DubVerseEditor({
                   className={cn('h-6 text-[11px] px-2', playbackMode === 'original' ? 'text-white' : 'text-slate-500')}
                   onClick={() => setPlaybackMode('original')}
                 >
-                  Original
+                  {t('Original')}
                 </Button>
                 <Button
                   variant="ghost"
@@ -8132,7 +8136,7 @@ export function DubVerseEditor({
                   )}
                   onClick={() => setPlaybackMode('dubbed')}
                 >
-                  Translated
+                  {t('Translated')}
                 </Button>
                 <Button
                   variant="ghost"
@@ -8145,7 +8149,7 @@ export function DubVerseEditor({
                   )}
                   onClick={() => setPlaybackMode('preview')}
                 >
-                  Preview
+                  {t('Preview')}
                 </Button>
               </div>
             )}
@@ -8211,7 +8215,7 @@ export function DubVerseEditor({
                 currentTimeRef={currentTimeRef}
               />
               <div className="absolute bottom-2 right-2 flex items-center gap-1 text-xs text-slate-500">
-                <span>Video Translated by DubMaster</span>
+                <span>{t('Video Translated by DubMaster')}</span>
               </div>
             </div>
           </div>
@@ -8236,7 +8240,7 @@ export function DubVerseEditor({
                 <span className="w-11 h-11 rounded-lg bg-[#1c1c20] border border-white/10 flex items-center justify-center shrink-0">
                   <AskAiBotIcon id="askAiBotGradient-header" size={26} />
                 </span>
-                Ask DubMaster AI
+                {t('Ask DubMaster AI')}
               </span>
               <div className="flex items-center gap-1">
                 <button
@@ -8273,7 +8277,7 @@ export function DubVerseEditor({
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto px-8 py-6 space-y-6">
               {askAiChatMessages.length === 0 && (
-                <div className="text-sm text-white/40">Ask me anything about your dub — QC scores, Velma enrichment, exporting, timeline behavior.</div>
+                <div className="text-sm text-white/40">{t('Ask me anything about your dub — QC scores, Velma enrichment, exporting, timeline behavior.')}</div>
               )}
               {askAiChatMessages.map((m, i) => (
                 <div key={i} className={cn("flex items-start gap-3", m.role === 'user' ? "flex-row-reverse" : "flex-row")}>
@@ -8306,7 +8310,7 @@ export function DubVerseEditor({
                   value={askAiChatInput}
                   onChange={e => setAskAiChatInput(e.target.value)}
                   onKeyDown={e => { if (e.key === 'Enter') submitAskAiChat() }}
-                  placeholder="Ask about your dub..."
+                  placeholder={t('Ask about your dub...')}
                   className="w-full bg-white/5 text-white text-sm rounded-full px-4 py-3 outline-none placeholder:text-white/30"
                 />
               </div>
@@ -8503,7 +8507,7 @@ export function DubVerseEditor({
           {/* Studio tab — placeholder */}
           {rightPanelTab === 'studio' && hasFeature('studioCollaboration') && (
             <div className="flex-1 min-h-0 flex items-center justify-center text-slate-500 text-sm bg-neutral-950">
-              Studio coming soon
+              {t('Studio coming soon')}
             </div>
           )}
 
@@ -8666,11 +8670,11 @@ export function DubVerseEditor({
 
                 {markers.length > 0 && (
                   <div className="text-[9px] text-slate-600">
-                    Click a colored span to remove its marker
+                    {t('Click a colored span to remove its marker')}
                   </div>
                 )}
 
-                <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold pt-1">Basic</div>
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold pt-1">{t('Basic')}</div>
                 {tier1.map(({ key, labels }) => (
                   <div key={key} className="space-y-1">
                     <div className="text-[11px] text-slate-400 capitalize">{key}</div>
@@ -8702,12 +8706,12 @@ export function DubVerseEditor({
                         : 'text-slate-500 border border-slate-700'
                     )}
                     onClick={() => setNuancesAdvanced(p => !p)}
-                  >Advanced</button>
+                  >{t('Advanced')}</button>
                 </div>
 
                 {nuancesAdvanced && (
                   <div className="space-y-3 pt-1">
-                    <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">Advanced</div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">{t('Advanced')}</div>
                     {tier2.map(({ key, min, max }) => (
                       <div key={key} className="space-y-0.5">
                         <div className="flex items-center justify-between">
@@ -8734,7 +8738,7 @@ export function DubVerseEditor({
 
                 {/* Free-text write-in — folds into this segment's composed S2 nuance directive */}
                 <div className="space-y-1 pt-1">
-                  <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">Write-in</div>
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">{t('Write-in')}</div>
                   <input
                     type="text"
                     value={seg?.custom_nuance ?? ''}
@@ -8751,7 +8755,7 @@ export function DubVerseEditor({
                     placeholder="e.g. lingers on the last word, slight tremble"
                     className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 placeholder:text-slate-600 focus:border-violet-500/60 focus:outline-none"
                   />
-                  <div className="text-[9px] text-slate-600">Free-text delivery note, added to this segment's nuance directive on regenerate.</div>
+                  <div className="text-[9px] text-slate-600">{t("Free-text delivery note, added to this segment's nuance directive on regenerate.")}</div>
                 </div>
 
                 <div className="pt-3">
@@ -8761,7 +8765,7 @@ export function DubVerseEditor({
                     onClick={() => handleGenerateSpeech(nIdx)}
                     disabled={isRegenerating}
                   >
-                    {isRegenerating ? 'Generating...' : 'Regenerate with Nuances'}
+                    {isRegenerating ? t('Generating...') : t('Regenerate with Nuances')}
                   </Button>
                 </div>
               </div>
@@ -8939,7 +8943,7 @@ export function DubVerseEditor({
                 <div className="px-3 pt-2 pb-1">
                   <input
                     type="text"
-                    placeholder="Search curves..."
+                    placeholder={t('Search curves...')}
                     value={curveSearchQuery}
                     onChange={e => setCurveSearchQuery(e.target.value)}
                     className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white placeholder-slate-500 outline-none focus:border-violet-500"
@@ -8949,8 +8953,7 @@ export function DubVerseEditor({
                   <div className="flex-1 flex items-center justify-center p-6 text-center">
                     <p className="text-xs text-slate-500">
                       {savedCurves.length === 0
-                        ? 'No saved curves yet. Set an emotion curve on a segment, name it in the Chord view, and click Save.'
-                        : 'No curves match your search.'}
+                        ? t('No saved curves yet. Set an emotion curve on a segment, name it in the Chord view, and click Save.') : t('No curves match your search.')}
                     </p>
                   </div>
                 ) : (
@@ -8996,15 +8999,15 @@ export function DubVerseEditor({
                             onClick={() => applyCurve(curve)}
                             disabled={selectedSegmentIndex === null}
                           >
-                            Apply
+                            {t('Apply')}
                           </button>
                           {deleteConfirmCurveId === curve.id ? (
                             <>
-                              <button type="button" className="px-2 py-0.5 rounded text-[10px] bg-red-500/30 text-red-300 border border-red-500/40 hover:bg-red-500/50 transition-colors" onClick={() => deleteCurve(curve.id)}>Confirm</button>
-                              <button type="button" className="px-2 py-0.5 rounded text-[10px] text-slate-400 border border-slate-700 hover:text-slate-200 transition-colors" onClick={() => setDeleteConfirmCurveId(null)}>Cancel</button>
+                              <button type="button" className="px-2 py-0.5 rounded text-[10px] bg-red-500/30 text-red-300 border border-red-500/40 hover:bg-red-500/50 transition-colors" onClick={() => deleteCurve(curve.id)}>{t('Confirm')}</button>
+                              <button type="button" className="px-2 py-0.5 rounded text-[10px] text-slate-400 border border-slate-700 hover:text-slate-200 transition-colors" onClick={() => setDeleteConfirmCurveId(null)}>{t('Cancel')}</button>
                             </>
                           ) : (
-                            <button type="button" className="px-2 py-0.5 rounded text-[10px] text-slate-500 border border-slate-700 hover:text-red-400 hover:border-red-500/40 transition-colors" onClick={() => setDeleteConfirmCurveId(curve.id)}>Delete</button>
+                            <button type="button" className="px-2 py-0.5 rounded text-[10px] text-slate-500 border border-slate-700 hover:text-red-400 hover:border-red-500/40 transition-colors" onClick={() => setDeleteConfirmCurveId(curve.id)}>{t('Delete')}</button>
                           )}
                         </div>
                       </div>
@@ -9032,7 +9035,7 @@ export function DubVerseEditor({
               />
             ) : (
               <div className="flex-1 flex items-center justify-center text-slate-600 text-sm">
-                Double-click a segment in the Emotion track
+                {t('Double-click a segment in the Emotion track')}
               </div>
             )}
           </div>
@@ -9074,7 +9077,7 @@ export function DubVerseEditor({
           <div className="w-full max-w-md rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl"
             onClick={(e) => e.stopPropagation()}>
             <h2 id="confirm-render-title" className="text-base font-semibold text-slate-100">
-              Make movie now?
+              {t('Make movie now?')}
             </h2>
 
             <div className="mt-3 space-y-2.5">
@@ -9084,7 +9087,7 @@ export function DubVerseEditor({
                     {confirmRender.staged} segment{confirmRender.staged === 1 ? '' : 's'} staged but not saved
                   </div>
                   <div className="mt-1 text-[11px] leading-relaxed text-amber-100/70">
-                    These takes will be <strong>missing from the film</strong> — the render
+                    {t('These takes will be')} <strong>missing from the film</strong> — the render
                     uses saved segments only. Save first to include them.
                   </div>
                 </div>
@@ -9096,7 +9099,7 @@ export function DubVerseEditor({
                     Segment{confirmRender.failed.length === 1 ? '' : 's'} {confirmRender.failed.join(', ')} failed to save
                   </div>
                   <div className="mt-1 text-[11px] leading-relaxed text-red-100/70">
-                    These will not be in the film either.
+                    {t('These will not be in the film either.')}
                   </div>
                 </div>
               )}
@@ -9131,7 +9134,7 @@ export function DubVerseEditor({
               <Button variant="ghost" size="sm"
                 onClick={() => setConfirmRender(null)}
                 className="h-8 text-xs text-slate-400">
-                Cancel
+                {t('Cancel')}
               </Button>
               {confirmRender.staged > 0 && (
                 <Button size="sm"
@@ -9141,7 +9144,7 @@ export function DubVerseEditor({
                     handleRebuildVideo()
                   }}
                   className="h-8 text-xs bg-teal-600 hover:bg-teal-700 text-white">
-                  Save, then make movie
+                  {t('Save, then make movie')}
                 </Button>
               )}
               <Button size="sm"
@@ -9151,7 +9154,7 @@ export function DubVerseEditor({
                   confirmRender.staged > 0
                     ? 'border-slate-600 text-slate-300'
                     : 'bg-teal-600 hover:bg-teal-700 text-white')}>
-                {confirmRender.staged > 0 ? 'Make movie without them' : 'Make movie anyway'}
+                {confirmRender.staged > 0 ? t('Make movie without them') : t('Make movie anyway')}
               </Button>
             </div>
           </div>
@@ -9254,14 +9257,14 @@ export function DubVerseEditor({
                   Ask AI
                   {seg && <span className="text-slate-500 font-normal text-xs">— Segment {selectedSegmentIndex! + 1}</span>}
                 </span>
-                <button type="button" title="Close" onClick={() => setAskAiOpen(false)} className="text-slate-500 hover:text-white">
+                <button type="button" title={t('Close')} onClick={() => setAskAiOpen(false)} className="text-slate-500 hover:text-white">
                   <X className="h-4 w-4" />
                 </button>
               </div>
 
               {/* Model selector */}
               <div className="px-4 pt-3 pb-3 border-b border-slate-800 shrink-0">
-                <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold mb-2">Select AI Model</p>
+                <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold mb-2">{t('Select AI Model')}</p>
                 <div className="flex gap-2">
                   {AI_MODELS.map(m => (
                     <button
@@ -9287,11 +9290,11 @@ export function DubVerseEditor({
                 {seg && (
                   <div className="bg-slate-800 rounded-lg p-3 space-y-1.5 text-xs">
                     <div className="flex gap-2">
-                      <span className="text-slate-500 w-14 shrink-0">Original</span>
+                      <span className="text-slate-500 w-14 shrink-0">{t('Original')}</span>
                       <span className="text-slate-300">{seg.source_text}</span>
                     </div>
                     <div className="flex gap-2">
-                      <span className="text-slate-500 w-14 shrink-0">Dubbed</span>
+                      <span className="text-slate-500 w-14 shrink-0">{t('Dubbed')}</span>
                       <span className="text-amber-300">{seg.preview_text ?? seg.active_text ?? seg.target_text}</span>
                     </div>
                   </div>
@@ -9314,7 +9317,7 @@ export function DubVerseEditor({
                 {/* Custom prompt */}
                 <div className="flex gap-2">
                   <input
-                    aria-label="Ask AI prompt"
+                    aria-label={t('Ask AI prompt')}
                     className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-amber-500/50"
                     placeholder="Ask anything about this segment…"
                     value={askAiPrompt}
@@ -9354,7 +9357,7 @@ export function DubVerseEditor({
                         }}
                       >
                         <Check className="h-3 w-3 mr-1.5" />
-                        Apply suggestion
+                        {t('Apply suggestion')}
                       </Button>
                     )}
                   </div>
@@ -9389,7 +9392,7 @@ export function DubVerseEditor({
                   </span>
                 )}
               </span>
-              <button type="button" title="Close" onClick={() => setPitchPopupIndex(null)} className="text-slate-500 hover:text-white">
+              <button type="button" title={t('Close')} onClick={() => setPitchPopupIndex(null)} className="text-slate-500 hover:text-white">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -9409,7 +9412,7 @@ export function DubVerseEditor({
                   "text-4xl font-mono w-28 text-center cursor-pointer select-none transition-colors",
                   (stagedPitches[keyAt(pitchPopupIndex)] ?? 0) !== 0 ? "text-cyan-400" : "text-white"
                 )}
-                title="Click to reset"
+                title={t('Click to reset')}
                 onClick={() => setStagedPitches(prev => { const n = { ...prev }; delete n[keyAt(pitchPopupIndex)]; return n })}
               >
                 {(stagedPitches[keyAt(pitchPopupIndex)] ?? 0) > 0 ? '+' : ''}{stagedPitches[keyAt(pitchPopupIndex)] ?? 0}
@@ -9445,7 +9448,7 @@ export function DubVerseEditor({
               onClick={() => { setPitchPopupIndex(null); handleGenerateSpeech() }}
             >
               <Sparkles className="h-4 w-4 mr-1" />
-              Generate Speech
+              {t('Generate Speech')}
             </Button>
           </div>
         </>
@@ -9466,7 +9469,7 @@ export function DubVerseEditor({
                 <Gauge className="h-4 w-4" />
                 Speed — Segment {speedPopupIndex + 1}
               </span>
-              <button type="button" title="Close" onClick={() => setSpeedPopupIndex(null)} className="text-slate-500 hover:text-white">
+              <button type="button" title={t('Close')} onClick={() => setSpeedPopupIndex(null)} className="text-slate-500 hover:text-white">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -9486,7 +9489,7 @@ export function DubVerseEditor({
                   "text-4xl font-mono w-28 text-center cursor-pointer select-none transition-colors",
                   (stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0) !== 1.0 ? "text-orange-400" : "text-white"
                 )}
-                title="Click to reset"
+                title={t('Click to reset')}
                 onClick={() => setStagedSpeeds(prev => { const n = { ...prev }; delete n[keyAt(speedPopupIndex)]; return n })}
               >
                 {(stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0).toFixed(2)}
@@ -9541,7 +9544,7 @@ export function DubVerseEditor({
               onClick={() => { setSpeedPopupIndex(null); handleGenerateSpeech() }}
             >
               <Sparkles className="h-4 w-4 mr-1" />
-              Generate Speech
+              {t('Generate Speech')}
             </Button>
           </div>
         </>
@@ -9590,7 +9593,7 @@ export function DubVerseEditor({
                 <PopoverContent className="w-48 bg-slate-900 border-slate-700 p-3">
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <span className="text-xs text-slate-400">Master Volume</span>
+                      <span className="text-xs text-slate-400">{t('Master Volume')}</span>
                       <span className="text-xs text-slate-300 font-mono">{masterVolume}%</span>
                     </div>
                     <Slider
@@ -9606,7 +9609,7 @@ export function DubVerseEditor({
                       className="w-full h-7 text-xs"
                       onClick={() => setIsMuted(!isMuted)}
                     >
-                      {isMuted ? 'Unmute All' : 'Mute All'}
+                      {isMuted ? t('Unmute All') : t('Mute All')}
                     </Button>
                   </div>
                 </PopoverContent>
@@ -9614,7 +9617,7 @@ export function DubVerseEditor({
               <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
                 <Grid3X3 className="h-4 w-4" />
               </Button>
-              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Clear editor" onClick={() => setShowRevertAllConfirm(true)}>
+              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title={t('Clear editor')} onClick={() => setShowRevertAllConfirm(true)}>
                 <Trash2 className="h-4 w-4" />
               </Button>
               {/* Timecode lives here rather than in the centred group: it is ~90px
@@ -9752,9 +9755,9 @@ export function DubVerseEditor({
               size="sm"
               className="h-8 px-2 text-xs text-neutral-300 hover:text-white gap-1"
               onClick={handleSplitSceneAtPlayhead}
-              title="Split the current video scene at the playhead"
+              title={t('Split the current video scene at the playhead')}
             >
-              <span>✂️</span> Scene
+              <span>✂️</span> {t('Scene')}
             </Button>
 
           </div>
@@ -9848,7 +9851,7 @@ export function DubVerseEditor({
         {chunkMode && (
           <div ref={chunkBarRef} className="shrink-0 flex items-center gap-2 border-t border-neutral-800 bg-neutral-950 px-3 py-2 overflow-x-auto">
             <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-              Chunks
+              {t('Chunks')}
             </span>
             {Array.from({ length: chunkCount }, (_, i) => {
               const isActive = currentChunk === i
@@ -9932,7 +9935,7 @@ export function DubVerseEditor({
               <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800 bg-neutral-900">
                 <div className="flex items-center gap-2">
                   <Gauge className={cn("h-4 w-4", qcLoading && !qcAnalysis ? "text-amber-400 animate-pulse" : "text-amber-400")} />
-                  <span className="text-sm font-semibold text-white">QC Monitor</span>
+                  <span className="text-sm font-semibold text-white">{t('QC Monitor')}</span>
                 </div>
                 <div className="relative">
                   <button
@@ -10050,20 +10053,20 @@ export function DubVerseEditor({
             {/* Each spacer/label MUST match its track height exactly */}
             {/* Layover — where sections lifted out of the picture are parked. */}
             <div className="h-20 shrink-0 flex items-center px-2 text-xs text-cyan-400/80 border-b border-neutral-800 gap-1">
-              <span className="truncate">Layover</span>
+              <span className="truncate">{t('Layover')}</span>
               {parkedScenes.length > 0 && (
                 <span className="text-[9px] px-1 rounded bg-cyan-500/20 border border-cyan-500/40">{parkedScenes.length}</span>
               )}
             </div>
             <div className="h-5 shrink-0 border-b border-neutral-800 bg-neutral-900" />
-            <div className="h-20 shrink-0 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-800">Video</div>
+            <div className="h-20 shrink-0 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-800">{t('Video')}</div>
             <div className="h-20 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1">
                   <button type="button" onClick={() => setIsMutedOriginal(v => !v)} className="flex-shrink-0">
                     {isMutedOriginal ? <VolumeX className="h-3 w-3 text-red-400" /> : <Volume2 className="h-3 w-3 text-blue-400" />}
                   </button>
-                  <span className="truncate">Original</span>
+                  <span className="truncate">{t('Original')}</span>
                 </div>
                 <span className="font-mono text-neutral-500 text-[10px]">{originalTextVolume}</span>
               </div>
@@ -10079,7 +10082,7 @@ export function DubVerseEditor({
             {/* Reference track label — shown only when a reference video has been imported */}
             {referenceSegments && referenceSegments.length > 0 && (
               <div className="h-20 shrink-0 flex flex-col justify-center px-2 text-xs border-b border-amber-800/40 gap-0.5 bg-amber-950/20">
-                <span className="truncate text-amber-400/80 font-medium">Reference</span>
+                <span className="truncate text-amber-400/80 font-medium">{t('Reference')}</span>
                 {referenceDetectedLang && (
                   <span className="text-[10px] text-neutral-500 uppercase">{referenceDetectedLang}</span>
                 )}
@@ -10092,7 +10095,7 @@ export function DubVerseEditor({
                   <button type="button" onClick={() => setIsMutedDubbed(v => !v)} className="flex-shrink-0">
                     {isMutedDubbed ? <VolumeX className="h-3 w-3 text-red-400" /> : <Volume2 className="h-3 w-3 text-amber-400" />}
                   </button>
-                  <span className="truncate">Dubbed</span>
+                  <span className="truncate">{t('Dubbed')}</span>
                 </div>
                 <span className="font-mono text-neutral-500 text-[10px]">{dubbedTextVolume}</span>
               </div>
@@ -10113,7 +10116,7 @@ export function DubVerseEditor({
                   <button type="button" onClick={() => setIsMutedRPT(v => !v)} className="flex-shrink-0">
                     {isMutedRPT ? <VolumeX className="h-3 w-3 text-red-400" /> : <Volume2 className="h-3 w-3 text-amber-400" />}
                   </button>
-                  <span className="truncate text-amber-400">Preview Audio</span>
+                  <span className="truncate text-amber-400">{t('Preview Audio')}</span>
                 </div>
                 <span className="font-mono text-neutral-500 text-[10px]">{rptVolume}</span>
               </div>
@@ -10147,7 +10150,7 @@ export function DubVerseEditor({
             {hasFeature('emotionalCurveEditor') && (
             <div className="h-24 shrink-0 flex items-start px-2 pt-2 text-xs text-neutral-400 border-b border-neutral-700 bg-neutral-900/30">
               <div className="flex flex-col text-xs text-slate-300 select-none">
-                <span className="font-semibold mb-1">Emotion</span>
+                <span className="font-semibold mb-1">{t('Emotion')}</span>
 
                 <div className="flex items-center gap-1 mt-1">
                   <button
@@ -10158,7 +10161,7 @@ export function DubVerseEditor({
                         ? 'bg-amber-400/20 text-amber-300 border border-amber-400/40'
                         : 'text-slate-500 border border-slate-700'
                     }`}
-                  >Auto</button>
+                  >{t('Auto')}</button>
                   <button
                     type="button"
                     onClick={() => setEmotionSource('advanced')}
@@ -10167,7 +10170,7 @@ export function DubVerseEditor({
                         ? 'bg-violet-400/20 text-violet-300 border border-violet-400/40'
                         : 'text-slate-500 border border-slate-700'
                     }`}
-                  >Advanced</button>
+                  >{t('Advanced')}</button>
                 </div>
               </div>
             </div>
@@ -10446,7 +10449,7 @@ export function DubVerseEditor({
             onClick={() => setParkedMenu(null)}
             className="w-full text-left px-3 py-2 text-xs text-slate-400 hover:bg-slate-700 whitespace-nowrap"
           >
-            Cancel
+            {t('Cancel')}
           </button>
         </div>
       )}
@@ -10501,14 +10504,14 @@ export function DubVerseEditor({
               }}
               className="w-full text-left px-3 py-2 text-xs text-slate-300 hover:bg-slate-700 whitespace-nowrap"
             >
-              Clear fades
+              {t('Clear fades')}
             </button>
             <button
               type="button"
               onClick={() => setSceneMenu(null)}
               className="w-full text-left px-3 py-2 text-xs text-slate-400 hover:bg-slate-700 whitespace-nowrap"
             >
-              Cancel
+              {t('Cancel')}
             </button>
           </div>
         )
@@ -10566,7 +10569,7 @@ export function DubVerseEditor({
                 />
                 {parkedScenes.length === 0 && (
                   <div className="absolute inset-0 flex items-center pl-3 text-[10px] text-cyan-600/50 pointer-events-none">
-                    Lift a scene here to take it out of the picture without losing it
+                    {t('Lift a scene here to take it out of the picture without losing it')}
                   </div>
                 )}
                 {parkedScenes.map((sc) => {
@@ -10999,7 +11002,7 @@ export function DubVerseEditor({
                         <button
                           type="button"
                           className="absolute right-1 top-0.5 text-[8px] text-emerald-300 hover:text-white px-1 py-0.5 rounded bg-emerald-950/60 hover:bg-emerald-500/40 pointer-events-auto z-30"
-                          title="Render this scene preview"
+                          title={t('Render this scene preview')}
                           onClick={(e) => {
                             e.stopPropagation()
                             apiClient.renderScenePreview(jobId, scene.id).then(({ url }) => {
@@ -11010,7 +11013,7 @@ export function DubVerseEditor({
                             })
                           }}
                         >
-                          Render
+                          {t('Render')}
                         </button>
                         {/* Left boundary drag handle */}
                         <div
@@ -11281,7 +11284,7 @@ export function DubVerseEditor({
                   </div>
                 ) : isExtractingThumbnails ? (
                   <div className="absolute inset-y-1 left-1 right-1 bg-emerald-600/20 border border-emerald-500/50 rounded flex items-center justify-center">
-                    <span className="text-xs text-emerald-400 animate-pulse">Extracting frames...</span>
+                    <span className="text-xs text-emerald-400 animate-pulse">{t('Extracting frames...')}</span>
                   </div>
                 ) : null}
               </div>
@@ -11872,7 +11875,7 @@ export function DubVerseEditor({
                       {segment.was_truncated && (
                         <div
                           className="absolute top-0 right-0 w-4 h-4 flex items-center justify-center cursor-pointer z-10 text-yellow-400 hover:text-yellow-300 hover:scale-110 transition-transform"
-                          title="Truncated — click to regenerate"
+                          title={t('Truncated — click to regenerate')}
                           onClick={(e) => {
                             e.stopPropagation()
                             handleGenerateSpeech(index)
@@ -12517,9 +12520,9 @@ export function DubVerseEditor({
               <Lock className="h-6 w-6 text-amber-400" />
             </div>
             <div className="text-center">
-              <p className="text-sm font-semibold text-white tracking-wide">Editor locked</p>
+              <p className="text-sm font-semibold text-white tracking-wide">{t('Editor locked')}</p>
               <p className="text-xs text-slate-400 mt-1 max-w-[16rem]">
-                Nothing can be moved or changed. Your work stays exactly as you left it.
+                {t('Nothing can be moved or changed. Your work stays exactly as you left it.')}
               </p>
             </div>
             <button
@@ -12531,7 +12534,7 @@ export function DubVerseEditor({
                          uppercase tracking-widest transition-colors cursor-pointer"
             >
               <Unlock className="h-3.5 w-3.5" />
-              Unlock
+              {t('Unlock')}
             </button>
           </div>
         </div>
@@ -12553,10 +12556,10 @@ export function DubVerseEditor({
               <div className="w-10 h-10 rounded-full bg-red-500/20 flex items-center justify-center shrink-0">
                 <span className="text-red-400 text-xl">⚠</span>
               </div>
-              <h3 className="text-lg font-semibold text-white">Rewrite Text — Timing Exclusion Error</h3>
+              <h3 className="text-lg font-semibold text-white">{t('Rewrite Text — Timing Exclusion Error')}</h3>
             </div>
             <p className="text-sm text-neutral-300 mb-4">
-              Your allotted space for this text is <span className="text-amber-400 font-mono font-bold">{timingExclusion.slotDuration.toFixed(1)}s</span>.
+              {t('Your allotted space for this text is')} <span className="text-amber-400 font-mono font-bold">{timingExclusion.slotDuration.toFixed(1)}s</span>.
               Your text exceeds this by <span className="text-red-400 font-mono font-bold">{timingExclusion.overlap.toFixed(1)}s</span>.
             </p>
             <p className="text-sm text-neutral-400 mb-6">
@@ -12581,7 +12584,7 @@ export function DubVerseEditor({
                 className="px-4 py-2 rounded bg-neutral-700 hover:bg-neutral-600 text-white text-sm font-medium transition-colors"
                 onClick={() => setTimingExclusion(null)}
               >
-                Cancel
+                {t('Cancel')}
               </button>
             </div>
           </div>
@@ -12596,21 +12599,21 @@ export function DubVerseEditor({
               <div className="w-10 h-10 rounded-full bg-amber-500/20 flex items-center justify-center shrink-0">
                 <span className="text-amber-400 text-xl">⚠</span>
               </div>
-              <h3 className="text-lg font-semibold text-white">Timing Warning</h3>
+              <h3 className="text-lg font-semibold text-white">{t('Timing Warning')}</h3>
             </div>
             <p className="text-sm text-neutral-300 mb-4">
-              Your allotted space for this text is <span className="text-amber-400 font-mono font-bold">{timingExclusion.slotDuration.toFixed(1)}s</span>.
+              {t('Your allotted space for this text is')} <span className="text-amber-400 font-mono font-bold">{timingExclusion.slotDuration.toFixed(1)}s</span>.
               Your text exceeds this by <span className="text-amber-400 font-mono font-bold">{timingExclusion.overlap.toFixed(1)}s</span>.
             </p>
             <p className="text-sm text-neutral-400 mb-6">
-              This is close enough to fit. You can generate anyway or rewrite the text to shorten it.
+              {t('This is close enough to fit. You can generate anyway or rewrite the text to shorten it.')}
             </p>
             <div className="flex justify-end gap-2">
               <button
                 className="px-4 py-2 rounded bg-neutral-700 hover:bg-neutral-600 text-white text-sm font-medium transition-colors"
                 onClick={() => setTimingExclusion(null)}
               >
-                Rewrite Text
+                {t('Rewrite Text')}
               </button>
               <button
                 type="button"
@@ -12665,7 +12668,7 @@ export function DubVerseEditor({
                   }
                 }}
               >
-                Generate Anyway
+                {t('Generate Anyway')}
               </button>
             </div>
           </div>
@@ -12677,7 +12680,7 @@ export function DubVerseEditor({
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="bg-neutral-900 border border-neutral-700 rounded-lg p-6 w-[500px] shadow-xl">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-white">Add New Segment</h3>
+              <h3 className="text-lg font-semibold text-white">{t('Add New Segment')}</h3>
               <Button
                 variant="ghost"
                 size="sm"
@@ -12714,7 +12717,7 @@ export function DubVerseEditor({
               <div>
                 <label className="block text-sm text-neutral-400 mb-1">Original Text (Source Language)</label>
                 <textarea
-                  placeholder="Enter the original spoken text..."
+                  placeholder={t('Enter the original spoken text...')}
                   value={newSegmentOriginal}
                   onChange={(e) => setNewSegmentOriginal(e.target.value)}
                   className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded text-white text-sm focus:outline-none focus:border-blue-500 resize-none h-20"
@@ -12724,7 +12727,7 @@ export function DubVerseEditor({
               <div>
                 <label className="block text-sm text-neutral-400 mb-1">Translation (Target Language)</label>
                 <textarea
-                  placeholder="Enter the translated text..."
+                  placeholder={t('Enter the translated text...')}
                   value={newSegmentTranslation}
                   onChange={(e) => setNewSegmentTranslation(e.target.value)}
                   className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded text-white text-sm focus:outline-none focus:border-amber-500 resize-none h-20"
@@ -12737,14 +12740,14 @@ export function DubVerseEditor({
                   className="border-neutral-700"
                   onClick={() => setShowAddSegment(false)}
                 >
-                  Cancel
+                  {t('Cancel')}
                 </Button>
                 <Button
                   className="bg-amber-500 hover:bg-amber-600 text-black"
                   onClick={handleAddSegment}
                   disabled={!newSegmentStart || !newSegmentEnd || !newSegmentOriginal}
                 >
-                  Add Segment
+                  {t('Add Segment')}
                 </Button>
               </div>
             </div>

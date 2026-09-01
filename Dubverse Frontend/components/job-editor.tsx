@@ -3,6 +3,7 @@
 import { useRef, useState, useCallback, useEffect } from "react"
 import { Badge } from "@/components/ui/badge"
 import type { Segment, Transcript } from "@/lib/api-client"
+import { useT } from '@/lib/use-t'
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -50,6 +51,7 @@ export function JobEditor({
   segmentsLanguage,
   transcript,
 }: JobEditorProps) {
+  const t = useT()
   const [leftPct, setLeftPct] = useState(50)
   const containerRef = useRef<HTMLDivElement>(null)
   const isDragging = useRef(false)
@@ -99,7 +101,7 @@ export function JobEditor({
       >
         <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-            Dubbed Video
+            {t('Dubbed Video')}
           </span>
           <Badge variant="outline" className="text-[10px] h-5">
             {targetLang}
