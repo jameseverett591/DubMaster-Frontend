@@ -119,8 +119,8 @@ frontend/
 
 **Now that Docker is working, you can remove:**
 
-- [ ] Delete `venv/` folder (if exists)
-- [ ] Delete `venv311/` folder
+- [x] Delete `venv/` folder (if exists) — done 2 Sep 2026, 66,034 files
+- [x] Delete `venv311/` folder — done 2 Sep 2026, 44,060 files
 - [ ] Remove old startup scripts (if any PowerShell/bash scripts)
 - [ ] Uninstall redundant VS Code extensions:
   - [ ] Augment Code
