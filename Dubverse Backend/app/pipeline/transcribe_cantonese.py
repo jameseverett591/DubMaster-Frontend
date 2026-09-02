@@ -57,6 +57,7 @@ def transcribe_cantonese(
     extract_result: Dict[str, Any],
     vocals_path: Optional[str] = None,
     job_id: str | None = None,
+    source_language: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run the multi-engine Cantonese transcription pipeline.
@@ -184,7 +185,7 @@ def transcribe_cantonese(
             try:
                 from app.pipeline.transcribe_audio import transcribe_audio
 
-                whisper_result = transcribe_audio(extract_result, job_id)
+                whisper_result = transcribe_audio(extract_result, job_id, source_language=source_language)
                 if whisper_result.get("status") == "ok":
                     import json
                     transcript_path = whisper_result.get("transcript_path")

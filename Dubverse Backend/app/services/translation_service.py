@@ -562,7 +562,7 @@ class TranslationService:
         )
 
         source_norm = normalize_language_code(source_language, allow_auto=True)
-        target_norm = normalize_language_code(target_language)
+        target_norm = normalize_language_code(target_language, strict=True)
 
         if source_norm != source_language or target_norm != target_language:
             logger.info(
@@ -1423,21 +1423,35 @@ class TranslationService:
         deepl_target = target_language.upper()
         if deepl_target == "EN":
             deepl_target = "EN-US"
-        elif deepl_target == "PT":
+        elif deepl_target in ("PT", "PT-BR", "PT-PT"):
             deepl_target = "PT-BR"
+        elif deepl_target in ("ES", "ES-MX", "ES-ES", "ES-US"):
+            deepl_target = "ES"
+        elif deepl_target in ("YUE", "ZH-YUE", "YUE-HK", "ZH-HK"):
+            # DeepL does not support Cantonese as a target language.
+            return None
+
+        deepl_source = source_language.upper()
+        if deepl_source in ("PT-BR", "PT-PT"):
+            deepl_source = "PT"
+        elif deepl_source in ("ES-MX", "ES-ES", "ES-US"):
+            deepl_source = "ES"
+        elif deepl_source in ("YUE", "ZH-YUE", "YUE-HK", "ZH-HK"):
+            deepl_source = "ZH"
 
         form_pairs: List[Tuple[str, str]] = [("text", t) for t in protected]
         form_pairs.append(("target_lang", deepl_target))
         # Omit source_lang for auto-detection; DeepL rejects "AUTO"
-        if source_language.lower() not in ("auto", ""):
-            form_pairs.append(("source_lang", source_language.upper()))
+        if deepl_source.lower() not in ("auto", ""):
+            form_pairs.append(("source_lang", deepl_source))
 
         headers = {
             "Authorization": f"DeepL-Auth-Key {self.deepl_api_key}",
             "Content-Type": "application/x-www-form-urlencoded",
         }
 
-        src_display = source_language.upper() if source_language.lower() != "auto" else "AUTO-DETECT"
+        _src_for_display = deepl_source if deepl_source else source_language.upper()
+        src_display = _src_for_display if _src_for_display.lower() != "auto" else "AUTO-DETECT"
         logger.info(
             f"[TRANSLATE] DeepL batch: {len(protected)} segments, "
             f"{src_display} -> {deepl_target}"
@@ -1547,10 +1561,22 @@ class TranslationService:
                 src = "auto"
             elif src == "zh":
                 src = "zh-TW"
+            elif src in ("pt-br", "pt-pt"):
+                src = "pt"
+            elif src in ("es-mx", "es-es", "es-us"):
+                src = "es"
+
+            tgt = target_language
+            if tgt in ("pt-br", "pt-pt"):
+                tgt = "pt"
+            elif tgt in ("es-mx", "es-es", "es-us"):
+                tgt = "es"
+            elif tgt in ("yue", "yue-HK", "zh-yue", "zh-HK"):
+                tgt = "zh-TW"
 
             payload = {
                 "q": protected,
-                "target": target_language,
+                "target": tgt,
                 "format": "text",
             }
             # Only set source if not auto-detect
@@ -1559,7 +1585,7 @@ class TranslationService:
 
             logger.info(
                 f"[TRANSLATE] Google Cloud API batch: {len(protected)} segments, "
-                f"{src if src.lower() != 'auto' else 'AUTO-DETECT'} -> {target_language}"
+                f"{src if src.lower() != 'auto' else 'AUTO-DETECT'} -> {tgt}"
             )
 
             response = await asyncio.to_thread(
@@ -1650,8 +1676,18 @@ class TranslationService:
             # deep_translator uses zh-CN / zh-TW codes, not bare "zh" or "yue"
             if src in ("zh", "yue"):
                 src = "zh-TW"   # Traditional Chinese (closest to Cantonese)
+            if src in ("pt-br", "pt-pt"):
+                src = "pt"
+            if src in ("es-mx", "es-es", "es-us"):
+                src = "es"
             if tgt == "zh":
                 tgt = "zh-CN"
+            if tgt in ("pt-br", "pt-pt"):
+                tgt = "pt"
+            if tgt in ("es-mx", "es-es", "es-us"):
+                tgt = "es"
+            if tgt in ("yue", "yue-hk", "zh-yue", "zh-hk"):
+                tgt = "zh-TW"
 
             logger.info(
                 f"[TRANSLATE] Batch translating {len(translate_texts)} segments "

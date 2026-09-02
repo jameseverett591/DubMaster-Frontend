@@ -2750,7 +2750,10 @@ async def upload_video(
 
     tgt_lang: Optional[str] = None
     if target_language:
-        _tgt_norm = normalize_language_code(target_language, allow_auto=False)
+        try:
+            _tgt_norm = normalize_language_code(target_language, strict=True)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         if _tgt_norm and _tgt_norm != "auto":
             tgt_lang = _tgt_norm
 
@@ -3057,7 +3060,7 @@ async def transcribe_video_only(
             if lang:
                 os.environ["WHISPER_LANGUAGE"] = lang
 
-            transcript_result = transcribe_audio(extract_result, job_id=ref_id)
+            transcript_result = transcribe_audio(extract_result, job_id=ref_id, source_language=lang)
 
             os.environ.pop("WHISPER_LANGUAGE", None)
 
@@ -4476,7 +4479,10 @@ async def dub_video(request: DubRequest, http_request: Request, background_tasks
         else:
             source_lang = "auto"
 
-    target_lang = normalize_language_code(request.target_language)
+    try:
+        target_lang = normalize_language_code(request.target_language, strict=True)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     source_lang = normalize_language_code(source_lang, allow_auto=True)
 
     if detected_lang:
@@ -4613,7 +4619,10 @@ async def translate_only(request: DubRequest, http_request: Request):
         else:
             source_lang = "auto"
 
-    target_lang = normalize_language_code(request.target_language)
+    try:
+        target_lang = normalize_language_code(request.target_language, strict=True)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     source_lang = normalize_language_code(source_lang, allow_auto=True)
 
     if detected_lang:
@@ -4733,7 +4742,10 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
             "confidence_tier": seg.confidence_tier if getattr(seg, "confidence_tier", None) is not None else _tier,
         })
 
-    target_lang = normalize_language_code(request.target_language)
+    try:
+        target_lang = normalize_language_code(request.target_language, strict=True)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     detected_lang = job.transcript.language if job and job.transcript else None
     source_lang = request.source_language
