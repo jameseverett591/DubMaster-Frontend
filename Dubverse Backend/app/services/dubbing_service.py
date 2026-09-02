@@ -3649,12 +3649,6 @@ class DubbingService:
         if seg is None:
             raise ValueError(f"Segment with transcript_index={segment_index} not found in job {job_id}")
 
-        # A locked segment is frozen — refuse to regenerate it here, the single
-        # choke point every regen path (HTTP endpoint, bulk/auto) flows through,
-        # so nothing but a manual unlock in the editor can overwrite it.
-        if seg.get("locked"):
-            raise PermissionError(f"Segment {segment_index} is locked — unlock it to regenerate")
-
         if stage:
             # Staged mode (chunk-lens editor): render and fit against a COPY of
             # the segment so the take is auditionable without touching committed
@@ -4078,7 +4072,7 @@ class DubbingService:
             # manually placed segment moves it to match the TTS duration.
             user_committed_timing = (
                 _pre_fit_committed[0] is not None and _pre_fit_committed[1] is not None
-            )
+            ) or seg.get("locked")
 
             if user_committed_timing and actual_dur > slot_dur + 0.05:
                 target = max(0.2, slot_dur)

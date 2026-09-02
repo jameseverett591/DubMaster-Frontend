@@ -196,10 +196,13 @@ def diarize_audio(
         # Constrain speaker count.  For known-N-speaker content set both
         # min_speakers and max_speakers to N so pyannote is forced to find
         # exactly N clusters instead of collapsing similar-sounding speakers.
+        # No hard upper cap by default; an env var can still impose one if needed.
         if min_speakers is None:
-            min_speakers = int(os.getenv("DIARIZATION_MIN_SPEAKERS", "1"))
+            min_speakers_env = os.getenv("DIARIZATION_MIN_SPEAKERS")
+            min_speakers = int(min_speakers_env) if min_speakers_env is not None else 1
         if max_speakers is None:
-            max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "6"))
+            max_speakers_env = os.getenv("DIARIZATION_MAX_SPEAKERS")
+            max_speakers = int(max_speakers_env) if max_speakers_env is not None else None
 
         # Ensure audio is float32 mono [1, samples] as pyannote expects
         import torch

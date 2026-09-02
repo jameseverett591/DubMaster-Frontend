@@ -7683,9 +7683,9 @@ async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
     The old client-side per-segment regen loop was unreliable (skipped locked
     segments, dropped failed calls, slow), so a speaker's segments drifted onto
     different voices. This regenerates all of a speaker's segments here with the
-    same voice while preserving each segment's own text/emotion/speed, so a voice
-    assignment is applied consistently and persisted in one call. Locked segments
-    are skipped (reported) so the lock still wins.
+    same voice while preserving each segment's own text/emotion/speed and its
+    position, so a voice assignment is applied consistently and persisted in
+    one call. Lock is positional, so locked segments are regenerated too.
     """
     voice_id = body.voice_id
     if body.voice_key and not voice_id:
@@ -7704,7 +7704,6 @@ async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
     targets = [
         {
             "ti": s.get("transcript_index"),
-            "locked": bool(s.get("locked")),
             "speed": s.get("speed"),
             "emotion": s.get("emotion"),
             "traits": s.get("attached_traits"),
@@ -7724,22 +7723,7 @@ async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
     )
 
     regenerated, skipped_locked, failed = [], [], []
-    # A LOCKED SEGMENT IS SKIPPED, WINDOWED OR NOT.
-    #
-    # This used to include locked segments for a windowed apply, on the reasoning
-    # that work in front of you is fair game. But regenerate_segment refuses a
-    # locked segment unconditionally — it is the single choke point every regen
-    # path flows through — so those segments did not get a new voice, they threw
-    # and landed in . The editor then told the user "N segment(s) failed —
-    # try applying again", advice that could never work: a locked segment fails
-    # identically every time.
-    #
-    # Skipping them here makes the endpoint honest and produces the message that
-    # already existed for exactly this case.
     for t in targets:
-        if t["locked"]:
-            skipped_locked.append(t["ti"])
-            continue
         try:
             seg = await dubbing_service.regenerate_segment(
                 job_id=job_id,
@@ -7768,7 +7752,7 @@ async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
         "status": "ok",
         "voice_id": voice_id,
         "regenerated": regenerated,
-        "skipped_locked": skipped_locked,
+        "skipped_locked": [],
         "failed": failed,
     }
 

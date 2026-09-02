@@ -4633,14 +4633,9 @@ export function DubVerseEditor({
     const committedText = segment.committed_adapted_text ?? segment.target_text
     const textChanged = incomingText !== committedText
 
-    // The backend refuses to regenerate a locked segment (HTTP 423), so block
-    // every path — button, drag, popup, and queued drain — at the single point
-    // that calls regenerateSegment.
-    if (lockedSegments.has(keyAt(activeIndex))) {
-      console.warn('[REGEN] aborted — segment locked', { activeIndex })
-      setRegenError('Segment is locked — unlock it to regenerate')
-      return false
-    }
+    // Lock is positional: a locked segment can still be regenerated (voice,
+    // emotion, speed, text), but its timeline slot must not move.
+    const isLocked = lockedSegments.has(keyAt(activeIndex))
 
     selectSegment(activeIndex)
     setRegenError(null)
@@ -4767,7 +4762,7 @@ export function DubVerseEditor({
       const bEnd = response.segment.end
       const backendDur = bEnd - bStart
       const liveDur = liveEnd - liveStart
-      const needsMoreRoom = backendDur > liveDur + 0.02
+      const needsMoreRoom = !isLocked && backendDur > liveDur + 0.02
       const grownEnd = liveStart + backendDur
       if (needsMoreRoom) {
         updateSegment(activeIndex, { start_time: liveStart, end_time: grownEnd })
@@ -4791,7 +4786,7 @@ export function DubVerseEditor({
       // user ever moved it: the second half of the snap-back, and the half that
       // survived fixing the grow path.
       const slotDur = liveEnd - liveStart
-      const shouldShrink = !needsMoreRoom && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
+      const shouldShrink = !isLocked && !needsMoreRoom && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
       let shrunkEnd = liveEnd
       if (shouldShrink) {
         const buffer = getTrailingBuffer(segment.preview_text ?? segment.active_text ?? segment.target_text ?? '')
@@ -5671,8 +5666,9 @@ export function DubVerseEditor({
     if (editingSegmentIndex !== null) {
       const idx = editingSegmentIndex
       const text = editingTextRef.current
+      const previousDisplayText = displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? ''
       // Push pre-edit text onto the global undo stack before applying the change.
-      undoStack.current.push({ kind: 'text', index: idx, prevText: displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? '' })
+      undoStack.current.push({ kind: 'text', index: idx, prevText: previousDisplayText })
       emotionAutoFiredRef.current.delete(idx)
       setPreviewText(idx, text)
       setImportedSegments(prev => {
@@ -5698,10 +5694,13 @@ export function DubVerseEditor({
       // review modes — firing synthesis while someone is watching a render costs
       // money on every one of 818 segments and can fire mid-keystroke.
       if (playbackMode === 'preview') {
-        if (autoRegenTimerRef.current) clearTimeout(autoRegenTimerRef.current)
-        autoRegenTimerRef.current = setTimeout(() => {
-          handleGenerateSpeechRef.current(idx, undefined, text)
+        if (autoRegenTimerRef.current) {
+          clearTimeout(autoRegenTimerRef.current)
           autoRegenTimerRef.current = null
+        }
+        autoRegenTimerRef.current = setTimeout(() => {
+          autoRegenTimerRef.current = null
+          handleGenerateSpeechRef.current(idx, undefined, text)
         }, 2000)
       }
     }
@@ -5735,7 +5734,8 @@ export function DubVerseEditor({
     }
     if (text == null) return
     const segs = displaySegmentsRef.current
-    undoStack.current.push({ kind: 'text', index, prevText: segs[index]?.preview_text ?? segs[index]?.active_text ?? segs[index]?.target_text ?? '' })
+    const previousDisplayText = segs[index]?.preview_text ?? segs[index]?.active_text ?? segs[index]?.target_text ?? ''
+    undoStack.current.push({ kind: 'text', index, prevText: previousDisplayText })
     emotionAutoFiredRef.current.delete(index)
     setPreviewText(index, text)
     setImportedSegments(prev => {
@@ -5752,10 +5752,13 @@ export function DubVerseEditor({
     )
     // Auto-regen in PREVIEW only — see saveEditing for why.
     if (playbackMode === 'preview') {
-      if (autoRegenTimerRef.current) clearTimeout(autoRegenTimerRef.current)
-      autoRegenTimerRef.current = setTimeout(() => {
-        handleGenerateSpeechRef.current(index, undefined, text)
+      if (autoRegenTimerRef.current) {
+        clearTimeout(autoRegenTimerRef.current)
         autoRegenTimerRef.current = null
+      }
+      autoRegenTimerRef.current = setTimeout(() => {
+        autoRegenTimerRef.current = null
+        handleGenerateSpeechRef.current(index, undefined, text)
       }, 2000)
     }
   }, [setPreviewText, jobId, playbackMode])
@@ -7610,9 +7613,11 @@ export function DubVerseEditor({
                                   : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
                             )}
                             onDoubleClick={() => {
-                              // Locking freezes position on the timeline, not
-                              // content edits. Preview-only segments still can't
-                              // be edited because there is nothing committed yet.
+                              // Locked segments are audio-frozen and cannot be
+                              // regenerated; editing their text would desync the
+                              // displayed line from the existing take. Preview-only
+                              // segments still can't be edited because there is
+                              // nothing committed yet.
                               if (segment.isPreviewing) return
                               // When the write-in box is open, double-clicking the line drops it
                               // into that field (Delivery Script) so you can add [tags]. Otherwise
@@ -7936,22 +7941,15 @@ export function DubVerseEditor({
                   "h-8 text-xs",
                   selectedSegmentIndex === null
                     ? "bg-slate-700 text-slate-400 cursor-not-allowed"
-                    : lockedSegments.has(keyAt(selectedSegmentIndex))
-                      ? "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30"
-                      : "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
+                    : "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
                 )}
                 onClick={() => handleGenerateSpeech()}
-                disabled={selectedSegmentIndex === null || isRegenerating || (selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex)))}
+                disabled={selectedSegmentIndex === null || isRegenerating}
               >
                 {isRegenerating ? (
                   <>
                     <RefreshCw className="h-4 w-4 mr-1 animate-spin" />
                     {t('Generating...')}
-                  </>
-                ) : selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex)) ? (
-                  <>
-                    <Lock className="h-4 w-4 mr-1" />
-                    {t('Locked')}
                   </>
                 ) : (
                   <>
@@ -11374,6 +11372,28 @@ export function DubVerseEditor({
                       onMouseDown={(e) => {
                         const t = e.target as HTMLElement
                         if (t.closest('[data-resize-handle]')) return
+
+                        // In group-select mode a Ctrl press builds the range — don't
+                        // let it start a drag or group move.
+                        if (groupSelectMode && (e.ctrlKey || e.metaKey)) return
+
+                        // Start group move if segment is selected and Shift is not pressed.
+                        // A locked segment's position is frozen, so a group selection that
+                        // includes any locked segment can't be moved as a whole.
+                        if (groupSelectedSegments.has(index) && !e.shiftKey) {
+                          const selected = Array.from(groupSelectedSegments)
+                          if (selected.some(i => lockedSegments.has(keyAt(i)))) return
+                          e.preventDefault()
+                          e.stopPropagation()
+                          groupMoveActiveRef.current = true
+                          groupMoveStartXRef.current = e.clientX
+                          groupMoveOffsetRef.current = { x: 0, y: 0 }
+                          captureGroupDragEls()
+                          setGroupMoveActive(true)
+                          setGroupMoveOffset({ x: 0, y: 0 })
+                          return
+                        }
+
                         e.preventDefault()
                         e.stopPropagation()
                         const startX = e.clientX
@@ -12616,11 +12636,12 @@ export function DubVerseEditor({
               </button>
               <button
                 type="button"
-                className="px-4 py-2 rounded bg-amber-500 hover:bg-amber-600 text-black text-sm font-medium transition-colors"
+                className="px-4 py-2 rounded bg-amber-500 hover:bg-amber-600 text-black text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 onClick={async () => {
                   const idx = timingExclusion.segmentIndex
                   const seg = displaySegments[idx]
                   if (!seg) return
+                  const isLocked = lockedSegments.has(keyAt(idx))
                   setTimingExclusion(null)
                   setIsRegenerating(true)
                   setRegeneratingSegmentIndex(idx)
@@ -12636,7 +12657,7 @@ export function DubVerseEditor({
                     const audio_url = filename ? apiClient.getAudioFileUrl(jobId, filename, true) : seg.audio_url
                     const audioDur = response.segment.audio_duration
                     const slotDur = seg.end_time - seg.start_time
-                    const shouldShrink = audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
+                    const shouldShrink = !isLocked && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
                     let shrunkEnd = seg.end_time
                     if (shouldShrink) {
                       const buffer = getTrailingBuffer(seg.preview_text ?? seg.active_text ?? seg.target_text ?? '')
