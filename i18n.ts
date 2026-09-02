@@ -8,7 +8,7 @@ export const locales = [
   'ar', 'he', 'ur', 'fa',
   'hi', 'bn', 'pa', 'ta',
   'zh', 'ja', 'ko', 'vi', 'th', 'id', 'ms', 'tl',
-  'sw',
+  'sw', 'ha', 'yo', 'ig',
 ] as const;
 export type Locale = (typeof locales)[number];
 
@@ -56,6 +56,9 @@ export const localeNames: Record<Locale, string> = {
   tl: 'Filipino',
   // African
   sw: 'Kiswahili',
+  ha: 'Hausa',
+  yo: 'Yorùbá',
+  ig: 'Igbo',
 };
 
 export const localeFlags: Record<Locale, string> = {
@@ -95,6 +98,9 @@ export const localeFlags: Record<Locale, string> = {
   ms: '🇲🇾',
   tl: '🇵🇭',
   sw: '🇰🇪',
+  ha: '🇳🇬',
+  yo: '🇳🇬',
+  ig: '🇳🇬',
 };
 
 export default getRequestConfig(async ({ requestLocale }) => {
