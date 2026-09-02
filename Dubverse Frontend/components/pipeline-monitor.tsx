@@ -14,6 +14,7 @@ import {
   Loader2, SkipForward, ChevronDown, ChevronUp, Cpu, Timer, Zap,
   AlertTriangle, RefreshCw, BarChart3
 } from "lucide-react"
+import { useT } from '@/lib/use-t'
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
@@ -146,6 +147,7 @@ function StageNode({ stage, isLast, isExpanded, onToggle }: {
 }
 
 export default function PipelineMonitor({ jobId }: { jobId: string }) {
+  const t = useT()
   const [pipelineData, setPipelineData] = useState<PipelineData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -188,7 +190,7 @@ export default function PipelineMonitor({ jobId }: { jobId: string }) {
         <CardContent className="flex items-center justify-center py-12">
           <div className="text-center">
             <Loader2 className="h-8 w-8 text-primary animate-spin mx-auto mb-3" />
-            <p className="text-sm text-muted-foreground">Connecting to pipeline...</p>
+            <p className="text-sm text-muted-foreground">{t('Connecting to pipeline...')}</p>
           </div>
         </CardContent>
       </Card>
@@ -203,7 +205,7 @@ export default function PipelineMonitor({ jobId }: { jobId: string }) {
             <XCircle className="h-8 w-8 text-red-500 mx-auto mb-3" />
             <p className="text-sm text-red-400">{error}</p>
             <Button variant="outline" size="sm" className="mt-3" onClick={fetchPipeline}>
-              <RefreshCw className="h-4 w-4 mr-2" />Retry
+              <RefreshCw className="h-4 w-4 mr-2" />{t('Retry')}
             </Button>
           </div>
         </CardContent>
@@ -262,7 +264,7 @@ export default function PipelineMonitor({ jobId }: { jobId: string }) {
               <Link href={`/editor/${jobId}?showQC=true`}>
                 <Button variant="outline" size="sm" className="gap-2">
                   <BarChart3 className="h-4 w-4" />
-                  View QC
+                  {t('View QC')}
                 </Button>
               </Link>
             )}

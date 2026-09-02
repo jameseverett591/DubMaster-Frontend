@@ -11,8 +11,10 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Mic2, Mail, Lock, User, Github, Check, Loader2, Eye, EyeOff } from "lucide-react"
 import Link from "next/link"
+import { useT } from '@/lib/use-t'
 
 export default function SignUpPage() {
+  const tUi = useT()
   const [selectedPlan, setSelectedPlan] = useState<"basic" | "premium" | "professional">("basic")
   const [isYearly, setIsYearly] = useState(false)
   const [email, setEmail] = useState("")
@@ -339,7 +341,7 @@ export default function SignUpPage() {
                   <Input
                     id="name"
                     type="text"
-                    placeholder="Ip Man"
+                    placeholder={tUi('Ip Man')}
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
                     className="pl-10 bg-[#0F172A] border-[#334155] text-white placeholder:text-[#475569] focus:border-[#A855F7] focus:ring-[#A855F7]/20"
@@ -370,7 +372,7 @@ export default function SignUpPage() {
                   <Input
                     id="password"
                     type={showPassword ? "text" : "password"}
-                    placeholder="Min. 6 characters"
+                    placeholder={tUi('Min. 6 characters')}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
@@ -394,7 +396,7 @@ export default function SignUpPage() {
                   <Input
                     id="confirmPassword"
                     type={showConfirmPassword ? "text" : "password"}
-                    placeholder="Re-enter password"
+                    placeholder={tUi('Re-enter password')}
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     required

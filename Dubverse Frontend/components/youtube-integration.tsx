@@ -28,6 +28,7 @@ import {
   Edit3
 } from "lucide-react"
 import type { VideoSource } from "@/components/dashboard"
+import { useT } from '@/lib/use-t'
 
 interface YouTubeIntegrationProps {
   onVideoSelect: (video: VideoSource) => void
@@ -103,6 +104,7 @@ function formatTime(seconds: number): string {
 }
 
 export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
+  const t = useT()
   const [searchQuery, setSearchQuery] = useState("")
   const [searchResults, setSearchResults] = useState<YouTubeVideo[]>([])
   const [isSearching, setIsSearching] = useState(false)
@@ -260,14 +262,14 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
           <div className="flex items-start gap-3">
             <Info className="h-5 w-5 text-blue-500 mt-0.5 shrink-0" />
             <div className="space-y-2">
-              <p className="font-medium text-blue-400">About YouTube Integration</p>
+              <p className="font-medium text-blue-400">{t('About YouTube Integration')}</p>
               <p className="text-sm text-blue-300/80">
                 Due to YouTube's Terms of Service, we cannot directly download video files from YouTube. However, we CAN legally:
               </p>
               <ul className="text-sm text-blue-300/80 list-disc list-inside space-y-1 ml-2">
-                <li>Extract captions and transcripts with full timestamps for translation</li>
-                <li>Embed YouTube videos for playback reference while dubbing</li>
-                <li>Help you dub videos you already own or have downloaded yourself</li>
+                <li>{t('Extract captions and transcripts with full timestamps for translation')}</li>
+                <li>{t('Embed YouTube videos for playback reference while dubbing')}</li>
+                <li>{t('Help you dub videos you already own or have downloaded yourself')}</li>
               </ul>
               <p className="text-sm text-blue-300/80 mt-2">
                 <strong>Tip:</strong> If you own a YouTube video or have legal download rights, upload your video file in the Upload tab, 
@@ -283,15 +285,15 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
         <TabsList className="grid w-full grid-cols-3 bg-background/50 backdrop-blur-md">
           <TabsTrigger value="captions" className="flex items-center gap-2">
             <FileText className="h-4 w-4" />
-            Extract Captions
+            {t('Extract Captions')}
           </TabsTrigger>
           <TabsTrigger value="own-video" className="flex items-center gap-2">
             <Upload className="h-4 w-4" />
-            Your Own Video
+            {t('Your Own Video')}
           </TabsTrigger>
           <TabsTrigger value="browse" className="flex items-center gap-2">
             <Search className="h-4 w-4" />
-            Browse Videos
+            {t('Browse Videos')}
           </TabsTrigger>
         </TabsList>
 
@@ -301,10 +303,10 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Youtube className="h-5 w-5 text-red-500" />
-                Extract YouTube Transcripts
+                {t('Extract YouTube Transcripts')}
               </CardTitle>
               <CardDescription>
-                Paste a YouTube URL to extract captions with timestamps for dubbing
+                {t('Paste a YouTube URL to extract captions with timestamps for dubbing')}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -321,14 +323,14 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                   }
                 }}>
                   <FileText className="mr-2 h-4 w-4" />
-                  Extract Captions
+                  {t('Extract Captions')}
                 </Button>
               </div>
               
               {isExtracting && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between text-sm">
-                    <span className="text-muted-foreground">Extracting transcript...</span>
+                    <span className="text-muted-foreground">{t('Extracting transcript...')}</span>
                     <span className="text-primary">{extractProgress}%</span>
                   </div>
                   <Progress value={extractProgress} className="h-2" />
@@ -345,7 +347,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                   <div>
                     <CardTitle className="flex items-center gap-2">
                       <CheckCircle2 className="h-5 w-5 text-green-500" />
-                      Transcript Extracted
+                      {t('Transcript Extracted')}
                     </CardTitle>
                     <CardDescription>
                       {extractedTranscript.length} segments with timestamps
@@ -407,7 +409,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                 <div className="mt-4 flex gap-3">
                   <Button className="flex-1" onClick={handleUrlSubmit}>
                     <Play className="mr-2 h-4 w-4" />
-                    Start Dubbing with Embedded Video
+                    {t('Start Dubbing with Embedded Video')}
                   </Button>
                 </div>
               </CardContent>
@@ -421,10 +423,10 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Upload className="h-5 w-5 text-primary" />
-                Dub Your Own YouTube Video
+                {t('Dub Your Own YouTube Video')}
               </CardTitle>
               <CardDescription>
-                Upload a video you own and pair it with YouTube captions for perfect sync
+                {t('Upload a video you own and pair it with YouTube captions for perfect sync')}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -434,7 +436,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                   <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
                     1
                   </div>
-                  <h4 className="font-medium">Upload Your Video File</h4>
+                  <h4 className="font-medium">{t('Upload Your Video File')}</h4>
                 </div>
                 <div className="ml-8">
                   <label 
@@ -445,7 +447,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                       {ownVideoFile ? ownVideoFile.name : "Click to upload your video"}
                     </span>
                     <span className="text-xs text-muted-foreground mt-1">
-                      MP4, WebM, MOV up to 5GB
+                      {t('MP4, WebM, MOV up to 5GB')}
                     </span>
                     <input 
                       type="file" 
@@ -475,7 +477,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                   <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
                     2
                   </div>
-                  <h4 className="font-medium">Get Captions from YouTube</h4>
+                  <h4 className="font-medium">{t('Get Captions from YouTube')}</h4>
                 </div>
                 <div className="ml-8 space-y-3">
                   <p className="text-sm text-muted-foreground">
@@ -498,7 +500,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                       }}
                     >
                       <Link2 className="mr-2 h-4 w-4" />
-                      Extract
+                      {t('Extract')}
                     </Button>
                   </div>
                   
@@ -522,7 +524,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                     3
                   </div>
                   <h4 className={`font-medium ${!ownVideoFile || !extractedTranscript ? "text-muted-foreground" : ""}`}>
-                    Start Dubbing
+                    {t('Start Dubbing')}
                   </h4>
                 </div>
                 <div className="ml-8">
@@ -532,7 +534,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                     onClick={handleStartDubbingWithOwnVideo}
                   >
                     <Languages className="mr-2 h-4 w-4" />
-                    Start Dubbing Your Video
+                    {t('Start Dubbing Your Video')}
                   </Button>
                 </div>
               </div>
@@ -545,15 +547,15 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
           {/* Search */}
           <Card className="backdrop-blur-md bg-card/50 border-border/50">
             <CardHeader>
-              <CardTitle>Search YouTube Videos</CardTitle>
-              <CardDescription>Find videos with available captions for dubbing practice</CardDescription>
+              <CardTitle>{t('Search YouTube Videos')}</CardTitle>
+              <CardDescription>{t('Find videos with available captions for dubbing practice')}</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="flex gap-3">
                 <div className="relative flex-1">
                   <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
-                    placeholder="Search for videos..."
+                    placeholder={t('Search for videos...')}
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && handleSearch()}
@@ -561,7 +563,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                   />
                 </div>
                 <Button onClick={handleSearch} disabled={isSearching}>
-                  {isSearching ? "Searching..." : "Search"}
+                  {isSearching ? t('Searching...') : t('Search')}
                 </Button>
               </div>
             </CardContent>
@@ -570,7 +572,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
           {/* Search Results */}
           {searchResults.length > 0 && (
             <div className="space-y-4">
-              <h3 className="text-lg font-semibold text-foreground">Search Results</h3>
+              <h3 className="text-lg font-semibold text-foreground">{t('Search Results')}</h3>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {searchResults.map((video) => (
                   <Card
@@ -590,7 +592,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                       </div>
                       {video.hasCaptions && (
                         <div className="absolute left-2 top-2 rounded bg-green-500/90 px-2 py-1 text-xs font-medium text-white">
-                          CC Available
+                          {t('CC Available')}
                         </div>
                       )}
                     </div>
@@ -629,8 +631,8 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
           {/* Popular for Practice */}
           <Card className="backdrop-blur-md bg-card/50 border-border/50">
             <CardHeader>
-              <CardTitle>Popular for Translation Practice</CardTitle>
-              <CardDescription>Educational content with professional captions</CardDescription>
+              <CardTitle>{t('Popular for Translation Practice')}</CardTitle>
+              <CardDescription>{t('Educational content with professional captions')}</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">

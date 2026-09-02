@@ -4,6 +4,7 @@ import React, { useState, useCallback } from 'react'
 import { Radio, Copy, Check, ShieldCheck, Music2, AlertTriangle, Tag, Mic2 } from 'lucide-react'
 import type { Segment } from '@/lib/editor-types'
 import type { Voice } from '@/lib/api-client'
+import { useT } from '@/lib/use-t'
 
 interface Chord { trait: string; state: string; emotion: string }
 
@@ -140,10 +141,11 @@ export default function VelmaPanel({
   voices: Voice[]
   setRightPanelTab: (tab: string) => void
 }) {
+  const t = useT()
   if (!segment) {
     return (
       <div className="flex items-center justify-center h-full text-slate-500 text-xs px-4 text-center">
-        Select a segment to view Velma analysis.
+        {t('Select a segment to view Velma analysis.')}
       </div>
     )
   }
@@ -172,14 +174,14 @@ export default function VelmaPanel({
       {/* Header */}
       <div className="flex items-center gap-2 pb-1 border-b border-neutral-800">
         <Radio className="h-3.5 w-3.5 text-violet-400" />
-        <span className="text-xs font-semibold text-violet-300 tracking-wide">Velma Analysis</span>
+        <span className="text-xs font-semibold text-violet-300 tracking-wide">{t('Velma Analysis')}</span>
       </div>
 
       {/* No data */}
       {!hasVelmaData && (
         <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-3">
           <p className="text-[11px] text-slate-400 leading-relaxed">
-            No Velma signals for this segment. Re-dub with Velma enabled to populate emotion, accent, and deepfake scores.
+            {t('No Velma signals for this segment. Re-dub with Velma enabled to populate emotion, accent, and deepfake scores.')}
           </p>
         </div>
       )}
@@ -190,7 +192,7 @@ export default function VelmaPanel({
         return (
           <SectionCard
             icon={<ShieldCheck className="h-3.5 w-3.5" />}
-            title="Authenticity Score"
+            title={t('Authenticity Score')}
             trailing={
               <span className={`text-[10px] px-2 py-0.5 rounded-full border font-medium ${dq.color} ${dq.border} ${dq.bg}`}>
                 {dq.label}
@@ -207,7 +209,7 @@ export default function VelmaPanel({
                   Based on deepfake detection score ({segment.velma_deepfake_score.toFixed(2)})
                 </span>
                 {segment.velma_deepfake_score > 0.55 && (
-                  <span className="text-[10px] text-red-400 mt-0.5">Sounds synthetic — consider regenerating</span>
+                  <span className="text-[10px] text-red-400 mt-0.5">{t('Sounds synthetic — consider regenerating')}</span>
                 )}
               </div>
             </div>
@@ -217,14 +219,14 @@ export default function VelmaPanel({
 
       {/* Authenticity Score — no deepfake score fallback */}
       {hasVelmaData && typeof segment.velma_deepfake_score !== 'number' && (
-        <SectionCard icon={<ShieldCheck className="h-3.5 w-3.5" />} title="Authenticity Score">
-          <span className="text-[11px] text-slate-500">Deepfake score unavailable for this segment.</span>
+        <SectionCard icon={<ShieldCheck className="h-3.5 w-3.5" />} title={t('Authenticity Score')}>
+          <span className="text-[11px] text-slate-500">{t('Deepfake score unavailable for this segment.')}</span>
         </SectionCard>
       )}
 
       {/* Original Performance */}
       {hasVelmaData && (
-        <SectionCard icon={<Radio className="h-3.5 w-3.5" />} title="Original Performance">
+        <SectionCard icon={<Radio className="h-3.5 w-3.5" />} title={t('Original Performance')}>
           {segment.velma_emotion && (
             <DataRow label="Emotion">
               <span className="text-[10px] px-2 py-0.5 rounded-full border border-violet-500/30 bg-violet-500/10 text-violet-200 font-medium">
@@ -253,7 +255,7 @@ export default function VelmaPanel({
       {dominantChord && curveAvg !== null && (
         <SectionCard
           icon={<Music2 className="h-3.5 w-3.5" />}
-          title="Chord Analysis"
+          title={t('Chord Analysis')}
           trailing={
             <span className="text-[10px] text-slate-500 font-mono">{Math.round(curveAvg * 100)}% intensity</span>
           }
@@ -268,7 +270,7 @@ export default function VelmaPanel({
             <span className="text-[10px] font-semibold text-sky-400">{dominantChord.trait}</span>
           </DataRow>
           <div className="flex items-center justify-between pt-2 mt-0.5">
-            <span className="text-[10px] text-slate-500">Fish Audio tag</span>
+            <span className="text-[10px] text-slate-500">{t('Fish Audio tag')}</span>
             <CopyChip tag={`[${dominantChord.emotion.toLowerCase()}]`} />
           </div>
         </SectionCard>
@@ -278,7 +280,7 @@ export default function VelmaPanel({
       {segment.velma_emotion && segment.dubEmotion && segment.velma_emotion !== segment.dubEmotion && (
         <SectionCard
           icon={<AlertTriangle className="h-3.5 w-3.5 text-yellow-400" />}
-          title="Emotion Mismatch"
+          title={t('Emotion Mismatch')}
         >
           <p className="text-[11px] text-slate-300 leading-relaxed">
             Original: <span className="font-semibold text-white">{segment.velma_emotion}</span>
@@ -292,7 +294,7 @@ export default function VelmaPanel({
       {segment.velma_accent && segment.voiceAccent && segment.velma_accent !== segment.voiceAccent && (
         <SectionCard
           icon={<AlertTriangle className="h-3.5 w-3.5 text-yellow-400" />}
-          title="Accent Mismatch"
+          title={t('Accent Mismatch')}
         >
           <p className="text-[11px] text-slate-300 leading-relaxed">
             Original: <span className="font-semibold text-white">{segment.velma_accent}</span>
@@ -304,8 +306,8 @@ export default function VelmaPanel({
 
       {/* Suggested Fish Audio Tags */}
       {hasVelmaData && suggestedTags.length > 0 && (
-        <SectionCard icon={<Tag className="h-3.5 w-3.5" />} title="Suggested Tags">
-          <p className="text-[10px] text-slate-500 mb-2">Click to copy Fish Audio bracket tag</p>
+        <SectionCard icon={<Tag className="h-3.5 w-3.5" />} title={t('Suggested Tags')}>
+          <p className="text-[10px] text-slate-500 mb-2">{t('Click to copy Fish Audio bracket tag')}</p>
           <div className="flex flex-wrap gap-1.5">
             {suggestedTags.map((tag) => (
               <CopyChip key={tag} tag={tag} />
@@ -316,7 +318,7 @@ export default function VelmaPanel({
 
       {/* Voice Recommendations */}
       {recommendations.length > 0 && (
-        <SectionCard icon={<Mic2 className="h-3.5 w-3.5" />} title="Recommended Voices">
+        <SectionCard icon={<Mic2 className="h-3.5 w-3.5" />} title={t('Recommended Voices')}>
           <ul className="space-y-1 mb-2">
             {recommendations.map((v) => (
               <li key={v.id} className="text-[11px] text-slate-300">

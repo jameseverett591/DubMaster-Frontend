@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useMemo } from 'react'
 import { AlertTriangle, Check, ChevronDown, RefreshCw, Loader2 } from 'lucide-react'
 import { useEditorStore } from '@/lib/editor-store'
 import { apiClient } from '@/lib/api-client'
+import { useT } from '@/lib/use-t'
 
 // Curated starter set of character-trait words. Per-speaker custom additions
 // (via the Customize input) extend the list at the speaker level only.
@@ -15,6 +16,7 @@ const TRAIT_PRESETS = [
 ]
 
 export function SpeakerVoicePanel() {
+  const t = useT()
   const {
     jobId,
     segments,
@@ -194,7 +196,7 @@ export function SpeakerVoicePanel() {
   if (segments.length === 0) {
     return (
       <div className="flex items-center justify-center h-32 px-4">
-        <p className="text-sm text-slate-500 text-center">No segments loaded.</p>
+        <p className="text-sm text-slate-500 text-center">{t('No segments loaded.')}</p>
       </div>
     )
   }
@@ -211,7 +213,7 @@ export function SpeakerVoicePanel() {
           This cannot be changed — to change it means creating a new and/or different character.
           You can do this by using the Clear button to wipe the segment clean and start building
           the character over. This will affect all segments across the board.{' '}
-          <span className="font-semibold text-amber-300">Please build characters decisively and carefully.</span>{' '}
+          <span className="font-semibold text-amber-300">{t('Please build characters decisively and carefully.')}</span>{' '}
           Make all character changes early on in production so you are happy with the character.
           This way you don&apos;t lose hours and days of work unnecessarily.
         </p>
@@ -219,7 +221,7 @@ export function SpeakerVoicePanel() {
 
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-          Characters
+          {t('Characters')}
         </span>
         <span className="text-xs text-slate-500">
           {speakerData.length} speaker{speakerData.length !== 1 ? 's' : ''}
@@ -347,7 +349,7 @@ export function SpeakerVoicePanel() {
               <div className="flex justify-end">
                 {isJustApplied ? (
                   <span className="flex items-center gap-1 text-[10px] text-emerald-400 font-medium">
-                    <Check className="h-3 w-3" /> Applied
+                    <Check className="h-3 w-3" /> {t('Applied')}
                   </span>
                 ) : (
                   <button
@@ -359,7 +361,7 @@ export function SpeakerVoicePanel() {
                     }`}
                     title={isChanged ? 'Lock these traits for this character' : 'No changes to apply'}
                   >
-                    Apply
+                    {t('Apply')}
                   </button>
                 )}
               </div>
@@ -367,7 +369,7 @@ export function SpeakerVoicePanel() {
               {/* Pitch slider */}
               <div className="flex flex-col gap-1">
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-slate-400">Pitch</span>
+                  <span className="text-[10px] text-slate-400">{t('Pitch')}</span>
                   <span className="text-[10px] text-slate-300">
                     {(speakerPitchMap[spk.speaker_id] ?? 0) > 0 ? '+' : ''}
                     {speakerPitchMap[spk.speaker_id] ?? 0} semitones
@@ -376,7 +378,7 @@ export function SpeakerVoicePanel() {
                 <input
                   type="range"
                   aria-label={`Pitch shift for ${spk.display_name} in semitones`}
-                  title="Pitch shift"
+                  title={t('Pitch shift')}
                   min={-12}
                   max={12}
                   step={1}
@@ -412,7 +414,7 @@ export function SpeakerVoicePanel() {
                   return (
                     <div className="rounded-md bg-amber-500/10 border border-amber-500/40 p-2 flex flex-col gap-2">
                       <p className="text-[10px] text-amber-200 leading-snug">
-                        This will regenerate <span className="font-semibold">{speakerSegmentCount}</span> segments using
+                        {t('This will regenerate')} <span className="font-semibold">{speakerSegmentCount}</span> segments using
                         <span className="font-semibold"> {spk.display_name}</span>&apos;s current voice. Continue?
                       </p>
                       <div className="flex gap-1.5">
@@ -421,14 +423,14 @@ export function SpeakerVoicePanel() {
                           onClick={() => handleRegenerateAllForSpeaker(spk.speaker_id)}
                           className="flex-1 text-[10px] rounded py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-medium transition-colors"
                         >
-                          Yes, regenerate
+                          {t('Yes, regenerate')}
                         </button>
                         <button
                           type="button"
                           onClick={() => setRegenStatus(prev => { const n = { ...prev }; delete n[spk.speaker_id]; return n })}
                           className="flex-1 text-[10px] rounded py-1 bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
                         >
-                          Cancel
+                          {t('Cancel')}
                         </button>
                       </div>
                     </div>
@@ -477,7 +479,7 @@ export function SpeakerVoicePanel() {
       </div>
 
       <p className="text-[10px] text-slate-600 text-center mt-1">
-        Traits attach to a segment on first keystroke in the text box.
+        {t('Traits attach to a segment on first keystroke in the text box.')}
       </p>
     </div>
   )

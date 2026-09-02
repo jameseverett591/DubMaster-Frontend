@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Wand2, Clapperboard, Check, Sparkles, Clock, Sliders, Users, FileVideo, Zap } from "lucide-react"
 import type { EditorMode } from "@/components/dashboard"
+import { useT } from '@/lib/use-t'
 
 interface StudioModeSelectorProps {
   editorMode: EditorMode
@@ -14,6 +15,7 @@ interface StudioModeSelectorProps {
 }
 
 export function StudioModeSelector({ editorMode, onEditorModeChange, onStartProject, onOpenEditor }: StudioModeSelectorProps) {
+  const t = useT()
   return (
     <div className="space-y-8">
       {/* Header */}
@@ -23,8 +25,8 @@ export function StudioModeSelector({ editorMode, onEditorModeChange, onStartProj
             <div className="flex items-center gap-3">
               <Clapperboard className="h-10 w-10 text-primary" />
               <div>
-                <h1 className="text-3xl font-bold text-foreground">DubMaster Studio</h1>
-                <p className="text-sm text-muted-foreground">Choose your editing experience</p>
+                <h1 className="text-3xl font-bold text-foreground">{t('DubMaster Studio')}</h1>
+                <p className="text-sm text-muted-foreground">{t('Choose your editing experience')}</p>
               </div>
             </div>
             <div className="flex items-center gap-4">
@@ -42,10 +44,10 @@ export function StudioModeSelector({ editorMode, onEditorModeChange, onStartProj
                 >
                   2HRS
                 </span>
-                <span className="text-xs text-muted-foreground">Max Length</span>
+                <span className="text-xs text-muted-foreground">{t('Max Length')}</span>
               </div>
               <Badge variant="outline" className="text-primary border-primary">
-                {editorMode === "automatic" ? "Automatic Mode" : "Professional Mode"}
+                {editorMode === "automatic" ? t('Automatic Mode') : t('Professional Mode')}
               </Badge>
             </div>
           </div>
@@ -72,41 +74,41 @@ export function StudioModeSelector({ editorMode, onEditorModeChange, onStartProj
                 </div>
               )}
             </div>
-            <CardTitle className="text-2xl mt-4">Automatic</CardTitle>
+            <CardTitle className="text-2xl mt-4">{t('Automatic')}</CardTitle>
             <CardDescription className="text-base">
-              Perfect for beginners and quick projects. Let AI handle the heavy lifting.
+              {t('Perfect for beginners and quick projects. Let AI handle the heavy lifting.')}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-3">
               <div className="flex items-center gap-3 text-sm">
                 <Sparkles className="h-4 w-4 text-primary" />
-                <span>One-click AI dubbing</span>
+                <span>{t('One-click AI dubbing')}</span>
               </div>
               <div className="flex items-center gap-3 text-sm">
                 <Clock className="h-4 w-4 text-primary" />
-                <span>Fast processing - results in minutes</span>
+                <span>{t('Fast processing - results in minutes')}</span>
               </div>
               <div className="flex items-center gap-3 text-sm">
                 <FileVideo className="h-4 w-4 text-primary" />
-                <span>Automatic voice detection & assignment</span>
+                <span>{t('Automatic voice detection & assignment')}</span>
               </div>
               <div className="flex items-center gap-3 text-sm">
                 <Zap className="h-4 w-4 text-primary" />
-                <span>Simple language selection</span>
+                <span>{t('Simple language selection')}</span>
               </div>
             </div>
 
             <div className="pt-4 border-t border-border/50">
               <p className="text-xs text-muted-foreground mb-3">Best for:</p>
               <div className="flex flex-wrap gap-2">
-                <Badge variant="secondary" className="text-xs">Social Media</Badge>
-                <Badge variant="secondary" className="text-xs">Quick Clips</Badge>
-                <Badge variant="secondary" className="text-xs">Personal Projects</Badge>
-                <Badge variant="secondary" className="text-xs">Movies</Badge>
-                <Badge variant="secondary" className="text-xs">Kung-Fu Films</Badge>
-                <Badge variant="secondary" className="text-xs">Indie Films</Badge>
-                <Badge variant="secondary" className="text-xs">Foreign Films</Badge>
+                <Badge variant="secondary" className="text-xs">{t('Social Media')}</Badge>
+                <Badge variant="secondary" className="text-xs">{t('Quick Clips')}</Badge>
+                <Badge variant="secondary" className="text-xs">{t('Personal Projects')}</Badge>
+                <Badge variant="secondary" className="text-xs">{t('Movies')}</Badge>
+                <Badge variant="secondary" className="text-xs">{t('Kung-Fu Films')}</Badge>
+                <Badge variant="secondary" className="text-xs">{t('Indie Films')}</Badge>
+                <Badge variant="secondary" className="text-xs">{t('Foreign Films')}</Badge>
               </div>
             </div>
 
@@ -118,7 +120,7 @@ export function StudioModeSelector({ editorMode, onEditorModeChange, onStartProj
                 onEditorModeChange("automatic")
               }}
             >
-              {editorMode === "automatic" ? "Currently Selected" : "Select Automatic"}
+              {editorMode === "automatic" ? t('Currently Selected') : t('Select Automatic')}
             </Button>
           </CardContent>
         </Card>
@@ -141,41 +143,41 @@ export function StudioModeSelector({ editorMode, onEditorModeChange, onStartProj
                 </div>
               )}
             </div>
-            <CardTitle className="text-2xl mt-4">Professional</CardTitle>
+            <CardTitle className="text-2xl mt-4">{t('Professional')}</CardTitle>
             <CardDescription className="text-base">
-              Full creative control with advanced editing tools for serious creators.
+              {t('Full creative control with advanced editing tools for serious creators.')}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-3">
               <div className="flex items-center gap-3 text-sm">
                 <Sliders className="h-4 w-4 text-primary" />
-                <span>Timeline-based editing</span>
+                <span>{t('Timeline-based editing')}</span>
               </div>
               <div className="flex items-center gap-3 text-sm">
                 <Users className="h-4 w-4 text-primary" />
-                <span>Per-speaker voice customization</span>
+                <span>{t('Per-speaker voice customization')}</span>
               </div>
               <div className="flex items-center gap-3 text-sm">
                 <FileVideo className="h-4 w-4 text-primary" />
-                <span>Transcript editing & sync</span>
+                <span>{t('Transcript editing & sync')}</span>
               </div>
               <div className="flex items-center gap-3 text-sm">
                 <Sparkles className="h-4 w-4 text-primary" />
-                <span>Emotion, pronunciation & pause control</span>
+                <span>{t('Emotion, pronunciation & pause control')}</span>
               </div>
             </div>
 
             <div className="pt-4 border-t border-border/50">
               <p className="text-xs text-muted-foreground mb-3">Best for:</p>
               <div className="flex flex-wrap gap-2">
-                <Badge variant="secondary" className="text-xs">Films & Documentaries</Badge>
-                <Badge variant="secondary" className="text-xs">Professional Content</Badge>
-                <Badge variant="secondary" className="text-xs">Precise Editing</Badge>
-                <Badge variant="secondary" className="text-xs">Movies</Badge>
-                <Badge variant="secondary" className="text-xs">Kung-Fu Films</Badge>
-                <Badge variant="secondary" className="text-xs">Indie Films</Badge>
-                <Badge variant="secondary" className="text-xs">Foreign Films</Badge>
+                <Badge variant="secondary" className="text-xs">{t('Films & Documentaries')}</Badge>
+                <Badge variant="secondary" className="text-xs">{t('Professional Content')}</Badge>
+                <Badge variant="secondary" className="text-xs">{t('Precise Editing')}</Badge>
+                <Badge variant="secondary" className="text-xs">{t('Movies')}</Badge>
+                <Badge variant="secondary" className="text-xs">{t('Kung-Fu Films')}</Badge>
+                <Badge variant="secondary" className="text-xs">{t('Indie Films')}</Badge>
+                <Badge variant="secondary" className="text-xs">{t('Foreign Films')}</Badge>
               </div>
             </div>
 
@@ -187,7 +189,7 @@ export function StudioModeSelector({ editorMode, onEditorModeChange, onStartProj
                 onEditorModeChange("professional")
               }}
             >
-              {editorMode === "professional" ? "Currently Selected" : "Select Professional"}
+              {editorMode === "professional" ? t('Currently Selected') : t('Select Professional')}
             </Button>
           </CardContent>
         </Card>
@@ -198,14 +200,14 @@ export function StudioModeSelector({ editorMode, onEditorModeChange, onStartProj
         <CardContent className="py-8">
           <div className="flex flex-col md:flex-row items-center justify-between gap-6">
             <div className="text-center md:text-left">
-              <h3 className="text-xl font-semibold mb-2">Ready to start dubbing?</h3>
+              <h3 className="text-xl font-semibold mb-2">{t('Ready to start dubbing?')}</h3>
               <p className="text-muted-foreground">
                 Upload a video or try the {editorMode === "automatic" ? "Automatic" : "Professional"} editor with a demo
               </p>
             </div>
             <div className="flex items-center gap-4">
               <Button size="lg" variant="outline" onClick={onStartProject}>
-                Upload Video
+                {t('Upload Video')}
               </Button>
               <Button
                 size="lg"

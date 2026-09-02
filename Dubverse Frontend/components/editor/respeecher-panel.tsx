@@ -8,6 +8,7 @@ import type { Segment } from '@/lib/editor-types'
 import { Slider } from '@/components/ui/slider'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { useT } from '@/lib/use-t'
 
 /** Hover explainer styled like the write-in chip — cyan on the dark panel blue.
  *  The shared TooltipContent hardcodes its arrow to fill-foreground, so the arrow
@@ -159,6 +160,7 @@ export default function RespeecherPanel({
   /** Re-render this segment on Fish, using the speaker's mapped Fish voice. */
   onUseFish: () => void
 }) {
+  const t = useT()
   const [voices, setVoices] = useState<RespeecherVoice[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -224,7 +226,7 @@ export default function RespeecherPanel({
   if (!segment) {
     return (
       <div className="flex items-center justify-center h-full text-slate-500 text-xs px-4 text-center">
-        Select a segment to generate it with Respeecher.
+        {t('Select a segment to generate it with Respeecher.')}
       </div>
     )
   }
@@ -305,7 +307,7 @@ export default function RespeecherPanel({
                   : 'bg-slate-900 text-slate-400 hover:bg-slate-800 hover:text-cyan-200'
               )}
             >
-              Respeecher
+              {t('Respeecher')}
             </button>
             <button
               onClick={() => { if (lastEngine !== 'fish-audio') onUseFish() }}
@@ -322,31 +324,31 @@ export default function RespeecherPanel({
                   : 'bg-slate-900 text-slate-400 hover:bg-slate-800 hover:text-teal-200'
               )}
             >
-              Fish Audio
+              {t('Fish Audio')}
             </button>
           </div>
         </div>
         <button
           onClick={clearPanel}
-          title="Clear the voice, sampling and seed controls. Does not change this segment's audio, takes or saved seeds."
+          title={t("Clear the voice, sampling and seed controls. Does not change this segment's audio, takes or saved seeds.")}
           className="shrink-0 text-[10px] px-2.5 py-1 rounded-full border border-teal-400/60
                      bg-teal-500/25 text-white font-medium
                      hover:bg-teal-500/40 hover:border-teal-300 transition-colors"
         >
-          Clear
+          {t('Clear')}
         </button>
       </div>
 
       {lastEngine === 'fish-audio' && (
         <p className="text-[10px] text-amber-400/90 leading-snug flex gap-1.5 shrink-0">
           <AlertTriangle className="h-3 w-3 shrink-0 mt-px" />
-          Last rendered on Fish. Child speakers always fall back — Respeecher has no child voice.
+          {t('Last rendered on Fish. Child speakers always fall back — Respeecher has no child voice.')}
         </p>
       )}
       {fits === false && (
         <p className="text-[10px] text-red-400 leading-snug flex gap-1.5 shrink-0">
           <AlertTriangle className="h-3 w-3 shrink-0 mt-px" />
-          Best take overruns the slot beyond clean time-stretch. Shorten the line.
+          {t('Best take overruns the slot beyond clean time-stretch. Shorten the line.')}
         </p>
       )}
 
@@ -354,7 +356,7 @@ export default function RespeecherPanel({
       {takes.length > 0 && (
         <div className="space-y-1 shrink-0">
           <div className="text-[9px] text-slate-500 uppercase tracking-wide">
-            Takes — first is live
+            {t('Takes — first is live')}
           </div>
           {takes.map((p, i) => (
             <div key={p} className="flex items-center gap-1.5">
@@ -378,7 +380,7 @@ export default function RespeecherPanel({
 
         {/* left — voices (the only thing that scrolls) */}
         <div className="flex flex-col min-h-0 min-w-0 gap-1">
-          <div className="text-[9px] text-slate-500 uppercase tracking-wide">Voice</div>
+          <div className="text-[9px] text-slate-500 uppercase tracking-wide">{t('Voice')}</div>
           {showHelp && (
             <p className="text-[9px] text-slate-400 leading-snug rounded-md border border-slate-800 bg-slate-900/60 p-1.5">
               <span className="text-amber-400">★</span> = Respeecher&apos;s recommended
@@ -431,33 +433,33 @@ export default function RespeecherPanel({
         {/* right — sampling parameters, fixed; scrolls only if the pane is short */}
         <div className="flex flex-col min-h-0 min-w-0 gap-2 overflow-y-auto pr-0.5">
           <div className="flex items-center justify-between">
-            <span className="text-[9px] text-slate-500 uppercase tracking-wide">Sampling</span>
+            <span className="text-[9px] text-slate-500 uppercase tracking-wide">{t('Sampling')}</span>
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => setShowHelp((h) => !h)}
-                title="What do these do?"
+                title={t('What do these do?')}
                 className={cn(
                   'text-[9px] flex items-center gap-0.5',
                   showHelp ? 'text-cyan-300' : 'text-slate-500 hover:text-slate-200'
                 )}
               >
-                <HelpCircle className="h-2.5 w-2.5" /> Help
+                <HelpCircle className="h-2.5 w-2.5" /> {t('Help')}
               </button>
               <button
                 type="button"
                 onClick={resetAll}
-                title="Restore this voice's defaults and clear the seed"
+                title={t("Restore this voice's defaults and clear the seed")}
                 className="text-[9px] text-slate-500 hover:text-slate-200 flex items-center gap-0.5"
               >
-                <RotateCcw className="h-2.5 w-2.5" /> Reset
+                <RotateCcw className="h-2.5 w-2.5" /> {t('Reset')}
               </button>
             </div>
           </div>
 
           {showHelp && (
             <p className="text-[9px] text-slate-400 leading-snug rounded-md border border-slate-800 bg-slate-900/60 p-1.5">
-              These shape how the model picks each sound. <span className="text-slate-200">Temperature</span> is
+              {t('These shape how the model picks each sound.')} <span className="text-slate-200">{t('Temperature')}</span> is
               the one worth moving. The three penalties suppress artifacts rather than shape
               performance — leave them at the voice&apos;s defaults unless you hear a specific
               defect. Hover any label for detail.
@@ -489,7 +491,7 @@ export default function RespeecherPanel({
           {/* seed block — pinned to the bottom of the tuning column */}
           <div className="pt-1.5 mt-1 border-t border-slate-800 space-y-1.5">
             <div className="flex items-center justify-between gap-1">
-              <Hint text={TOP_K_HINT}>Top K</Hint>
+              <Hint text={TOP_K_HINT}>{t('Top K')}</Hint>
               <input
                 type="number"
                 value={topK}
@@ -506,7 +508,7 @@ export default function RespeecherPanel({
 
             <div className="flex items-center justify-between gap-1">
               <Hint text="The number behind this exact performance. Lock it and every regeneration returns identical audio; re-roll to race three fresh reads and harvest a new one.">
-                Seed
+                {t('Seed')}
               </Hint>
               <input
                 type="number"
@@ -545,10 +547,10 @@ export default function RespeecherPanel({
               <button
                 type="button"
                 onClick={() => { setSeed(null); setLocked(false) }}
-                title="Discard the pinned seed and race fresh takes on the next generate"
+                title={t('Discard the pinned seed and race fresh takes on the next generate')}
                 className="flex-1 text-[9px] py-1 rounded-md border border-slate-700 bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center gap-1"
               >
-                <Dices className="h-2.5 w-2.5" /> Re-roll
+                <Dices className="h-2.5 w-2.5" /> {t('Re-roll')}
               </button>
             </div>
 
@@ -565,11 +567,11 @@ export default function RespeecherPanel({
             >
               {isRegenerating
                 ? <><Loader2 className="h-3 w-3 animate-spin" /> Generating…</>
-                : <><Play className="h-3 w-3" /> Generate</>}
+                : <><Play className="h-3 w-3" /> {t('Generate')}</>}
             </button>
             {!selected && (
               <p className="text-[9px] text-slate-600 leading-snug text-center">
-                Pick a voice to enable
+                {t('Pick a voice to enable')}
               </p>
             )}
           </div>

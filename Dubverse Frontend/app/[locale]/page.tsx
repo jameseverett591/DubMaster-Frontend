@@ -37,6 +37,7 @@ import {
 } from "lucide-react"
 import Link from "next/link"
 import { LanguageSwitcher } from "@/components/language-switcher"
+import { useT } from '@/lib/use-t'
 
 /* ─── Floating particles component ─── */
 
@@ -92,6 +93,7 @@ function GlowSeparator() {
 /* Pricing section removed - users see plans on signup page */
 
 export default function LandingPage() {
+  const tUi = useT()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [videoMode, setVideoMode] = useState<"original" | "dubbed" | "split">("split")
   const [scrollY, setScrollY] = useState(0)
@@ -556,8 +558,8 @@ export default function LandingPage() {
               <AccordionContent className="text-[#94A3B8] space-y-2">
                 <p><strong className="text-[#C084FC]">Voice Cloning:</strong> Fish Audio S1 (zero-shot, 30-60s samples)</p>
                 <p><strong className="text-[#C084FC]">Emotion Analysis:</strong> Hume AI + emotion2vec</p>
-                <p><strong className="text-[#C084FC]">Quality Control:</strong> Azure Speech, SyncNet, Claude synthesis</p>
-                <p><strong className="text-[#C084FC]">Lip-Sync:</strong> Industry-standard LSE-D scoring</p>
+                <p><strong className="text-[#C084FC]">Quality Control:</strong> {tUi('Azure Speech, SyncNet, Claude synthesis')}</p>
+                <p><strong className="text-[#C084FC]">Lip-Sync:</strong> {tUi('Industry-standard LSE-D scoring')}</p>
               </AccordionContent>
             </AccordionItem>
           </Accordion>
@@ -614,11 +616,11 @@ export default function LandingPage() {
             <table className="w-full border-collapse">
               <thead>
                 <tr className="border-b border-[#A855F7]/20">
-                  <th className="text-left py-5 px-6 text-[#94A3B8]">Feature</th>
+                  <th className="text-left py-5 px-6 text-[#94A3B8]">{tUi('Feature')}</th>
                   <th className="py-5 px-6 text-[#C084FC] font-bold text-lg">DubMaster</th>
-                  <th className="py-5 px-6 text-[#64748B]">Dubverse.ai</th>
-                  <th className="py-5 px-6 text-[#64748B]">HeyGen</th>
-                  <th className="py-5 px-6 text-[#64748B]">Traditional</th>
+                  <th className="py-5 px-6 text-[#64748B]">{tUi('Dubverse.ai')}</th>
+                  <th className="py-5 px-6 text-[#64748B]">{tUi('HeyGen')}</th>
+                  <th className="py-5 px-6 text-[#64748B]">{tUi('Traditional')}</th>
                 </tr>
               </thead>
               <tbody>

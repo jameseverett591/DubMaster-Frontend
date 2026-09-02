@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input'
 import { Mic2, Star, Search, Play, Check, Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
 import { apiClient, API_BASE_URL, type Voice } from '@/lib/api-client'
 import { useEditorStore } from '@/lib/editor-store'
+import { useT } from '@/lib/use-t'
 
 const FAVORITES_KEY = 'dubmaster.voiceLibrary.favorites'
 // voice_id -> name, remembered across sessions. The speakers strip resolves names
@@ -38,6 +39,7 @@ interface VoiceLibraryContentProps {
  * (right-panel-tab wrapper). All state lives here.
  */
 export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVoicesVersion = 0, onOpenCustomVoices }: VoiceLibraryContentProps) {
+  const t = useT()
   // Job context (browse-only when no jobId in URL)
   const params = useParams<{ jobId?: string }>()
   const routeJobId = (params as any)?.jobId as string | undefined
@@ -551,7 +553,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
           </div>
           <button type="button"
             title={isFav ? 'Remove from favorites' : 'Add to favorites'}
-            aria-label="Toggle favorite"
+            aria-label={t('Toggle favorite')}
             onClick={() => toggleFavorite(v.voice_id)}
             className={`shrink-0 ${isFav ? 'text-amber-400' : 'text-slate-600 hover:text-amber-400'} transition-colors`}>
             <Star className={`${isHero ? 'h-6 w-6' : 'h-4 w-4'} ${isFav ? 'fill-current' : ''}`} />
@@ -560,7 +562,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
         {customVoiceIds.has(v.voice_id) && (
           <div className={`flex ${isHero ? 'shrink-0' : ''}`}>
             <span
-              title="Your cloned voice — manage it in Test Clips"
+              title={t('Your cloned voice — manage it in Test Clips')}
               className={`inline-flex items-center gap-1 rounded-full border border-purple-500/50 bg-purple-500/15 text-purple-300 ${
                 isHero ? 'text-[11px] px-2.5 py-0.5' : 'text-[9px] px-2 py-0.5'
               }`}
@@ -619,7 +621,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                 <Check className="h-3 w-3" /> {assignedTo}
               </span>
             ) : (
-              <select aria-label="Assign to speaker" defaultValue=""
+              <select aria-label={t('Assign to speaker')} defaultValue=""
                 onChange={(e) => {
                   if (e.target.value) {
                     handleAssign(v.voice_id, e.target.value)
@@ -652,7 +654,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
         <div className="flex flex-col items-center justify-center h-32 gap-2 text-red-400 text-xs">
           <span>{pageError[pageNum]}</span>
           <Button size="sm" variant="outline" onClick={() => fetchPage(pageNum)} className="h-7 text-xs">
-            Retry
+            {t('Retry')}
           </Button>
         </div>
       )
@@ -668,7 +670,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     if (voices.length === 0) {
       return (
         <div className="flex items-center justify-center h-32 text-slate-500 text-sm">
-          No voices match your filters.
+          {t('No voices match your filters.')}
         </div>
       )
     }
@@ -769,7 +771,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                   </h3>
                   <button
                     onClick={() => toggleFavorite(selected.voice_id)}
-                    aria-label="Toggle favourite"
+                    aria-label={t('Toggle favourite')}
                     className="shrink-0 text-slate-400 hover:text-amber-300"
                   >
                     <Star className={`h-4 w-4 ${favorites.has(selected.voice_id) ? 'fill-amber-400 text-amber-400' : ''}`} />
@@ -807,7 +809,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                   </Button>
                   {isJobAware && (
                     <select
-                      aria-label="Assign to speaker"
+                      aria-label={t('Assign to speaker')}
                       value=""
                       onChange={(e) => { if (e.target.value) handleAssign(selected.voice_id, e.target.value) }}
                       className="h-8 flex-1 min-w-0 rounded-md border border-amber-500/30 bg-[#0F172A] px-2 text-xs text-slate-200"
@@ -827,7 +829,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                 )}
               </div>
             ) : (
-              <p className="text-sm text-slate-500">Select a voice to see its details.</p>
+              <p className="text-sm text-slate-500">{t('Select a voice to see its details.')}</p>
             )}
           </div>
         </div>
@@ -943,43 +945,43 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
           <div className="relative flex-1 min-w-[180px]">
             <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500 pointer-events-none" />
             <Input value={search} onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by name…" aria-label="Search voices by name"
+              placeholder="Search by name…" aria-label={t('Search voices by name')}
               className="pl-8 h-8 text-xs bg-slate-900 border-slate-700" />
           </div>
           <select value={gender} onChange={(e) => setGender(e.target.value)}
-            aria-label="Filter by gender"
+            aria-label={t('Filter by gender')}
             className="h-8 px-2 text-xs rounded bg-slate-900 border border-slate-700 text-slate-200">
-            <option value="">All genders</option>
-            <option value="male">Male</option>
-            <option value="female">Female</option>
-            <option value="child">Child</option>
+            <option value="">{t('All genders')}</option>
+            <option value="male">{t('Male')}</option>
+            <option value="female">{t('Female')}</option>
+            <option value="child">{t('Child')}</option>
           </select>
           <select value={tag} onChange={(e) => setTag(e.target.value)}
-            aria-label="Filter by tag"
+            aria-label={t('Filter by tag')}
             className="h-8 px-2 text-xs rounded bg-slate-900 border border-slate-700 text-slate-200">
-            <option value="">All tags</option>
+            <option value="">{t('All tags')}</option>
             {['calm','expressive','dramatic','warm','cinematic','natural','narration','character-voice','energetic','authoritative','intense','smooth'].map(t => (
               <option key={t} value={t}>{t}</option>
             ))}
           </select>
           <select value={language} onChange={(e) => setLanguage(e.target.value)}
-            aria-label="Filter by language"
+            aria-label={t('Filter by language')}
             className="h-8 px-2 text-xs rounded bg-slate-900 border border-slate-700 text-slate-200">
-            <option value="">All languages</option>
-            <option value="en">English</option>
-            <option value="zh">Chinese</option>
-            <option value="ja">Japanese</option>
-            <option value="ko">Korean</option>
-            <option value="es">Spanish</option>
-            <option value="fr">French</option>
-            <option value="de">German</option>
+            <option value="">{t('All languages')}</option>
+            <option value="en">{t('English')}</option>
+            <option value="zh">{t('Chinese')}</option>
+            <option value="ja">{t('Japanese')}</option>
+            <option value="ko">{t('Korean')}</option>
+            <option value="es">{t('Spanish')}</option>
+            <option value="fr">{t('French')}</option>
+            <option value="de">{t('German')}</option>
           </select>
           <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}
-            aria-label="Sort order"
+            aria-label={t('Sort order')}
             className="h-8 px-2 text-xs rounded bg-slate-900 border border-slate-700 text-slate-200">
-            <option value="task_count">Most used</option>
-            <option value="like_count">Most liked</option>
-            <option value="created_at">Newest</option>
+            <option value="task_count">{t('Most used')}</option>
+            <option value="like_count">{t('Most liked')}</option>
+            <option value="created_at">{t('Newest')}</option>
           </select>
           <Button size="sm" variant={showOnlyFavorites ? 'default' : 'outline'}
             onClick={() => setShowOnlyFavorites(p => !p)}
@@ -991,7 +993,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
             <Button size="sm" variant="outline" onClick={onOpenCustomVoices}
               className="h-8 text-xs border-slate-700 text-slate-300">
               <Mic2 className="h-3.5 w-3.5 mr-1" />
-              Test Clips
+              {t('Test Clips')}
             </Button>
           )}
         </div>
@@ -1004,13 +1006,13 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
           }}>
             <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500 pointer-events-none" />
             <Input ref={searchInputRef} value={search} onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by name… (right-click for gender)" aria-label="Search voices by name"
+              placeholder="Search by name… (right-click for gender)" aria-label={t('Search voices by name')}
               className="pl-8 h-8 text-xs bg-slate-900 border-slate-700" />
           </div>
           {gender && (
             <span className="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full bg-purple-600/20 border border-purple-600/40 text-purple-300">
               {gender.charAt(0).toUpperCase() + gender.slice(1)}
-              <button type="button" onClick={() => setGender('')} aria-label="Clear gender filter" className="hover:text-purple-100">
+              <button type="button" onClick={() => setGender('')} aria-label={t('Clear gender filter')} className="hover:text-purple-100">
                 ✕
               </button>
             </span>
@@ -1025,7 +1027,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
             <Button size="sm" variant="outline" onClick={onOpenCustomVoices}
               className="h-8 text-xs border-slate-700 text-slate-300">
               <Mic2 className="h-3.5 w-3.5 mr-1" />
-              Test Clips
+              {t('Test Clips')}
             </Button>
           )}
           {/* Gender context menu */}
@@ -1066,7 +1068,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
             onClick={() => setAssignMenu(null)}
             className="w-full text-left px-3 py-2 text-xs text-slate-300 hover:bg-slate-700 whitespace-nowrap"
           >
-            Cancel
+            {t('Cancel')}
           </button>
         </div>
       )}
@@ -1080,7 +1082,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
             </div>
           ) : (
             <div className="flex items-center justify-center h-32 text-slate-500 text-sm">
-              No favorites yet — star a voice to add it here.
+              {t('No favorites yet — star a voice to add it here.')}
             </div>
           )}
         </div>
@@ -1101,8 +1103,8 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
               <button
                 type="button"
                 onClick={() => goToPage(currentPage - 1)}
-                aria-label="Previous page"
-                title="Previous page"
+                aria-label={t('Previous page')}
+                title={t('Previous page')}
                 className="absolute left-1 top-1/2 -translate-y-1/2 z-10 w-8 h-12 flex items-center justify-center rounded-md bg-slate-900/40 text-slate-500 hover:bg-slate-900/75 hover:text-slate-200 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity duration-150"
               >
                 <ChevronLeft className="h-6 w-6" />
@@ -1112,8 +1114,8 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
               <button
                 type="button"
                 onClick={() => goToPage(currentPage + 1)}
-                aria-label="Next page"
-                title="Next page"
+                aria-label={t('Next page')}
+                title={t('Next page')}
                 className="absolute right-1 top-1/2 -translate-y-1/2 z-10 w-8 h-12 flex items-center justify-center rounded-md bg-slate-900/40 text-slate-500 hover:bg-slate-900/75 hover:text-slate-200 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity duration-150"
               >
                 <ChevronRight className="h-6 w-6" />
@@ -1144,7 +1146,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
             {layout === 'list' ? (
               <div className="flex items-center gap-2">
                 <span className="text-[11px] text-slate-400 tabular-nums">
-                  Page <span className="text-slate-100 font-medium">{currentPage}</span>
+                  {t('Page')} <span className="text-slate-100 font-medium">{currentPage}</span>
                   <span className="text-slate-600"> of </span>
                   <span className="text-slate-200">{totalPages}</span>
                 </span>
@@ -1166,7 +1168,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                         }
                       }}
                       placeholder="#"
-                      aria-label="Jump to page"
+                      aria-label={t('Jump to page')}
                       className="h-7 w-14 text-[11px] bg-slate-900 border-slate-700 px-2 text-center tabular-nums"
                     />
                   </>
@@ -1218,13 +1220,14 @@ interface VoiceLibraryModalProps {
 }
 
 export function VoiceLibraryModal({ open, onOpenChange }: VoiceLibraryModalProps) {
+  const t = useT()
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-5xl max-h-[85vh] bg-[#020817]/95 backdrop-blur-md border-[#A855F7]/30 flex flex-col gap-3">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-white">
             <Mic2 className="h-5 w-5 text-[#A855F7]" />
-            Voice Library
+            {t('Voice Library')}
             <span className="text-xs text-slate-400 ml-2">— browse only (open a project to assign)</span>
           </DialogTitle>
           <DialogDescription className="text-[#94A3B8]">

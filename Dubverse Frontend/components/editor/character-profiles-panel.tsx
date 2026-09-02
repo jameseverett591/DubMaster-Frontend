@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react'
 import { apiClient, type CharacterProfile } from '@/lib/api-client'
+import { useT } from '@/lib/use-t'
 
 interface Props {
   jobId: string
@@ -10,6 +11,7 @@ interface Props {
 const EMPTY_PROFILE = (): CharacterProfile => ({ name: '', traits: [], speech_style: '' })
 
 export function CharacterProfilesPanel({ jobId }: Props) {
+  const t = useT()
   const [profiles, setProfiles] = useState<CharacterProfile[]>([])
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -73,8 +75,8 @@ export function CharacterProfilesPanel({ jobId }: Props) {
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-white/8 shrink-0">
         <div>
-          <span className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold">Character Profiles</span>
-          <p className="text-[9px] text-slate-600 mt-0.5">Define voices to keep characters consistent across translation</p>
+          <span className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold">{t('Character Profiles')}</span>
+          <p className="text-[9px] text-slate-600 mt-0.5">{t('Define voices to keep characters consistent across translation')}</p>
         </div>
         <button
           onClick={save}
@@ -116,7 +118,7 @@ export function CharacterProfilesPanel({ jobId }: Props) {
             </div>
             <div className="flex gap-1 shrink-0">
               <button onClick={() => openEdit(i)} className="text-[9px] text-slate-500 hover:text-slate-300 px-1.5 py-0.5 rounded transition-colors"
-                style={{ border: '1px solid rgba(255,255,255,0.08)' }}>Edit</button>
+                style={{ border: '1px solid rgba(255,255,255,0.08)' }}>{t('Edit')}</button>
               <button onClick={() => remove(i)} className="text-[9px] text-red-600 hover:text-red-400 px-1.5 py-0.5 rounded transition-colors"
                 style={{ border: '1px solid rgba(239,68,68,0.2)' }}>✕</button>
             </div>
@@ -125,7 +127,7 @@ export function CharacterProfilesPanel({ jobId }: Props) {
 
         {profiles.length === 0 && editingIndex === null && (
           <p className="text-[10px] text-slate-600 text-center mt-6 leading-relaxed">
-            No characters yet.<br />Add one to give the AI a consistent voice to write for.
+            {t('No characters yet.')}<br />{t('Add one to give the AI a consistent voice to write for.')}
           </p>
         )}
       </div>
@@ -135,12 +137,12 @@ export function CharacterProfilesPanel({ jobId }: Props) {
         <div className="px-3 py-3 border-t border-white/8 flex flex-col gap-2 shrink-0"
           style={{ background: 'rgba(167,139,250,0.05)' }}>
           <span className="text-[9px] text-slate-500 uppercase tracking-widest">
-            {editingIndex < profiles.length ? 'Edit Character' : 'New Character'}
+            {editingIndex < profiles.length ? t('Edit Character') : t('New Character')}
           </span>
           <input
             className="w-full bg-transparent text-xs text-slate-200 px-2 py-1.5 rounded outline-none"
             style={{ border: '1px solid rgba(255,255,255,0.12)' }}
-            placeholder="Character name"
+            placeholder={t('Character name')}
             value={draft.name}
             onChange={e => setDraft(d => ({ ...d, name: e.target.value }))}
           />
@@ -170,14 +172,14 @@ export function CharacterProfilesPanel({ jobId }: Props) {
                 border: `1px solid ${draft.name.trim() ? 'rgba(167,139,250,0.35)' : 'rgba(100,100,100,0.2)'}`,
               }}
             >
-              {editingIndex < profiles.length ? 'Update' : 'Add Character'}
+              {editingIndex < profiles.length ? t('Update') : t('Add Character')}
             </button>
             <button
               onClick={() => setEditingIndex(null)}
               className="px-3 py-1.5 rounded text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
               style={{ border: '1px solid rgba(255,255,255,0.08)' }}
             >
-              Cancel
+              {t('Cancel')}
             </button>
           </div>
         </div>

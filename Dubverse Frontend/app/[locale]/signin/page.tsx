@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Mic2, Mail, Lock, Github } from "lucide-react"
 import Link from "next/link"
+import { useT } from '@/lib/use-t'
 
 export default function SignInPage() {
   return (
@@ -20,6 +21,7 @@ export default function SignInPage() {
 }
 
 function SignInContent() {
+  const tUi = useT()
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [loading, setLoading] = useState(false)
@@ -234,7 +236,7 @@ function SignInContent() {
                   <Input
                     id="password"
                     type="password"
-                    placeholder="Your password"
+                    placeholder={tUi('Your password')}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
