@@ -15,7 +15,6 @@ import { useT } from '@/lib/use-t'
  *  is recoloured here with an arbitrary variant rather than by editing the shared
  *  component, which would restyle every tooltip in the app. */
 function Hint({ text, children }: { text: string; children: React.ReactNode }) {
-  const t = useT()
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -87,7 +86,6 @@ function fmt(s: number): string {
  *  preload="metadata" so the duration is known before playback — the native
  *  players sat at 0:00 / 0:00 until pressed, which read as broken. */
 function TakePlayer({ src, accent }: { src: string; accent: boolean }) {
-  const t = useT()
   const ref = useRef<HTMLAudioElement | null>(null)
   const [playing, setPlaying] = useState(false)
   const [at, setAt] = useState(0)

@@ -274,7 +274,6 @@ function VariantCard({
 // ---------------------------------------------------------------------------
 
 function FitBar({ ratio }: { ratio: number }) {
-  const t = useT()
   const pct = Math.min(100, Math.round(ratio * 100))
   const barColor = fitRatioColor(ratio)
   const label = fitRatioLabel(ratio)
@@ -301,7 +300,6 @@ function FitBar({ ratio }: { ratio: number }) {
 // ---------------------------------------------------------------------------
 
 function EmptyState({ message }: { message: string }) {
-  const t = useT()
   return (
     <div className="flex items-center justify-center h-32 px-4">
       <p className="text-sm text-slate-500 text-center">{message}</p>
@@ -310,7 +308,6 @@ function EmptyState({ message }: { message: string }) {
 }
 
 function LoadingSkeleton() {
-  const t = useT()
   return (
     <div className="flex flex-col gap-3 p-3 animate-pulse">
       <div className="h-3 w-32 rounded bg-slate-700" />

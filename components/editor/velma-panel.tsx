@@ -81,7 +81,6 @@ function scoreRing(score: number): string {
 }
 
 function CopyChip({ tag }: { tag: string }) {
-  const t = useT()
   const [copied, setCopied] = useState(false)
   const handleCopy = useCallback(() => {
     navigator.clipboard.writeText(tag).then(() => {
@@ -112,7 +111,6 @@ function SectionCard({ icon, title, trailing, children }: {
   trailing?: React.ReactNode
   children?: React.ReactNode
 }) {
-  const t = useT()
   return (
     <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-3">
       <div className="flex items-center gap-2 mb-2.5">
@@ -126,7 +124,6 @@ function SectionCard({ icon, title, trailing, children }: {
 }
 
 function DataRow({ label, children }: { label: string; children: React.ReactNode }) {
-  const t = useT()
   return (
     <div className="flex items-center justify-between py-1.5 border-b border-neutral-800/60 last:border-0">
       <span className="text-[11px] text-slate-400">{label}</span>

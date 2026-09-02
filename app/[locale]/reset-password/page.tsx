@@ -289,7 +289,6 @@ function ResetPasswordContent() {
 }
 
 export default function ResetPasswordPage() {
-  const t = useT()
   return (
     <Suspense
       fallback={

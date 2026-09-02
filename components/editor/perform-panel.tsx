@@ -36,7 +36,6 @@ function fmt(s: number): string {
  *  is browser chrome and cannot be themed, and its light bar reads as a bright
  *  slab against this panel. */
 function ClipPlayer({ src, accent, label }: { src: string; accent: boolean; label: string }) {
-  const t = useT()
   const ref = useRef<HTMLAudioElement | null>(null)
   const [playing, setPlaying] = useState(false)
   const [at, setAt] = useState(0)

@@ -1246,7 +1246,6 @@ export function VoiceLibraryModal({ open, onOpenChange }: VoiceLibraryModalProps
  * right rail as a sibling to the Speakers tab.
  */
 export function VoiceLibraryPanel({ onVoiceAssigned, customVoicesVersion, onOpenCustomVoices }: { onVoiceAssigned?: (speakerId: string, voiceId: string) => void; customVoicesVersion?: number; onOpenCustomVoices?: () => void } = {}) {
-  const t = useT()
   return (
     <div className="flex-1 min-h-0 flex flex-col p-3">
       <VoiceLibraryContent layout="list" onVoiceAssigned={onVoiceAssigned} customVoicesVersion={customVoicesVersion} onOpenCustomVoices={onOpenCustomVoices} />

@@ -253,7 +253,6 @@ function BrowserBody({
 }
 
 export function AdvancedChordBrowser({ segment, segmentIndex, embedded, onClose, onApply }: Props) {
-  const t = useT()
   const [selected, setSelected] = useState<Chord | null>(null)
   const [stack, setStack] = useState<StackItem[]>([])
 
