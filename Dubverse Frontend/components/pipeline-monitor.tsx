@@ -70,7 +70,6 @@ function formatMs(ms: number | null): string {
 function StageNode({ stage, isLast, isExpanded, onToggle }: {
   stage: PipelineStage; isLast: boolean; isExpanded: boolean; onToggle: () => void
 }) {
-  const t = useT()
   const config = STATUS_CONFIG[stage.status] || STATUS_CONFIG.pending
   const Icon = STAGE_ICONS[stage.id] || Activity
 

@@ -13,7 +13,6 @@ import Link from "next/link"
 import { useT } from '@/lib/use-t'
 
 export default function SignInPage() {
-  const tUi = useT()
   return (
     <Suspense>
       <SignInContent />

@@ -441,7 +441,6 @@ type AskAiMessage = { role: 'user' | 'assistant'; content: string; displayed?: s
 
 // Ask DubMaster AI's bot icon — outlined, brand-gradient linework. `id` must be unique per instance (SVG gradient ids can't repeat on a page).
 function AskAiBotIcon({ id, size = 20 }: { id: string; size?: number }) {
-  const t = useT()
   return (
     <svg width={size} height={size} viewBox="0 0 24 24">
       <defs>

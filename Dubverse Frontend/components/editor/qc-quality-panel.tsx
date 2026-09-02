@@ -391,7 +391,6 @@ interface SectionCardProps {
 }
 
 function SectionCard({ icon, title, subtitle, trailing, children }: SectionCardProps) {
-  const t = useT()
   return (
     <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-3">
       <div className="flex items-center justify-between mb-2">
@@ -408,7 +407,6 @@ function SectionCard({ icon, title, subtitle, trailing, children }: SectionCardP
 }
 
 function Stat({ label, value, accent }: { label: string; value: string; accent?: string }) {
-  const t = useT()
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-950 p-2">
       <div className="text-[10px] text-slate-500 mb-0.5">{label}</div>

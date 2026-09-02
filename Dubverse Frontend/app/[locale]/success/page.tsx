@@ -9,7 +9,6 @@ import Link from "next/link"
 import { useT } from '@/lib/use-t'
 
 export default function SuccessPage() {
-  const t = useT()
   return (
     <Suspense>
       <SuccessContent />

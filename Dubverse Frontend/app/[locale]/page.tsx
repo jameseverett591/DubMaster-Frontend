@@ -54,7 +54,6 @@ function particleRand(i: number, salt: number): number {
 }
 
 function Particles() {
-  const tUi = useT()
   return (
     <div className="absolute inset-0 overflow-hidden pointer-events-none">
       {Array.from({ length: 30 }).map((_, i) => {
@@ -86,7 +85,6 @@ function Particles() {
 
 /* ─── Glowing separator ─── */
 function GlowSeparator() {
-  const tUi = useT()
   return (
     <div className="w-full h-px bg-gradient-to-r from-transparent via-[#A855F7]/50 to-transparent" />
   )
