@@ -7782,7 +7782,7 @@ export function DubVerseEditor({
                     onDragEnd={() => setDraggedVoice(null)}
                     className="px-2 py-0.5 rounded text-[11px] font-medium bg-slate-700 text-slate-300 cursor-grab active:cursor-grabbing border border-slate-600 hover:border-cyan-500/60 hover:text-cyan-300 select-none"
                   >
-                    {v.label}
+                    {t(v.label)}
                   </div>
                 ))}
                 <span className="text-[10px] text-slate-600 ml-1">drag to segment</span>
@@ -8089,26 +8089,26 @@ export function DubVerseEditor({
                 { id: 'library',    label: 'Voice Library' },
                 { id: 'testclips',  label: 'Test Clips',   feature: 'customVoices' },
                 { id: 'ei-library', label: 'E.I. Library', feature: 'emotionalIntelligence' },
-              ] as const).filter((t) => !('feature' in t) || hasFeature(t.feature as any)).map((t) => (
+              ] as const).filter((tab) => !('feature' in tab) || hasFeature(tab.feature as any)).map((tab) => (
                 <button
                   type="button"
-                  key={t.id}
+                  key={tab.id}
                   onClick={() => {
-                    if (t.id === 'studio') {
+                    if (tab.id === 'studio') {
                       router.push('/studio')
                       return
                     }
-                    setRightPanelTab(t.id)
+                    setRightPanelTab(tab.id)
                   }}
                   className={cn(
                     'text-xs px-3 py-1 rounded-md transition-colors',
-                    rightPanelTab === t.id
+                    rightPanelTab === tab.id
                       ? 'bg-slate-700 text-white'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
                   )}
                 >
-                  {t.label}
-                  {t.id === 'quality' && qcReport && (qcReport.grade === 'D' || qcReport.grade === 'F') && (
+                  {t(tab.label)}
+                  {tab.id === 'quality' && qcReport && (qcReport.grade === 'D' || qcReport.grade === 'F') && (
                     <span className="ml-1.5 inline-block w-1.5 h-1.5 rounded-full bg-red-500" />
                   )}
                 </button>
@@ -9382,10 +9382,10 @@ export function DubVerseEditor({
             <div className="flex items-center justify-between mb-4">
               <span className="text-sm font-semibold text-cyan-400 flex items-center gap-2">
                 <Music2 className="h-4 w-4" />
-                Pitch — Segment {pitchPopupIndex + 1}
+                {t('Pitch — Segment {n}', { n: pitchPopupIndex + 1 })}
                 {stagedVoices[keyAt(pitchPopupIndex)] && (
                   <span className="text-[10px] font-normal text-slate-400">
-                    ({VOICE_OPTIONS.find(v => v.key === stagedVoices[keyAt(pitchPopupIndex)])?.label})
+                    ({t(VOICE_OPTIONS.find(v => v.key === stagedVoices[keyAt(pitchPopupIndex)])?.label ?? '')})
                   </span>
                 )}
               </span>
@@ -12586,7 +12586,7 @@ export function DubVerseEditor({
               segments over to make space, then refits the audio at a natural pace.
             </p>
             <div className="flex items-center gap-2 mb-4">
-              <span className="text-xs text-neutral-500 shrink-0">Make room:</span>
+              <span className="text-xs text-neutral-500 shrink-0">{t('Make room:')}</span>
               {[1, 2, 3].map(m => (
                 <button
                   key={m}

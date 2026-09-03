@@ -195,7 +195,7 @@ export default function VelmaPanel({
             title={t('Authenticity Score')}
             trailing={
               <span className={`text-[10px] px-2 py-0.5 rounded-full border font-medium ${dq.color} ${dq.border} ${dq.bg}`}>
-                {dq.label}
+                {t(dq.label)}
               </span>
             }
           >
@@ -283,7 +283,7 @@ export default function VelmaPanel({
           title={t('Emotion Mismatch')}
         >
           <p className="text-[11px] text-slate-300 leading-relaxed">
-            Original: <span className="font-semibold text-white">{segment.velma_emotion}</span>
+            {t('Original:')} <span className="font-semibold text-white">{segment.velma_emotion}</span>
             {' · '}
             Dub: <span className="font-semibold text-yellow-300">{segment.dubEmotion}</span>
           </p>
@@ -297,7 +297,7 @@ export default function VelmaPanel({
           title={t('Accent Mismatch')}
         >
           <p className="text-[11px] text-slate-300 leading-relaxed">
-            Original: <span className="font-semibold text-white">{segment.velma_accent}</span>
+            {t('Original:')} <span className="font-semibold text-white">{segment.velma_accent}</span>
             {' · '}
             Voice: <span className="font-semibold text-yellow-300">{segment.voiceAccent}</span>
           </p>

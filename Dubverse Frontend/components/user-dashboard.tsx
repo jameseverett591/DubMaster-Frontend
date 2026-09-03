@@ -49,6 +49,7 @@ const STATUS_CONFIG: Record<string, { label: string; classes: string }> = {
 }
 
 function StatusBadge({ status }: { status: string }) {
+  const t = useT()
   const cfg = STATUS_CONFIG[status] ?? {
     label: status,
     classes: "text-gray-400 border-gray-400/30 bg-gray-400/10",
@@ -57,7 +58,7 @@ function StatusBadge({ status }: { status: string }) {
     <span
       className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${cfg.classes}`}
     >
-      {cfg.label}
+      {t(cfg.label)}
     </span>
   )
 }
