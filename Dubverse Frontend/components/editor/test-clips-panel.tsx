@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Mic2, Trash2, Loader2, Upload, Wand2, Check, AlertTriangle, Play, Square } from 'lucide-react'
 import { apiClient, type CustomVoice } from '@/lib/api-client'
 import { useEditorStore } from '@/lib/editor-store'
+import { useT } from '@/lib/use-t'
 
 interface TestClipsPanelProps {
   jobId?: string
@@ -33,6 +34,7 @@ export function TestClipsPanel({
   onVoiceAssigned,
   onApplyToSegment,
 }: TestClipsPanelProps) {
+  const t = useT()
   const { segments, speakerVoiceMap, updateSpeakerVoice, pulseSpeaker } = useEditorStore()
 
   const [voices, setVoices] = useState<CustomVoice[]>([])
@@ -251,7 +253,7 @@ export function TestClipsPanel({
       <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-3 space-y-3">
         <div className="flex items-center gap-2">
           <Mic2 className="h-4 w-4 text-[#A855F7]" />
-          <h3 className="text-sm font-semibold text-slate-200">Create a voice from a clip</h3>
+          <h3 className="text-sm font-semibold text-slate-200">{t('Create a voice from a clip')}</h3>
         </div>
         <p className="text-xs text-slate-500">
           10&ndash;30 seconds of clean, single-speaker speech (WAV or MP3) &mdash; no music
@@ -279,7 +281,7 @@ export function TestClipsPanel({
           className="w-full h-9 text-xs bg-amber-600 hover:bg-amber-700 text-white">
           {cloning
             ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Cloning&hellip;</>
-            : <><Wand2 className="h-3.5 w-3.5 mr-1.5" />Create voice</>}
+            : <><Wand2 className="h-3.5 w-3.5 mr-1.5" />{t('Create voice')}</>}
         </Button>
       </div>
 
@@ -355,12 +357,12 @@ export function TestClipsPanel({
                     <Button size="sm" variant="ghost"
                       onClick={() => setConfirmDelete(null)}
                       className="h-7 px-2 text-[10px] text-slate-400">
-                      Cancel
+                      {t('Cancel')}
                     </Button>
                   </div>
                 ) : (
                   <button type="button"
-                    title="Delete this voice — permanent"
+                    title={t('Delete this voice — permanent')}
                     aria-label={`Delete ${v.name}`}
                     onClick={() => setConfirmDelete(v.voice_id)}
                     className="shrink-0 text-slate-600 hover:text-red-400 transition-colors">
@@ -371,8 +373,7 @@ export function TestClipsPanel({
 
               {confirmDelete === v.voice_id && (
                 <p className="text-[10px] text-red-300/80">
-                  This removes the cloned model permanently. It cannot be recovered
-                  without the original clip.
+                  {t('This removes the cloned model permanently. It cannot be recovered without the original clip.')}
                 </p>
               )}
 
@@ -403,7 +404,7 @@ export function TestClipsPanel({
                     flash(v.voice_id, 'Applied to segment')
                   }}
                   className="h-8 text-xs border-slate-700 text-slate-300 shrink-0">
-                  This segment
+                  {t('This segment')}
                 </Button>
               </div>
 

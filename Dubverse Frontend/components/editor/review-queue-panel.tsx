@@ -4,6 +4,7 @@ import { useMemo } from 'react'
 import { X, ArrowRight, CheckCircle, AlertTriangle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { Segment } from '@/lib/editor-types'
+import { useT } from '@/lib/use-t'
 
 interface ReviewQueuePanelProps {
   segments: Segment[]
@@ -31,6 +32,7 @@ export function ReviewQueuePanel({
   onJumpToSegment,
   onMarkOk,
 }: ReviewQueuePanelProps) {
+  const t = useT()
   const flagged = useMemo(
     () =>
       segments.filter(
@@ -55,7 +57,7 @@ export function ReviewQueuePanel({
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-700 shrink-0">
           <div className="flex items-center gap-2">
             <AlertTriangle className="h-4 w-4 text-amber-400" />
-            <span className="text-sm font-semibold text-white">Review Queue</span>
+            <span className="text-sm font-semibold text-white">{t('Review Queue')}</span>
             {flagged.length > 0 && (
               <span className="text-xs font-medium px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
                 {flagged.length} unreviewed
@@ -74,14 +76,14 @@ export function ReviewQueuePanel({
         <div className="overflow-y-auto flex-1 p-3 space-y-2">
           {flagged.length === 0 && reviewed.length === 0 && (
             <div className="text-center py-10 text-neutral-500 text-sm">
-              No flagged segments — pipeline confidence looks good.
+              {t('No flagged segments — pipeline confidence looks good.')}
             </div>
           )}
 
           {flagged.length === 0 && reviewed.length > 0 && (
             <div className="flex items-center gap-2 text-emerald-400 text-sm py-3 justify-center">
               <CheckCircle className="h-4 w-4" />
-              All flagged segments reviewed.
+              {t('All flagged segments reviewed.')}
             </div>
           )}
 
@@ -132,14 +134,14 @@ export function ReviewQueuePanel({
                     className="flex items-center gap-1 text-xs px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white transition-colors border border-neutral-700"
                   >
                     <ArrowRight className="h-3 w-3" />
-                    Jump
+                    {t('Jump')}
                   </button>
                   <button
                     onClick={() => onMarkOk(seg.index)}
                     className="flex items-center gap-1 text-xs px-2.5 py-1 rounded bg-neutral-800 hover:bg-emerald-900/50 text-neutral-300 hover:text-emerald-300 transition-colors border border-neutral-700 hover:border-emerald-700"
                   >
                     <CheckCircle className="h-3 w-3" />
-                    Mark OK
+                    {t('Mark OK')}
                   </button>
                 </div>
               </div>

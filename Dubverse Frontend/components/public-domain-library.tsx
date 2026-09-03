@@ -38,6 +38,7 @@ import {
   List
 } from "lucide-react"
 import type { VideoSource } from "@/components/dashboard"
+import { useT } from '@/lib/use-t'
 
 interface SavedVideo {
   id: string
@@ -56,6 +57,7 @@ interface PublicDomainLibraryProps {
 }
 
 export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps) {
+  const t = useT()
   const [searchQuery, setSearchQuery] = useState("")
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid")
   const [selectedVideo, setSelectedVideo] = useState<SavedVideo | null>(null)
@@ -135,8 +137,8 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
           <div className="flex items-center gap-3">
             <Globe2 className="h-10 w-10 text-primary" />
             <div>
-              <h1 className="text-3xl font-bold text-foreground">Dubverse Studio</h1>
-              <p className="text-sm text-muted-foreground">Your saved dubbed videos</p>
+              <h1 className="text-3xl font-bold text-foreground">{t('Dubverse Studio')}</h1>
+              <p className="text-sm text-muted-foreground">{t('Your saved dubbed videos')}</p>
             </div>
           </div>
         </CardContent>
@@ -167,7 +169,7 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder="Search your dubbed videos..."
+            placeholder={t('Search your dubbed videos...')}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="pl-10 bg-background/50 backdrop-blur-sm border-border/50"
@@ -177,18 +179,18 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
           <DropdownMenuTrigger asChild>
             <Button variant="outline" className="gap-2 bg-transparent">
               <Filter className="h-4 w-4" />
-              Filter
+              {t('Filter')}
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="bg-background/95 backdrop-blur-md">
-            <DropdownMenuItem>All Videos</DropdownMenuItem>
-            <DropdownMenuItem>Completed</DropdownMenuItem>
-            <DropdownMenuItem>Processing</DropdownMenuItem>
+            <DropdownMenuItem>{t('All Videos')}</DropdownMenuItem>
+            <DropdownMenuItem>{t('Completed')}</DropdownMenuItem>
+            <DropdownMenuItem>{t('Processing')}</DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem>Spanish Dubs</DropdownMenuItem>
-            <DropdownMenuItem>French Dubs</DropdownMenuItem>
-            <DropdownMenuItem>German Dubs</DropdownMenuItem>
-            <DropdownMenuItem>Japanese Dubs</DropdownMenuItem>
+            <DropdownMenuItem>{t('Spanish Dubs')}</DropdownMenuItem>
+            <DropdownMenuItem>{t('French Dubs')}</DropdownMenuItem>
+            <DropdownMenuItem>{t('German Dubs')}</DropdownMenuItem>
+            <DropdownMenuItem>{t('Japanese Dubs')}</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -227,7 +229,7 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
                   {video.status === "processing" && (
                     <div className="absolute top-2 left-2">
                       <Badge variant="secondary" className="bg-yellow-500/80 text-white">
-                        Processing
+                        {t('Processing')}
                       </Badge>
                     </div>
                   )}
@@ -253,23 +255,23 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="bg-background/95 backdrop-blur-md">
                         <DropdownMenuItem className="gap-2">
-                          <Play className="h-4 w-4" /> Play
+                          <Play className="h-4 w-4" /> {t('Play')}
                         </DropdownMenuItem>
                         <DropdownMenuItem className="gap-2">
-                          <Download className="h-4 w-4" /> Download
+                          <Download className="h-4 w-4" /> {t('Download')}
                         </DropdownMenuItem>
                         <DropdownMenuItem className="gap-2">
-                          <Share2 className="h-4 w-4" /> Share
+                          <Share2 className="h-4 w-4" /> {t('Share')}
                         </DropdownMenuItem>
                         <DropdownMenuItem className="gap-2">
-                          <Pencil className="h-4 w-4" /> Rename
+                          <Pencil className="h-4 w-4" /> {t('Rename')}
                         </DropdownMenuItem>
                         <DropdownMenuItem className="gap-2">
-                          <Copy className="h-4 w-4" /> Duplicate & Re-dub
+                          <Copy className="h-4 w-4" /> {t('Duplicate & Re-dub')}
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem className="gap-2 text-destructive">
-                          <Trash2 className="h-4 w-4" /> Delete
+                          <Trash2 className="h-4 w-4" /> {t('Delete')}
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
@@ -302,7 +304,7 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
                         <h3 className="font-medium text-foreground truncate">{video.title}</h3>
                         {video.status === "processing" && (
                           <Badge variant="secondary" className="bg-yellow-500/80 text-white text-xs">
-                            Processing
+                            {t('Processing')}
                           </Badge>
                         )}
                       </div>
@@ -324,10 +326,10 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
                     </div>
                     <div className="flex items-center gap-2">
                       <Button size="sm" variant="outline" className="gap-1 bg-transparent" onClick={() => handlePlayVideo(video)}>
-                        <Play className="h-4 w-4" /> Play
+                        <Play className="h-4 w-4" /> {t('Play')}
                       </Button>
                       <Button size="sm" variant="outline" className="gap-1 bg-transparent">
-                        <Download className="h-4 w-4" /> Download
+                        <Download className="h-4 w-4" /> {t('Download')}
                       </Button>
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
@@ -337,17 +339,17 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end" className="bg-background/95 backdrop-blur-md">
                           <DropdownMenuItem className="gap-2">
-                            <Share2 className="h-4 w-4" /> Share
+                            <Share2 className="h-4 w-4" /> {t('Share')}
                           </DropdownMenuItem>
                           <DropdownMenuItem className="gap-2">
-                            <Pencil className="h-4 w-4" /> Rename
+                            <Pencil className="h-4 w-4" /> {t('Rename')}
                           </DropdownMenuItem>
                           <DropdownMenuItem className="gap-2">
-                            <Copy className="h-4 w-4" /> Duplicate & Re-dub
+                            <Copy className="h-4 w-4" /> {t('Duplicate & Re-dub')}
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem className="gap-2 text-destructive">
-                            <Trash2 className="h-4 w-4" /> Delete
+                            <Trash2 className="h-4 w-4" /> {t('Delete')}
                           </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
@@ -364,12 +366,12 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
           <CardContent className="py-16">
             <div className="text-center">
               <FolderOpen className="h-16 w-16 text-muted-foreground mx-auto mb-4" />
-              <h2 className="text-xl font-semibold text-foreground mb-2">No dubbed videos yet</h2>
+              <h2 className="text-xl font-semibold text-foreground mb-2">{t('No dubbed videos yet')}</h2>
               <p className="text-muted-foreground mb-6 max-w-md mx-auto">
-                Your dubbed videos will appear here once you complete your first dubbing project.
+                {t('Your dubbed videos will appear here once you complete your first dubbing project.')}
               </p>
               <Button size="lg" className="gap-2">
-                Start Your First Dub
+                {t('Start Your First Dub')}
               </Button>
             </div>
           </CardContent>
@@ -388,15 +390,15 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
           <div className="aspect-video bg-black rounded-lg flex items-center justify-center">
             <div className="text-center text-white">
               <Play className="h-16 w-16 mx-auto mb-4 opacity-50" />
-              <p className="text-muted-foreground">Video player would load here</p>
+              <p className="text-muted-foreground">{t('Video player would load here')}</p>
             </div>
           </div>
           <div className="flex gap-2 justify-end">
             <Button variant="outline" className="gap-2 bg-transparent">
-              <Share2 className="h-4 w-4" /> Share
+              <Share2 className="h-4 w-4" /> {t('Share')}
             </Button>
             <Button className="gap-2">
-              <Download className="h-4 w-4" /> Download
+              <Download className="h-4 w-4" /> {t('Download')}
             </Button>
           </div>
         </DialogContent>

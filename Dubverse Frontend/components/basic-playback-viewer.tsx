@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import { Download, Loader2, AlertCircle, CheckCircle2 } from "lucide-react"
 import { apiClient, type JobStatusValue } from "@/lib/api-client"
 import { Button } from "@/components/ui/button"
+import { useT } from '@/lib/use-t'
 
 interface BasicPlaybackViewerProps {
   jobId: string
@@ -26,6 +27,7 @@ const STAGE_LABELS: Partial<Record<JobStatusValue, string>> = {
 }
 
 export function BasicPlaybackViewer({ jobId }: BasicPlaybackViewerProps) {
+  const t = useT()
   const [status, setStatus] = useState<JobStatusValue>("pending")
   const [progress, setProgress] = useState(0)
   const [stageLabel, setStageLabel] = useState("Preparing your video...")
@@ -78,7 +80,7 @@ export function BasicPlaybackViewer({ jobId }: BasicPlaybackViewerProps) {
             <Loader2 className="h-4 w-4 text-[#A855F7] animate-spin" />
           )}
           <span className="text-sm font-semibold text-white">
-            {isComplete ? "Your Dub is Ready" : failed ? "Processing Failed" : "Dubbing in Progress"}
+            {isComplete ? "Your Dub is Ready" : failed ? t('Processing Failed') : t('Dubbing in Progress')}
           </span>
         </div>
         {!failed && !isComplete && (
@@ -102,7 +104,7 @@ export function BasicPlaybackViewer({ jobId }: BasicPlaybackViewerProps) {
             >
               <a href={dubbedUrl!} download>
                 <Download className="mr-2 h-4 w-4" />
-                Download Dubbed Video
+                {t('Download Dubbed Video')}
               </a>
             </Button>
           </div>
@@ -110,7 +112,7 @@ export function BasicPlaybackViewer({ jobId }: BasicPlaybackViewerProps) {
           /* ── Error ───────────────────────────────────────────── */
           <div className="flex flex-col items-center gap-3 py-8 text-center">
             <AlertCircle className="h-10 w-10 text-red-400" />
-            <p className="text-sm text-[#94A3B8]">Something went wrong. Please try again.</p>
+            <p className="text-sm text-[#94A3B8]">{t('Something went wrong. Please try again.')}</p>
           </div>
         ) : (
           /* ── Loading ─────────────────────────────────────────── */

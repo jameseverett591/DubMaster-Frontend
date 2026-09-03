@@ -365,12 +365,20 @@ the brackets are balanced.
 - **Delete Segment**.
 - **Group Selection** / **Clear Group** — start or release a multi-segment selection to
   move several segments as one; see "Moving and grouping segments on the timeline" below.
-- **Lock / Unlock** (keyboard: **Shift+L** to lock, **Shift+U** to unlock) — a locked
-  segment is fully frozen: it cannot be dragged, resized, text-edited, or regenerated, and
-  its voice, emotion, and speed are held exactly as they are. Locked segments show a green
-  highlight and stay locked through a page refresh or closing and reopening the editor.
-  Regeneration of a locked segment is refused even by bulk or automated actions — unlock
-  it (Shift+U) to make any change.
+- **Lock / Unlock** (keyboard: **Shift+L** to lock, **Shift+U** to unlock) — locks the
+  selected segment's **position** on the timeline. A locked segment cannot be dragged,
+  resized, or moved by a group drag, and it stays locked through a page refresh or
+  closing and reopening the editor. Text edits, voice assignment, emotion, speed, and
+  Generate Speech still work on a locked segment. Locked segments show a green highlight.
+
+- **Lock Scene / Unlock Scene** — right-click a segment and choose **Lock Scene…** to
+  start scene-lock mode with that segment as the anchor. A green band appears over the
+  selected range. Right-click the last segment you want included and choose **Lock Scene**
+  to lock every segment from the anchor to that segment. You can also use the keyboard:
+  press **Shift+L** once to arm the anchor on the selected segment, select the last segment,
+  then press **Shift+L** again to lock the run. **Shift+U** unlocks the contiguous locked
+  run containing the selected segment. Press **Escape** to cancel scene-lock mode without
+  locking anything.
 - **Pair with Next** (keyboard: **Shift+P**) — links the segment with the one immediately
   to its right so the two move together on the timeline. Choose it again (it becomes
   **Unpair**) to release one pair, or press **Escape** to release all pairs at once. (This
@@ -387,13 +395,15 @@ the brackets are balanced.
 - **Move one segment**: drag its block on the timeline. All of that segment's blocks
   across the Original, Dubbed, Preview Audio, and Emotion tracks move together in real
   time, and the new position is saved. Drag a block's left or right edge to resize it.
+  Locked segments cannot be moved or resized.
 - **Move several segments together (group move)**: right-click a segment and choose
   **Group Selection** to enter group mode — the cursor changes. Hold **Ctrl** and click
   the first segment, then Ctrl+click the last segment; everything from first to last is
   selected and enclosed in a transparent amber box (only the first and last segments are
   highlighted). Drag that box — or any selected segment — to move the whole group at once,
   with all tracks moving in sync. To release the group, right-click the box and choose
-  **Clear Group**, or press **Escape**.
+  **Clear Group**, or press **Escape**. Locked segments are excluded from the move even
+  if they are selected; only the unlocked selected segments move.
 - **Pair with Next** (shortcut **Shift+P**) links a single segment with the one immediately
   to its right so the two move together — a quick two-segment link, different from a group
   selection.

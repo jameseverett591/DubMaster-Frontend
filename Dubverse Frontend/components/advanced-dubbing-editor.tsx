@@ -57,6 +57,7 @@ import {
 } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { createClient } from "@/lib/supabase/client"
+import { useT } from '@/lib/use-t'
 
 interface TranscriptSegment {
   id: string
@@ -193,6 +194,7 @@ export function AdvancedDubbingEditor({
   onBack,
   onExport,
 }: AdvancedDubbingEditorProps) {
+  const t = useT()
   const [segments, setSegments] = useState<TranscriptSegment[]>(SAMPLE_TRANSCRIPT)
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>("3")
   const [activeMode, setActiveMode] = useState<"speech" | "subtitles" | "brand" | "lipsync">("speech")
@@ -331,7 +333,7 @@ export function AdvancedDubbingEditor({
           <span className="font-medium text-foreground truncate max-w-md">{videoTitle}</span>
           <Button variant="outline" size="sm" className="bg-transparent gap-2">
             <Languages className="h-4 w-4" />
-            Translate & Dub
+            {t('Translate & Dub')}
           </Button>
         </div>
         <div className="flex items-center gap-4">
@@ -364,7 +366,7 @@ export function AdvancedDubbingEditor({
             }}
           >
             <Download className="h-4 w-4" />
-            Export
+            {t('Export')}
           </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -373,20 +375,20 @@ export function AdvancedDubbingEditor({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48">
-              <DropdownMenuLabel>My Account</DropdownMenuLabel>
+              <DropdownMenuLabel>{t('My Account')}</DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={() => router.push("/account")} className="cursor-pointer">
                 <User className="mr-2 h-4 w-4" />
-                Account
+                {t('Account')}
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => router.push("/account")} className="cursor-pointer">
                 <Settings className="mr-2 h-4 w-4" />
-                Settings
+                {t('Settings')}
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={handleSignOut} className="cursor-pointer text-red-400 focus:text-red-300 focus:bg-red-500/10">
                 <LogOut className="mr-2 h-4 w-4" />
-                Sign Out
+                {t('Sign Out')}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -406,10 +408,10 @@ export function AdvancedDubbingEditor({
                   onClick={() => setActiveMode("speech")}
                 >
                   <AudioWaveform className="h-5 w-5" />
-                  <span className="text-[10px]">Speech</span>
+                  <span className="text-[10px]">{t('Speech')}</span>
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="right">Speech Editor</TooltipContent>
+              <TooltipContent side="right">{t('Speech Editor')}</TooltipContent>
             </Tooltip>
 
             <Tooltip>
@@ -421,10 +423,10 @@ export function AdvancedDubbingEditor({
                   onClick={() => setActiveMode("subtitles")}
                 >
                   <Subtitles className="h-5 w-5" />
-                  <span className="text-[10px]">Subtitles</span>
+                  <span className="text-[10px]">{t('Subtitles')}</span>
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="right">Subtitle Editor</TooltipContent>
+              <TooltipContent side="right">{t('Subtitle Editor')}</TooltipContent>
             </Tooltip>
 
             <Tooltip>
@@ -436,10 +438,10 @@ export function AdvancedDubbingEditor({
                   onClick={() => setActiveMode("brand")}
                 >
                   <Stamp className="h-5 w-5" />
-                  <span className="text-[10px]">Brand</span>
+                  <span className="text-[10px]">{t('Brand')}</span>
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="right">Brand Settings</TooltipContent>
+              <TooltipContent side="right">{t('Brand Settings')}</TooltipContent>
             </Tooltip>
 
             <Tooltip>
@@ -451,10 +453,10 @@ export function AdvancedDubbingEditor({
                   onClick={() => setActiveMode("lipsync")}
                 >
                   <Waves className="h-5 w-5" />
-                  <span className="text-[10px]">Lip Sync</span>
+                  <span className="text-[10px]">{t('Lip Sync')}</span>
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="right">Lip Sync Settings</TooltipContent>
+              <TooltipContent side="right">{t('Lip Sync Settings')}</TooltipContent>
             </Tooltip>
           </TooltipProvider>
         </div>
@@ -470,7 +472,7 @@ export function AdvancedDubbingEditor({
               </div>
               <Button size="sm" onClick={() => handleGenerateSpeech()} className="gap-2">
                 <Sparkles className="h-4 w-4" />
-                Generate Speech
+                {t('Generate Speech')}
               </Button>
             </div>
           )}
@@ -484,10 +486,10 @@ export function AdvancedDubbingEditor({
                 <div className="flex items-center gap-2 flex-1">
                   <Select value={speakerFilter} onValueChange={setSpeakerFilter}>
                     <SelectTrigger className="w-20 h-8 bg-transparent">
-                      <SelectValue placeholder="All" />
+                      <SelectValue placeholder={t('All')} />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="all">All</SelectItem>
+                      <SelectItem value="all">{t('All')}</SelectItem>
                       {uniqueSpeakers.map((speaker) => (
                         <SelectItem key={speaker} value={speaker}>{speaker}</SelectItem>
                       ))}
@@ -577,27 +579,27 @@ export function AdvancedDubbingEditor({
                 <div className="flex items-center gap-1 px-4 py-2 border-t border-border/50 bg-card/30 flex-wrap">
                   <Button variant="ghost" size="sm" className="gap-1 text-xs bg-transparent" onClick={() => handleRevertToOriginal(selectedSegmentId)}>
                     <RotateCcw className="h-3 w-3" />
-                    Revert to Original
+                    {t('Revert to Original')}
                   </Button>
                   <Button variant="ghost" size="sm" className="gap-1 text-xs bg-transparent">
                     <Mic2 className="h-3 w-3" />
-                    Change Voice
+                    {t('Change Voice')}
                   </Button>
                   <Button variant="ghost" size="sm" className="gap-1 text-xs bg-transparent">
                     <Languages className="h-3 w-3" />
-                    Pronunciation
+                    {t('Pronunciation')}
                   </Button>
                   <Button variant="ghost" size="sm" className="gap-1 text-xs bg-transparent">
                     <SmilePlus className="h-3 w-3" />
-                    Emotion
+                    {t('Emotion')}
                   </Button>
                   <Button variant="ghost" size="sm" className="gap-1 text-xs bg-transparent">
                     <Pause className="h-3 w-3" />
-                    Pause
+                    {t('Pause')}
                   </Button>
                   <Button variant="ghost" size="sm" className="gap-1 text-xs bg-transparent">
                     <Sparkles className="h-3 w-3" />
-                    Ask AI
+                    {t('Ask AI')}
                   </Button>
                   <Button 
                     variant="ghost" 
@@ -606,7 +608,7 @@ export function AdvancedDubbingEditor({
                     onClick={() => handleGenerateSpeech(selectedSegmentId)}
                   >
                     <Sparkles className="h-3 w-3" />
-                    Generate Speech
+                    {t('Generate Speech')}
                   </Button>
                   <Button variant="ghost" size="icon" className="h-7 w-7 bg-transparent ml-auto" onClick={() => handleDeleteSegment(selectedSegmentId)}>
                     <Trash2 className="h-4 w-4 text-destructive" />
@@ -633,8 +635,8 @@ export function AdvancedDubbingEditor({
               <div className="flex items-center justify-center border-b border-border/50 py-2">
                 <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as "original" | "translated")}>
                   <TabsList className="bg-background/50">
-                    <TabsTrigger value="original">Original</TabsTrigger>
-                    <TabsTrigger value="translated">Translated</TabsTrigger>
+                    <TabsTrigger value="original">{t('Original')}</TabsTrigger>
+                    <TabsTrigger value="translated">{t('Translated')}</TabsTrigger>
                   </TabsList>
                 </Tabs>
               </div>
@@ -655,7 +657,7 @@ export function AdvancedDubbingEditor({
                   </div>
                   {/* Translated By Badge */}
                   <div className="absolute top-2 right-2 text-xs text-white/70">
-                    Video Translated by DubMaster
+                    {t('Video Translated by DubMaster')}
                   </div>
                 </div>
 

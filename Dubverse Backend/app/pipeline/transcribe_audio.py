@@ -2,7 +2,7 @@ from pathlib import Path
 import json
 import logging
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -344,7 +344,11 @@ def _fix_timestamp_bleed(segments: List[Dict]) -> List[Dict]:
     return segments
 
 
-def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) -> Dict[str, Any]:
+def transcribe_audio(
+    extract_result: Dict[str, Any],
+    job_id: str | None = None,
+    source_language: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Transcribe decoded audio using faster-whisper.
 
@@ -394,7 +398,14 @@ def transcribe_audio(extract_result: Dict[str, Any], job_id: str | None = None) 
         import os
         model = _get_whisper_model()
 
-        whisper_language = os.getenv("WHISPER_LANGUAGE", "").strip() or None
+        _whisper_lang = (source_language or os.getenv("WHISPER_LANGUAGE", "")).strip()
+        # Whisper/faster-whisper language codes are generally ISO 639-1; regional
+        # variants like pt-br or es-mx should fall back to the base language code.
+        if _whisper_lang:
+            _whisper_lang = _whisper_lang.lower().replace("_", "-")
+            if _whisper_lang in ("pt-br", "es-mx", "pt-pt", "es-es", "en-us", "en-gb"):
+                _whisper_lang = _whisper_lang.split("-")[0]
+        whisper_language = _whisper_lang or None
         _is_yue = (whisper_language or "").lower().strip() in ("yue", "zh-yue", "yue-hk", "zh-hk")
 
         def _do_transcribe(_use_vad: bool, _vad_threshold: float):

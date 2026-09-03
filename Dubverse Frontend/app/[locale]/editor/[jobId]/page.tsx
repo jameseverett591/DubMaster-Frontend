@@ -9,6 +9,7 @@ import { newSegmentId } from '@/lib/editor-types'
 
 import { apiClient } from '@/lib/api-client'
 import { createClient } from '@/lib/supabase/client'
+import { useT } from '@/lib/use-t'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -25,6 +26,7 @@ function toAbsoluteUrl(url: string): string {
 }
 
 export default function EditorJobPage({ params }: { params: Promise<{ jobId: string }> }) {
+  const t = useT()
   const { jobId } = use(params)
   const [editorProps, setEditorProps] = useState<any>(null)
   const [segments, setSegments] = useState<Segment[]>([])
@@ -154,7 +156,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             id: seg.id ?? newSegmentId(),
             index: idx,
             transcript_index: seg.transcript_index ?? idx,
-            status: seg.locked ? 'locked' : 'auto',
+            status: seg.locked ? 'locked' : ((seg.committed_adapted_text && String(seg.committed_adapted_text).trim()) || seg.text_locked) ? 'edited' : 'auto',
             // Carried so the editor can restore persisted pairs on load.
             paired_with_next: seg.paired_with_next ?? false,
             start_time: seg.committed_start_time ?? seg.start ?? 0,
@@ -412,7 +414,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   if (error || !editorProps) {
     return (
       <div className="flex flex-col items-center justify-center h-screen bg-slate-950 text-white gap-4">
-        <h2 className="text-xl font-semibold">Job Not Found</h2>
+        <h2 className="text-xl font-semibold">{t('Job Not Found')}</h2>
         <p className="text-slate-400">Could not load job {jobId}</p>
       </div>
     )

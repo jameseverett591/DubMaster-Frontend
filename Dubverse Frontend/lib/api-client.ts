@@ -582,6 +582,13 @@ class DubVerseAPIClient {
     if (!url) return url
     try {
       const u = new URL(url, this.baseURL)
+      // ONLY OUR OWN MEDIA. The token is ours, so re-minting one is meaningless
+      // for anything else — and rebuilding the pathname against baseURL would
+      // point an externally hosted asset (R2, a CDN) at the API host and turn a
+      // recoverable error into a guaranteed 404. Anything off-origin is returned
+      // untouched.
+      const base = new URL(this.baseURL)
+      if (u.origin !== base.origin) return url
       u.searchParams.delete('access_token')
       const rest = u.searchParams.toString()
       return this._mediaUrl(u.pathname + (rest ? `?${rest}` : ''))

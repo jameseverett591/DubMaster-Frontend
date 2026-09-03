@@ -63,7 +63,7 @@ import { TestClipsPanel } from '@/components/editor/test-clips-panel'
 import { EmotionLibraryPopup } from '@/components/editor/emotion-library-popup'
 import { CharacterProfilePopover } from '@/components/editor/character-profile-popover'
 import { useEditorStore, type SidebarTab, CHUNK_SECONDS } from '@/lib/editor-store'
-import type { Segment, Scene, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType, StagedEdit } from '@/lib/editor-types'
+import type { Segment, Scene, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType, StagedEdit, PlaybackMode } from '@/lib/editor-types'
 import { normalizeScenes } from '@/lib/editor-types'
 import { DEFAULT_NUANCES, NUANCE_MARKER_META, newSegmentId, newSceneId, getSegmentKey, defaultScenes, computeVideoFadeOpacity, timelineToSourceTime, sourceToTimelineTime } from '@/lib/editor-types'
 import { formatTime, getSpeakerColor } from '@/lib/editor-types'
@@ -127,6 +127,7 @@ import {
 import { LayoutList, AudioLines, Zap, GitBranch, Sliders, MessageCircle, ArrowUp, AlertCircle } from 'lucide-react'
 import { usePlan } from '@/lib/use-plan'
 import { useUsage } from '@/hooks/use-usage'
+import { useT } from '@/lib/use-t'
 
 // QC Tab definitions - main navigation tabs + QC-specific tabs
 type QCCategory = 'speech' | 'lip-sync' | 'pipeline' | 'voices' | 'script' | 'timeline-tab' | 'timing' | 'pronunciation' | 'translation' | 'delivery' | 'sync'
@@ -171,7 +172,6 @@ interface SegmentContextMenuProps {
   // (used for the on* callbacks); this is what the transient collections key on.
   segmentKey: string
   lockedSegments: Set<string>
-  lockedPairs: Set<string>
   stagedEmotions: Record<string, string>
   emotions: string[]
   onSplit: (index: number) => void
@@ -183,7 +183,8 @@ interface SegmentContextMenuProps {
   onToggleLock: (index: number) => void
   onLockScene: (index: number) => void
   onUnlockScene: (index: number) => void
-  onTogglePair: (index: number) => void
+  sceneLockMode: boolean
+  sceneAnchor: number | null
   onRevert: (index: number) => void
   onUndoLastEdit: (index: number) => void
   onUndoSplit: (index: number) => void
@@ -205,7 +206,6 @@ function SegmentContextMenu({
   children,
   segmentKey,
   lockedSegments,
-  lockedPairs,
   stagedEmotions,
   emotions,
   onSplit,
@@ -217,7 +217,8 @@ function SegmentContextMenu({
   onToggleLock,
   onLockScene,
   onUnlockScene,
-  onTogglePair,
+  sceneLockMode,
+  sceneAnchor,
   onRevert,
   onUndoLastEdit,
   onUndoSplit,
@@ -233,6 +234,7 @@ function SegmentContextMenu({
   onClearGroup,
   groupSelectActive,
 }: SegmentContextMenuProps) {
+  const t = useT()
   const [showEmotions, setShowEmotions] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const confirmClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -311,15 +313,22 @@ function SegmentContextMenu({
         <ContextMenuItem
           onClick={(e) => {
             e.stopPropagation()
-            if (lockedSegments.has(segmentKey)) onUnlockScene(index)
-            else onLockScene(index)
+            // Right-click "Lock Scene" is a two-step range workflow:
+            //   1. With no scene-lock armed, it starts the scene-lock mode at this segment.
+            //   2. With scene-lock armed, it locks the contiguous run from the anchor to
+            //      this segment (inclusive).
+            if (sceneLockMode) {
+              onLockScene(index)
+            } else if (lockedSegments.has(segmentKey)) {
+              onUnlockScene(index)
+            } else {
+              onLockScene(index)
+            }
           }}
           className="text-xs gap-2">
-          {lockedSegments.has(segmentKey) ? '🔓 Unlock Scene' : '🔒 Lock Scene…'}
-        </ContextMenuItem>
-        <ContextMenuItem onClick={(e) => { e.stopPropagation(); onTogglePair(index) }} className="text-xs gap-2">
-          {lockedPairs.has(segmentKey) ? '🔗 Unpair' : '🔗 Pair with Next'}
-          <ContextMenuShortcut>⇧P</ContextMenuShortcut>
+          {sceneLockMode
+            ? (sceneAnchor === index ? '🔒 Lock this scene' : '🔒 Lock Scene')
+            : (lockedSegments.has(segmentKey) ? '🔓 Unlock Scene' : '🔒 Lock Scene…')}
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem onClick={(e) => { e.stopPropagation(); onRevert(index) }} className="text-xs gap-2">
@@ -388,7 +397,7 @@ function SegmentContextMenu({
               onClick={(e) => { e.stopPropagation(); onClearEmotion(index) }}
               className="text-center text-xs text-slate-400 hover:text-slate-200 py-1.5 mt-1 rounded hover:bg-neutral-800 transition-colors cursor-pointer select-none"
             >
-              Clear Emotion
+              {t('Clear Emotion')}
             </div>
           </>
         )}
@@ -894,6 +903,61 @@ const TimeRuler = memo(function TimeRuler({ durationSec, pps, variant }: TimeRul
   )
 })
 
+type CaptionOverlayProps = {
+  playbackMode: PlaybackMode
+  selectedSegmentIndex: number | null
+  displaySegments: Segment[]
+  currentTimeRef: React.RefObject<number>
+}
+
+/**
+ * Render the video caption independently of the editor's throttled React state.
+ * In preview mode it follows the RAF-updated playhead so captions never lag the
+ * picture; in other modes it shows the selected segment for context.
+ */
+const CaptionOverlay = memo(function CaptionOverlay({
+  playbackMode,
+  selectedSegmentIndex,
+  displaySegments,
+  currentTimeRef,
+}: CaptionOverlayProps) {
+  const [liveText, setLiveText] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (playbackMode !== 'preview') {
+      setLiveText(null)
+      return
+    }
+    let raf: number
+    const tick = () => {
+      const t = currentTimeRef.current
+      const seg = displaySegments.find(s => t >= effStart(s) && t < effEnd(s))
+      const text = seg ? (seg.preview_text ?? seg.active_text ?? seg.target_text) : null
+      setLiveText(prev => (prev === text ? prev : text))
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [playbackMode, displaySegments, currentTimeRef])
+
+  let text: string | null = null
+  if (playbackMode === 'preview') {
+    text = liveText
+  } else {
+    const seg = selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null
+    text = seg ? (seg.preview_text ?? seg.active_text ?? seg.target_text) : null
+  }
+
+  if (!text) return null
+  return (
+    <div className="absolute bottom-8 left-0 right-0 text-center px-4">
+      <span className="bg-black/75 px-4 py-2 rounded text-white text-sm">
+        {text}
+      </span>
+    </div>
+  )
+})
+
 export function DubVerseEditor({
   jobId,
   title,
@@ -922,6 +986,7 @@ export function DubVerseEditor({
   chunkStatus: initialChunkStatus,
   retention: initialRetention,
 }: DubVerseEditorProps) {
+  const t = useT()
   const videoRef = useRef<HTMLVideoElement>(null)
   /** One retry per SOURCE, so a genuinely broken source cannot loop while a
    *  new one still gets its own attempt. Reset by the effect below. */
@@ -1021,6 +1086,34 @@ export function DubVerseEditor({
   const peaksRef = useRef<{ left: Float32Array; right: Float32Array } | null>(null)
   const groupMoveStartXRef = useRef(0)
   const groupMoveActiveRef = useRef(false)
+  // Live group-move offset in a ref: the mousemove handler was setStating this
+  // 60x/sec, re-rendering the whole editor for every pixel. Blocks follow the
+  // cursor via direct DOM transform; React is told once, on release.
+  const groupMoveOffsetRef = useRef({ x: 0, y: 0 })
+  const groupDragElsRef = useRef<HTMLElement[]>([])
+
+  /** THE ONLY WAY A GROUP DRAG ENDS.
+   *
+   *  A group drag leaves three things behind: inline transforms on the dragged
+   *  elements, the accumulated offset, and the active flag. There are four exits
+   *  — normal mouseup, Escape, clearing the selection, and the global interrupt —
+   *  and each one used to clean up a different subset.
+   *
+   *  Every combination has now bitten us. Escape left the blocks visually
+   *  displaced AND cleared the flag, so the interrupt handler then skipped its
+   *  own cleanup because the drag looked inactive. The interrupt left the offset
+   *  armed so a later mouseup committed an abandoned delta to every selected
+   *  segment.
+   *
+   *  So: one function, called from all four. Idempotent — calling it twice is
+   *  harmless, which matters because some paths legitimately overlap.
+   */
+  const endGroupDrag = useCallback(() => {
+    for (const el of groupDragElsRef.current) el.style.transform = ''
+    groupDragElsRef.current = []
+    groupMoveOffsetRef.current = { x: 0, y: 0 }
+    groupMoveActiveRef.current = false
+  }, [])
 
   const {
     setJobData,
@@ -1283,8 +1376,6 @@ export function DubVerseEditor({
     originalEnd: number
     currentDelta: number
   } | null>(null)
-  const [lockedPairs, setLockedPairs] = useState<Set<string>>(new Set())
-  const [flashingPair, setFlashingPair] = useState<number | null>(null)
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [regenError, setRegenError] = useState<string | null>(null)
@@ -1503,6 +1594,10 @@ export function DubVerseEditor({
   // read the current delta at interrupt time without re-subscribing on every move.
   const draggingSegmentRef = useRef(draggingSegment)
   draggingSegmentRef.current = draggingSegment
+  // The LIVE drag delta, written by the direct-DOM mousemove handlers. The drag
+  // no longer setStates per move, so draggingSegment.currentDelta stays 0 for the
+  // whole drag — the interrupt commit must read this ref instead.
+  const dragLiveDeltaRef = useRef(0)
   // Handles to the in-flight block-move document listeners, so the safety net can
   // tear them down if the normal mouseup is missed. Non-null === a block drag is
   // live and its normal onMouseUp has NOT yet run (used to avoid double-commit).
@@ -1537,14 +1632,20 @@ export function DubVerseEditor({
     const handleInterrupt = () => {
       const drag = draggingSegmentRef.current
       // No-op on ordinary mouseups when nothing is in flight.
-      if (!drag && !dragUpListenerRef.current) return
+      //
+      // A GROUP DRAG SETS NEITHER of the two single-segment indicators, so this
+      // returned before reaching the cleanup below — the blocks stayed visually
+      // translated and the abandoned offset stayed armed for a later mouseup to
+      // commit. Group drags have to get past this guard to be cleaned up at all.
+      if (!drag && !dragUpListenerRef.current && !groupMoveActiveRef.current) return
       // Commit the block-move position — but only if the normal onMouseUp has not
       // already run. It nulls dragUpListenerRef synchronously and fires on the
       // document BEFORE this window-level handler, so this guard prevents a
       // double-commit on a normal release.
       if (drag && dragUpListenerRef.current) {
-        const newStart = Math.max(0, drag.originalStart + drag.currentDelta)
-        const newEnd = Math.max(0, drag.originalEnd + drag.currentDelta)
+        const liveDelta = dragLiveDeltaRef.current
+        const newStart = Math.max(0, drag.originalStart + liveDelta)
+        const newEnd = Math.max(0, drag.originalEnd + liveDelta)
         updateSegment(drag.index, { start_time: newStart, end_time: newEnd })
         commitSegmentChanges(drag.index, {
           committed_start_time: newStart,
@@ -1575,6 +1676,17 @@ export function DubVerseEditor({
       setDraggingSegment(null)
       setDragReorder(null)
       setDragSpeedPreview(null)
+      dragLiveDeltaRef.current = 0
+      // Drag visuals are direct DOM transforms now — clear any left behind by an
+      // interrupted gesture or a block would float at its dragged offset forever.
+      timelineRef.current?.querySelectorAll<HTMLElement>('[data-drag-block]').forEach(el => { el.style.transform = ''; el.style.width = '' })
+      document.querySelectorAll<HTMLElement>('[data-group-frame]').forEach(el => { el.style.transform = '' })
+      // DISARM THE GROUP DRAG. These were left populated, so the offset from an
+      // ABANDONED gesture survived — and the next ordinary mouseup read it and
+      // committed that stale delta to every selected segment. Losing an
+      // interrupted move is acceptable; silently applying it later to the wrong
+      // moment is not.
+      endGroupDrag()
     }
     window.addEventListener('mouseup', handleInterrupt)
     window.addEventListener('blur', handleInterrupt)
@@ -1654,19 +1766,8 @@ export function DubVerseEditor({
           const parsed = JSON.parse(payload) as { voice_id: string; name: string }
           console.log('[VOICE-DROP] parsed payload (native)', parsed)
           if (parsed.voice_id) {
-            const speakerId = displaySegmentsRef.current[hit.index]?.speaker_id
             const dropKey = displaySegmentsRef.current[hit.index]?.id ?? ''
             setStagedVoices(prev => ({ ...prev, [dropKey]: parsed.voice_id }))
-            if (speakerId) {
-              setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: parsed.voice_id }))
-              setStagedVoices(prev => {
-                const next = { ...prev }
-                displaySegmentsRef.current.forEach((seg, i) => {
-                  if (seg.speaker_id === speakerId && i !== hit.index) delete next[getSegmentKey(seg)]
-                })
-                return next
-              })
-            }
             selectSegment(hit.index)
             setCurrentTime(displaySegmentsRef.current[hit.index].start_time)
             console.log('[VOICE-DROP] calling handleGenerateSpeech (native)', { index: hit.index, voice_id: parsed.voice_id })
@@ -1675,24 +1776,15 @@ export function DubVerseEditor({
             // handled by this native listener rather than that one, so dropping
             // onto the Dubbed track fell through to the backend's unknown-voice
             // backstop instead of saying what it meant.
-            if (speakerId) {
-              // Same outcome as the transcript-row drop and the Assign to…
-              // dropdown: the voice belongs to the SPEAKER across this window,
-              // not just to the one line it was dropped on.
-              setVoiceAppliedFeedback({ segmentIndex: hit.index, voiceName: parsed.name })
-              setTimeout(() => setVoiceAppliedFeedback(null), 2200)
-              applyVoiceToSpeakerRef.current?.(speakerId, parsed.voice_id)
-            } else {
-              handleGenerateSpeechRef.current(hit.index, parsed.voice_id, undefined, undefined, 'fish-audio').then(ok => {
-                if (ok) {
-                  console.log('[VOICE-DROP] regen succeeded — showing applied chip (native)', { index: hit.index, voiceName: parsed.name })
-                  setVoiceAppliedFeedback({ segmentIndex: hit.index, voiceName: parsed.name })
-                  setTimeout(() => setVoiceAppliedFeedback(null), 2200)
-                } else {
-                  console.warn('[VOICE-DROP] regen failed — no confirmation chip (native)')
-                }
-              })
-            }
+            handleGenerateSpeechRef.current(hit.index, parsed.voice_id, undefined, undefined, 'fish-audio').then(ok => {
+              if (ok) {
+                console.log('[VOICE-DROP] regen succeeded — showing applied chip (native)', { index: hit.index, voiceName: parsed.name })
+                setVoiceAppliedFeedback({ segmentIndex: hit.index, voiceName: parsed.name })
+                setTimeout(() => setVoiceAppliedFeedback(null), 2200)
+              } else {
+                console.warn('[VOICE-DROP] regen failed — no confirmation chip (native)')
+              }
+            })
           }
         } catch (err) {
           console.error('[VOICE-DROP] payload parse failed (native)', err)
@@ -1952,7 +2044,31 @@ export function DubVerseEditor({
   // Every recorded Respeecher take across the job, flattened out of the segments.
   // Built here rather than inside the panel so the tab can be sized without
   // mounting it, and so it recomputes on the same input the timeline renders from.
-  const seedLibrary = useMemo(() => buildSeedLibrary(displaySegments), [displaySegments])
+  //
+  // INCREMENTAL: a drag commit gives displaySegments a new identity, but store
+  // updates are immutable spreads, so unchanged segments keep their object
+  // references. Their entries come straight from the WeakMap; only edited
+  // segments rebuild. A full rebuild walked all ~817 segments and their take
+  // histories on every single drag mouseup.
+  const seedCacheRef = useRef<WeakMap<Segment, ReturnType<typeof buildSeedLibrary>>>(new WeakMap())
+  const seedLibrary = useMemo(() => {
+    const cache = seedCacheRef.current
+    const out: ReturnType<typeof buildSeedLibrary> = []
+    displaySegments.forEach((seg, i) => {
+      let entries = cache.get(seg)
+      if (!entries) {
+        entries = buildSeedLibrary([seg])
+        cache.set(seg, entries)
+      }
+      // Index fields describe array position, not content — fix them up cheaply
+      // in case a split renumbered the array under an unchanged segment object.
+      const ti = seg.transcript_index ?? i
+      for (const e of entries) {
+        out.push(e.segmentIndex === i && e.transcriptIndex === ti ? e : { ...e, segmentIndex: i, transcriptIndex: ti })
+      }
+    })
+    return out
+  }, [displaySegments])
 
   /** Segments whose committed window collides with a neighbour's.
    *
@@ -2018,14 +2134,10 @@ export function DubVerseEditor({
   })()
 
   // Whether a segment should move with the current single-segment drag: it's the
-  // one being dragged, or it's paired with it (adjacent, and the left of the two
-  // is in lockedPairs). Used so a paired neighbor tracks live on every track.
+  // one being dragged. Pairing is gone, so nothing else tracks a drag: group
+  // move covers the same need and in larger numbers.
   const draggedIdx = draggingSegment?.index ?? null
-  const movesWithDrag = (index: number) => {
-    if (draggedIdx === null) return false
-    if (draggedIdx === index) return true
-    return Math.abs(draggedIdx - index) === 1 && lockedPairs.has(keyAt(Math.min(draggedIdx, index)))
-  }
+  const movesWithDrag = (index: number) => draggedIdx !== null && draggedIdx === index
 
   // Keep the store's segments array in sync with importedSegments after
   // structural edits (split, add, delete) so that commitPreview /
@@ -2285,24 +2397,6 @@ export function DubVerseEditor({
     setRenameValue('')
   }, [displaySegments])
 
-  // Pair a segment with the one immediately to its right so they move together on
-  // the timeline. lockedPairs stores the LEFT index of each pair. Toggles off if
-  // already paired; no-op if there is no right neighbor. (Shift+P / context menu.)
-  const togglePairWithNext = useCallback((index: number) => {
-    if (index + 1 >= displaySegmentsRef.current.length) return
-    const nowPaired = !lockedPairs.has(keyAt(index))
-    setLockedPairs(prev => {
-      const next = new Set(prev)
-      nowPaired ? next.add(keyAt(index)) : next.delete(keyAt(index))
-      return next
-    })
-    setFlashingPair(index)
-    setTimeout(() => setFlashingPair(null), 300)
-    // Persist so pairs survive refresh / crash — stored on the LEFT segment.
-    const ti = displaySegmentsRef.current[index]?.transcript_index ?? index
-    apiClient.commitSegmentTiming(jobId, ti, { paired_with_next: nowPaired })
-      .catch(err => console.warn('[PAIR] persist failed:', err))
-  }, [lockedPairs, jobId, keyAt])
 
   // Keyboard shortcuts — Shift+P: pair with next, C: split
   // Placed after displaySegments and qcBoxPosition so dep array has no TDZ
@@ -2312,24 +2406,22 @@ export function DubVerseEditor({
       if (e.key === 'Escape') {
         setGroupSelectedSegments(new Set())
         setGroupMoveActive(false)
-        groupMoveActiveRef.current = false
+        // Was clearing the flag WITHOUT clearing the transforms, so the blocks
+        // stayed displaced and the interrupt handler then skipped its cleanup.
+        endGroupDrag()
         setGroupMoveOffset({ x: 0, y: 0 })
         setGroupSelectMode(false)
         setGroupAnchor(null)
-        // Persist the unpair so refreshing doesn't bring the pairs back.
-        lockedPairs.forEach(i => {
-          const ti = displaySegmentsRef.current[i]?.transcript_index ?? i
-          apiClient.commitSegmentTiming(jobId, ti, { paired_with_next: false })
-            .catch(err => console.warn('[PAIR] unpair persist failed:', err))
-        })
-        setLockedPairs(new Set())
+
         return
       }
 
-      // Shift+L / Shift+U — lock / unlock the selected segment. A locked segment
-      // can't be dragged or resized, and its voice/emotion/speed are frozen (the
-      // regenerate guard in handleGenerateSpeech refuses locked segments, and those
-      // attachments only take effect on regenerate). Stays until Shift+U.
+      // Shift+L / Shift+U — lock / unlock a scene of contiguous segments.
+      // Locking freezes only position on the timeline; text edits and voice
+      // changes still work. Shift+L arms scene-lock mode on the selected segment,
+      // and a second Shift+L locks the run from that anchor to the new selected
+      // segment. Shift+U unlocks the contiguous locked run containing the selected
+      // segment.
       if (e.shiftKey && (e.code === 'KeyL' || e.code === 'KeyU')) {
         const target = e.target as HTMLElement
         if (
@@ -2337,9 +2429,30 @@ export function DubVerseEditor({
           target.tagName === 'TEXTAREA' ||
           target.contentEditable === 'true'
         ) return
-        if (selectedSegmentIndex === null) return
-        setSegmentLocked(selectedSegmentIndex, e.code === 'KeyL')
+        // CLAIM THE KEY BEFORE ANY EARLY RETURN.
+        //
+        // preventDefault used to run only after a successful lock, so with no
+        // segment selected the handler returned and the keystroke reached the
+        // browser — where Shift+U opens view-source. The shortcut looked dead AND
+        // hijacked the window. Once we know the chord is ours it is ours,
+        // whether or not there is anything to act on.
         e.preventDefault()
+        if (selectedSegmentIndex === null) return
+        if (e.code === 'KeyL') {
+          if (sceneLockModeRef.current && sceneAnchorRef.current !== null) {
+            const start = Math.min(sceneAnchorRef.current, selectedSegmentIndex)
+            const end = Math.max(sceneAnchorRef.current, selectedSegmentIndex)
+            lockSceneRef.current(start, end)
+          } else {
+            // First Shift+L arms the anchor; second locks the run.
+            setSceneLockModeRef.current(true)
+            setSceneAnchorRef.current(selectedSegmentIndex)
+            setSceneRangeRef.current({ start: selectedSegmentIndex, end: selectedSegmentIndex })
+          }
+        } else {
+          // Unlock the contiguous locked run containing the selected segment.
+          unlockSceneRef.current(selectedSegmentIndex)
+        }
         return
       }
 
@@ -2353,7 +2466,6 @@ export function DubVerseEditor({
           target.contentEditable === 'true'
         ) return
         if (selectedSegmentIndex === null) return
-        togglePairWithNext(selectedSegmentIndex)
         e.preventDefault()
         return
       }
@@ -2372,7 +2484,7 @@ export function DubVerseEditor({
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [selectedSegmentIndex, lockedPairs, displaySegments, handleSplitAtPlayhead, jobId])
+  }, [selectedSegmentIndex, displaySegments, handleSplitAtPlayhead, jobId])
 
   // Video thumbnails for timeline
   const [videoThumbnails, setVideoThumbnails] = useState<string[]>([])
@@ -2490,20 +2602,17 @@ export function DubVerseEditor({
   // removed after 7s — the lock itself persists, only the glow is temporary.
   const [lockGlowIndices, setLockGlowIndices] = useState<Set<string>>(new Set())
   // Restore persisted locks AND pairs once per job load, from the backend `locked`
-  // and `paired_with_next` flags (the page loader carries both onto the segment).
+  // flags (the page loader carries them onto the segment).
   const locksInitRef = useRef<string | null>(null)
   useEffect(() => {
     if (locksInitRef.current === jobId) return
     if (!displaySegments.length) return
     const restoredLocks = new Set<string>()
-    const restoredPairs = new Set<string>()
     displaySegments.forEach((s) => {
       const k = getSegmentKey(s)
       if (s.status === 'locked' || (s as unknown as { locked?: boolean }).locked) restoredLocks.add(k)
-      if ((s as unknown as { paired_with_next?: boolean }).paired_with_next) restoredPairs.add(k)
     })
     if (restoredLocks.size) setLockedSegments(restoredLocks)
-    if (restoredPairs.size) setLockedPairs(restoredPairs)
     locksInitRef.current = jobId
   }, [displaySegments, jobId])
 
@@ -2529,7 +2638,10 @@ export function DubVerseEditor({
     commitOrStageRef.current?.(_ti, { locked: lock })
       ?.catch(err => console.warn('[LOCK] persist failed', err))
     setImportedSegments(prev => prev ? prev.map((seg, i) =>
-      i === index ? { ...seg, locked: lock, status: lock ? 'locked' as const : 'auto' as const } : seg
+      // Locking is a positional guard only; it must not overwrite the segment's
+      // edit status. Unlocking used to force status back to 'auto', which
+      // silently wiped an 'edited' state and made the segment look untouched.
+      i === index ? { ...seg, locked: lock } : seg
     ) : prev)
     if (lock) {
       setLockGlowIndices(prev => new Set(prev).add(key))
@@ -2558,9 +2670,8 @@ export function DubVerseEditor({
     if (!first || !second) return false
     if (first.speaker_id !== second.speaker_id) return false
     if (lockedSegments.has(keyAt(index)) || lockedSegments.has(keyAt(index + 1))) return false
-    if (lockedPairs.has(keyAt(index)) || lockedPairs.has(keyAt(index + 1))) return false
     return true
-  }, [displaySegments, lockedSegments, lockedPairs, keyAt])
+  }, [displaySegments, lockedSegments, keyAt])
 
   const handleMergeWithNextRef = useRef<((index: number) => void) | null>(null)
   const handleMergeWithNext = useCallback((index: number) => {
@@ -2569,7 +2680,6 @@ export function DubVerseEditor({
     if (!first || !second) return
     if (first.speaker_id !== second.speaker_id) return
     if (lockedSegments.has(keyAt(index)) || lockedSegments.has(keyAt(index + 1))) return
-    if (lockedPairs.has(keyAt(index)) || lockedPairs.has(keyAt(index + 1))) return
 
     const joinText = (a: string | null | undefined, b: string | null | undefined) => {
       const at = (a ?? '').trim()
@@ -2659,7 +2769,7 @@ export function DubVerseEditor({
     })
     selectSegment(index)
     setTimeout(() => syncSegmentsToBackend(displaySegmentsRef.current), 0)
-  }, [displaySegments, lockedSegments, lockedPairs, selectSegment, syncSegmentsToBackend, keyAt])
+  }, [displaySegments, lockedSegments, selectSegment, syncSegmentsToBackend, keyAt])
   handleMergeWithNextRef.current = handleMergeWithNext
 
   const [groupedSegments, setGroupedSegments] = useState<Set<number>>(new Set())
@@ -3122,20 +3232,6 @@ export function DubVerseEditor({
     videoRetriedRef.current = false
   }, [activeVideoUrl])
 
-  // The caption to show over the video. In preview mode it follows the playhead (the segment
-  // being spoken right now), so subtitles are live and disappear during gaps — no stale baked
-  // pixels. In other modes it shows the selected segment for context.
-  const captionSegment = useMemo(() => {
-    if (playbackMode === 'preview') {
-      const t = currentTime
-      const live = displaySegments.find(s => t >= effStart(s) && t < effEnd(s))
-      if (live) return live
-      // paused between segments: keep the selected one visible for context; hide while playing
-      return isPlaying ? null : (selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null)
-    }
-    return selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null
-  }, [playbackMode, currentTime, isPlaying, displaySegments, selectedSegmentIndex])
-  
   // Track which URL we've already extracted thumbnails for
   const lastExtractedUrlRef = useRef<string | null>(null)
   
@@ -3534,6 +3630,11 @@ export function DubVerseEditor({
 
   useEffect(() => { setPendingDelete(null) }, [selectedSegmentIndex])
 
+  // React state ticks throttled to 4Hz during playback: the needle, clock and
+  // scroll are all written straight to the DOM by the RAF loop at 50ms, so this
+  // state only feeds captions and a few UI bits — and every write re-renders the
+  // entire editor. At native timeupdate rate it rendered on every tick.
+  const lastTimeStateWriteRef = useRef(0)
   const handleVideoTimeUpdate = useCallback(() => {
     if (videoRef.current) {
       // Chunk lens: playback stops at the window boundary — the user is
@@ -3543,7 +3644,11 @@ export function DubVerseEditor({
         setCurrentTime(chunkEndRef.current)
         return
       }
-      setCurrentTime(videoRef.current.currentTime)
+      const now = performance.now()
+      if (now - lastTimeStateWriteRef.current >= 250) {
+        lastTimeStateWriteRef.current = now
+        setCurrentTime(videoRef.current.currentTime)
+      }
       if (timelineRef.current) {
         const container = timelineRef.current
         const pps = 40 * zoomLevel
@@ -3763,9 +3868,9 @@ export function DubVerseEditor({
     setGroupAnchor(null)
     setGroupSelectedSegments(new Set())
     setGroupMoveActive(false)
-    groupMoveActiveRef.current = false
+    endGroupDrag()
     setGroupMoveOffset({ x: 0, y: 0 })
-  }, [])
+  }, [endGroupDrag])
 
   /** Scene lock — pick a contiguous run and freeze it.
    *
@@ -3809,6 +3914,21 @@ export function DubVerseEditor({
     exitSceneLockMode()
   }, [exitSceneLockMode])
 
+  // Right-click / keyboard entry point for scene locking. First call arms the
+  // mode with the clicked segment as the anchor; subsequent calls lock the
+  // contiguous run from that anchor to the newly clicked segment.
+  const handleLockScene = useCallback((index: number) => {
+    if (!sceneLockMode) {
+      setSceneLockMode(true)
+      setSceneAnchor(index)
+      setSceneRange({ start: index, end: index })
+    } else if (sceneAnchor !== null) {
+      const start = Math.min(sceneAnchor, index)
+      const end = Math.max(sceneAnchor, index)
+      lockScene(start, end)
+    }
+  }, [sceneLockMode, sceneAnchor, setSceneLockMode, setSceneAnchor, setSceneRange, lockScene])
+
   /** Unlock the contiguous run of locked segments containing `index`. The scene IS
    *  the run, so there is no scene id to store, migrate, or keep in sync. */
   const unlockScene = useCallback((index: number) => {
@@ -3820,6 +3940,23 @@ export function DubVerseEditor({
     while (to + 1 < segs.length && isLocked(to + 1)) to++
     for (let i = from; i <= to; i++) setSegmentLockedRef.current?.(i, false)
   }, [keyAt])
+
+  // The keyboard shortcut effect is declared earlier than the scene-lock state,
+  // so read it through refs instead of pulling it into the dependency array.
+  const sceneLockModeRef = useRef(sceneLockMode)
+  sceneLockModeRef.current = sceneLockMode
+  const sceneAnchorRef = useRef(sceneAnchor)
+  sceneAnchorRef.current = sceneAnchor
+  const lockSceneRef = useRef(lockScene)
+  lockSceneRef.current = lockScene
+  const unlockSceneRef = useRef(unlockScene)
+  unlockSceneRef.current = unlockScene
+  const setSceneLockModeRef = useRef(setSceneLockMode)
+  setSceneLockModeRef.current = setSceneLockMode
+  const setSceneAnchorRef = useRef(setSceneAnchor)
+  setSceneAnchorRef.current = setSceneAnchor
+  const setSceneRangeRef = useRef(setSceneRange)
+  setSceneRangeRef.current = setSceneRange
 
   const handleSegmentClick = useCallback((index: number, e?: React.MouseEvent) => {
     // In group-selection mode a Ctrl+click builds the range instead of selecting
@@ -3843,83 +3980,172 @@ export function DubVerseEditor({
     }
   }, [selectSegment, groupSelectMode, handleGroupRangeClick, sceneLockMode, handleSceneRangeClick])
   
+  // Shared resize drag helper: batches DOM writes in requestAnimationFrame,
+  // uses pointer capture so the cursor can leave the window, and only writes
+  // React state on pointer-up. This keeps the 12k-line editor from choking
+  // while a panel is being resized.
+  const startResizeDrag = useCallback(({
+    e,
+    axis,
+    min,
+    max,
+    startSize,
+    invertDelta,
+    onStart,
+    setSize,
+    onEnd,
+  }: {
+    e: React.PointerEvent<HTMLElement>
+    axis: 'x' | 'y'
+    min: number
+    max: number
+    startSize: number
+    // Handles on the left/top edge of a panel need the delta inverted so the
+    // drag direction matches the user's cursor movement.
+    invertDelta?: boolean
+    onStart?: () => void
+    setSize: (size: number) => void
+    onEnd: (size: number) => void
+  }) => {
+    // Frozen by the layout lock — the panes hold their size.
+    if (layoutLocked) return
+    e.preventDefault()
+    const target = e.currentTarget
+    try {
+      target.setPointerCapture(e.pointerId)
+    } catch {
+      // ignore
+    }
+    const prevBodyUserSelect = document.body.style.userSelect
+    document.body.style.userSelect = 'none'
+    onStart?.()
+    const startCoord = axis === 'x' ? e.clientX : e.clientY
+    let finalSize = startSize
+    let pendingSize = startSize
+    let rafId: number | null = null
+
+    const flush = () => {
+      rafId = null
+      setSize(pendingSize)
+    }
+
+    const onMove = (ev: PointerEvent) => {
+      let delta = (axis === 'x' ? ev.clientX : ev.clientY) - startCoord
+      if (invertDelta) delta = -delta
+      const next = Math.min(Math.max(startSize + delta, min), max)
+      finalSize = next
+      if (pendingSize === next) return
+      pendingSize = next
+      if (!rafId) rafId = requestAnimationFrame(flush)
+    }
+
+    const onUp = () => {
+      if (rafId) cancelAnimationFrame(rafId)
+      setSize(finalSize)
+      onEnd(finalSize)
+      document.body.style.userSelect = prevBodyUserSelect
+      try {
+        target.releasePointerCapture(e.pointerId)
+      } catch {
+        // ignore
+      }
+      document.removeEventListener('pointermove', onMove)
+      document.removeEventListener('pointerup', onUp)
+      document.removeEventListener('pointercancel', onUp)
+      window.removeEventListener('blur', onUp)
+    }
+
+    document.addEventListener('pointermove', onMove)
+    document.addEventListener('pointerup', onUp)
+    document.addEventListener('pointercancel', onUp)
+    window.addEventListener('blur', onUp)
+  }, [layoutLocked])
+
   // Handle preview panel resize
-  const handlePreviewResizeStart = useCallback((e: React.MouseEvent) => {
-    // Frozen by the layout lock — the panes hold their size.
-    if (layoutLocked) return
-    e.preventDefault()
-    setIsResizingPreview(true)
+  const handlePreviewResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    startResizeDrag({
+      e,
+      axis: 'x',
+      min: 300,
+      max: 1100,
+      startSize: previewWidth,
+      invertDelta: true,
+      onStart: () => setIsResizingPreview(true),
+      setSize: (width) => {
+        if (previewPanelRef.current) previewPanelRef.current.style.width = `${width}px`
+      },
+      onEnd: (width) => {
+        setIsResizingPreview(false)
+        setPreviewWidth(width)
+        if (!layoutLocked) {
+          localStorage.setItem('dubverse.editor.previewWidth', width.toString())
+        }
+      },
+    })
+  }, [startResizeDrag, previewWidth, layoutLocked])
 
-    const startX = e.clientX
-    const startWidth = previewWidth
-    let finalWidth = previewWidth
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const delta = startX - moveEvent.clientX
-      const newWidth = Math.min(Math.max(startWidth + delta, 300), 1100)
-      finalWidth = newWidth
-      // Update the DOM directly during the drag so the whole editor doesn't
-      // re-render on every mousemove — same fix that made the playhead smooth.
-      if (previewPanelRef.current) {
-        previewPanelRef.current.style.width = `${newWidth}px`
-      }
-    }
-
-    const handleMouseUp = () => {
-      setIsResizingPreview(false)
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-      document.removeEventListener('pointercancel', handleMouseUp)
-      window.removeEventListener('blur', handleMouseUp)
-      setPreviewWidth(finalWidth)
-      if (!layoutLocked) {
-        localStorage.setItem('dubverse.editor.previewWidth', finalWidth.toString())
-      }
-    }
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    document.addEventListener('pointercancel', handleMouseUp)
-    window.addEventListener('blur', handleMouseUp)
-  }, [previewWidth, layoutLocked])
-  
   // Handle timeline resize (vertical)
-  const handleTimelineResizeStart = useCallback((e: React.MouseEvent) => {
-    // Frozen by the layout lock — the panes hold their size.
-    if (layoutLocked) return
-    e.preventDefault()
-    setIsResizingTimeline(true)
-    
-    const startY = e.clientY
-    const startHeight = timelineHeight
-    let finalHeight = timelineHeight
-    
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const delta = startY - moveEvent.clientY
-      const newHeight = Math.min(Math.max(startHeight + delta, 150), 700)
-      finalHeight = newHeight
-      if (timelinePanelRef.current) {
-        timelinePanelRef.current.style.height = `${newHeight}px`
-      }
-    }
-    
-    const handleMouseUp = () => {
-      setIsResizingTimeline(false)
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-      document.removeEventListener('pointercancel', handleMouseUp)
-      window.removeEventListener('blur', handleMouseUp)
-      setTimelineHeight(finalHeight)
-      if (!layoutLocked) {
-        localStorage.setItem('dubverse.editor.timelineHeight', finalHeight.toString())
-      }
-    }
+  const handleTimelineResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    startResizeDrag({
+      e,
+      axis: 'y',
+      min: 150,
+      max: 700,
+      startSize: timelineHeight,
+      invertDelta: true,
+      onStart: () => setIsResizingTimeline(true),
+      setSize: (height) => {
+        if (timelinePanelRef.current) timelinePanelRef.current.style.height = `${height}px`
+      },
+      onEnd: (height) => {
+        setIsResizingTimeline(false)
+        setTimelineHeight(height)
+        if (!layoutLocked) {
+          localStorage.setItem('dubverse.editor.timelineHeight', height.toString())
+        }
+      },
+    })
+  }, [startResizeDrag, timelineHeight, layoutLocked])
 
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    document.addEventListener('pointercancel', handleMouseUp)
-    window.addEventListener('blur', handleMouseUp)
-  }, [timelineHeight, layoutLocked])
+  // Handle QC monitor panel resize
+  const handleQcMonitorResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    startResizeDrag({
+      e,
+      axis: 'x',
+      min: 200,
+      max: 600,
+      startSize: qcMonitorWidth,
+      onStart: () => setIsResizingQcMonitor(true),
+      setSize: (width) => {
+        if (qcMonitorRef.current) qcMonitorRef.current.style.width = `${width}px`
+      },
+      onEnd: (width) => {
+        setIsResizingQcMonitor(false)
+        setQcMonitorWidth(width)
+        localStorage.setItem('dubverse.editor.qcMonitorWidth', width.toString())
+      },
+    })
+  }, [startResizeDrag, qcMonitorWidth])
+
+  // Handle track label column resize
+  const handleTrackLabelResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    startResizeDrag({
+      e,
+      axis: 'x',
+      min: 60,
+      max: 280,
+      startSize: trackLabelWidth,
+      onStart: () => setIsResizingTrackLabel(true),
+      setSize: (width) => {
+        if (trackLabelRef.current) trackLabelRef.current.style.width = `${width}px`
+      },
+      onEnd: (width) => {
+        setIsResizingTrackLabel(false)
+        setTrackLabelWidth(width)
+        localStorage.setItem('dubverse.editor.trackLabelWidth', width.toString())
+      },
+    })
+  }, [startResizeDrag, trackLabelWidth])
   
   // Toggle layout lock
   const toggleLayoutLock = useCallback(() => {
@@ -4100,23 +4326,49 @@ export function DubVerseEditor({
     setDraggedTranslation(null)
   }, [updateSegmentText])
 
+  // Capture every block (all tracks) belonging to the selected group, plus the
+  // group frame, once at drag start. The move handler then only writes
+  // transforms to this list — no per-move render.
+  // Locked segments are part of the selection for other operations, but their
+  // position is frozen, so they are not captured for a group move.
+  const captureGroupDragEls = useCallback(() => {
+    const tl = timelineRef.current
+    const els: HTMLElement[] = []
+    if (tl) {
+      groupSelectedSegments.forEach(idx => {
+        if (lockedSegments.has(keyAt(idx))) return
+        tl.querySelectorAll<HTMLElement>(`[data-drag-block="${idx}"]`).forEach(el => els.push(el))
+      })
+      const frame = tl.querySelector<HTMLElement>('[data-group-frame]')
+      if (frame) els.push(frame)
+    }
+    groupDragElsRef.current = els
+  }, [groupSelectedSegments, lockedSegments, keyAt])
+
   const handleTimelineMouseMove = useCallback((e: React.MouseEvent) => {
     // Group movement during the drag phase — offset all selected segments live.
+    // Direct DOM transform, NOT setState: a state write here re-rendered the
+    // whole editor on every mousemove (the "mouseup handler took 3444ms" storm).
     if (groupMoveActiveRef.current) {
-      setGroupMoveOffset({
-        x: e.clientX - groupMoveStartXRef.current,
-        y: 0
-      })
+      const x = e.clientX - groupMoveStartXRef.current
+      groupMoveOffsetRef.current = { x, y: 0 }
+      for (const el of groupDragElsRef.current) el.style.transform = `translateX(${x}px)`
     }
   }, [])
 
   const handleTimelineMouseUpWrapper = useCallback((e: React.MouseEvent) => {
     // Handle group movement end
     if (groupMoveActiveRef.current) {
-      const timeDelta = groupMoveOffset.x / PIXELS_PER_SECOND
+      const timeDelta = groupMoveOffsetRef.current.x / PIXELS_PER_SECOND
+      // Release the visual offset before the committed position renders.
+      for (const el of groupDragElsRef.current) el.style.transform = ''
+      groupDragElsRef.current = []
+      groupMoveOffsetRef.current = { x: 0, y: 0 }
 
       displaySegments.forEach((segment, index) => {
-        if (groupSelectedSegments.has(index)) {
+        // A locked segment's position is frozen; it stays put even if it's part
+        // of the current group selection.
+        if (groupSelectedSegments.has(index) && !lockedSegments.has(keyAt(index))) {
           // Base on effStart/effEnd and write the committed fields (+ persist), the
           // same way the single-segment drag does — otherwise the group snaps back
           // to its pre-move position because the tracks render through effStart.
@@ -4148,9 +4400,9 @@ export function DubVerseEditor({
       })
 
       setGroupMoveActive(false)
-      groupMoveActiveRef.current = false
+      endGroupDrag()
     }
-  }, [groupMoveOffset, groupSelectedSegments, displaySegments, commitSegmentChanges, jobId])
+  }, [groupSelectedSegments, displaySegments, lockedSegments, keyAt, commitSegmentChanges, jobId])
 
   // Global undo stack: each text edit pushes {index, prevText} so the top-bar
   // undo button can step backward through all edits in reverse order.
@@ -4381,12 +4633,9 @@ export function DubVerseEditor({
     const committedText = segment.committed_adapted_text ?? segment.target_text
     const textChanged = incomingText !== committedText
 
-    // Lock freezes POSITION, not the segment. A locked scene still plays, still
-    // takes a new voice, emotion or speed, and still regenerates — what it will
-    // not do is move. This used to refuse regeneration outright, which made lock
-    // unusable for its actual purpose: pinning finished timing while continuing
-    // to work on the performance. Movement is blocked where movement happens —
-    // the drag handler and the merge guard — not here.
+    // Lock is positional: a locked segment can still be regenerated (voice,
+    // emotion, speed, text), but its timeline slot must not move.
+    const isLocked = lockedSegments.has(keyAt(activeIndex))
 
     selectSegment(activeIndex)
     setRegenError(null)
@@ -4513,7 +4762,7 @@ export function DubVerseEditor({
       const bEnd = response.segment.end
       const backendDur = bEnd - bStart
       const liveDur = liveEnd - liveStart
-      const needsMoreRoom = backendDur > liveDur + 0.02
+      const needsMoreRoom = !isLocked && backendDur > liveDur + 0.02
       const grownEnd = liveStart + backendDur
       if (needsMoreRoom) {
         updateSegment(activeIndex, { start_time: liveStart, end_time: grownEnd })
@@ -4537,7 +4786,7 @@ export function DubVerseEditor({
       // user ever moved it: the second half of the snap-back, and the half that
       // survived fixing the grow path.
       const slotDur = liveEnd - liveStart
-      const shouldShrink = !needsMoreRoom && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
+      const shouldShrink = !isLocked && !needsMoreRoom && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
       let shrunkEnd = liveEnd
       if (shouldShrink) {
         const buffer = getTrailingBuffer(segment.preview_text ?? segment.active_text ?? segment.target_text ?? '')
@@ -5217,7 +5466,6 @@ export function DubVerseEditor({
               flag_status: seg.flag_status,
               correction_type: seg.correction_type,
               locked: lockedSegments.has(keyAt(i)),
-              paired_with_next: lockedPairs.has(keyAt(i)),
               // Persist the display text too so a plain edit doesn't revert on
               // reopen — the loader reads `text` back into target/active text.
               text: seg.active_text ?? seg.target_text,
@@ -5248,7 +5496,7 @@ export function DubVerseEditor({
     } finally {
       setIsSaving(false)
     }
-  }, [isSaving, displaySegments, jobId, title, targetLanguage, lockedSegments, lockedPairs, keyAt,
+  }, [isSaving, displaySegments, jobId, title, targetLanguage, lockedSegments, keyAt,
       chunkMode, chunkStart, chunkEnd, activeChunk, chunkStatusMap, setChunkStatusMap])
 
   // Flag outcome helpers — set both flag_status and correction_type together,
@@ -5418,8 +5666,9 @@ export function DubVerseEditor({
     if (editingSegmentIndex !== null) {
       const idx = editingSegmentIndex
       const text = editingTextRef.current
+      const previousDisplayText = displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? ''
       // Push pre-edit text onto the global undo stack before applying the change.
-      undoStack.current.push({ kind: 'text', index: idx, prevText: displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? '' })
+      undoStack.current.push({ kind: 'text', index: idx, prevText: previousDisplayText })
       emotionAutoFiredRef.current.delete(idx)
       setPreviewText(idx, text)
       setImportedSegments(prev => {
@@ -5445,10 +5694,13 @@ export function DubVerseEditor({
       // review modes — firing synthesis while someone is watching a render costs
       // money on every one of 818 segments and can fire mid-keystroke.
       if (playbackMode === 'preview') {
-        if (autoRegenTimerRef.current) clearTimeout(autoRegenTimerRef.current)
-        autoRegenTimerRef.current = setTimeout(() => {
-          handleGenerateSpeechRef.current(idx, undefined, text)
+        if (autoRegenTimerRef.current) {
+          clearTimeout(autoRegenTimerRef.current)
           autoRegenTimerRef.current = null
+        }
+        autoRegenTimerRef.current = setTimeout(() => {
+          autoRegenTimerRef.current = null
+          handleGenerateSpeechRef.current(idx, undefined, text)
         }, 2000)
       }
     }
@@ -5482,7 +5734,8 @@ export function DubVerseEditor({
     }
     if (text == null) return
     const segs = displaySegmentsRef.current
-    undoStack.current.push({ kind: 'text', index, prevText: segs[index]?.preview_text ?? segs[index]?.active_text ?? segs[index]?.target_text ?? '' })
+    const previousDisplayText = segs[index]?.preview_text ?? segs[index]?.active_text ?? segs[index]?.target_text ?? ''
+    undoStack.current.push({ kind: 'text', index, prevText: previousDisplayText })
     emotionAutoFiredRef.current.delete(index)
     setPreviewText(index, text)
     setImportedSegments(prev => {
@@ -5499,10 +5752,13 @@ export function DubVerseEditor({
     )
     // Auto-regen in PREVIEW only — see saveEditing for why.
     if (playbackMode === 'preview') {
-      if (autoRegenTimerRef.current) clearTimeout(autoRegenTimerRef.current)
-      autoRegenTimerRef.current = setTimeout(() => {
-        handleGenerateSpeechRef.current(index, undefined, text)
+      if (autoRegenTimerRef.current) {
+        clearTimeout(autoRegenTimerRef.current)
         autoRegenTimerRef.current = null
+      }
+      autoRegenTimerRef.current = setTimeout(() => {
+        autoRegenTimerRef.current = null
+        handleGenerateSpeechRef.current(index, undefined, text)
       }, 2000)
     }
   }, [setPreviewText, jobId, playbackMode])
@@ -5574,6 +5830,39 @@ export function DubVerseEditor({
     { code: 'id',  label: 'Indonesian (ID)' },
     { code: 'ms',  label: 'Malay (MS)' },
     { code: 'tr',  label: 'Turkish (TR)' },
+    { code: 'tl',  label: 'Filipino (TL)' },
+    { code: 'km',  label: 'Khmer (KM)' },
+    { code: 'my',  label: 'Burmese (MY)' },
+    { code: 'bn',  label: 'Bengali (BN)' },
+    { code: 'ur',  label: 'Urdu (UR)' },
+    { code: 'te',  label: 'Telugu (TE)' },
+    { code: 'mr',  label: 'Marathi (MR)' },
+    { code: 'pa',  label: 'Punjabi (PA)' },
+    { code: 'si',  label: 'Sinhala (SI)' },
+    { code: 'fa',  label: 'Persian (FA)' },
+    { code: 'he',  label: 'Hebrew (HE)' },
+    { code: 'nl',  label: 'Dutch (NL)' },
+    { code: 'sv',  label: 'Swedish (SV)' },
+    { code: 'no',  label: 'Norwegian (NO)' },
+    { code: 'da',  label: 'Danish (DA)' },
+    { code: 'fi',  label: 'Finnish (FI)' },
+    { code: 'el',  label: 'Greek (EL)' },
+    { code: 'uk',  label: 'Ukrainian (UK)' },
+    { code: 'pl',  label: 'Polish (PL)' },
+    { code: 'cs',  label: 'Czech (CS)' },
+    { code: 'sk',  label: 'Slovak (SK)' },
+    { code: 'hu',  label: 'Hungarian (HU)' },
+    { code: 'ro',  label: 'Romanian (RO)' },
+    { code: 'bg',  label: 'Bulgarian (BG)' },
+    { code: 'hr',  label: 'Croatian (HR)' },
+    { code: 'sr',  label: 'Serbian (SR)' },
+    { code: 'sw',  label: 'Swahili (SW)' },
+    { code: 'am',  label: 'Amharic (AM)' },
+    { code: 'yo',  label: 'Yoruba (YO)' },
+    { code: 'ig',  label: 'Igbo (IG)' },
+    { code: 'zu',  label: 'Zulu (ZU)' },
+    { code: 'pt-br', label: 'Portuguese, Brazil (PT-BR)' },
+    { code: 'es-mx', label: 'Spanish, Mexico (ES-MX)' },
   ]
 
   // Get language display name
@@ -5839,7 +6128,7 @@ export function DubVerseEditor({
                 </Button>
               ) : (
                 <span className="flex-1 text-xs text-slate-400">
-                  Download or export the film before this date to keep it.
+                  {t('Download or export the film before this date to keep it.')}
                 </span>
               )}
               <Button
@@ -5847,7 +6136,7 @@ export function DubVerseEditor({
                 className="border-slate-700 hover:bg-slate-800"
                 onClick={() => setRetentionDismissed(true)}
               >
-                Dismiss
+                {t('Dismiss')}
               </Button>
             </div>
 
@@ -5913,7 +6202,7 @@ export function DubVerseEditor({
                 onClick={() => resolveChunkSwitch('stay')}
                 disabled={chunkSwitchBusy !== null}
               >
-                Stay
+                {t('Stay')}
               </Button>
             </div>
           </div>
@@ -5942,7 +6231,7 @@ export function DubVerseEditor({
           {rebuildStatus !== 'processing' && (
             <button
               type="button"
-              aria-label="Dismiss"
+              aria-label={t('Dismiss')}
               onClick={() => setRebuildStatus('idle')}
               className="absolute right-5 opacity-70 hover:opacity-100 transition-opacity"
             >
@@ -5969,7 +6258,7 @@ export function DubVerseEditor({
               <span className="font-bold text-lg text-white">DubMaster</span>
               {(isProfessional || isPremium) && (
                 <span className="text-xs font-semibold uppercase tracking-wide text-cyan-400">
-                  {isProfessional ? 'Professional' : 'Premium'}
+                  {isProfessional ? t('Professional') : t('Premium')}
                 </span>
               )}
             </div>
@@ -5977,9 +6266,9 @@ export function DubVerseEditor({
           
           {/* Nav */}
           <nav className="hidden md:flex items-center gap-1 ml-4">
-            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/dashboard')}>Dashboard</Button>
-            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/studio?tab=projects')}>My Projects</Button>
-            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/collaborate')}>Collaborate</Button>
+            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/dashboard')}>{t('Dashboard')}</Button>
+            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/studio?tab=projects')}>{t('My Projects')}</Button>
+            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/collaborate')}>{t('Collaborate')}</Button>
             <Button
               variant="ghost"
               size="sm"
@@ -5989,9 +6278,9 @@ export function DubVerseEditor({
               )}
               onClick={() => setRightPanelTab('library')}
             >
-              Voice Library
+              {t('Voice Library')}
             </Button>
-            <Button variant="ghost" size="sm" className="bg-slate-800 text-white">Editor</Button>
+            <Button variant="ghost" size="sm" className="bg-slate-800 text-white">{t('Editor')}</Button>
 
             {/* Edit counters, in the top bar beside MAKE MOVIE — the place the
                 user looks before committing to a render.
@@ -6113,19 +6402,19 @@ export function DubVerseEditor({
             {layoutLocked ? (
               <>
                 <Lock className="h-3.5 w-3.5" />
-                <span>Locked</span>
+                <span>{t('Locked')}</span>
               </>
             ) : (
               <>
                 <Unlock className="h-3.5 w-3.5" />
-                <span>Lock Editor</span>
+                <span>{t('Lock Editor')}</span>
               </>
             )}
           </Button>
           {/* Language selector */}
           <LanguageSwitcher />
           <Bell className="h-5 w-5 text-slate-400" />
-          <Link href="/account" className="w-8 h-8 rounded-full bg-amber-500 flex items-center justify-center hover:opacity-80 transition-opacity" title="Account">
+          <Link href="/account" className="w-8 h-8 rounded-full bg-amber-500 flex items-center justify-center hover:opacity-80 transition-opacity" title={t('Account')}>
             <span className="text-sm font-medium text-white">{userInitials}</span>
           </Link>
         </div>
@@ -6171,7 +6460,7 @@ export function DubVerseEditor({
               </>
             )}
           </div>
-          <Button variant="ghost" size="sm" className="h-8" onClick={handleGlobalUndo} title="Undo last edit">
+          <Button variant="ghost" size="sm" className="h-8" onClick={handleGlobalUndo} title={t('Undo last edit')}>
             <RotateCcw className="h-4 w-4" />
           </Button>
           <Popover onOpenChange={() => setShareCopied(null)}>
@@ -6183,16 +6472,16 @@ export function DubVerseEditor({
             <PopoverContent align="end" className="w-80 bg-slate-900 border-slate-700 p-4 space-y-4">
               <p className="text-sm font-semibold text-white flex items-center gap-2">
                 <Share2 className="h-4 w-4 text-amber-400" />
-                Share Project
+                {t('Share Project')}
               </p>
 
               {/* Editor link */}
               <div className="space-y-1.5">
-                <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">Editor link</p>
+                <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Editor link')}</p>
                 <div className="flex gap-2">
                   <input
                     readOnly
-                    aria-label="Editor link"
+                    aria-label={t('Editor link')}
                     value={typeof window !== 'undefined' ? window.location.href : ''}
                     className="flex-1 text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 truncate focus:outline-none"
                   />
@@ -6217,11 +6506,11 @@ export function DubVerseEditor({
               {/* Dubbed video */}
               {activeDubbedVideoUrl ? (
                 <div className="space-y-1.5">
-                  <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">Dubbed video</p>
+                  <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Dubbed video')}</p>
                   <div className="flex gap-2">
                     <input
                       readOnly
-                      aria-label="Dubbed video link"
+                      aria-label={t('Dubbed video link')}
                       value={activeDubbedVideoUrl}
                       className="flex-1 text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 truncate focus:outline-none"
                     />
@@ -6246,29 +6535,29 @@ export function DubVerseEditor({
                       className="h-7 px-2 text-xs border-slate-700 text-slate-300 shrink-0"
                       asChild
                     >
-                      <a href={activeDubbedVideoUrl} download title="Download dubbed video" target="_blank" rel="noreferrer">
+                      <a href={activeDubbedVideoUrl} download title={t('Download dubbed video')} target="_blank" rel="noreferrer">
                         <Download className="h-3 w-3" />
                       </a>
                     </Button>
                   </div>
                 </div>
               ) : (
-                <p className="text-xs text-slate-600 italic">No dubbed video yet — rebuild to generate one.</p>
+                <p className="text-xs text-slate-600 italic">{t('No dubbed video yet — rebuild to generate one.')}</p>
               )}
 
               {/* Social share */}
               <div className="space-y-1.5 pt-1 border-t border-slate-800">
-                <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">Share to</p>
+                <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Share to')}</p>
                 <div className="flex gap-2">
                   {/* Facebook */}
                   <button
                     type="button"
-                    title="Share to Facebook"
+                    title={t('Share to Facebook')}
                     className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#1877F2] hover:bg-[#1565C0] text-white transition-colors"
                     onClick={() => window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}`, '_blank', 'width=600,height=400')}
                   >
                     <Facebook className="h-4 w-4" />
-                    <span className="text-[9px] font-medium">Facebook</span>
+                    <span className="text-[9px] font-medium">{t('Facebook')}</span>
                   </button>
                   {/* Twitter / X */}
                   <button
@@ -6278,12 +6567,12 @@ export function DubVerseEditor({
                     onClick={() => window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}&text=${encodeURIComponent(`Check out my dubbed video — ${title}`)}`, '_blank', 'width=600,height=400')}
                   >
                     <Twitter className="h-4 w-4" />
-                    <span className="text-[9px] font-medium">X / Twitter</span>
+                    <span className="text-[9px] font-medium">{t('X / Twitter')}</span>
                   </button>
                   {/* YouTube — download video then open YouTube Studio */}
                   <button
                     type="button"
-                    title="Download for YouTube"
+                    title={t('Download for YouTube')}
                     className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#FF0000] hover:bg-[#CC0000] text-white transition-colors"
                     onClick={() => {
                       if (activeDubbedVideoUrl) {
@@ -6296,12 +6585,12 @@ export function DubVerseEditor({
                     }}
                   >
                     <Youtube className="h-4 w-4" />
-                    <span className="text-[9px] font-medium">YouTube</span>
+                    <span className="text-[9px] font-medium">{t('YouTube')}</span>
                   </button>
                   {/* Instagram — download video (no web upload API) */}
                   <button
                     type="button"
-                    title="Download for Instagram"
+                    title={t('Download for Instagram')}
                     className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-gradient-to-br from-[#833AB4] via-[#E1306C] to-[#F77737] hover:opacity-90 text-white transition-opacity"
                     onClick={() => {
                       if (activeDubbedVideoUrl) {
@@ -6313,7 +6602,7 @@ export function DubVerseEditor({
                     }}
                   >
                     <Instagram className="h-4 w-4" />
-                    <span className="text-[9px] font-medium">Instagram</span>
+                    <span className="text-[9px] font-medium">{t('Instagram')}</span>
                   </button>
                 </div>
               </div>
@@ -6326,7 +6615,7 @@ export function DubVerseEditor({
             onClick={() => videoInputRef.current?.click()}
           >
             <Upload className="h-4 w-4 mr-1" />
-            Import Video
+            {t('Import Video')}
           </Button>
           <input
             ref={videoInputRef}
@@ -6344,7 +6633,7 @@ export function DubVerseEditor({
                 className="h-8 border-slate-700 hover:bg-slate-800"
               >
                 <Settings className="h-4 w-4 mr-1" />
-                Advanced
+                {t('Advanced')}
                 <ChevronDown className="h-3 w-3 ml-1" />
               </Button>
             </DropdownMenuTrigger>
@@ -6357,7 +6646,7 @@ export function DubVerseEditor({
                     className="cursor-pointer hover:bg-slate-800"
                   >
                     <AlertTriangle className="h-4 w-4 mr-2 text-amber-400" />
-                    <span className="flex-1">Review Queue</span>
+                    <span className="flex-1">{t('Review Queue')}</span>
                     {unreviewedCount > 0 && (
                       <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">
                         {unreviewedCount}
@@ -6421,7 +6710,7 @@ export function DubVerseEditor({
                   : releasedForRender
                     ? <Check className="h-4 w-4 mr-2 text-emerald-400" />
                     : <AlertCircle className="h-4 w-4 mr-2 text-red-400" />}
-                <span className="flex-1">Release for render</span>
+                <span className="flex-1">{t('Release for render')}</span>
                 <span
                   className={cn(
                     "text-[10px] font-medium px-1.5 py-0.5 rounded tabular-nums",
@@ -6438,7 +6727,7 @@ export function DubVerseEditor({
                 className="cursor-pointer hover:bg-slate-800"
               >
                 <FileText className="h-4 w-4 mr-2" />
-                Import Transcript
+                {t('Import Transcript')}
               </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => {
@@ -6453,14 +6742,14 @@ export function DubVerseEditor({
                 className="cursor-pointer hover:bg-slate-800"
               >
                 <Download className="h-4 w-4 mr-2" />
-                Download Transcript
+                {t('Download Transcript')}
               </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => setShowAddSegment(true)}
                 className="cursor-pointer hover:bg-slate-800"
               >
                 <Plus className="h-4 w-4 mr-2" />
-                Add Segment
+                {t('Add Segment')}
               </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={handleRetranslate}
@@ -6475,7 +6764,7 @@ export function DubVerseEditor({
                 className="cursor-pointer hover:bg-red-950/50 text-red-400"
               >
                 <Trash2 className="h-4 w-4 mr-2" />
-                Clear Editor
+                {t('Clear Editor')}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -6514,7 +6803,7 @@ export function DubVerseEditor({
             onClick={() => router.push('/subscribe')}
           >
             <Sparkles className="h-4 w-4 mr-1" />
-            Upgrade
+            {t('Upgrade')}
           </Button>
           {/* Hidden for Professional: Make Movie already rebuilds AND exports,
               opening this same modal when it finishes, so a separate Download
@@ -6527,11 +6816,11 @@ export function DubVerseEditor({
               onClick={() => setShowExportModal(true)}
             >
               <Download className="h-4 w-4 mr-1" />
-              Download
+              {t('Download')}
             </Button>
           )}
           <Link href="/profile">
-            <Button variant="ghost" size="sm" className="h-8" title="Profile">
+            <Button variant="ghost" size="sm" className="h-8" title={t('Profile')}>
               <User className="h-4 w-4" />
             </Button>
           </Link>
@@ -6546,12 +6835,12 @@ export function DubVerseEditor({
           <div className="flex items-center gap-4 px-4 py-3 border-b border-slate-800">
             <Select defaultValue="all">
               <SelectTrigger className="w-16 h-8 bg-slate-800 border-slate-700">
-                <SelectValue placeholder="All" />
+                <SelectValue placeholder={t('All')} />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All</SelectItem>
-                <SelectItem value="errors">Errors</SelectItem>
-                <SelectItem value="warnings">Warnings</SelectItem>
+                <SelectItem value="all">{t('All')}</SelectItem>
+                <SelectItem value="errors">{t('Errors')}</SelectItem>
+                <SelectItem value="warnings">{t('Warnings')}</SelectItem>
               </SelectContent>
             </Select>
             {/* Source language selector */}
@@ -6591,7 +6880,7 @@ export function DubVerseEditor({
                     digits are the reading. Only the count changes, so only the
                     count needs to catch the eye. */}
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400">
-                  Segment Counter
+                  {t('Segment Counter')}
                 </span>
                 {saveProgress ? (
                   <span className="text-xs font-semibold text-emerald-400">
@@ -6628,7 +6917,7 @@ export function DubVerseEditor({
                             bar's green dots come from, so the two can't disagree. */}
                         <span
                           className="text-xs font-semibold text-emerald-400"
-                          title="Windows saved out of the whole film"
+                          title={t('Windows saved out of the whole film')}
                         >
                           <span className="text-amber-300 tabular-nums">
                             {String(
@@ -6646,7 +6935,7 @@ export function DubVerseEditor({
                     <span className="text-slate-700">|</span>
                     <span
                       className="text-xs font-semibold text-emerald-400"
-                      title="Auditioned edits not yet committed — press Save to keep them"
+                      title={t('Auditioned edits not yet committed — press Save to keep them')}
                     >
                       <span className="text-amber-300 tabular-nums">
                         {String(stagedEditCount).padStart(2, '0')}
@@ -6656,7 +6945,7 @@ export function DubVerseEditor({
                     <span className="text-slate-700">|</span>
                     <span
                       className="text-xs font-semibold text-emerald-400"
-                      title="Segments whose save failed — they remain staged for re-editing"
+                      title={t('Segments whose save failed — they remain staged for re-editing')}
                     >
                       <span
                         className={cn(
@@ -6696,8 +6985,8 @@ export function DubVerseEditor({
             <div className="flex-1 flex flex-col items-center justify-center gap-4 p-8">
               <div className="w-12 h-12 border-4 border-amber-500/30 border-t-amber-500 rounded-full animate-spin" />
               <div className="text-center">
-                <p className="text-lg font-medium text-white">Transcribing video...</p>
-                <p className="text-sm text-neutral-400 mt-1">This may take a few moments depending on video length</p>
+                <p className="text-lg font-medium text-white">{t('Transcribing video...')}</p>
+                <p className="text-sm text-neutral-400 mt-1">{t('This may take a few moments depending on video length')}</p>
               </div>
             </div>
           )}
@@ -6718,8 +7007,8 @@ export function DubVerseEditor({
             >
               <Upload className="h-12 w-12 text-[#A855F7]" />
               <div>
-                <p className="text-lg font-medium text-neutral-300">Click to upload a video</p>
-                <p className="text-sm text-neutral-500 mt-1">Select a video file to upload and automatically transcribe it</p>
+                <p className="text-lg font-medium text-neutral-300">{t('Click to upload a video')}</p>
+                <p className="text-sm text-neutral-500 mt-1">{t('Select a video file to upload and automatically transcribe it')}</p>
               </div>
             </div>
           )}
@@ -6747,7 +7036,6 @@ export function DubVerseEditor({
                   index={index}
                   segmentKey={getSegmentKey(segment)}
                   lockedSegments={lockedSegments}
-                  lockedPairs={lockedPairs}
                   stagedEmotions={stagedEmotions}
                   emotions={EMOTIONS}
                   onSelect={(idx) => { selectSegment(idx); setContextSegmentIndex(idx) }}
@@ -6758,9 +7046,10 @@ export function DubVerseEditor({
                   canMergeNext={canMergeWithNext(index)}
                   onDelete={(idx) => setPendingDelete(idx)}
                   onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
-                      onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+                      sceneLockMode={sceneLockMode}
+                      sceneAnchor={sceneAnchor}
+                      onLockScene={handleLockScene}
                       onUnlockScene={(idx) => unlockScene(idx)}
-                  onTogglePair={togglePairWithNext}
                   onRevert={() => handleRevert()}
                   onUndoLastEdit={handleUndoLastEdit}
                   onUndoSplit={handleUndoSplit}
@@ -6841,27 +7130,17 @@ export function DubVerseEditor({
                         const parsed = JSON.parse(payload) as { voice_id: string; name: string }
                         console.log('[VOICE-DROP] parsed payload', parsed)
                         if (parsed.voice_id) {
-                          const speakerId = displaySegments[index]?.speaker_id
                           setStagedVoices(prev => ({ ...prev, [keyAt(index)]: parsed.voice_id }))
-                          if (speakerId) {
-                            setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: parsed.voice_id }))
-                            setStagedVoices(prev => {
-                              const next = { ...prev }
-                              displaySegments.forEach((seg, i) => {
-                                if (seg.speaker_id === speakerId && i !== index) delete next[getSegmentKey(seg)]
-                              })
-                              return next
-                            })
-                          }
                           selectSegment(index)
-                          if (speakerId) {
-                            applyVoiceToSpeaker(speakerId, parsed.voice_id)
-                          } else {
-                            // A Fish voice implies the Fish engine. Without this the
-                            // segment's stored engine wins and the Fish UUID is handed
-                            // to Respeecher, which 500s on an unknown voice id.
-                            handleGenerateSpeech(index, parsed.voice_id, undefined, undefined, 'fish-audio')
-                          }
+                          // A Fish voice implies the Fish engine. Without this the
+                          // segment's stored engine wins and the Fish UUID is handed
+                          // to Respeecher, which 500s on an unknown voice id.
+                          handleGenerateSpeech(index, parsed.voice_id, undefined, undefined, 'fish-audio').then(ok => {
+                            if (ok) {
+                              setVoiceAppliedFeedback({ segmentIndex: index, voiceName: parsed.name })
+                              setTimeout(() => setVoiceAppliedFeedback(null), 2200)
+                            }
+                          })
                         } else {
                           console.warn('[VOICE-DROP] payload missing voice_id', parsed)
                         }
@@ -6873,18 +7152,7 @@ export function DubVerseEditor({
                     const fallbackVoiceId = e.dataTransfer.getData('text/plain')
                     const vk = draggedVoice ?? e.dataTransfer.getData('voice_key') ?? fallbackVoiceId
                     if (!vk) return
-                    const speakerId = displaySegments[index]?.speaker_id
                     setStagedVoices(prev => ({ ...prev, [keyAt(index)]: vk }))
-                    if (speakerId) {
-                      setSpeakerVoiceMap(prev => ({ ...prev, [speakerId]: vk }))
-                      setStagedVoices(prev => {
-                        const next = { ...prev }
-                        displaySegments.forEach((seg, i) => {
-                          if (seg.speaker_id === speakerId && i !== index) delete next[getSegmentKey(seg)]
-                        })
-                        return next
-                      })
-                    }
                     selectSegment(index)
                     setPitchPopupPos({
                       x: Math.max(20, window.innerWidth / 2 - 160),
@@ -6921,7 +7189,7 @@ export function DubVerseEditor({
                         "cursor-grab active:cursor-grabbing text-slate-600 hover:text-slate-400",
                         dragReorder?.fromIndex === index && "text-amber-400"
                       )}
-                      title="Drag to reorder speaker"
+                      title={t('Drag to reorder speaker')}
                       onMouseDown={(e) => {
                         e.preventDefault()
                         e.stopPropagation()
@@ -6965,7 +7233,7 @@ export function DubVerseEditor({
                           <div
                             className={cn('flex items-center px-5 py-2 rounded-full border text-sm font-semibold shrink-0 cursor-pointer', speakerColor.bg, speakerColor.text, speakerColor.border)}
                             onClick={(e) => e.stopPropagation()}
-                            title="Click to reassign speaker"
+                            title={t('Click to reassign speaker')}
                           >
                             <span>{segment.speaker_label && !/^\d+$/.test(segment.speaker_label) ? segment.speaker_label : `speaker-${speakerNumberMap[segment.speaker_id] ?? 1}`}</span>
                           </div>
@@ -7091,7 +7359,7 @@ export function DubVerseEditor({
                         })() : (
                           <span
                             className="inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full text-slate-600 border border-slate-800 hover:text-violet-400 hover:border-violet-500/30 transition-colors cursor-pointer select-none"
-                            title="Set emotion for this segment"
+                            title={t('Set emotion for this segment')}
                             onClick={(e) => {
                               e.stopPropagation()
                               selectSegment(null)
@@ -7178,7 +7446,7 @@ export function DubVerseEditor({
                               ))}
                               {/* Open the full Emotion Library (~194 states) */}
                               <span
-                                title="Open the Emotion Library — 194 delivery states"
+                                title={t('Open the Emotion Library — 194 delivery states')}
                                 className="text-[9px] px-1.5 py-0.5 rounded-full cursor-pointer border border-violet-400/50 bg-violet-500/15 text-violet-200 hover:bg-violet-500/30 hover:text-white transition-colors select-none font-mono"
                                 onClick={() => setEmotionLibraryTarget({ index, mode: 'stage' })}
                               >
@@ -7314,7 +7582,7 @@ export function DubVerseEditor({
                               ? 'bg-orange-500/20 text-orange-300 border-orange-500/40 hover:bg-red-500/20 hover:text-red-300'
                               : 'text-slate-600 border-slate-800 hover:text-orange-400 hover:border-orange-500/30'
                           )}
-                          title="Adjust segment speed"
+                          title={t('Adjust segment speed')}
                           onClick={(e) => {
                             e.stopPropagation()
                             const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -7378,7 +7646,12 @@ export function DubVerseEditor({
                                   : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
                             )}
                             onDoubleClick={() => {
-                              if (lockedSegments.has(keyAt(index)) || segment.isPreviewing) return
+                              // Locked segments are audio-frozen and cannot be
+                              // regenerated; editing their text would desync the
+                              // displayed line from the existing take. Preview-only
+                              // segments still can't be edited because there is
+                              // nothing committed yet.
+                              if (segment.isPreviewing) return
                               // When the write-in box is open, double-clicking the line drops it
                               // into that field (Delivery Script) so you can add [tags]. Otherwise
                               // double-click edits the line inline as before.
@@ -7394,7 +7667,7 @@ export function DubVerseEditor({
                             {segment.engine === 'elevenlabs-sts' && (
                               <Mic2
                                 className="h-3 w-3 shrink-0 text-violet-300"
-                                aria-label="Audio comes from a recording"
+                                aria-label={t('Audio comes from a recording')}
                               />
                             )}
                             {(segment.preview_text ?? segment.active_text ?? segment.target_text)
@@ -7405,7 +7678,7 @@ export function DubVerseEditor({
                         {hasQCFindings && (
                           <button
                             className="opacity-0 group-hover:opacity-100 transition-opacity ml-1 text-slate-500 hover:text-amber-400"
-                            title="View QC details"
+                            title={t('View QC details')}
                             onClick={(e) => {
                               e.stopPropagation()
                               selectSegment(index)
@@ -7483,15 +7756,15 @@ export function DubVerseEditor({
                             handleGenerateSpeech(index, undefined, _liveText)
                           }}
                         >
-                          Commit
+                          {t('Commit')}
                         </button>
                         <button
                           type="button"
                           className="text-[10px] px-2 py-0.5 rounded bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30 hover:text-red-300 transition-colors pointer-events-auto cursor-pointer select-none"
-                          title="Reset segment to pipeline-original — wipes all edits, emotion, voice, speed, and audio"
+                          title={t('Reset segment to pipeline-original — wipes all edits, emotion, voice, speed, and audio')}
                           onClick={(e) => { e.stopPropagation(); handleClearSegment(index) }}
                         >
-                          Clear
+                          {t('Clear')}
                         </button>
                       </div>
                     )}
@@ -7516,7 +7789,7 @@ export function DubVerseEditor({
               }}
             >
               <MessageCircle className="h-4 w-4 mr-1" />
-              Ask DubMaster AI
+              {t('Ask DubMaster AI')}
             </Button>
             {/* Change Voice — click to reveal draggable chips, drag onto a segment */}
             <Button
@@ -7526,7 +7799,7 @@ export function DubVerseEditor({
               onClick={() => setVoicePaletteOpen(p => !p)}
             >
               <Mic2 className="h-4 w-4 mr-1" />
-              Change Voice
+              {t('Change Voice')}
             </Button>
             {voicePaletteOpen && (
               <div className="flex items-center gap-1.5">
@@ -7542,7 +7815,7 @@ export function DubVerseEditor({
                     onDragEnd={() => setDraggedVoice(null)}
                     className="px-2 py-0.5 rounded text-[11px] font-medium bg-slate-700 text-slate-300 cursor-grab active:cursor-grabbing border border-slate-600 hover:border-cyan-500/60 hover:text-cyan-300 select-none"
                   >
-                    {v.label}
+                    {t(v.label)}
                   </div>
                 ))}
                 <span className="text-[10px] text-slate-600 ml-1">drag to segment</span>
@@ -7588,7 +7861,7 @@ export function DubVerseEditor({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-48 bg-[#0F172A] border-slate-700 max-h-80 overflow-y-auto">
                 {selectedSegmentIndex === null && (
-                  <div className="px-2 py-1.5 text-[10px] text-slate-500">Select a segment first</div>
+                  <div className="px-2 py-1.5 text-[10px] text-slate-500">{t('Select a segment first')}</div>
                 )}
                 {EMOTIONS.map((emotion) => (
                   <DropdownMenuItem
@@ -7656,14 +7929,14 @@ export function DubVerseEditor({
                     }
                   }}
                 >
-                  Clear this segment
+                  {t('Clear this segment')}
                 </DropdownMenuItem>
                 {Object.keys(stagedEmotions).length > 1 && (
                   <DropdownMenuItem
                     className="text-slate-500 hover:text-red-400 hover:bg-slate-700 cursor-pointer text-xs"
                     onClick={() => setStagedEmotions({})}
                   >
-                    Clear all emotions
+                    {t('Clear all emotions')}
                   </DropdownMenuItem>
                 )}
               </DropdownMenuContent>
@@ -7675,7 +7948,7 @@ export function DubVerseEditor({
               onClick={() => setRightPanelTab('nuances')}
             >
               <Sliders className="h-4 w-4 mr-1" />
-              Nuances
+              {t('Nuances')}
             </Button>
             <Button
               variant="ghost"
@@ -7692,15 +7965,15 @@ export function DubVerseEditor({
               }}
             >
               <Sparkles className="h-4 w-4 mr-1" />
-              Ask AI
+              {t('Ask AI')}
             </Button>
             <div className="ml-auto flex flex-col items-end gap-1">
               <Button
                 size="sm"
                 className={cn(
                   "h-8 text-xs",
-                  selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex))
-                    ? "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30"
+                  selectedSegmentIndex === null
+                    ? "bg-slate-700 text-slate-400 cursor-not-allowed"
                     : "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
                 )}
                 onClick={() => handleGenerateSpeech()}
@@ -7709,17 +7982,12 @@ export function DubVerseEditor({
                 {isRegenerating ? (
                   <>
                     <RefreshCw className="h-4 w-4 mr-1 animate-spin" />
-                    Generating...
-                  </>
-                ) : selectedSegmentIndex !== null && lockedSegments.has(keyAt(selectedSegmentIndex)) ? (
-                  <>
-                    <Lock className="h-4 w-4 mr-1" />
-                    Locked
+                    {t('Generating...')}
                   </>
                 ) : (
                   <>
                     <Sparkles className="h-4 w-4 mr-1" />
-                    Generate Speech
+                    {t('Generate Speech')}
                   </>
                 )}
               </Button>
@@ -7728,7 +7996,7 @@ export function DubVerseEditor({
               )}
               {addSegmentFeedback === 'error' && (
                 <p className="text-xs text-red-400 font-medium">
-                  Add Segment failed — please try again or reload the page.
+                  {t('Add Segment failed — please try again or reload the page.')}
                 </p>
               )}
               {addSegmentFeedback === 'success' && (
@@ -7746,7 +8014,7 @@ export function DubVerseEditor({
           </div>
           {pendingDelete !== null && (
             <div className="flex items-center gap-2 px-3 py-1.5 bg-red-950/50 border border-red-500/30 rounded text-xs text-red-400 mx-4 mb-2">
-              <span>Delete this segment?</span>
+              <span>{t('Delete this segment?')}</span>
               <Button size="sm" className="h-6 text-xs bg-red-600 hover:bg-red-700 text-white px-2"
                 onClick={() => {
                   const idx = pendingDelete
@@ -7767,17 +8035,17 @@ export function DubVerseEditor({
                   selectSegment(null)
                   setPendingDelete(null)
                 }}>
-                Delete
+                {t('Delete')}
               </Button>
               <Button size="sm" variant="ghost" className="h-6 text-xs px-2"
                 onClick={() => setPendingDelete(null)}>
-                Cancel
+                {t('Cancel')}
               </Button>
             </div>
           )}
           {showRevertAllConfirm && (
             <div className="flex items-center gap-2 px-3 py-1.5 bg-red-950/50 border border-red-500/30 rounded text-xs text-red-400 mx-4 mb-2">
-              <span>This will clear all editor changes and return to the original pipeline output. Are you sure?</span>
+              <span>{t('This will clear all editor changes and return to the original pipeline output. Are you sure?')}</span>
               <Button size="sm" className="h-6 text-xs bg-red-600 hover:bg-red-700 text-white px-2"
                 onClick={() => {
                   // Wipe all store state (job, video, segments, speakers, QC)
@@ -7791,7 +8059,6 @@ export function DubVerseEditor({
                   setStagedVoices({})
                   setCustomEmotionDrafts({})
                   setLockedSegments(new Set())
-                  setLockedPairs(new Set())
                   setGroupedSegments(new Set())
                   setInlineEmotionPicker(null)
                   setInlineEmotionWriteIn(null)
@@ -7809,11 +8076,11 @@ export function DubVerseEditor({
                   }
                   setShowRevertAllConfirm(false)
                 }}>
-                Clear Editor
+                {t('Clear Editor')}
               </Button>
               <Button size="sm" variant="ghost" className="h-6 text-xs px-2"
                 onClick={() => setShowRevertAllConfirm(false)}>
-                Cancel
+                {t('Cancel')}
               </Button>
             </div>
           )}
@@ -7827,8 +8094,8 @@ export function DubVerseEditor({
         >
           {/* Resize handle */}
           <div
-            className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group"
-            onMouseDown={handlePreviewResizeStart}
+            className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group select-none touch-none"
+            onPointerDown={handlePreviewResizeStart}
           >
             <div className={cn(
               "absolute inset-y-0 left-0 w-0.5 bg-amber-500/30 group-hover:bg-amber-500",
@@ -7855,26 +8122,26 @@ export function DubVerseEditor({
                 { id: 'library',    label: 'Voice Library' },
                 { id: 'testclips',  label: 'Test Clips',   feature: 'customVoices' },
                 { id: 'ei-library', label: 'E.I. Library', feature: 'emotionalIntelligence' },
-              ] as const).filter((t) => !('feature' in t) || hasFeature(t.feature as any)).map((t) => (
+              ] as const).filter((tab) => !('feature' in tab) || hasFeature(tab.feature as any)).map((tab) => (
                 <button
                   type="button"
-                  key={t.id}
+                  key={tab.id}
                   onClick={() => {
-                    if (t.id === 'studio') {
+                    if (tab.id === 'studio') {
                       router.push('/studio')
                       return
                     }
-                    setRightPanelTab(t.id)
+                    setRightPanelTab(tab.id)
                   }}
                   className={cn(
                     'text-xs px-3 py-1 rounded-md transition-colors',
-                    rightPanelTab === t.id
+                    rightPanelTab === tab.id
                       ? 'bg-slate-700 text-white'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
                   )}
                 >
-                  {t.label}
-                  {t.id === 'quality' && qcReport && (qcReport.grade === 'D' || qcReport.grade === 'F') && (
+                  {t(tab.label)}
+                  {tab.id === 'quality' && qcReport && (qcReport.grade === 'D' || qcReport.grade === 'F') && (
                     <span className="ml-1.5 inline-block w-1.5 h-1.5 rounded-full bg-red-500" />
                   )}
                 </button>
@@ -7888,7 +8155,7 @@ export function DubVerseEditor({
                   className={cn('h-6 text-[11px] px-2', playbackMode === 'original' ? 'text-white' : 'text-slate-500')}
                   onClick={() => setPlaybackMode('original')}
                 >
-                  Original
+                  {t('Original')}
                 </Button>
                 <Button
                   variant="ghost"
@@ -7899,7 +8166,7 @@ export function DubVerseEditor({
                   )}
                   onClick={() => setPlaybackMode('dubbed')}
                 >
-                  Translated
+                  {t('Translated')}
                 </Button>
                 <Button
                   variant="ghost"
@@ -7912,7 +8179,7 @@ export function DubVerseEditor({
                   )}
                   onClick={() => setPlaybackMode('preview')}
                 >
-                  Preview
+                  {t('Preview')}
                 </Button>
               </div>
             )}
@@ -7971,15 +8238,14 @@ export function DubVerseEditor({
                 className="absolute top-0 left-0 w-full h-full bg-black pointer-events-none"
                 style={{ opacity: 0 }}
               />
-              {captionSegment && (
-                <div className="absolute bottom-8 left-0 right-0 text-center px-4">
-                  <span className="bg-black/75 px-4 py-2 rounded text-white text-sm">
-                    {captionSegment.preview_text ?? captionSegment.active_text ?? captionSegment.target_text}
-                  </span>
-                </div>
-              )}
+              <CaptionOverlay
+                playbackMode={playbackMode}
+                selectedSegmentIndex={selectedSegmentIndex}
+                displaySegments={displaySegments}
+                currentTimeRef={currentTimeRef}
+              />
               <div className="absolute bottom-2 right-2 flex items-center gap-1 text-xs text-slate-500">
-                <span>Video Translated by DubMaster</span>
+                <span>{t('Video Translated by DubMaster')}</span>
               </div>
             </div>
           </div>
@@ -8004,7 +8270,7 @@ export function DubVerseEditor({
                 <span className="w-11 h-11 rounded-lg bg-[#1c1c20] border border-white/10 flex items-center justify-center shrink-0">
                   <AskAiBotIcon id="askAiBotGradient-header" size={26} />
                 </span>
-                Ask DubMaster AI
+                {t('Ask DubMaster AI')}
               </span>
               <div className="flex items-center gap-1">
                 <button
@@ -8041,7 +8307,7 @@ export function DubVerseEditor({
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto px-8 py-6 space-y-6">
               {askAiChatMessages.length === 0 && (
-                <div className="text-sm text-white/40">Ask me anything about your dub — QC scores, Velma enrichment, exporting, timeline behavior.</div>
+                <div className="text-sm text-white/40">{t('Ask me anything about your dub — QC scores, Velma enrichment, exporting, timeline behavior.')}</div>
               )}
               {askAiChatMessages.map((m, i) => (
                 <div key={i} className={cn("flex items-start gap-3", m.role === 'user' ? "flex-row-reverse" : "flex-row")}>
@@ -8074,7 +8340,7 @@ export function DubVerseEditor({
                   value={askAiChatInput}
                   onChange={e => setAskAiChatInput(e.target.value)}
                   onKeyDown={e => { if (e.key === 'Enter') submitAskAiChat() }}
-                  placeholder="Ask about your dub..."
+                  placeholder={t('Ask about your dub...')}
                   className="w-full bg-white/5 text-white text-sm rounded-full px-4 py-3 outline-none placeholder:text-white/30"
                 />
               </div>
@@ -8271,7 +8537,7 @@ export function DubVerseEditor({
           {/* Studio tab — placeholder */}
           {rightPanelTab === 'studio' && hasFeature('studioCollaboration') && (
             <div className="flex-1 min-h-0 flex items-center justify-center text-slate-500 text-sm bg-neutral-950">
-              Studio coming soon
+              {t('Studio coming soon')}
             </div>
           )}
 
@@ -8434,11 +8700,11 @@ export function DubVerseEditor({
 
                 {markers.length > 0 && (
                   <div className="text-[9px] text-slate-600">
-                    Click a colored span to remove its marker
+                    {t('Click a colored span to remove its marker')}
                   </div>
                 )}
 
-                <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold pt-1">Basic</div>
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold pt-1">{t('Basic')}</div>
                 {tier1.map(({ key, labels }) => (
                   <div key={key} className="space-y-1">
                     <div className="text-[11px] text-slate-400 capitalize">{key}</div>
@@ -8470,12 +8736,12 @@ export function DubVerseEditor({
                         : 'text-slate-500 border border-slate-700'
                     )}
                     onClick={() => setNuancesAdvanced(p => !p)}
-                  >Advanced</button>
+                  >{t('Advanced')}</button>
                 </div>
 
                 {nuancesAdvanced && (
                   <div className="space-y-3 pt-1">
-                    <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">Advanced</div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">{t('Advanced')}</div>
                     {tier2.map(({ key, min, max }) => (
                       <div key={key} className="space-y-0.5">
                         <div className="flex items-center justify-between">
@@ -8502,7 +8768,7 @@ export function DubVerseEditor({
 
                 {/* Free-text write-in — folds into this segment's composed S2 nuance directive */}
                 <div className="space-y-1 pt-1">
-                  <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">Write-in</div>
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">{t('Write-in')}</div>
                   <input
                     type="text"
                     value={seg?.custom_nuance ?? ''}
@@ -8519,7 +8785,7 @@ export function DubVerseEditor({
                     placeholder="e.g. lingers on the last word, slight tremble"
                     className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 placeholder:text-slate-600 focus:border-violet-500/60 focus:outline-none"
                   />
-                  <div className="text-[9px] text-slate-600">Free-text delivery note, added to this segment's nuance directive on regenerate.</div>
+                  <div className="text-[9px] text-slate-600">{t("Free-text delivery note, added to this segment's nuance directive on regenerate.")}</div>
                 </div>
 
                 <div className="pt-3">
@@ -8529,7 +8795,7 @@ export function DubVerseEditor({
                     onClick={() => handleGenerateSpeech(nIdx)}
                     disabled={isRegenerating}
                   >
-                    {isRegenerating ? 'Generating...' : 'Regenerate with Nuances'}
+                    {isRegenerating ? t('Generating...') : t('Regenerate with Nuances')}
                   </Button>
                 </div>
               </div>
@@ -8707,7 +8973,7 @@ export function DubVerseEditor({
                 <div className="px-3 pt-2 pb-1">
                   <input
                     type="text"
-                    placeholder="Search curves..."
+                    placeholder={t('Search curves...')}
                     value={curveSearchQuery}
                     onChange={e => setCurveSearchQuery(e.target.value)}
                     className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white placeholder-slate-500 outline-none focus:border-violet-500"
@@ -8717,8 +8983,7 @@ export function DubVerseEditor({
                   <div className="flex-1 flex items-center justify-center p-6 text-center">
                     <p className="text-xs text-slate-500">
                       {savedCurves.length === 0
-                        ? 'No saved curves yet. Set an emotion curve on a segment, name it in the Chord view, and click Save.'
-                        : 'No curves match your search.'}
+                        ? t('No saved curves yet. Set an emotion curve on a segment, name it in the Chord view, and click Save.') : t('No curves match your search.')}
                     </p>
                   </div>
                 ) : (
@@ -8764,15 +9029,15 @@ export function DubVerseEditor({
                             onClick={() => applyCurve(curve)}
                             disabled={selectedSegmentIndex === null}
                           >
-                            Apply
+                            {t('Apply')}
                           </button>
                           {deleteConfirmCurveId === curve.id ? (
                             <>
-                              <button type="button" className="px-2 py-0.5 rounded text-[10px] bg-red-500/30 text-red-300 border border-red-500/40 hover:bg-red-500/50 transition-colors" onClick={() => deleteCurve(curve.id)}>Confirm</button>
-                              <button type="button" className="px-2 py-0.5 rounded text-[10px] text-slate-400 border border-slate-700 hover:text-slate-200 transition-colors" onClick={() => setDeleteConfirmCurveId(null)}>Cancel</button>
+                              <button type="button" className="px-2 py-0.5 rounded text-[10px] bg-red-500/30 text-red-300 border border-red-500/40 hover:bg-red-500/50 transition-colors" onClick={() => deleteCurve(curve.id)}>{t('Confirm')}</button>
+                              <button type="button" className="px-2 py-0.5 rounded text-[10px] text-slate-400 border border-slate-700 hover:text-slate-200 transition-colors" onClick={() => setDeleteConfirmCurveId(null)}>{t('Cancel')}</button>
                             </>
                           ) : (
-                            <button type="button" className="px-2 py-0.5 rounded text-[10px] text-slate-500 border border-slate-700 hover:text-red-400 hover:border-red-500/40 transition-colors" onClick={() => setDeleteConfirmCurveId(curve.id)}>Delete</button>
+                            <button type="button" className="px-2 py-0.5 rounded text-[10px] text-slate-500 border border-slate-700 hover:text-red-400 hover:border-red-500/40 transition-colors" onClick={() => setDeleteConfirmCurveId(curve.id)}>{t('Delete')}</button>
                           )}
                         </div>
                       </div>
@@ -8800,7 +9065,7 @@ export function DubVerseEditor({
               />
             ) : (
               <div className="flex-1 flex items-center justify-center text-slate-600 text-sm">
-                Double-click a segment in the Emotion track
+                {t('Double-click a segment in the Emotion track')}
               </div>
             )}
           </div>
@@ -8842,7 +9107,7 @@ export function DubVerseEditor({
           <div className="w-full max-w-md rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl"
             onClick={(e) => e.stopPropagation()}>
             <h2 id="confirm-render-title" className="text-base font-semibold text-slate-100">
-              Make movie now?
+              {t('Make movie now?')}
             </h2>
 
             <div className="mt-3 space-y-2.5">
@@ -8852,7 +9117,7 @@ export function DubVerseEditor({
                     {confirmRender.staged} segment{confirmRender.staged === 1 ? '' : 's'} staged but not saved
                   </div>
                   <div className="mt-1 text-[11px] leading-relaxed text-amber-100/70">
-                    These takes will be <strong>missing from the film</strong> — the render
+                    {t('These takes will be')} <strong>missing from the film</strong> — the render
                     uses saved segments only. Save first to include them.
                   </div>
                 </div>
@@ -8864,7 +9129,7 @@ export function DubVerseEditor({
                     Segment{confirmRender.failed.length === 1 ? '' : 's'} {confirmRender.failed.join(', ')} failed to save
                   </div>
                   <div className="mt-1 text-[11px] leading-relaxed text-red-100/70">
-                    These will not be in the film either.
+                    {t('These will not be in the film either.')}
                   </div>
                 </div>
               )}
@@ -8899,7 +9164,7 @@ export function DubVerseEditor({
               <Button variant="ghost" size="sm"
                 onClick={() => setConfirmRender(null)}
                 className="h-8 text-xs text-slate-400">
-                Cancel
+                {t('Cancel')}
               </Button>
               {confirmRender.staged > 0 && (
                 <Button size="sm"
@@ -8909,7 +9174,7 @@ export function DubVerseEditor({
                     handleRebuildVideo()
                   }}
                   className="h-8 text-xs bg-teal-600 hover:bg-teal-700 text-white">
-                  Save, then make movie
+                  {t('Save, then make movie')}
                 </Button>
               )}
               <Button size="sm"
@@ -8919,7 +9184,7 @@ export function DubVerseEditor({
                   confirmRender.staged > 0
                     ? 'border-slate-600 text-slate-300'
                     : 'bg-teal-600 hover:bg-teal-700 text-white')}>
-                {confirmRender.staged > 0 ? 'Make movie without them' : 'Make movie anyway'}
+                {confirmRender.staged > 0 ? t('Make movie without them') : t('Make movie anyway')}
               </Button>
             </div>
           </div>
@@ -9022,14 +9287,14 @@ export function DubVerseEditor({
                   Ask AI
                   {seg && <span className="text-slate-500 font-normal text-xs">— Segment {selectedSegmentIndex! + 1}</span>}
                 </span>
-                <button type="button" title="Close" onClick={() => setAskAiOpen(false)} className="text-slate-500 hover:text-white">
+                <button type="button" title={t('Close')} onClick={() => setAskAiOpen(false)} className="text-slate-500 hover:text-white">
                   <X className="h-4 w-4" />
                 </button>
               </div>
 
               {/* Model selector */}
               <div className="px-4 pt-3 pb-3 border-b border-slate-800 shrink-0">
-                <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold mb-2">Select AI Model</p>
+                <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold mb-2">{t('Select AI Model')}</p>
                 <div className="flex gap-2">
                   {AI_MODELS.map(m => (
                     <button
@@ -9055,11 +9320,11 @@ export function DubVerseEditor({
                 {seg && (
                   <div className="bg-slate-800 rounded-lg p-3 space-y-1.5 text-xs">
                     <div className="flex gap-2">
-                      <span className="text-slate-500 w-14 shrink-0">Original</span>
+                      <span className="text-slate-500 w-14 shrink-0">{t('Original')}</span>
                       <span className="text-slate-300">{seg.source_text}</span>
                     </div>
                     <div className="flex gap-2">
-                      <span className="text-slate-500 w-14 shrink-0">Dubbed</span>
+                      <span className="text-slate-500 w-14 shrink-0">{t('Dubbed')}</span>
                       <span className="text-amber-300">{seg.preview_text ?? seg.active_text ?? seg.target_text}</span>
                     </div>
                   </div>
@@ -9082,7 +9347,7 @@ export function DubVerseEditor({
                 {/* Custom prompt */}
                 <div className="flex gap-2">
                   <input
-                    aria-label="Ask AI prompt"
+                    aria-label={t('Ask AI prompt')}
                     className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-amber-500/50"
                     placeholder="Ask anything about this segment…"
                     value={askAiPrompt}
@@ -9122,7 +9387,7 @@ export function DubVerseEditor({
                         }}
                       >
                         <Check className="h-3 w-3 mr-1.5" />
-                        Apply suggestion
+                        {t('Apply suggestion')}
                       </Button>
                     )}
                   </div>
@@ -9150,14 +9415,14 @@ export function DubVerseEditor({
             <div className="flex items-center justify-between mb-4">
               <span className="text-sm font-semibold text-cyan-400 flex items-center gap-2">
                 <Music2 className="h-4 w-4" />
-                Pitch — Segment {pitchPopupIndex + 1}
+                {t('Pitch — Segment {n}', { n: pitchPopupIndex + 1 })}
                 {stagedVoices[keyAt(pitchPopupIndex)] && (
                   <span className="text-[10px] font-normal text-slate-400">
-                    ({VOICE_OPTIONS.find(v => v.key === stagedVoices[keyAt(pitchPopupIndex)])?.label})
+                    ({t(VOICE_OPTIONS.find(v => v.key === stagedVoices[keyAt(pitchPopupIndex)])?.label ?? '')})
                   </span>
                 )}
               </span>
-              <button type="button" title="Close" onClick={() => setPitchPopupIndex(null)} className="text-slate-500 hover:text-white">
+              <button type="button" title={t('Close')} onClick={() => setPitchPopupIndex(null)} className="text-slate-500 hover:text-white">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -9177,7 +9442,7 @@ export function DubVerseEditor({
                   "text-4xl font-mono w-28 text-center cursor-pointer select-none transition-colors",
                   (stagedPitches[keyAt(pitchPopupIndex)] ?? 0) !== 0 ? "text-cyan-400" : "text-white"
                 )}
-                title="Click to reset"
+                title={t('Click to reset')}
                 onClick={() => setStagedPitches(prev => { const n = { ...prev }; delete n[keyAt(pitchPopupIndex)]; return n })}
               >
                 {(stagedPitches[keyAt(pitchPopupIndex)] ?? 0) > 0 ? '+' : ''}{stagedPitches[keyAt(pitchPopupIndex)] ?? 0}
@@ -9213,7 +9478,7 @@ export function DubVerseEditor({
               onClick={() => { setPitchPopupIndex(null); handleGenerateSpeech() }}
             >
               <Sparkles className="h-4 w-4 mr-1" />
-              Generate Speech
+              {t('Generate Speech')}
             </Button>
           </div>
         </>
@@ -9234,7 +9499,7 @@ export function DubVerseEditor({
                 <Gauge className="h-4 w-4" />
                 Speed — Segment {speedPopupIndex + 1}
               </span>
-              <button type="button" title="Close" onClick={() => setSpeedPopupIndex(null)} className="text-slate-500 hover:text-white">
+              <button type="button" title={t('Close')} onClick={() => setSpeedPopupIndex(null)} className="text-slate-500 hover:text-white">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -9254,7 +9519,7 @@ export function DubVerseEditor({
                   "text-4xl font-mono w-28 text-center cursor-pointer select-none transition-colors",
                   (stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0) !== 1.0 ? "text-orange-400" : "text-white"
                 )}
-                title="Click to reset"
+                title={t('Click to reset')}
                 onClick={() => setStagedSpeeds(prev => { const n = { ...prev }; delete n[keyAt(speedPopupIndex)]; return n })}
               >
                 {(stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0).toFixed(2)}
@@ -9309,7 +9574,7 @@ export function DubVerseEditor({
               onClick={() => { setSpeedPopupIndex(null); handleGenerateSpeech() }}
             >
               <Sparkles className="h-4 w-4 mr-1" />
-              Generate Speech
+              {t('Generate Speech')}
             </Button>
           </div>
         </>
@@ -9324,8 +9589,8 @@ export function DubVerseEditor({
       >
         {/* Resize handle at top */}
         <div
-          className="absolute top-0 left-0 right-0 h-1.5 cursor-ns-resize hover:bg-amber-500/50 transition-colors z-20 group"
-          onMouseDown={handleTimelineResizeStart}
+          className="absolute top-0 left-0 right-0 h-1.5 cursor-ns-resize hover:bg-amber-500/50 transition-colors z-20 group select-none touch-none"
+          onPointerDown={handleTimelineResizeStart}
         >
           <div className={cn(
             "absolute inset-x-0 top-0 h-0.5 bg-amber-500/30 group-hover:bg-amber-500",
@@ -9358,7 +9623,7 @@ export function DubVerseEditor({
                 <PopoverContent className="w-48 bg-slate-900 border-slate-700 p-3">
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <span className="text-xs text-slate-400">Master Volume</span>
+                      <span className="text-xs text-slate-400">{t('Master Volume')}</span>
                       <span className="text-xs text-slate-300 font-mono">{masterVolume}%</span>
                     </div>
                     <Slider
@@ -9374,7 +9639,7 @@ export function DubVerseEditor({
                       className="w-full h-7 text-xs"
                       onClick={() => setIsMuted(!isMuted)}
                     >
-                      {isMuted ? 'Unmute All' : 'Mute All'}
+                      {isMuted ? t('Unmute All') : t('Mute All')}
                     </Button>
                   </div>
                 </PopoverContent>
@@ -9382,7 +9647,7 @@ export function DubVerseEditor({
               <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
                 <Grid3X3 className="h-4 w-4" />
               </Button>
-              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Clear editor" onClick={() => setShowRevertAllConfirm(true)}>
+              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title={t('Clear editor')} onClick={() => setShowRevertAllConfirm(true)}>
                 <Trash2 className="h-4 w-4" />
               </Button>
               {/* Timecode lives here rather than in the centred group: it is ~90px
@@ -9390,6 +9655,24 @@ export function DubVerseEditor({
               <span ref={timeDisplayRef} className="ml-2 text-sm font-mono text-slate-400 tabular-nums">
                 {formatTime(currentTime)} / {formatTime(videoDuration)}
               </span>
+              {/* WHICH SEGMENTS ARE LOCKED, AND WHERE YOU CAN SEE IT.
+                  This used to be a green pill sitting ON the Generate Speech button,
+                  so a status read as a control — and it only ever described the
+                  SELECTED segment, which is no use when you are trying to find out
+                  what is protected before a bulk action. Here it is a standing
+                  readout of every locked segment, out of the way of any button. */}
+              {lockedSegments.size > 0 && (
+                <span
+                  className="ml-4 text-xs font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded px-2 py-0.5 whitespace-nowrap"
+                  title="Locked segments are skipped by Apply Voice. Right-click one, or select it and press Shift+U, to unlock."
+                >
+                  🔒 Locked SG {displaySegments
+                    .map((s, i) => lockedSegments.has(getSegmentKey(s)) ? (s.transcript_index ?? i) : null)
+                    .filter((n): n is number => n !== null)
+                    .sort((a, b) => a - b)
+                    .join(", ")}
+                </span>
+              )}
             </div>
           </div>
 
@@ -9502,9 +9785,9 @@ export function DubVerseEditor({
               size="sm"
               className="h-8 px-2 text-xs text-neutral-300 hover:text-white gap-1"
               onClick={handleSplitSceneAtPlayhead}
-              title="Split the current video scene at the playhead"
+              title={t('Split the current video scene at the playhead')}
             >
-              <span>✂️</span> Scene
+              <span>✂️</span> {t('Scene')}
             </Button>
 
           </div>
@@ -9534,8 +9817,8 @@ export function DubVerseEditor({
                 localStorage.setItem('dubverse.editor.followPlayhead', next ? '1' : '0')
               }}
               title={followPlayhead
-                ? 'Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.'
-                : 'Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.'}
+                ? t('Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.')
+                : t('Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.')}
               className={cn(
                 'h-7 px-2 rounded text-[11px] font-medium transition-colors whitespace-nowrap',
                 followPlayhead
@@ -9543,26 +9826,26 @@ export function DubVerseEditor({
                   : 'text-slate-500 hover:text-slate-300 border border-transparent',
               )}
             >
-              {followPlayhead ? '⇢ always' : '⇢ on play'}
+              {followPlayhead ? t('⇢ always') : t('⇢ on play')}
             </button>
             <div className="w-px h-5 bg-white/10 mx-1" />
             {([
-              { id: 'chord',      label: '🎼 Chord',      feature: 'emotionalCurveEditor' },
-              { id: 'advanced',   label: '🎛 Advanced',   feature: 'emotionalCurveEditor' },
-              { id: 'characters', label: '🎭 Characters', feature: 'characterProfiles' },
-            ] as const).filter(t => hasFeature(t.feature as any)).map(t => (
+              { id: 'chord',      icon: '🎼', label: 'Chord',      feature: 'emotionalCurveEditor' },
+              { id: 'advanced',   icon: '🎛', label: 'Advanced',   feature: 'emotionalCurveEditor' },
+              { id: 'characters', icon: '🎭', label: 'Characters', feature: 'characterProfiles' },
+            ] as const).filter(tab => hasFeature(tab.feature as any)).map(tab => (
               <button
-                key={t.id}
+                key={tab.id}
                 type="button"
-                onClick={() => setVideoSubTab(prev => prev === t.id ? null : t.id)}
+                onClick={() => setVideoSubTab(prev => prev === tab.id ? null : tab.id)}
                 className="text-xs px-2.5 py-1 rounded-md transition-all font-medium"
                 style={{
-                  background: videoSubTab === t.id ? 'rgba(167,139,250,0.15)' : 'transparent',
-                  color: videoSubTab === t.id ? '#a78bfa' : '#64748b',
-                  border: `1px solid ${videoSubTab === t.id ? 'rgba(167,139,250,0.35)' : 'transparent'}`,
+                  background: videoSubTab === tab.id ? 'rgba(167,139,250,0.15)' : 'transparent',
+                  color: videoSubTab === tab.id ? '#a78bfa' : '#64748b',
+                  border: `1px solid ${videoSubTab === tab.id ? 'rgba(167,139,250,0.35)' : 'transparent'}`,
                 }}
               >
-                {t.label}
+                {tab.icon} {t(tab.label)}
               </button>
             ))}
             <div className="w-px h-5 bg-white/10 mx-1" />
@@ -9576,7 +9859,7 @@ export function DubVerseEditor({
                 a.download = `${title || jobId}_dubbed.mp4`
                 a.click()
               }}
-              title={activeDubbedVideoUrl ?? dubbedVideoUrl ? 'Download dubbed video' : 'No dubbed video yet'}
+              title={activeDubbedVideoUrl ?? dubbedVideoUrl ? t('Download dubbed video') : t('No dubbed video yet')}
               className="text-xs px-2.5 py-1 rounded-md transition-all font-medium flex items-center gap-1.5"
               style={{
                 background: 'transparent',
@@ -9586,7 +9869,7 @@ export function DubVerseEditor({
                 opacity: (activeDubbedVideoUrl ?? dubbedVideoUrl) ? 1 : 0.45,
               }}
             >
-              ⬇ Download
+              ⬇ {t('Download')}
             </button>
           </div>
         </div>
@@ -9598,7 +9881,7 @@ export function DubVerseEditor({
         {chunkMode && (
           <div ref={chunkBarRef} className="shrink-0 flex items-center gap-2 border-t border-neutral-800 bg-neutral-950 px-3 py-2 overflow-x-auto">
             <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-              Chunks
+              {t('Chunks')}
             </span>
             {Array.from({ length: chunkCount }, (_, i) => {
               const isActive = currentChunk === i
@@ -9670,35 +9953,8 @@ export function DubVerseEditor({
           <div ref={qcMonitorRef} className="shrink-0 border-r border-neutral-700 bg-neutral-950 flex flex-col overflow-hidden relative" style={{ width: qcMonitorWidth }}>
               {/* Resize handle - right edge */}
               <div
-                className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group"
-                onMouseDown={(e) => {
-                  e.preventDefault()
-                  const startX = e.clientX
-                  const startW = qcMonitorWidth
-                  let finalW = qcMonitorWidth
-                  setIsResizingQcMonitor(true)
-                  const onMove = (ev: MouseEvent) => {
-                    const delta = ev.clientX - startX
-                    const next = Math.max(200, Math.min(600, startW + delta))
-                    finalW = next
-                    if (qcMonitorRef.current) {
-                      qcMonitorRef.current.style.width = `${next}px`
-                    }
-                  }
-                  const onUp = () => {
-                    setIsResizingQcMonitor(false)
-                    setQcMonitorWidth(finalW)
-                    localStorage.setItem('dubverse.editor.qcMonitorWidth', String(finalW))
-                    document.removeEventListener('mousemove', onMove)
-                    document.removeEventListener('mouseup', onUp)
-                    document.removeEventListener('pointercancel', onUp)
-                    window.removeEventListener('blur', onUp)
-                  }
-                  document.addEventListener('mousemove', onMove)
-                  document.addEventListener('mouseup', onUp)
-                  document.addEventListener('pointercancel', onUp)
-                  window.addEventListener('blur', onUp)
-                }}
+                className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group select-none touch-none"
+                onPointerDown={handleQcMonitorResizeStart}
               >
                 <div className={cn(
                   "absolute inset-y-0 right-0 w-0.5 bg-amber-500/30 group-hover:bg-amber-500",
@@ -9709,7 +9965,7 @@ export function DubVerseEditor({
               <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800 bg-neutral-900">
                 <div className="flex items-center gap-2">
                   <Gauge className={cn("h-4 w-4", qcLoading && !qcAnalysis ? "text-amber-400 animate-pulse" : "text-amber-400")} />
-                  <span className="text-sm font-semibold text-white">QC Monitor</span>
+                  <span className="text-sm font-semibold text-white">{t('QC Monitor')}</span>
                 </div>
                 <div className="relative">
                   <button
@@ -9816,35 +10072,8 @@ export function DubVerseEditor({
           <div ref={trackLabelRef} className="shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col relative overflow-hidden" style={{ width: trackLabelWidth }}>
             {/* Resize handle - right edge */}
             <div
-              className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group"
-              onMouseDown={(e) => {
-                e.preventDefault()
-                const startX = e.clientX
-                const startW = trackLabelWidth
-                let finalW = trackLabelWidth
-                setIsResizingTrackLabel(true)
-                const onMove = (ev: MouseEvent) => {
-                  const delta = ev.clientX - startX
-                  const next = Math.max(60, Math.min(280, startW + delta))
-                  finalW = next
-                  if (trackLabelRef.current) {
-                    trackLabelRef.current.style.width = `${next}px`
-                  }
-                }
-                const onUp = () => {
-                  setIsResizingTrackLabel(false)
-                  setTrackLabelWidth(finalW)
-                  localStorage.setItem('dubverse.editor.trackLabelWidth', String(finalW))
-                  document.removeEventListener('mousemove', onMove)
-                  document.removeEventListener('mouseup', onUp)
-                  document.removeEventListener('pointercancel', onUp)
-                  window.removeEventListener('blur', onUp)
-                }
-                document.addEventListener('mousemove', onMove)
-                document.addEventListener('mouseup', onUp)
-                document.addEventListener('pointercancel', onUp)
-                window.addEventListener('blur', onUp)
-              }}
+              className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group select-none touch-none"
+              onPointerDown={handleTrackLabelResizeStart}
             >
               <div className={cn(
                 "absolute inset-y-0 right-0 w-0.5 bg-amber-500/30 group-hover:bg-amber-500",
@@ -9854,20 +10083,20 @@ export function DubVerseEditor({
             {/* Each spacer/label MUST match its track height exactly */}
             {/* Layover — where sections lifted out of the picture are parked. */}
             <div className="h-20 shrink-0 flex items-center px-2 text-xs text-cyan-400/80 border-b border-neutral-800 gap-1">
-              <span className="truncate">Layover</span>
+              <span className="truncate">{t('Layover')}</span>
               {parkedScenes.length > 0 && (
                 <span className="text-[9px] px-1 rounded bg-cyan-500/20 border border-cyan-500/40">{parkedScenes.length}</span>
               )}
             </div>
             <div className="h-5 shrink-0 border-b border-neutral-800 bg-neutral-900" />
-            <div className="h-20 shrink-0 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-800">Video</div>
+            <div className="h-20 shrink-0 flex items-center px-2 text-xs text-neutral-400 border-b border-neutral-800">{t('Video')}</div>
             <div className="h-20 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1">
                   <button type="button" onClick={() => setIsMutedOriginal(v => !v)} className="flex-shrink-0">
                     {isMutedOriginal ? <VolumeX className="h-3 w-3 text-red-400" /> : <Volume2 className="h-3 w-3 text-blue-400" />}
                   </button>
-                  <span className="truncate">Original</span>
+                  <span className="truncate">{t('Original')}</span>
                 </div>
                 <span className="font-mono text-neutral-500 text-[10px]">{originalTextVolume}</span>
               </div>
@@ -9883,7 +10112,7 @@ export function DubVerseEditor({
             {/* Reference track label — shown only when a reference video has been imported */}
             {referenceSegments && referenceSegments.length > 0 && (
               <div className="h-20 shrink-0 flex flex-col justify-center px-2 text-xs border-b border-amber-800/40 gap-0.5 bg-amber-950/20">
-                <span className="truncate text-amber-400/80 font-medium">Reference</span>
+                <span className="truncate text-amber-400/80 font-medium">{t('Reference')}</span>
                 {referenceDetectedLang && (
                   <span className="text-[10px] text-neutral-500 uppercase">{referenceDetectedLang}</span>
                 )}
@@ -9896,7 +10125,7 @@ export function DubVerseEditor({
                   <button type="button" onClick={() => setIsMutedDubbed(v => !v)} className="flex-shrink-0">
                     {isMutedDubbed ? <VolumeX className="h-3 w-3 text-red-400" /> : <Volume2 className="h-3 w-3 text-amber-400" />}
                   </button>
-                  <span className="truncate">Dubbed</span>
+                  <span className="truncate">{t('Dubbed')}</span>
                 </div>
                 <span className="font-mono text-neutral-500 text-[10px]">{dubbedTextVolume}</span>
               </div>
@@ -9917,7 +10146,7 @@ export function DubVerseEditor({
                   <button type="button" onClick={() => setIsMutedRPT(v => !v)} className="flex-shrink-0">
                     {isMutedRPT ? <VolumeX className="h-3 w-3 text-red-400" /> : <Volume2 className="h-3 w-3 text-amber-400" />}
                   </button>
-                  <span className="truncate text-amber-400">Preview Audio</span>
+                  <span className="truncate text-amber-400">{t('Preview Audio')}</span>
                 </div>
                 <span className="font-mono text-neutral-500 text-[10px]">{rptVolume}</span>
               </div>
@@ -9951,7 +10180,7 @@ export function DubVerseEditor({
             {hasFeature('emotionalCurveEditor') && (
             <div className="h-24 shrink-0 flex items-start px-2 pt-2 text-xs text-neutral-400 border-b border-neutral-700 bg-neutral-900/30">
               <div className="flex flex-col text-xs text-slate-300 select-none">
-                <span className="font-semibold mb-1">Emotion</span>
+                <span className="font-semibold mb-1">{t('Emotion')}</span>
 
                 <div className="flex items-center gap-1 mt-1">
                   <button
@@ -9962,7 +10191,7 @@ export function DubVerseEditor({
                         ? 'bg-amber-400/20 text-amber-300 border border-amber-400/40'
                         : 'text-slate-500 border border-slate-700'
                     }`}
-                  >Auto</button>
+                  >{t('Auto')}</button>
                   <button
                     type="button"
                     onClick={() => setEmotionSource('advanced')}
@@ -9971,7 +10200,7 @@ export function DubVerseEditor({
                         ? 'bg-violet-400/20 text-violet-300 border border-violet-400/40'
                         : 'text-slate-500 border border-slate-700'
                     }`}
-                  >Advanced</button>
+                  >{t('Advanced')}</button>
                 </div>
               </div>
             </div>
@@ -10015,7 +10244,6 @@ export function DubVerseEditor({
               index={timelineCtxIndex}
               segmentKey={displaySegments[timelineCtxIndex] ? getSegmentKey(displaySegments[timelineCtxIndex]) : ''}
               lockedSegments={lockedSegments}
-              lockedPairs={lockedPairs}
               stagedEmotions={stagedEmotions}
               emotions={EMOTIONS}
               onSelect={(idx) => { selectSegment(idx); setContextSegmentIndex(idx) }}
@@ -10026,9 +10254,10 @@ export function DubVerseEditor({
               canMergeNext={canMergeWithNext(timelineCtxIndex)}
               onDelete={(idx) => setPendingDelete(idx)}
               onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
-              onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+              sceneLockMode={sceneLockMode}
+              sceneAnchor={sceneAnchor}
+              onLockScene={handleLockScene}
               onUnlockScene={(idx) => unlockScene(idx)}
-              onTogglePair={togglePairWithNext}
               onRevert={revertToOriginal}
               onUndoLastEdit={handleUndoLastEdit}
               onUndoSplit={handleUndoSplit}
@@ -10149,6 +10378,7 @@ export function DubVerseEditor({
                 <ContextMenu>
                 <ContextMenuTrigger asChild>
                 <div
+                  data-group-frame
                   className="absolute bottom-0 cursor-move rounded-lg border-2 border-amber-400/80 bg-amber-400/10 hover:bg-amber-400/20 shadow-[0_0_16px_rgba(251,191,36,0.35)] z-30 transition-colors"
                   style={{
                     // Start at the top of the segment tracks: below the h-6 seek
@@ -10178,10 +10408,16 @@ export function DubVerseEditor({
                     }
                     // Otherwise drag the box to move the whole group — the container's
                     // onMouseMove/onMouseUp drive the live offset and commit.
+                    // A locked segment's position is frozen, so a group selection that
+                    // includes any locked segment can't be moved as a whole.
+                    const selected = Array.from(groupSelectedSegments)
+                    if (selected.some(i => lockedSegments.has(keyAt(i)))) return
                     e.preventDefault()
                     e.stopPropagation()
                     groupMoveActiveRef.current = true
                     groupMoveStartXRef.current = e.clientX
+                    groupMoveOffsetRef.current = { x: 0, y: 0 }
+                    captureGroupDragEls()
                     setGroupMoveActive(true)
                     setGroupMoveOffset({ x: 0, y: 0 })
                   }}
@@ -10243,7 +10479,7 @@ export function DubVerseEditor({
             onClick={() => setParkedMenu(null)}
             className="w-full text-left px-3 py-2 text-xs text-slate-400 hover:bg-slate-700 whitespace-nowrap"
           >
-            Cancel
+            {t('Cancel')}
           </button>
         </div>
       )}
@@ -10298,14 +10534,14 @@ export function DubVerseEditor({
               }}
               className="w-full text-left px-3 py-2 text-xs text-slate-300 hover:bg-slate-700 whitespace-nowrap"
             >
-              Clear fades
+              {t('Clear fades')}
             </button>
             <button
               type="button"
               onClick={() => setSceneMenu(null)}
               className="w-full text-left px-3 py-2 text-xs text-slate-400 hover:bg-slate-700 whitespace-nowrap"
             >
-              Cancel
+              {t('Cancel')}
             </button>
           </div>
         )
@@ -10363,7 +10599,7 @@ export function DubVerseEditor({
                 />
                 {parkedScenes.length === 0 && (
                   <div className="absolute inset-0 flex items-center pl-3 text-[10px] text-cyan-600/50 pointer-events-none">
-                    Lift a scene here to take it out of the picture without losing it
+                    {t('Lift a scene here to take it out of the picture without losing it')}
                   </div>
                 )}
                 {parkedScenes.map((sc) => {
@@ -10796,7 +11032,7 @@ export function DubVerseEditor({
                         <button
                           type="button"
                           className="absolute right-1 top-0.5 text-[8px] text-emerald-300 hover:text-white px-1 py-0.5 rounded bg-emerald-950/60 hover:bg-emerald-500/40 pointer-events-auto z-30"
-                          title="Render this scene preview"
+                          title={t('Render this scene preview')}
                           onClick={(e) => {
                             e.stopPropagation()
                             apiClient.renderScenePreview(jobId, scene.id).then(({ url }) => {
@@ -10807,7 +11043,7 @@ export function DubVerseEditor({
                             })
                           }}
                         >
-                          Render
+                          {t('Render')}
                         </button>
                         {/* Left boundary drag handle */}
                         <div
@@ -10819,11 +11055,33 @@ export function DubVerseEditor({
                             const startX = e.clientX
                             const startStart = scene.start
                             const prev = scenes[idx - 1]
+                            // A SCENE'S SOURCE SPAN MUST EQUAL ITS TIMELINE SPAN.
+                            //
+                            // Moving a boundary used to change the timeline edge and
+                            // leave the source edge alone, which is not a trim — it is a
+                            // TIME WARP. The picture then has to play faster or slower
+                            // than 1x to fit, and since the element plays at 1x the
+                            // needle drifts away from the frame across that scene. Ip
+                            // Man 2 had accumulated 15.13s of skew this way, which is
+                            // what was bending sound against picture all week.
+                            //
+                            // Captured at pointer-down so a re-render mid-drag cannot
+                            // compound the offset.
+                            const startSrcStart = scene.source_start ?? scene.start
+                            const prevStartEnd = prev ? prev.end : 0
+                            const prevStartSrcEnd = prev ? (prev.source_end ?? prev.end) : 0
                             const onMove = (ev: MouseEvent) => {
                               const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
                               const newStart = Math.max(prev ? prev.start + 0.05 : 0, Math.min(scene.end - 0.1, startStart + delta))
-                              updateScene(scene.id, { start: newStart })
-                              if (prev) updateScene(prev.id, { end: newStart })
+                              // Trim the head: the footage start moves with the edge.
+                              updateScene(scene.id, {
+                                start: newStart,
+                                source_start: startSrcStart + (newStart - startStart),
+                              })
+                              if (prev) updateScene(prev.id, {
+                                end: newStart,
+                                source_end: prevStartSrcEnd + (newStart - prevStartEnd),
+                              })
                             }
                             const onUp = () => {
                               persistScenes().catch(err => console.warn('[SCENE-MOVE]', err))
@@ -10848,11 +11106,31 @@ export function DubVerseEditor({
                             const startX = e.clientX
                             const startEnd = scene.end
                             const next = scenes[idx + 1]
+                            // A SCENE'S SOURCE SPAN MUST EQUAL ITS TIMELINE SPAN.
+                            // Same rule as the left handle. Moving a boundary without
+                            // its source edge is not a trim, it is a TIME WARP: the
+                            // picture then has to play faster or slower than 1x to fit,
+                            // and since the element plays at 1x the needle drifts away
+                            // from the frame across that scene. Ip Man 2 accumulated
+                            // 15.13s of skew this way before it was repaired.
+                            //
+                            // Captured at pointer-down so a re-render mid-drag cannot
+                            // compound the offset.
+                            const startSrcEnd = scene.source_end ?? scene.end
+                            const nextStartStart = next ? next.start : 0
+                            const nextStartSrcStart = next ? (next.source_start ?? next.start) : 0
                             const onMove = (ev: MouseEvent) => {
                               const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
                               const newEnd = Math.max(scene.start + 0.1, Math.min(next ? next.end - 0.05 : videoDuration, startEnd + delta))
-                              updateScene(scene.id, { end: newEnd })
-                              if (next) updateScene(next.id, { start: newEnd })
+                              // Trim the tail: the footage end moves with the edge.
+                              updateScene(scene.id, {
+                                end: newEnd,
+                                source_end: startSrcEnd + (newEnd - startEnd),
+                              })
+                              if (next) updateScene(next.id, {
+                                start: newEnd,
+                                source_start: nextStartSrcStart + (newEnd - nextStartStart),
+                              })
                             }
                             const onUp = () => {
                               persistScenes().catch(err => console.warn('[SCENE-MOVE]', err))
@@ -11036,7 +11314,7 @@ export function DubVerseEditor({
                   </div>
                 ) : isExtractingThumbnails ? (
                   <div className="absolute inset-y-1 left-1 right-1 bg-emerald-600/20 border border-emerald-500/50 rounded flex items-center justify-center">
-                    <span className="text-xs text-emerald-400 animate-pulse">Extracting frames...</span>
+                    <span className="text-xs text-emerald-400 animate-pulse">{t('Extracting frames...')}</span>
                   </div>
                 ) : null}
               </div>
@@ -11058,7 +11336,6 @@ export function DubVerseEditor({
                       index={index}
                       segmentKey={getSegmentKey(segment)}
                       lockedSegments={lockedSegments}
-                      lockedPairs={lockedPairs}
                       stagedEmotions={stagedEmotions}
                       emotions={EMOTIONS}
                       onSelect={(idx) => { selectSegment(idx); setContextSegmentIndex(idx) }}
@@ -11069,9 +11346,10 @@ export function DubVerseEditor({
                       canMergeNext={canMergeWithNext(index)}
                       onDelete={(idx) => setPendingDelete(idx)}
                       onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
-                      onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+                      sceneLockMode={sceneLockMode}
+                      sceneAnchor={sceneAnchor}
+                      onLockScene={handleLockScene}
                       onUnlockScene={(idx) => unlockScene(idx)}
-                      onTogglePair={togglePairWithNext}
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
                       onUndoSplit={handleUndoSplit}
@@ -11101,6 +11379,12 @@ export function DubVerseEditor({
                     <div
                       data-segment-drop-zone
                       data-index={index}
+                      data-drag-block={index}
+                      // The pan excludes [data-segment-block]. Only the Dubbed track carried it,
+                      // so a press on this track was never recognised as a segment drag: the pan
+                      // claimed the gesture and the whole timeline moved with the block, instead
+                      // of the block moving within it.
+                      data-segment-block={true}
                       className={cn(
                         'absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded group',
                         lockedSegments.has(keyAt(index)) && 'ring-1 ring-green-400/60',
@@ -11108,12 +11392,10 @@ export function DubVerseEditor({
                         selectedSegmentIndex === index && !lockGlowIndices.has(keyAt(index)) && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                         voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
                         isAssignmentPulse && 'ring-2 ring-amber-400/60 shadow-[0_0_6px_2px_rgba(245,158,11,0.22)] animate-pulse',
-                        flashingPair === index && 'ring-1 ring-amber-400',
-                        (lockedPairs.has(keyAt(index)) || lockedPairs.has(keyAt(index - 1))) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
                         isDraggingThis ? 'cursor-grabbing' : 'cursor-grab'
                       )}
                       style={{
-                        left: (effStart(segment) + delta) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0),
+                        left: (effStart(segment) + delta) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index) && !lockedSegments.has(keyAt(index))) ? groupMoveOffset.x : 0),
                         width: (() => {
                           const dur = effEnd(segment) - effStart(segment)
                           const spd = dragSpeedPreview?.index === index ? dragSpeedPreview.speed : (stagedSpeeds[keyAt(index)] ?? 1.0)
@@ -11123,6 +11405,28 @@ export function DubVerseEditor({
                       onMouseDown={(e) => {
                         const t = e.target as HTMLElement
                         if (t.closest('[data-resize-handle]')) return
+
+                        // In group-select mode a Ctrl press builds the range — don't
+                        // let it start a drag or group move.
+                        if (groupSelectMode && (e.ctrlKey || e.metaKey)) return
+
+                        // Start group move if segment is selected and Shift is not pressed.
+                        // A locked segment's position is frozen, so a group selection that
+                        // includes any locked segment can't be moved as a whole.
+                        if (groupSelectedSegments.has(index) && !e.shiftKey) {
+                          const selected = Array.from(groupSelectedSegments)
+                          if (selected.some(i => lockedSegments.has(keyAt(i)))) return
+                          e.preventDefault()
+                          e.stopPropagation()
+                          groupMoveActiveRef.current = true
+                          groupMoveStartXRef.current = e.clientX
+                          groupMoveOffsetRef.current = { x: 0, y: 0 }
+                          captureGroupDragEls()
+                          setGroupMoveActive(true)
+                          setGroupMoveOffset({ x: 0, y: 0 })
+                          return
+                        }
+
                         e.preventDefault()
                         e.stopPropagation()
                         const startX = e.clientX
@@ -11132,12 +11436,29 @@ export function DubVerseEditor({
                         if (layoutLocked) return
                         if (lockedSegments.has(keyAt(index))) return // locked — position frozen
                         setDraggingSegment({ index, track: 'original', startX, originalStart, originalEnd, currentDelta: 0 })
+                        // DIRECT DOM DRAG. setDraggingSegment on every mousemove
+                        // re-rendered the whole editor 60x/sec — the drag freeze.
+                        // The state write above is the only render for the whole
+                        // drag; blocks follow the cursor via transform, and the
+                        // store is written once, on release.
+                        const dragEls: HTMLElement[] = []
+                        const tl0 = timelineRef.current
+                        tl0?.querySelectorAll<HTMLElement>(`[data-drag-block="${index}"]`).forEach(el => dragEls.push(el))
+                        dragLiveDeltaRef.current = 0
+                        let lastDeltaTime = 0
                         const onMouseMove = (ev: MouseEvent) => {
                           const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
-                          setDraggingSegment(prev => prev ? { ...prev, currentDelta: deltaTime } : null)
+                          lastDeltaTime = deltaTime
+                          dragLiveDeltaRef.current = deltaTime
+                          const px = deltaTime * PIXELS_PER_SECOND
+                          for (const el of dragEls) el.style.transform = px ? `translateX(${px}px)` : ''
                         }
                         const onMouseUp = (ev: MouseEvent) => {
-                          const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
+                          for (const el of dragEls) el.style.transform = ''
+                          dragLiveDeltaRef.current = 0
+                          // blur/pointercancel carry no clientX — fall back to the
+                          // last live delta rather than committing NaN.
+                          const deltaTime = Number.isFinite(ev.clientX) ? (ev.clientX - startX) / PIXELS_PER_SECOND : lastDeltaTime
                           updateSegment(index, {
                             start_time: Math.max(0, originalStart + deltaTime),
                             end_time: Math.max(0, originalEnd + deltaTime),
@@ -11152,25 +11473,6 @@ export function DubVerseEditor({
                           }).catch(err => console.warn('[COMMIT-TIMING]', err))
                           // Paired neighbor (Shift+P) moves by the same amount — commit
                           // its shifted timing too so it doesn't snap back.
-                          const partnerIdx = lockedPairs.has(keyAt(index)) ? index + 1 : (lockedPairs.has(keyAt(index - 1)) ? index - 1 : null)
-                          if (partnerIdx != null) {
-                            const p = displaySegmentsRef.current[partnerIdx]
-                            if (p) {
-                              const pStart = Math.max(0, effStart(p) + deltaTime)
-                              const pEnd = Math.max(0, effEnd(p) + deltaTime)
-                              updateSegment(partnerIdx, { start_time: pStart, end_time: pEnd })
-                              commitSegmentChanges(partnerIdx, { committed_start_time: pStart, committed_end_time: pEnd })
-                              commitOrStage(p.transcript_index ?? partnerIdx, {
-                                committed_start_time: pStart, committed_end_time: pEnd,
-                              }).catch(err => console.warn('[PAIR-MOVE]', err))
-                              setImportedSegments(prev => {
-                                const base = prev ?? displaySegments
-                                return base.map((seg, i) => i === partnerIdx
-                                  ? { ...seg, start_time: pStart, end_time: pEnd, committed_start_time: pStart, committed_end_time: pEnd }
-                                  : seg)
-                              })
-                            }
-                          }
                           setImportedSegments(prev => {
                             const base = prev ?? displaySegments
                             return base.map((seg, i) =>
@@ -11245,9 +11547,6 @@ export function DubVerseEditor({
                         <GripHorizontal className="h-3 w-3 rotate-90" />
                       </div>
 
-                      {lockedPairs.has(keyAt(index)) && (
-                        <Link2 className="absolute top-0.5 right-0.5 h-2.5 w-2.5 text-amber-400 opacity-80" />
-                      )}
                       <div className="px-2 truncate text-[10px] h-full flex items-center text-blue-200/80">
                         {segment.source_text}
                       </div>
@@ -11357,7 +11656,6 @@ export function DubVerseEditor({
                       index={index}
                       segmentKey={getSegmentKey(segment)}
                       lockedSegments={lockedSegments}
-                      lockedPairs={lockedPairs}
                       stagedEmotions={stagedEmotions}
                       emotions={EMOTIONS}
                       onSelect={(idx) => { selectSegment(idx); setContextSegmentIndex(idx) }}
@@ -11368,9 +11666,10 @@ export function DubVerseEditor({
                       canMergeNext={canMergeWithNext(index)}
                       onDelete={(idx) => setPendingDelete(idx)}
                       onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
-                      onLockScene={(idx) => { setSceneLockMode(true); setSceneAnchor(idx); setSceneRange({ start: idx, end: idx }) }}
+                      sceneLockMode={sceneLockMode}
+                      sceneAnchor={sceneAnchor}
+                      onLockScene={handleLockScene}
                       onUnlockScene={(idx) => unlockScene(idx)}
-                      onTogglePair={togglePairWithNext}
                       onRevert={revertToOriginal}
                       onUndoLastEdit={handleUndoLastEdit}
                       onUndoSplit={handleUndoSplit}
@@ -11400,6 +11699,7 @@ export function DubVerseEditor({
                     <div
                       data-segment-drop-zone
                       data-index={index}
+                      data-drag-block={index}
                       className={cn(
                         'absolute top-1 bottom-1 rounded group border transition-colors',
                         bgColor,
@@ -11410,8 +11710,6 @@ export function DubVerseEditor({
                           : 'border-slate-400/30',
                         selectedSegmentIndex === index && !lockGlowIndices.has(keyAt(index)) && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                         voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
-                        flashingPair === index && 'ring-1 ring-amber-400',
-                        (lockedPairs.has(keyAt(index)) || lockedPairs.has(keyAt(index - 1))) && 'shadow-[0_0_8px_2px_rgba(251,191,36,0.6)] animate-pulse',
                         groupSelectMode && !groupSelectedSegments.has(index) && 'ring-1 ring-yellow-400/30',
                         groupSelectMode
                           ? '!cursor-cell'
@@ -11424,7 +11722,7 @@ export function DubVerseEditor({
                           // a paired neighbor (Shift+P) moves too.
                           const isDraggingPaired = movesWithDrag(index)
                           const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
-                          const groupDelta = (groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0
+                          const groupDelta = (groupMoveActive && groupSelectedSegments.has(index) && !lockedSegments.has(keyAt(index))) ? groupMoveOffset.x : 0
                           return (effStart(segment) + delta) * PIXELS_PER_SECOND + groupDelta
                         })(),
                         width: (() => {
@@ -11448,12 +11746,18 @@ export function DubVerseEditor({
                         // don't let it start a drag or group move.
                         if (groupSelectMode && (e.ctrlKey || e.metaKey)) return
 
-                        // Start group move if segment is selected and Shift is not pressed
+                        // Start group move if segment is selected and Shift is not pressed.
+                        // A locked segment's position is frozen, so a group selection that
+                        // includes any locked segment can't be moved as a whole.
                         if (groupSelectedSegments.has(index) && !e.shiftKey) {
+                          const selected = Array.from(groupSelectedSegments)
+                          if (selected.some(i => lockedSegments.has(keyAt(i)))) return
                           e.preventDefault()
                           e.stopPropagation()
                           groupMoveActiveRef.current = true
                           groupMoveStartXRef.current = e.clientX
+                          groupMoveOffsetRef.current = { x: 0, y: 0 }
+                          captureGroupDragEls()
                           setGroupMoveActive(true)
                           setGroupMoveOffset({ x: 0, y: 0 })
                           return
@@ -11468,9 +11772,19 @@ export function DubVerseEditor({
                         if (layoutLocked) return
                         if (lockedSegments.has(keyAt(index))) return // locked — position frozen
                         setDraggingSegment({ index, track: 'dubbed', startX, originalStart, originalEnd, currentDelta: 0 })
+                        // DIRECT DOM DRAG — see the Original track handler. No
+                        // setState per mousemove; blocks follow via transform.
+                        const dragEls: HTMLElement[] = []
+                        const tl1 = timelineRef.current
+                        tl1?.querySelectorAll<HTMLElement>(`[data-drag-block="${index}"]`).forEach(el => dragEls.push(el))
+                        dragLiveDeltaRef.current = 0
+                        let lastDeltaTime = 0
                         const onMouseMove = (ev: MouseEvent) => {
                           const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
-                          setDraggingSegment(prev => prev ? { ...prev, currentDelta: deltaTime } : null)
+                          lastDeltaTime = deltaTime
+                          dragLiveDeltaRef.current = deltaTime
+                          const px = deltaTime * PIXELS_PER_SECOND
+                          for (const el of dragEls) el.style.transform = px ? `translateX(${px}px)` : ''
                           // Auto-scroll when dragging near the right or left edge
                           const timelineEl = timelineRef.current
                           if (timelineEl) {
@@ -11487,7 +11801,9 @@ export function DubVerseEditor({
                           }
                         }
                         const onMouseUp = (ev: MouseEvent) => {
-                          const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
+                          for (const el of dragEls) el.style.transform = ''
+                          dragLiveDeltaRef.current = 0
+                          const deltaTime = Number.isFinite(ev.clientX) ? (ev.clientX - startX) / PIXELS_PER_SECOND : lastDeltaTime
                           updateSegment(index, {
                             start_time: Math.max(0, originalStart + deltaTime),
                             end_time: Math.max(0, originalEnd + deltaTime),
@@ -11502,25 +11818,6 @@ export function DubVerseEditor({
                           }).catch(err => console.warn('[COMMIT-TIMING]', err))
                           // Paired neighbor (Shift+P) moves by the same amount — commit
                           // its shifted timing too so it doesn't snap back.
-                          const partnerIdx = lockedPairs.has(keyAt(index)) ? index + 1 : (lockedPairs.has(keyAt(index - 1)) ? index - 1 : null)
-                          if (partnerIdx != null) {
-                            const p = displaySegmentsRef.current[partnerIdx]
-                            if (p) {
-                              const pStart = Math.max(0, effStart(p) + deltaTime)
-                              const pEnd = Math.max(0, effEnd(p) + deltaTime)
-                              updateSegment(partnerIdx, { start_time: pStart, end_time: pEnd })
-                              commitSegmentChanges(partnerIdx, { committed_start_time: pStart, committed_end_time: pEnd })
-                              commitOrStage(p.transcript_index ?? partnerIdx, {
-                                committed_start_time: pStart, committed_end_time: pEnd,
-                              }).catch(err => console.warn('[PAIR-MOVE]', err))
-                              setImportedSegments(prev => {
-                                const base = prev ?? displaySegments
-                                return base.map((seg, i) => i === partnerIdx
-                                  ? { ...seg, start_time: pStart, end_time: pEnd, committed_start_time: pStart, committed_end_time: pEnd }
-                                  : seg)
-                              })
-                            }
-                          }
                           setImportedSegments(prev => {
                             const base = prev ?? displaySegments
                             return base.map((seg, i) =>
@@ -11612,14 +11909,10 @@ export function DubVerseEditor({
                       </div>
 
                       {/* Lock icon when paired */}
-                      {lockedPairs.has(keyAt(index)) && (
-                        <Link2 className="absolute top-0.5 right-0.5 h-2.5 w-2.5 text-amber-400 opacity-80" />
-                      )}
-
                       {/* Content */}
                       <div className="px-3 truncate text-[10px] h-full flex items-center text-white/80 gap-1">
                         {dragSpeedPreview?.index === index ? (
-                          <span className="text-amber-400 font-mono shrink-0">{dragSpeedPreview.speed.toFixed(2)}x</span>
+                          <span data-speed-label className="text-amber-400 font-mono shrink-0">{dragSpeedPreview.speed.toFixed(2)}x</span>
                         ) : stagedSpeeds[keyAt(index)] !== undefined ? (
                           <>
                             <span className="text-amber-400 font-mono shrink-0">{stagedSpeeds[keyAt(index)].toFixed(2)}x</span>
@@ -11634,7 +11927,7 @@ export function DubVerseEditor({
                       {segment.was_truncated && (
                         <div
                           className="absolute top-0 right-0 w-4 h-4 flex items-center justify-center cursor-pointer z-10 text-yellow-400 hover:text-yellow-300 hover:scale-110 transition-transform"
-                          title="Truncated — click to regenerate"
+                          title={t('Truncated — click to regenerate')}
                           onClick={(e) => {
                             e.stopPropagation()
                             handleGenerateSpeech(index)
@@ -11701,13 +11994,14 @@ export function DubVerseEditor({
                   const hasAudio = !!(seg.committed_audio_url ?? seg.audio_url)
                   const startT = effStart(seg)
                   const endT = effEnd(seg)
-                  const groupDelta = (groupMoveActive && groupSelectedSegments.has(i)) ? groupMoveOffset.x : 0
+                  const groupDelta = (groupMoveActive && groupSelectedSegments.has(i) && !lockedSegments.has(keyAt(i))) ? groupMoveOffset.x : 0
                   const dragDelta = movesWithDrag(i) && draggingSegment ? draggingSegment.currentDelta : 0
                   return (
                     <div
                       key={seg.id + '-rpt-audio'}
                       data-segment-drop-zone
                       data-index={i}
+                      data-drag-block={i}
                       className={cn(
                         'absolute top-1 bottom-1 rounded opacity-70 transition-colors group',
                         voiceDragOverIndex === i
@@ -11748,19 +12042,26 @@ export function DubVerseEditor({
                           e.stopPropagation()
                           const startX = e.clientX
                           const originalDuration = endT - startT
+                          // DIRECT DOM: resize this segment's blocks on every track
+                          // and update the live speed label without setState-per-move.
+                          const els: HTMLElement[] = []
+                          timelineRef.current?.querySelectorAll<HTMLElement>(`[data-drag-block="${i}"]`).forEach(el => els.push(el))
+                          const labelEl = timelineRef.current?.querySelector<HTMLElement>(`[data-drag-block="${i}"] [data-speed-label]`)
+                          let lastSpeed = stagedSpeeds[keyAt(i)] ?? 1.0
+                          setDragSpeedPreview({ index: i, speed: lastSpeed })
                           const onMouseMove = (ev: MouseEvent) => {
                             const dx = ev.clientX - startX
                             const newDuration = Math.max(0.1, originalDuration - dx / PIXELS_PER_SECOND)
                             const newSpeed = Math.min(2.0, Math.max(0.5, originalDuration / newDuration))
-                            setDragSpeedPreview({ index: i, speed: newSpeed })
+                            lastSpeed = newSpeed
+                            const w = Math.max((originalDuration / newSpeed) * PIXELS_PER_SECOND, 2)
+                            for (const el of els) el.style.width = `${w}px`
+                            if (labelEl) labelEl.textContent = `${newSpeed.toFixed(2)}x`
                           }
                           const onMouseUp = () => {
-                            setDragSpeedPreview(prev => {
-                              if (prev?.index === i) {
-                                setStagedSpeeds(s => ({ ...s, [keyAt(i)]: prev.speed }))
-                              }
-                              return null
-                            })
+                            const speed = lastSpeed
+                            setStagedSpeeds(s => ({ ...s, [keyAt(i)]: speed }))
+                            setDragSpeedPreview(null)
                             document.removeEventListener('mousemove', onMouseMove)
                             document.removeEventListener('mouseup', onMouseUp)
                             document.removeEventListener('pointercancel', onMouseUp)
@@ -11783,19 +12084,25 @@ export function DubVerseEditor({
                           e.stopPropagation()
                           const startX = e.clientX
                           const originalDuration = endT - startT
+                          // DIRECT DOM — same as the left handle: no setState per move.
+                          const els: HTMLElement[] = []
+                          timelineRef.current?.querySelectorAll<HTMLElement>(`[data-drag-block="${i}"]`).forEach(el => els.push(el))
+                          const labelEl = timelineRef.current?.querySelector<HTMLElement>(`[data-drag-block="${i}"] [data-speed-label]`)
+                          let lastSpeed = stagedSpeeds[keyAt(i)] ?? 1.0
+                          setDragSpeedPreview({ index: i, speed: lastSpeed })
                           const onMouseMove = (ev: MouseEvent) => {
                             const dx = ev.clientX - startX
                             const newDuration = Math.max(0.1, originalDuration + dx / PIXELS_PER_SECOND)
                             const newSpeed = Math.min(2.0, Math.max(0.5, originalDuration / newDuration))
-                            setDragSpeedPreview({ index: i, speed: newSpeed })
+                            lastSpeed = newSpeed
+                            const w = Math.max((originalDuration / newSpeed) * PIXELS_PER_SECOND, 2)
+                            for (const el of els) el.style.width = `${w}px`
+                            if (labelEl) labelEl.textContent = `${newSpeed.toFixed(2)}x`
                           }
                           const onMouseUp = () => {
-                            setDragSpeedPreview(prev => {
-                              if (prev?.index === i) {
-                                setStagedSpeeds(s => ({ ...s, [keyAt(i)]: prev.speed }))
-                              }
-                              return null
-                            })
+                            const speed = lastSpeed
+                            setStagedSpeeds(s => ({ ...s, [keyAt(i)]: speed }))
+                            setDragSpeedPreview(null)
                             document.removeEventListener('mousemove', onMouseMove)
                             document.removeEventListener('mouseup', onMouseUp)
                             document.removeEventListener('pointercancel', onMouseUp)
@@ -12016,6 +12323,12 @@ export function DubVerseEditor({
                       key={`emotion-${segment.id}`}
                       className="absolute top-0 bottom-0"
                       data-emotion-segment
+                      data-drag-block={index}
+                      // The pan excludes [data-segment-block]. Only the Dubbed track carried it,
+                      // so a press on this track was never recognised as a segment drag: the pan
+                      // claimed the gesture and the whole timeline moved with the block, instead
+                      // of the block moving within it.
+                      data-segment-block={true}
                       onDoubleClick={(e) => {
                         e.stopPropagation()
                         setAdvancedBrowserSegment(index)
@@ -12024,7 +12337,7 @@ export function DubVerseEditor({
                         setVideoSubTab('chord')
                       }}
                       style={{
-                        left: (effStart(segment) + (movesWithDrag(index) && draggingSegment ? draggingSegment.currentDelta : 0)) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index)) ? groupMoveOffset.x : 0),
+                        left: (effStart(segment) + (movesWithDrag(index) && draggingSegment ? draggingSegment.currentDelta : 0)) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index) && !lockedSegments.has(keyAt(index))) ? groupMoveOffset.x : 0),
                         width: segWidth,
                       }}
                     >
@@ -12259,9 +12572,9 @@ export function DubVerseEditor({
               <Lock className="h-6 w-6 text-amber-400" />
             </div>
             <div className="text-center">
-              <p className="text-sm font-semibold text-white tracking-wide">Editor locked</p>
+              <p className="text-sm font-semibold text-white tracking-wide">{t('Editor locked')}</p>
               <p className="text-xs text-slate-400 mt-1 max-w-[16rem]">
-                Nothing can be moved or changed. Your work stays exactly as you left it.
+                {t('Nothing can be moved or changed. Your work stays exactly as you left it.')}
               </p>
             </div>
             <button
@@ -12273,7 +12586,7 @@ export function DubVerseEditor({
                          uppercase tracking-widest transition-colors cursor-pointer"
             >
               <Unlock className="h-3.5 w-3.5" />
-              Unlock
+              {t('Unlock')}
             </button>
           </div>
         </div>
@@ -12295,10 +12608,10 @@ export function DubVerseEditor({
               <div className="w-10 h-10 rounded-full bg-red-500/20 flex items-center justify-center shrink-0">
                 <span className="text-red-400 text-xl">⚠</span>
               </div>
-              <h3 className="text-lg font-semibold text-white">Rewrite Text — Timing Exclusion Error</h3>
+              <h3 className="text-lg font-semibold text-white">{t('Rewrite Text — Timing Exclusion Error')}</h3>
             </div>
             <p className="text-sm text-neutral-300 mb-4">
-              Your allotted space for this text is <span className="text-amber-400 font-mono font-bold">{timingExclusion.slotDuration.toFixed(1)}s</span>.
+              {t('Your allotted space for this text is')} <span className="text-amber-400 font-mono font-bold">{timingExclusion.slotDuration.toFixed(1)}s</span>.
               Your text exceeds this by <span className="text-red-400 font-mono font-bold">{timingExclusion.overlap.toFixed(1)}s</span>.
             </p>
             <p className="text-sm text-neutral-400 mb-6">
@@ -12306,7 +12619,7 @@ export function DubVerseEditor({
               segments over to make space, then refits the audio at a natural pace.
             </p>
             <div className="flex items-center gap-2 mb-4">
-              <span className="text-xs text-neutral-500 shrink-0">Make room:</span>
+              <span className="text-xs text-neutral-500 shrink-0">{t('Make room:')}</span>
               {[1, 2, 3].map(m => (
                 <button
                   key={m}
@@ -12323,7 +12636,7 @@ export function DubVerseEditor({
                 className="px-4 py-2 rounded bg-neutral-700 hover:bg-neutral-600 text-white text-sm font-medium transition-colors"
                 onClick={() => setTimingExclusion(null)}
               >
-                Cancel
+                {t('Cancel')}
               </button>
             </div>
           </div>
@@ -12338,29 +12651,30 @@ export function DubVerseEditor({
               <div className="w-10 h-10 rounded-full bg-amber-500/20 flex items-center justify-center shrink-0">
                 <span className="text-amber-400 text-xl">⚠</span>
               </div>
-              <h3 className="text-lg font-semibold text-white">Timing Warning</h3>
+              <h3 className="text-lg font-semibold text-white">{t('Timing Warning')}</h3>
             </div>
             <p className="text-sm text-neutral-300 mb-4">
-              Your allotted space for this text is <span className="text-amber-400 font-mono font-bold">{timingExclusion.slotDuration.toFixed(1)}s</span>.
+              {t('Your allotted space for this text is')} <span className="text-amber-400 font-mono font-bold">{timingExclusion.slotDuration.toFixed(1)}s</span>.
               Your text exceeds this by <span className="text-amber-400 font-mono font-bold">{timingExclusion.overlap.toFixed(1)}s</span>.
             </p>
             <p className="text-sm text-neutral-400 mb-6">
-              This is close enough to fit. You can generate anyway or rewrite the text to shorten it.
+              {t('This is close enough to fit. You can generate anyway or rewrite the text to shorten it.')}
             </p>
             <div className="flex justify-end gap-2">
               <button
                 className="px-4 py-2 rounded bg-neutral-700 hover:bg-neutral-600 text-white text-sm font-medium transition-colors"
                 onClick={() => setTimingExclusion(null)}
               >
-                Rewrite Text
+                {t('Rewrite Text')}
               </button>
               <button
                 type="button"
-                className="px-4 py-2 rounded bg-amber-500 hover:bg-amber-600 text-black text-sm font-medium transition-colors"
+                className="px-4 py-2 rounded bg-amber-500 hover:bg-amber-600 text-black text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 onClick={async () => {
                   const idx = timingExclusion.segmentIndex
                   const seg = displaySegments[idx]
                   if (!seg) return
+                  const isLocked = lockedSegments.has(keyAt(idx))
                   setTimingExclusion(null)
                   setIsRegenerating(true)
                   setRegeneratingSegmentIndex(idx)
@@ -12376,7 +12690,7 @@ export function DubVerseEditor({
                     const audio_url = filename ? apiClient.getAudioFileUrl(jobId, filename, true) : seg.audio_url
                     const audioDur = response.segment.audio_duration
                     const slotDur = seg.end_time - seg.start_time
-                    const shouldShrink = audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
+                    const shouldShrink = !isLocked && audioDur != null && audioDur > 0 && audioDur < slotDur * 0.85
                     let shrunkEnd = seg.end_time
                     if (shouldShrink) {
                       const buffer = getTrailingBuffer(seg.preview_text ?? seg.active_text ?? seg.target_text ?? '')
@@ -12407,7 +12721,7 @@ export function DubVerseEditor({
                   }
                 }}
               >
-                Generate Anyway
+                {t('Generate Anyway')}
               </button>
             </div>
           </div>
@@ -12419,7 +12733,7 @@ export function DubVerseEditor({
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="bg-neutral-900 border border-neutral-700 rounded-lg p-6 w-[500px] shadow-xl">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-white">Add New Segment</h3>
+              <h3 className="text-lg font-semibold text-white">{t('Add New Segment')}</h3>
               <Button
                 variant="ghost"
                 size="sm"
@@ -12456,7 +12770,7 @@ export function DubVerseEditor({
               <div>
                 <label className="block text-sm text-neutral-400 mb-1">Original Text (Source Language)</label>
                 <textarea
-                  placeholder="Enter the original spoken text..."
+                  placeholder={t('Enter the original spoken text...')}
                   value={newSegmentOriginal}
                   onChange={(e) => setNewSegmentOriginal(e.target.value)}
                   className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded text-white text-sm focus:outline-none focus:border-blue-500 resize-none h-20"
@@ -12466,7 +12780,7 @@ export function DubVerseEditor({
               <div>
                 <label className="block text-sm text-neutral-400 mb-1">Translation (Target Language)</label>
                 <textarea
-                  placeholder="Enter the translated text..."
+                  placeholder={t('Enter the translated text...')}
                   value={newSegmentTranslation}
                   onChange={(e) => setNewSegmentTranslation(e.target.value)}
                   className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded text-white text-sm focus:outline-none focus:border-amber-500 resize-none h-20"
@@ -12479,14 +12793,14 @@ export function DubVerseEditor({
                   className="border-neutral-700"
                   onClick={() => setShowAddSegment(false)}
                 >
-                  Cancel
+                  {t('Cancel')}
                 </Button>
                 <Button
                   className="bg-amber-500 hover:bg-amber-600 text-black"
                   onClick={handleAddSegment}
                   disabled={!newSegmentStart || !newSegmentEnd || !newSegmentOriginal}
                 >
-                  Add Segment
+                  {t('Add Segment')}
                 </Button>
               </div>
             </div>

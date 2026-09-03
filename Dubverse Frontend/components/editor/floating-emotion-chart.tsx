@@ -3,6 +3,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react'
 import type { Segment } from '@/lib/editor-types'
 import { chordEmotionValue } from '@/lib/emotion-catalog'
+import { useT } from '@/lib/use-t'
 
 const SVG_W = 560
 const SVG_H = 280
@@ -307,6 +308,7 @@ export function FloatingEmotionChart({
   active = false,
   autoFiredRef: externalAutoFiredRef,
 }: FloatingEmotionChartProps) {
+  const t = useT()
   const [pos, setPos] = useState({ x: 0, y: 0 })
   const [ready, setReady] = useState(false)
   const draggingRef = useRef(false)
@@ -726,7 +728,7 @@ export function FloatingEmotionChart({
         onMouseDown={embedded ? undefined : handleHeaderMouseDown}
       >
         <div className="flex items-center gap-1.5 min-w-0">
-          <span className="text-[9px] text-slate-500 uppercase tracking-widest font-semibold shrink-0">Chord</span>
+          <span className="text-[9px] text-slate-500 uppercase tracking-widest font-semibold shrink-0">{t('Chord')}</span>
           <span className="text-[10px] font-bold text-red-400 shrink-0">{avgChord.emotion}</span>
           <span className="text-slate-700 text-[9px]">·</span>
           <span className="text-[10px] text-amber-400/80 shrink-0">{avgChord.state}</span>
@@ -749,7 +751,7 @@ export function FloatingEmotionChart({
               background: 'rgba(251,191,36,0.12)',
               border: '1px solid rgba(251,191,36,0.35)',
             }}
-            title="No emotion data for this segment — this curve is a default placeholder, not an analysis of the performance."
+            title={t('No emotion data for this segment — this curve is a default placeholder, not an analysis of the performance.')}
           >
             ⚠ No data — placeholder
           </span>
@@ -800,11 +802,11 @@ export function FloatingEmotionChart({
             letterSpacing: '0.01em',
             cursor: 'pointer',
           }}
-          title="Apply this curve's emotion to the segment"
+          title={t("Apply this curve's emotion to the segment")}
           onMouseDown={(e) => e.stopPropagation()}
           onClick={commitCurveEmotion}
         >
-          Apply
+          {t('Apply')}
         </button>
         <button
           type="button"
@@ -1166,7 +1168,7 @@ export function FloatingEmotionChart({
             }
             setChordName('')
             setChordDescription('')
-          }} className="text-[9px] font-semibold text-violet-300 hover:text-white bg-violet-600/30 hover:bg-violet-600/60 border border-violet-500/50 px-2 py-1 rounded shrink-0 transition-colors">Save</button>
+          }} className="text-[9px] font-semibold text-violet-300 hover:text-white bg-violet-600/30 hover:bg-violet-600/60 border border-violet-500/50 px-2 py-1 rounded shrink-0 transition-colors">{t('Save')}</button>
         )}
         <button
           type="button"
@@ -1180,7 +1182,7 @@ export function FloatingEmotionChart({
             setPendingChord(null)
             onUpdateCurve(segmentIndex, flat)
           }}
-        >Clear</button>
+        >{t('Clear')}</button>
       </div>
       {(autoMarkers.length > 0 || markers.length > 0) && (
         <div className="pb-2">

@@ -17,6 +17,7 @@ import {
 import Link from "next/link"
 import type { Database } from "@/lib/supabase/types"
 import { PLAN_MINUTES, PLAN_MINUTES_DEFAULT, type PlanType } from "@/lib/plan-features"
+import { useT } from '@/lib/use-t'
 
 type Profile = Database["public"]["Tables"]["profiles"]["Row"]
 type Subscription = Database["public"]["Tables"]["subscriptions"]["Row"]
@@ -30,6 +31,7 @@ const PLAN_COLORS: Record<string, string> = {
 
 
 export default function ProfilePage() {
+  const t = useT()
   const [profile, setProfile]           = useState<Profile | null>(null)
   const [subscription, setSubscription] = useState<Subscription | null>(null)
   const [usage, setUsage]               = useState<Usage | null>(null)
@@ -191,7 +193,7 @@ export default function ProfilePage() {
                 onClick={() => fileInputRef.current?.click()}
                 disabled={uploadingAvatar}
                 className="absolute bottom-0 right-0 w-7 h-7 rounded-full bg-[#A855F7] flex items-center justify-center hover:bg-[#9333EA] transition-colors shadow-lg"
-                title="Change photo"
+                title={t('Change photo')}
               >
                 {uploadingAvatar
                   ? <Loader2 className="h-3.5 w-3.5 text-white animate-spin" />
@@ -252,11 +254,11 @@ export default function ProfilePage() {
 
         {/* ── Contact info ── */}
         <div className="bg-[#0F172A]/80 border border-[#1E293B] rounded-2xl p-6 space-y-5">
-          <h2 className="text-white font-semibold">Contact Information</h2>
+          <h2 className="text-white font-semibold">{t('Contact Information')}</h2>
 
           <div className="space-y-2">
             <Label className="text-[#94A3B8] flex items-center gap-1.5">
-              <Phone className="h-3.5 w-3.5" />Phone Number
+              <Phone className="h-3.5 w-3.5" />{t('Phone Number')}
             </Label>
             <Input
               type="tel"
@@ -269,7 +271,7 @@ export default function ProfilePage() {
 
           <div className="space-y-2">
             <Label className="text-[#94A3B8] flex items-center gap-1.5">
-              <MapPin className="h-3.5 w-3.5" />Address
+              <MapPin className="h-3.5 w-3.5" />{t('Address')}
             </Label>
             <Input
               type="text"
@@ -291,7 +293,7 @@ export default function ProfilePage() {
             </Button>
             {contactSaved && (
               <span className="text-[#10B981] text-sm flex items-center gap-1">
-                <Check className="h-4 w-4" />Saved
+                <Check className="h-4 w-4" />{t('Saved')}
               </span>
             )}
           </div>
@@ -300,15 +302,15 @@ export default function ProfilePage() {
         {/* ── Password ── */}
         <div className="bg-[#0F172A]/80 border border-[#1E293B] rounded-2xl p-6 space-y-5">
           <h2 className="text-white font-semibold flex items-center gap-2">
-            <Lock className="h-4 w-4 text-[#A855F7]" />Change Password
+            <Lock className="h-4 w-4 text-[#A855F7]" />{t('Change Password')}
           </h2>
 
           <div className="space-y-2">
-            <Label className="text-[#94A3B8]">New Password</Label>
+            <Label className="text-[#94A3B8]">{t('New Password')}</Label>
             <div className="relative">
               <Input
                 type={showNew ? "text" : "password"}
-                placeholder="Min 8 characters"
+                placeholder={t('Min 8 characters')}
                 value={newPassword}
                 onChange={e => setNewPassword(e.target.value)}
                 className="bg-[#020817] border-[#334155] text-white focus:border-[#A855F7] pr-10 placeholder:text-[#334155]"
@@ -324,11 +326,11 @@ export default function ProfilePage() {
           </div>
 
           <div className="space-y-2">
-            <Label className="text-[#94A3B8]">Confirm New Password</Label>
+            <Label className="text-[#94A3B8]">{t('Confirm New Password')}</Label>
             <div className="relative">
               <Input
                 type={showConfirm ? "text" : "password"}
-                placeholder="Repeat password"
+                placeholder={t('Repeat password')}
                 value={confirmPassword}
                 onChange={e => setConfirmPassword(e.target.value)}
                 onKeyDown={e => { if (e.key === "Enter") changePassword() }}
@@ -364,30 +366,30 @@ export default function ProfilePage() {
         {/* ── Usage card ── */}
         <div className="bg-[#0F172A]/80 border border-[#1E293B] rounded-2xl p-6 space-y-4">
           <h2 className="text-white font-semibold flex items-center gap-2">
-            <Clock className="h-4 w-4 text-[#22D3EE]" />This Month's Usage
+            <Clock className="h-4 w-4 text-[#22D3EE]" />{t("This Month's Usage")}
           </h2>
 
           {planLimit > 0 ? (
             <div className="space-y-2">
               <div className="flex justify-between text-sm">
-                <span className="text-[#94A3B8]">Minutes dubbed</span>
+                <span className="text-[#94A3B8]">{t('Minutes dubbed')}</span>
                 <span className="text-white font-medium">{minutesUsed} / {planLimit} min</span>
               </div>
               <Progress value={usagePct} className="h-2" />
               {usagePct >= 80 && (
                 <p className="text-yellow-400 text-xs">
-                  {usagePct >= 100 ? "Limit reached — upgrade for more." : "Approaching your monthly limit."}
+                  {usagePct >= 100 ? t('Limit reached — upgrade for more.') : t('Approaching your monthly limit.')}
                 </p>
               )}
             </div>
           ) : (
-            <p className="text-[#10B981] text-sm font-medium">Unlimited usage on Professional plan</p>
+            <p className="text-[#10B981] text-sm font-medium">{t('Unlimited usage on Professional plan')}</p>
           )}
 
           {planType !== "professional" && (
             <Button asChild size="sm" className="bg-gradient-to-r from-[#A855F7] to-[#7C3AED] text-white">
               <Link href="/subscribe?upgrade=true">
-                <Crown className="h-3.5 w-3.5 mr-1.5" />Upgrade Plan
+                <Crown className="h-3.5 w-3.5 mr-1.5" />{t('Upgrade Plan')}
               </Link>
             </Button>
           )}
@@ -395,7 +397,7 @@ export default function ProfilePage() {
 
         {/* ── Quick links ── */}
         <div className="bg-[#0F172A]/80 border border-[#1E293B] rounded-2xl p-6">
-          <h2 className="text-white font-semibold mb-4">Quick Links</h2>
+          <h2 className="text-white font-semibold mb-4">{t('Quick Links')}</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <Link
               href="/account"
@@ -403,8 +405,8 @@ export default function ProfilePage() {
             >
               <Settings className="h-4 w-4 shrink-0" />
               <div>
-                <p className="text-sm font-medium">Account Settings</p>
-                <p className="text-xs text-[#64748B]">Billing, subscription, preferences</p>
+                <p className="text-sm font-medium">{t('Account Settings')}</p>
+                <p className="text-xs text-[#64748B]">{t('Billing, subscription, preferences')}</p>
               </div>
             </Link>
             <Link
@@ -413,8 +415,8 @@ export default function ProfilePage() {
             >
               <Crown className="h-4 w-4 shrink-0" />
               <div>
-                <p className="text-sm font-medium">Studio</p>
-                <p className="text-xs text-[#64748B]">Your dubbing projects</p>
+                <p className="text-sm font-medium">{t('Studio')}</p>
+                <p className="text-xs text-[#64748B]">{t('Your dubbing projects')}</p>
               </div>
             </Link>
           </div>
