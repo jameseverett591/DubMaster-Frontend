@@ -162,7 +162,14 @@ export function SpeakerVoicePanel() {
         const filename = response.segment.path?.split('/').pop() ?? ''
         // Cache-bust: filename stays the same across regenerates ("segment_NNNN_regen.mp3"),
         // so without a query param the browser keeps serving the old mp3 from cache.
-        const newAudioUrl = filename ? `${apiClient.getAudioFileUrl(jobId, filename)}?ts=${Date.now()}` : undefined
+        //
+        // Must go through getAudioFileUrl's own cacheBust param, not string
+        // concatenation — the URL already carries ?access_token=<jwt>, and a
+        // second literal "?ts=..." leaves two "?" in one URL. The server then
+        // parses ONE query string, so access_token becomes "<jwt>?ts=175...",
+        // which fails to decode, 401s, and the stitcher silently drops the
+        // segment (see 33a6aaa9 — this file wasn't covered by that fix).
+        const newAudioUrl = filename ? apiClient.getAudioFileUrl(jobId, filename, true) : undefined
         const update = {
           audio_url: newAudioUrl,
           committed_audio_url: newAudioUrl,
