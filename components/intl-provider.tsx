@@ -22,9 +22,22 @@ import type { AbstractIntlMessages } from 'next-intl'
  * Lives in its own 'use client' module — not inline in the server-component
  * layout — because a plain function defined in a Server Component can't
  * cross the RSC boundary as a prop to a Client Component.
+ *
+ * Scoped, not a blanket suppression: use-intl reports every invalid key it
+ * finds across the whole `messages` tree in ONE combined error, each one
+ * suffixed "(at <namespace>)" (validateMessagesSegment in use-intl's
+ * initializeConfig). Only swallow it when EVERY flagged key is "(at ui)" —
+ * a typo'd, genuinely-invalid key in one of the real next-intl namespaces
+ * (nav, editor, pricing, ...) still surfaces, so this can't mask an actual
+ * bug outside the namespace it's meant to cover.
  */
+function isOnlyUiNamespace(message: string): boolean {
+  const matches = [...message.matchAll(/\(at ([^)]*)\)/g)]
+  return matches.length > 0 && matches.every((m) => m[1] === 'ui')
+}
+
 function onIntlError(error: IntlError) {
-  if (error.code === IntlErrorCode.INVALID_KEY) return
+  if (error.code === IntlErrorCode.INVALID_KEY && isOnlyUiNamespace(error.message)) return
   console.error(error)
 }
 
