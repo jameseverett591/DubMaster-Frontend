@@ -228,9 +228,10 @@ def handler(event):
                 transcription_source,
                 vocals_path=vocals_audio_path,
                 job_id=job_id,
+                source_language=language,
             )
         else:
-            transcript_result = transcribe_audio(transcription_source, job_id=job_id)
+            transcript_result = transcribe_audio(transcription_source, job_id=job_id, source_language=language)
 
         if prev_lang is None:
             os.environ.pop("WHISPER_LANGUAGE", None)

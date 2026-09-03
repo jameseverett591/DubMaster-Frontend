@@ -191,8 +191,21 @@ class DubbingService:
         self.dubbed_dir = settings.DUBBED_DIR
         os.makedirs(self.dubbed_dir, exist_ok=True)
 
-    def _get_tts_provider(self):
-        """Return the active TTS service based on TTS_PROVIDER env/config."""
+    def _get_tts_provider(self, target_language: str = "en"):
+        """Return the active TTS service based on TTS_PROVIDER env/config.
+
+        Yoruba (yo) and Igbo (ig) are only supported by Fish Audio, so they
+        are routed there regardless of the default TTS_PROVIDER setting.
+        """
+        target_norm = normalize_language_code(target_language)
+        if target_norm in {"yo", "ig"}:
+            if fish_audio_tts.enabled:
+                return fish_audio_tts, "fish-audio"
+            raise RuntimeError(
+                f"Target language '{target_language}' requires Fish Audio TTS, "
+                "but Fish Audio is not enabled."
+            )
+
         provider = os.getenv("TTS_PROVIDER", settings.TTS_PROVIDER).lower().strip()
         if provider == "fish-audio" and fish_audio_tts.enabled:
             return fish_audio_tts, "fish-audio"
@@ -930,7 +943,7 @@ class DubbingService:
             # --- Extract speaker voice references for Fish Audio inline cloning ---
             # Must happen BEFORE translation so the reference text matches the
             # language spoken in the vocal audio.
-            _, provider_name_check = self._get_tts_provider()
+            _, provider_name_check = self._get_tts_provider(target_language)
             speaker_voice_refs: Dict[str, List[Dict]] = {}
             if provider_name_check == "fish-audio" and vocals_path and os.path.exists(vocals_path):
                 try:
@@ -947,7 +960,7 @@ class DubbingService:
                 logger.info("[VOICE-CLONE] Preset-only mode — no vocals or non-Fish provider")
 
             source_norm = normalize_language_code(source_language, allow_auto=True)
-            target_norm = normalize_language_code(target_language)
+            target_norm = normalize_language_code(target_language, strict=True)
 
             if source_norm != source_language or target_norm != target_language:
                 logger.info(
@@ -1204,7 +1217,7 @@ class DubbingService:
                 if tts_text != text:
                     logger.info(f"[PHONETIC] seg {i}: {text!r} -> {tts_text!r}")
 
-                tts_provider, provider_name = self._get_tts_provider()
+                tts_provider, provider_name = self._get_tts_provider(target_norm)
                 voice_key = _voice_key
                 voice_id = tts_provider.get_voice_id(voice_key)
                 model_id = tts_provider.get_model_for_language(target_norm)
