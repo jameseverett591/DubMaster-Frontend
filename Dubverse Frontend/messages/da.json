@@ -1104,6 +1104,11 @@
     "Voice Cloning:": "Stemmekloning:",
     "Waiting": "Afventer",
     "Waveform audio editor": "Lydbølgeredigering",
-    "Widescreen": "Bredformat"
+    "Widescreen": "Bredformat",
+    "⇢ always": "⇢ altid",
+    "⇢ on play": "⇢ ved afspilning",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Følg altid: tidslinjen centreres også ved søgning og spring, mens den er sat på pause. Slå fra for at holde visningen stille under redigering.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Følg kun under afspilning: tidslinjen forbliver, hvor du satte den under pause. Slå til for at den også centreres ved søgning.",
+    "No dubbed video yet": "Ingen dubbet video endnu"
   }
 }

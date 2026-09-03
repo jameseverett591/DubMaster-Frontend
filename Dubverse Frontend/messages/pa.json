@@ -1131,6 +1131,11 @@
     "Waiting": "ਉਡੀਕ ਵਿੱਚ",
     "Waveform audio editor": "ਵੇਵਫਾਰਮ ਆਡੀਓ ਐਡੀਟਰ",
     "Widescreen": "ਵਾਈਡਸਕ੍ਰੀਨ",
-    "per film": "ਪ੍ਰਤੀ ਫਿਲਮ"
+    "per film": "ਪ੍ਰਤੀ ਫਿਲਮ",
+    "⇢ always": "⇢ ਹਮੇਸ਼ਾ",
+    "⇢ on play": "⇢ ਚਲਾਉਣ ਵੇਲੇ",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "ਹਮੇਸ਼ਾ ਫਾਲੋ ਕਰੋ: ਰੋਕੇ ਜਾਣ 'ਤੇ ਵੀ ਸੀਕ ਅਤੇ ਜੰਪ 'ਤੇ ਟਾਈਮਲਾਈਨ ਮੁੜ ਕੇਂਦਰਿਤ ਹੁੰਦੀ ਹੈ। ਸੰਪਾਦਨ ਦੌਰਾਨ ਦ੍ਰਿਸ਼ ਨੂੰ ਸਥਿਰ ਰੱਖਣ ਲਈ ਇਸਨੂੰ ਬੰਦ ਕਰੋ।",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "ਸਿਰਫ਼ ਪਲੇਬੈਕ ਦੌਰਾਨ ਫਾਲੋ ਕਰੋ: ਰੋਕੇ ਜਾਣ 'ਤੇ ਟਾਈਮਲਾਈਨ ਉੱਥੇ ਹੀ ਰਹਿੰਦੀ ਹੈ ਜਿੱਥੇ ਤੁਸੀਂ ਛੱਡੀ ਸੀ। ਸੀਕ 'ਤੇ ਵੀ ਮੁੜ ਕੇਂਦਰਿਤ ਕਰਨ ਲਈ ਇਸਨੂੰ ਚਾਲੂ ਕਰੋ।",
+    "No dubbed video yet": "ਅਜੇ ਤੱਕ ਕੋਈ ਡੱਬ ਕੀਤੀ ਵੀਡੀਓ ਨਹੀਂ"
   }
 }

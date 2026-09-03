@@ -1122,6 +1122,11 @@
     "Waiting": "Čeká se",
     "Waveform audio editor": "Editor zvukové vlny",
     "Widescreen": "Širokoúhlý formát",
-    "per film": "za film"
+    "per film": "za film",
+    "⇢ always": "⇢ vždy",
+    "⇢ on play": "⇢ při přehrávání",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Vždy sledovat: časová osa se znovu vystředí i při posunu a skocích v pauze. Vypněte, aby zůstal pohled během úprav nehybný.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Sledovat jen při přehrávání: časová osa zůstává tam, kde jste ji nechali v pauze. Zapněte, aby se vystředila i při posunu.",
+    "No dubbed video yet": "Zatím žádné dabované video"
   }
 }

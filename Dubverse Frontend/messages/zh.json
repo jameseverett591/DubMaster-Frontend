@@ -1131,6 +1131,11 @@
     "Waiting": "等待中",
     "Waveform audio editor": "波形音频编辑器",
     "Widescreen": "宽银幕",
-    "per film": "每部影片"
+    "per film": "每部影片",
+    "⇢ always": "⇢ 始终",
+    "⇢ on play": "⇢ 播放时",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "始终跟随：暂停时进行跳转或拖动也会重新居中时间轴。关闭此选项可在编辑时保持视图静止。",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "仅在播放时跟随：暂停时时间轴会停留在你放置的位置。开启后跳转时也会重新居中。",
+    "No dubbed video yet": "尚无配音视频"
   }
 }

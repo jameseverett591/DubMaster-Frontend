@@ -1131,6 +1131,11 @@
     "Waiting": "대기 중",
     "Waveform audio editor": "파형 오디오 편집기",
     "Widescreen": "와이드스크린",
-    "per film": "편당"
+    "per film": "편당",
+    "⇢ always": "⇢ 항상",
+    "⇢ on play": "⇢ 재생 시",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "항상 따라가기: 일시정지 중에도 탐색 및 점프 시 타임라인이 다시 중앙 정렬됩니다. 편집 중 화면을 고정하려면 꺼주세요.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "재생 중에만 따라가기: 일시정지 시 타임라인이 두었던 위치에 그대로 있습니다. 탐색 시에도 다시 중앙 정렬하려면 켜주세요.",
+    "No dubbed video yet": "아직 더빙된 영상이 없습니다"
   }
 }

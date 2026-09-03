@@ -1131,6 +1131,11 @@
     "Waiting": "காத்திருக்கிறது",
     "Waveform audio editor": "வேவ்ஃபார்ம் ஆடியோ எடிட்டர்",
     "Widescreen": "வைட்ஸ்கிரீன்",
-    "per film": "ஒரு படத்திற்கு"
+    "per film": "ஒரு படத்திற்கு",
+    "⇢ always": "⇢ எப்போதும்",
+    "⇢ on play": "⇢ இயக்கும்போது",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "எப்போதும் பின்தொடர்தல்: இடைநிறுத்தத்தின் போதும் தேடல் மற்றும் தாவலில் காலவரிசை மீண்டும் மையப்படுத்தப்படும். திருத்தும்போது காட்சியை நிலையாக வைக்க இதை அணைக்கவும்.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "இயக்கத்தின் போது மட்டும் பின்தொடர்தல்: இடைநிறுத்தத்தில் காலவரிசை நீங்கள் விட்ட இடத்திலேயே இருக்கும். தேடலிலும் மீண்டும் மையப்படுத்த இதை இயக்கவும்.",
+    "No dubbed video yet": "இன்னும் டப் செய்யப்பட்ட வீடியோ இல்லை"
   }
 }

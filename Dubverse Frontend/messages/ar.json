@@ -1131,6 +1131,11 @@
     "Waiting": "بانتظار",
     "Waveform audio editor": "محرر صوت بالشكل الموجي",
     "Widescreen": "شاشة عريضة",
-    "per film": "لكل فيلم"
+    "per film": "لكل فيلم",
+    "⇢ always": "⇢ دائمًا",
+    "⇢ on play": "⇢ عند التشغيل",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "المتابعة دائمًا: يعيد الخط الزمني توسيطه أيضًا عند البحث والقفز أثناء الإيقاف المؤقت. أوقف هذا الخيار لإبقاء العرض ثابتًا أثناء التحرير.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "المتابعة أثناء التشغيل فقط: يبقى الخط الزمني حيث تركته أثناء الإيقاف المؤقت. فعّل هذا الخيار ليُعاد توسيطه أيضًا عند البحث.",
+    "No dubbed video yet": "لا يوجد فيديو مدبلج بعد"
   }
 }

@@ -1118,6 +1118,11 @@
     "Voice Cloning:": "Clonazione vocale:",
     "Waiting": "In attesa",
     "Waveform audio editor": "Editor audio a forma d'onda",
-    "per film": "a film"
+    "per film": "a film",
+    "⇢ always": "⇢ sempre",
+    "⇢ on play": "⇢ alla riproduzione",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Segui sempre: la timeline si ricentra anche durante ricerche e salti in pausa. Disattiva per mantenere la vista ferma durante la modifica.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Segui solo durante la riproduzione: la timeline resta dove l'hai lasciata in pausa. Attiva per ricentrarla anche durante le ricerche.",
+    "No dubbed video yet": "Nessun video doppiato ancora"
   }
 }

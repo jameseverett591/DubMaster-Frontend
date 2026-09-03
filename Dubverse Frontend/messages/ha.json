@@ -1129,6 +1129,11 @@
     "Waiting": "Ana Jira",
     "Waveform audio editor": "Na'urar gyara siffar sauti",
     "Widescreen": "Fadin Allo",
-    "per film": "kowace fim"
+    "per film": "kowace fim",
+    "⇢ always": "⇢ koyaushe",
+    "⇢ on play": "⇢ lokacin kunnawa",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Bi koyaushe: layin lokaci ma yana sake tsakiya lokacin bincike da tsalle yayin dakatarwa. Kashe don ci gaba da kallon tsaye yayin gyara.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Bi lokacin kunnawa kawai: layin lokaci yana zama inda ka bar shi yayin dakatarwa. Kunna don ya sake tsakiya lokacin bincike ma.",
+    "No dubbed video yet": "Babu bidiyon da aka fassara tukuna"
   }
 }

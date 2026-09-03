@@ -1071,6 +1071,11 @@
     "Uploading": "Ina-upload",
     "Verified by emotion2vec - maintains emotional authenticity": "Beripikado ng emotion2vec - pinapanatili ang tunay na emosyon",
     "Waiting": "Naghihintay",
-    "per film": "kada pelikula"
+    "per film": "kada pelikula",
+    "⇢ always": "⇢ palagi",
+    "⇢ on play": "⇢ kapag pinapatugtog",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Palaging sumusunod: nagre-recenter din ang timeline kapag nag-seek o tumalon habang naka-pause. I-off para manatiling steady ang view habang nag-e-edit.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Sumusunod lamang habang pinapatugtog: nananatili ang timeline kung saan mo ito iniwan habang naka-pause. I-on para mag-recenter din ito kapag nag-seek.",
+    "No dubbed video yet": "Wala pang na-dub na video"
   }
 }

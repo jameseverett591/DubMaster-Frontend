@@ -1127,6 +1127,11 @@
     "Waiting": "Oczekiwanie",
     "Waveform audio editor": "Edytor audio z przebiegiem fali",
     "Widescreen": "Szeroki ekran",
-    "per film": "za film"
+    "per film": "za film",
+    "⇢ always": "⇢ zawsze",
+    "⇢ on play": "⇢ przy odtwarzaniu",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Śledzenie zawsze: oś czasu wyśrodkowuje się także przy przewijaniu i skokach w trakcie pauzy. Wyłącz, aby widok pozostał nieruchomy podczas edycji.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Śledzenie tylko podczas odtwarzania: oś czasu pozostaje tam, gdzie ją zostawiono w trakcie pauzy. Włącz, aby wyśrodkowywała się także przy przewijaniu.",
+    "No dubbed video yet": "Brak jeszcze dubbingowanego wideo"
   }
 }

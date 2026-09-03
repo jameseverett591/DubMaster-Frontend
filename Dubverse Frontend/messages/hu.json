@@ -1129,6 +1129,11 @@
     "Waiting": "Várakozik",
     "Waveform audio editor": "Hullámforma-szerkesztő",
     "Widescreen": "Szélesvásznú",
-    "per film": "filmenként"
+    "per film": "filmenként",
+    "⇢ always": "⇢ mindig",
+    "⇢ on play": "⇢ lejátszáskor",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Mindig követés: az idővonal szüneteltetve is újraközéppontosít keresésnél és ugrásnál. Kapcsold ki, hogy a nézet mozdulatlan maradjon szerkesztés közben.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Csak lejátszás közben követés: az idővonal ott marad, ahol szüneteltetéskor hagytad. Kapcsold be, hogy keresésnél is újraközéppontosítson.",
+    "No dubbed video yet": "Még nincs szinkronizált videó"
   }
 }

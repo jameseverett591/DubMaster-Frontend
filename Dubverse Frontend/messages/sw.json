@@ -1129,6 +1129,11 @@
     "Waiting": "Inasubiri",
     "Waveform audio editor": "Kihariri cha mawimbi ya sauti",
     "Widescreen": "Skrini Pana",
-    "per film": "kwa kila filamu"
+    "per film": "kwa kila filamu",
+    "⇢ always": "⇢ kila wakati",
+    "⇢ on play": "⇢ wakati wa kucheza",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Kufuata kila wakati: ratiba pia hurudi katikati wakati wa kutafuta na kuruka hata ikiwa imesimamishwa. Zima ili kuweka mwonekano thabiti wakati wa kuhariri.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Kufuata wakati wa kucheza tu: ratiba hubaki mahali ulipoiacha ikiwa imesimamishwa. Washa ili irudi katikati pia wakati wa kutafuta.",
+    "No dubbed video yet": "Hakuna video iliyorekebishwa bado"
   }
 }

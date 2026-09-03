@@ -1128,6 +1128,11 @@
     "Waiting": "Bekliyor",
     "Waveform audio editor": "Dalga formu ses düzenleyici",
     "Widescreen": "Geniş Ekran",
-    "per film": "film başına"
+    "per film": "film başına",
+    "⇢ always": "⇢ her zaman",
+    "⇢ on play": "⇢ oynatmada",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Her zaman takip: duraklatıldığında arama ve atlamalarda da zaman çizelgesi yeniden ortalanır. Düzenlerken görünümü sabit tutmak için kapatın.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Yalnızca oynatma sırasında takip: duraklatıldığında zaman çizelgesi bıraktığınız yerde kalır. Aramalarda da yeniden ortalanması için açın.",
+    "No dubbed video yet": "Henüz dublajlı video yok"
   }
 }

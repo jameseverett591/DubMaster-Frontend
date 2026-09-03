@@ -1122,6 +1122,11 @@
     "Waiting": "În așteptare",
     "Waveform audio editor": "Editor audio cu formă de undă",
     "Widescreen": "Ecran lat",
-    "per film": "pe film"
+    "per film": "pe film",
+    "⇢ always": "⇢ mereu",
+    "⇢ on play": "⇢ la redare",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Urmărire permanentă: cronologia se recentrează și la căutări și sărituri în timp ce e pe pauză. Dezactivează pentru a păstra vizualizarea fixă în timpul editării.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Urmărire doar în timpul redării: cronologia rămâne unde ai lăsat-o pe pauză. Activează pentru a se recentra și la căutări.",
+    "No dubbed video yet": "Încă nu există video dublat"
   }
 }

@@ -1131,6 +1131,11 @@
     "Waiting": "ממתין",
     "Waveform audio editor": "עורך אודיו בצורת גל",
     "Widescreen": "מסך רחב",
-    "per film": "לסרט"
+    "per film": "לסרט",
+    "⇢ always": "⇢ תמיד",
+    "⇢ on play": "⇢ בהפעלה",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "מעקב תמידי: ציר הזמן ממורכז מחדש גם בחיפושים וקפיצות בזמן השהיה. כבה כדי לשמור על התצוגה יציבה בזמן העריכה.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "מעקב רק בזמן ניגון: ציר הזמן נשאר במקום שהשארת אותו בהשהיה. הפעל כדי שימורכז מחדש גם בחיפושים.",
+    "No dubbed video yet": "אין עדיין וידאו מדובב"
   }
 }

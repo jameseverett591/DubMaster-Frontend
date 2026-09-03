@@ -1131,6 +1131,11 @@
     "Waiting": "กำลังรอ",
     "Waveform audio editor": "โปรแกรมแก้ไขรูปคลื่นเสียง",
     "Widescreen": "จอกว้าง",
-    "per film": "ต่อภาพยนตร์"
+    "per film": "ต่อภาพยนตร์",
+    "⇢ always": "⇢ เสมอ",
+    "⇢ on play": "⇢ ขณะเล่น",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "ติดตามเสมอ: ไทม์ไลน์จะจัดกึ่งกลางใหม่เมื่อมีการเลื่อนหรือกระโดดแม้ขณะหยุดชั่วคราว ปิดเพื่อให้มุมมองนิ่งขณะแก้ไข",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "ติดตามเฉพาะขณะเล่นเท่านั้น: ไทม์ไลน์จะอยู่ตำแหน่งที่คุณวางไว้ขณะหยุดชั่วคราว เปิดเพื่อให้จัดกึ่งกลางใหม่เมื่อเลื่อนด้วย",
+    "No dubbed video yet": "ยังไม่มีวิดีโอที่พากย์เสียง"
   }
 }

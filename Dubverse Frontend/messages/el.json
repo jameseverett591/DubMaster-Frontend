@@ -1129,6 +1129,11 @@
     "Waiting": "Αναμονή",
     "Waveform audio editor": "Επεξεργαστής ήχου κυματομορφής",
     "Widescreen": "Ευρεία Οθόνη",
-    "per film": "ανά ταινία"
+    "per film": "ανά ταινία",
+    "⇢ always": "⇢ πάντα",
+    "⇢ on play": "⇢ κατά την αναπαραγωγή",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Πάντα παρακολούθηση: το χρονοδιάγραμμα επαναφέρεται στο κέντρο και σε αναζητήσεις/άλματα ενώ είναι σε παύση. Απενεργοποιήστε για να μείνει σταθερή η προβολή κατά την επεξεργασία.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Παρακολούθηση μόνο κατά την αναπαραγωγή: το χρονοδιάγραμμα μένει εκεί που το αφήσατε σε παύση. Ενεργοποιήστε για να επαναφέρεται στο κέντρο και σε αναζητήσεις.",
+    "No dubbed video yet": "Δεν υπάρχει ακόμη μεταγλωττισμένο βίντεο"
   }
 }

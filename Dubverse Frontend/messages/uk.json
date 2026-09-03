@@ -1131,6 +1131,11 @@
     "Waiting": "Очікування",
     "Waveform audio editor": "Редактор звукової хвилі",
     "Widescreen": "Широкий формат",
-    "per film": "за фільм"
+    "per film": "за фільм",
+    "⇢ always": "⇢ завжди",
+    "⇢ on play": "⇢ під час відтворення",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Завжди слідувати: шкала часу також центрується під час перемотування та переходів на паузі. Вимкніть, щоб вигляд лишався нерухомим під час редагування.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Слідувати лише під час відтворення: шкала часу лишається там, де ви її залишили на паузі. Увімкніть, щоб вона також центрувалася під час перемотування.",
+    "No dubbed video yet": "Дубльованого відео ще немає"
   }
 }
