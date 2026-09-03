@@ -224,8 +224,8 @@ export function ExportModal({ jobId, title, onClose }: ExportModalProps) {
                       aspect === a.value
                         ? 'border-amber-500/50 bg-amber-500/[0.08] text-amber-400'
                         : 'border-white/[0.07] bg-[#1E1E24] text-neutral-400 hover:border-white/[0.13] hover:text-white')}>
-                    <div className="text-[12px] font-semibold">{a.label}</div>
-                    <div className="text-[10px] opacity-60 mt-0.5">{a.sub}</div>
+                    <div className="text-[12px] font-semibold">{t(a.label)}</div>
+                    <div className="text-[10px] opacity-60 mt-0.5">{t(a.sub)}</div>
                   </button>
                 ))}
               </div>

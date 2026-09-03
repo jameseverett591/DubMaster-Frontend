@@ -70,6 +70,7 @@ function formatMs(ms: number | null): string {
 function StageNode({ stage, isLast, isExpanded, onToggle }: {
   stage: PipelineStage; isLast: boolean; isExpanded: boolean; onToggle: () => void
 }) {
+  const t = useT()
   const config = STATUS_CONFIG[stage.status] || STATUS_CONFIG.pending
   const Icon = STAGE_ICONS[stage.id] || Activity
 
@@ -104,7 +105,7 @@ function StageNode({ stage, isLast, isExpanded, onToggle }: {
                 {stage.name}
               </h4>
               <Badge variant="outline" className={`text-[10px] py-0 px-1.5 ${config.color} border-current/20`}>
-                {config.label}
+                {t(config.label)}
               </Badge>
             </div>
             <div className="flex items-center gap-2">

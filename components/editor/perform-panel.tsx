@@ -477,8 +477,7 @@ export default function PerformPanel({
             <span className="text-[10px] text-slate-300">{t('Remove background noise')}</span>
           </label>
           <p className="text-[9px] text-slate-500 leading-snug -mt-1">
-            On by default: phone and laptop recordings carry room tone that would
-            otherwise bleed into the converted voice.
+            {t('On by default: phone and laptop recordings carry room tone that would otherwise bleed into the converted voice.')}
           </p>
 
           <div className="space-y-1">
@@ -496,13 +495,13 @@ export default function PerformPanel({
                       : 'bg-slate-900 text-slate-400 hover:text-slate-200'
                   )}
                 >
-                  {m.label}
+                  {t(m.label)}
                 </button>
               ))}
             </div>
           </div>
 
-          {error && <p className="text-[10px] text-red-400 leading-snug">{error}</p>}
+          {error && <p className="text-[10px] text-red-400 leading-snug">{t(error)}</p>}
 
           <button
             type="button"

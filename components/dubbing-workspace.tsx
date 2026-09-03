@@ -1042,8 +1042,8 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                           <Icon className="h-3.5 w-3.5 text-muted-foreground" />
                         </div>
                         <div>
-                          <p className="text-xs font-medium text-foreground">{label}</p>
-                          <p className="text-[10px] text-muted-foreground">{desc}</p>
+                          <p className="text-xs font-medium text-foreground">{t(label)}</p>
+                          <p className="text-[10px] text-muted-foreground">{t(desc)}</p>
                         </div>
                       </div>
                     ))}

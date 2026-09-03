@@ -237,7 +237,7 @@ export default function LandingPage() {
               <Link href="/signup" className="text-sm text-[#94A3B8] hover:text-[#C084FC]">{t('navPricing')}</Link>
               <a href="#faq" className="text-sm text-[#94A3B8] hover:text-[#C084FC]">{t('navFaq')}</a>
               <div className="flex items-center gap-2 pt-1">
-                <span className="text-sm text-[#64748B]">Language:</span>
+                <span className="text-sm text-[#64748B]">{tUi('Language:')}</span>
                 <LanguageSwitcher />
               </div>
               <Button asChild variant="outline" className="w-full border-[#A855F7]/30 text-[#C084FC] hover:bg-[#A855F7]/10 cursor-pointer">
@@ -326,7 +326,7 @@ export default function LandingPage() {
                 <div className="text-2xl md:text-3xl font-bold text-[#FDB022] drop-shadow-[0_0_15px_rgba(253,176,34,0.4)]">
                   {stat.value}
                 </div>
-                <div className="text-sm text-[#94A3B8]">{stat.label}</div>
+                <div className="text-sm text-[#94A3B8]">{tUi(stat.label)}</div>
               </div>
             ))}
           </div>
@@ -556,10 +556,10 @@ export default function LandingPage() {
                 {t('techDetails')}
               </AccordionTrigger>
               <AccordionContent className="text-[#94A3B8] space-y-2">
-                <p><strong className="text-[#C084FC]">Voice Cloning:</strong> Fish Audio S1 (zero-shot, 30-60s samples)</p>
-                <p><strong className="text-[#C084FC]">Emotion Analysis:</strong> Hume AI + emotion2vec</p>
-                <p><strong className="text-[#C084FC]">Quality Control:</strong> {tUi('Azure Speech, SyncNet, Claude synthesis')}</p>
-                <p><strong className="text-[#C084FC]">Lip-Sync:</strong> {tUi('Industry-standard LSE-D scoring')}</p>
+                <p><strong className="text-[#C084FC]">{tUi('Voice Cloning:')}</strong> Fish Audio S1 (zero-shot, 30-60s samples)</p>
+                <p><strong className="text-[#C084FC]">{tUi('Emotion Analysis:')}</strong> Hume AI + emotion2vec</p>
+                <p><strong className="text-[#C084FC]">{tUi('Quality Control:')}</strong> {tUi('Azure Speech, SyncNet, Claude synthesis')}</p>
+                <p><strong className="text-[#C084FC]">{tUi('Lip-Sync:')}</strong> {tUi('Industry-standard LSE-D scoring')}</p>
               </AccordionContent>
             </AccordionItem>
           </Accordion>
@@ -594,8 +594,8 @@ export default function LandingPage() {
                   <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-[#A855F7]/20 to-[#22D3EE]/10 flex items-center justify-center mb-4">
                     <feature.icon className="h-5 w-5 text-[#C084FC]" />
                   </div>
-                  <h3 className="font-semibold mb-2 text-white">{feature.title}</h3>
-                  <p className="text-sm text-[#94A3B8]">{feature.desc}</p>
+                  <h3 className="font-semibold mb-2 text-white">{tUi(feature.title)}</h3>
+                  <p className="text-sm text-[#94A3B8]">{tUi(feature.desc)}</p>
                 </CardContent>
               </Card>
             ))}
@@ -801,7 +801,7 @@ export default function LandingPage() {
                   {col.links.map((link, j) => (
                     <li key={j}>
                       <Link href={link.href} className="text-sm text-[#64748B] hover:text-[#C084FC] transition-colors duration-300 cursor-pointer">
-                        {link.label}
+                        {tUi(link.label)}
                       </Link>
                     </li>
                   ))}

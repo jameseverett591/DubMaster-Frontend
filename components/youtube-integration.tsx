@@ -264,7 +264,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
             <div className="space-y-2">
               <p className="font-medium text-blue-400">{t('About YouTube Integration')}</p>
               <p className="text-sm text-blue-300/80">
-                Due to YouTube's Terms of Service, we cannot directly download video files from YouTube. However, we CAN legally:
+                {t("Due to YouTube's Terms of Service, we cannot directly download video files from YouTube. However, we CAN legally:")}
               </p>
               <ul className="text-sm text-blue-300/80 list-disc list-inside space-y-1 ml-2">
                 <li>{t('Extract captions and transcripts with full timestamps for translation')}</li>
@@ -272,7 +272,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                 <li>{t('Help you dub videos you already own or have downloaded yourself')}</li>
               </ul>
               <p className="text-sm text-blue-300/80 mt-2">
-                <strong>Tip:</strong> If you own a YouTube video or have legal download rights, upload your video file in the Upload tab, 
+                <strong>{t('Tip:')}</strong> If you own a YouTube video or have legal download rights, upload your video file in the Upload tab, 
                 then use this section to extract the captions for perfect synchronization.
               </p>
             </div>
@@ -481,7 +481,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                 </div>
                 <div className="ml-8 space-y-3">
                   <p className="text-sm text-muted-foreground">
-                    Paste the YouTube URL of this video to extract its captions:
+                    {t('Paste the YouTube URL of this video to extract its captions:')}
                   </p>
                   <div className="flex gap-3">
                     <Input

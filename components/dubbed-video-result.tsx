@@ -142,15 +142,15 @@ export function DubbedVideoResult({
           </div>
 
           <div className="rounded-lg bg-muted/50 p-3">
-            <h4 className="text-xs font-medium text-foreground">Processing Steps:</h4>
+            <h4 className="text-xs font-medium text-foreground">{t('Processing Steps:')}</h4>
             <ul className="mt-1.5 space-y-1.5 text-xs">
               {[
                 { label: "Extracting original audio", threshold: 12 },
-                { label: `Translating ${detectedVoices.length} speaker tracks`, threshold: 35 },
+                { label: "Translating {count} speaker tracks", vars: { count: detectedVoices.length }, threshold: 35 },
                 { label: "Generating AI voice-overs", threshold: 70 },
                 { label: "Syncing audio with video", threshold: 88 },
                 { label: "Final rendering", threshold: 100 },
-              ].map(({ label, threshold }, i, arr) => {
+              ].map(({ label, threshold, vars }, i, arr) => {
                 const prevThreshold = arr[i - 1]?.threshold ?? 0
                 const done = dubbingProgress > threshold
                 const active = dubbingProgress > prevThreshold && dubbingProgress <= threshold
@@ -163,7 +163,7 @@ export function DubbedVideoResult({
                     ) : (
                       <CheckCircle2 className="h-3.5 w-3.5 text-muted-foreground" />
                     )}
-                    <span className={done || active ? "text-foreground" : "text-muted-foreground"}>{label}</span>
+                    <span className={done || active ? "text-foreground" : "text-muted-foreground"}>{t(label, vars)}</span>
                   </li>
                 )
               })}

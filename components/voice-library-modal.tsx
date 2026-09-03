@@ -867,7 +867,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
         <div className="rounded-lg bg-slate-900/60 border border-slate-700 p-3">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             <span className="text-[11px] text-slate-400 shrink-0 whitespace-nowrap font-medium">
-              Speakers in this project:
+              {t('Speakers in this project:')}
             </span>
             {speakers.map(sp => {
               // The map holds EITHER a Fish voice id (Library assignment, or derived
@@ -1153,7 +1153,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                 {totalPages > 1 && (
                   <>
                     <span className="text-slate-700 mx-1">|</span>
-                    <span className="text-[11px] text-slate-500">Jump to:</span>
+                    <span className="text-[11px] text-slate-500">{t('Jump to:')}</span>
                     <Input
                       type="number"
                       min={1}

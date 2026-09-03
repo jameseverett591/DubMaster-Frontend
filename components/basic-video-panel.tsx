@@ -426,7 +426,7 @@ export function BasicVideoPanel({ jobId, onStale, onReviewingChange }: BasicVide
                 {t('Double-click text to edit. Reject bad segments before dubbing.')}
               </p>
               <div className="flex items-center gap-3">
-                <span className="text-xs text-[#64748B]">Target:</span>
+                <span className="text-xs text-[#64748B]">{t('Target:')}</span>
                 <Select value={targetLang} onValueChange={setTargetLang}>
                   <SelectTrigger className="w-36 h-8 bg-[#0F172A]/60 border-[#A855F7]/30 text-white text-sm">
                     <SelectValue />
