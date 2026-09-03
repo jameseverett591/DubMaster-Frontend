@@ -460,9 +460,7 @@ export default function RespeecherPanel({
           {showHelp && (
             <p className="text-[9px] text-slate-400 leading-snug rounded-md border border-slate-800 bg-slate-900/60 p-1.5">
               {t('These shape how the model picks each sound.')} <span className="text-slate-200">{t('Temperature')}</span> is
-              the one worth moving. The three penalties suppress artifacts rather than shape
-              performance — leave them at the voice&apos;s defaults unless you hear a specific
-              defect. Hover any label for detail.
+              the one worth moving. {t("The three penalties suppress artifacts rather than shape performance — leave them at the voice's defaults unless you hear a specific defect.")} {t('Hover any label for detail.')}
             </p>
           )}
 
@@ -471,11 +469,11 @@ export default function RespeecherPanel({
             return (
               <div key={sp.key} className="space-y-0.5">
                 <div className="flex items-center justify-between">
-                  <Hint text={sp.hint}>{sp.label}</Hint>
+                  <Hint text={t(sp.hint)}>{t(sp.label)}</Hint>
                   <span className="text-[9px] font-mono text-slate-200">{val.toFixed(2)}</span>
                 </div>
                 {showHelp && (
-                  <p className="text-[9px] text-cyan-200/70 leading-snug">{sp.hint}</p>
+                  <p className="text-[9px] text-cyan-200/70 leading-snug">{t(sp.hint)}</p>
                 )}
                 <Slider
                   value={[val]}

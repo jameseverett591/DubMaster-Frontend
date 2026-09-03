@@ -162,7 +162,7 @@ export function AdaptationPanel() {
       {/* Preview text */}
       {segment.isPreviewing && segment.preview_text && (
         <p className="rounded bg-orange-500/10 border border-orange-500/20 px-2 py-1.5 text-xs text-orange-200 leading-relaxed">
-          <span className="text-orange-400 font-medium">Preview:</span> {segment.preview_text}
+          <span className="text-orange-400 font-medium">{t('Preview:')}</span> {segment.preview_text}
         </p>
       )}
 

@@ -610,7 +610,7 @@ export function VideoUpload({
         <div className="mb-4 flex flex-wrap items-center justify-center gap-4">
           <div className="flex items-center gap-2">
             <label className="text-sm text-[#94A3B8] font-medium whitespace-nowrap">
-              Source language:
+              {tUi('Source language:')}
             </label>
             <Select value={sourceLanguage} onValueChange={setSourceLanguage}>
               <SelectTrigger className="w-[180px] h-9 text-sm bg-[#0F172A]/60 border-[#A855F7]/30">
@@ -630,7 +630,7 @@ export function VideoUpload({
 
           <div className="flex items-center gap-2">
             <label className="text-sm text-[#94A3B8] font-medium whitespace-nowrap">
-              Target language:
+              {tUi('Target language:')}
             </label>
             <Select value={targetLanguage} onValueChange={setTargetLanguage}>
               <SelectTrigger className="w-[180px] h-9 text-sm bg-[#0F172A]/60 border-[#A855F7]/30">
@@ -650,7 +650,7 @@ export function VideoUpload({
 
           <div className="flex items-center gap-2">
             <label className="text-sm text-[#94A3B8] font-medium whitespace-nowrap">
-              Speakers:
+              {tUi('Speakers:')}
             </label>
             <Select value={numSpeakers} onValueChange={setNumSpeakers}>
               <SelectTrigger className="w-[140px] h-9 text-sm bg-[#0F172A]/60 border-[#A855F7]/30">

@@ -113,7 +113,7 @@ export function BonusMinutesDialog({
 
         {/* Bonus packs */}
         <div className="space-y-3">
-          <p className="text-sm text-[#94A3B8] font-medium">Purchase additional minutes:</p>
+          <p className="text-sm text-[#94A3B8] font-medium">{t('Purchase additional minutes:')}</p>
           <div className="grid gap-3">
             {BONUS_PACKS.map((pack) => (
               <button

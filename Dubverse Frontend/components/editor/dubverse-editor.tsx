@@ -5830,6 +5830,39 @@ export function DubVerseEditor({
     { code: 'id',  label: 'Indonesian (ID)' },
     { code: 'ms',  label: 'Malay (MS)' },
     { code: 'tr',  label: 'Turkish (TR)' },
+    { code: 'tl',  label: 'Filipino (TL)' },
+    { code: 'km',  label: 'Khmer (KM)' },
+    { code: 'my',  label: 'Burmese (MY)' },
+    { code: 'bn',  label: 'Bengali (BN)' },
+    { code: 'ur',  label: 'Urdu (UR)' },
+    { code: 'te',  label: 'Telugu (TE)' },
+    { code: 'mr',  label: 'Marathi (MR)' },
+    { code: 'pa',  label: 'Punjabi (PA)' },
+    { code: 'si',  label: 'Sinhala (SI)' },
+    { code: 'fa',  label: 'Persian (FA)' },
+    { code: 'he',  label: 'Hebrew (HE)' },
+    { code: 'nl',  label: 'Dutch (NL)' },
+    { code: 'sv',  label: 'Swedish (SV)' },
+    { code: 'no',  label: 'Norwegian (NO)' },
+    { code: 'da',  label: 'Danish (DA)' },
+    { code: 'fi',  label: 'Finnish (FI)' },
+    { code: 'el',  label: 'Greek (EL)' },
+    { code: 'uk',  label: 'Ukrainian (UK)' },
+    { code: 'pl',  label: 'Polish (PL)' },
+    { code: 'cs',  label: 'Czech (CS)' },
+    { code: 'sk',  label: 'Slovak (SK)' },
+    { code: 'hu',  label: 'Hungarian (HU)' },
+    { code: 'ro',  label: 'Romanian (RO)' },
+    { code: 'bg',  label: 'Bulgarian (BG)' },
+    { code: 'hr',  label: 'Croatian (HR)' },
+    { code: 'sr',  label: 'Serbian (SR)' },
+    { code: 'sw',  label: 'Swahili (SW)' },
+    { code: 'am',  label: 'Amharic (AM)' },
+    { code: 'yo',  label: 'Yoruba (YO)' },
+    { code: 'ig',  label: 'Igbo (IG)' },
+    { code: 'zu',  label: 'Zulu (ZU)' },
+    { code: 'pt-br', label: 'Portuguese, Brazil (PT-BR)' },
+    { code: 'es-mx', label: 'Spanish, Mexico (ES-MX)' },
   ]
 
   // Get language display name
@@ -7782,7 +7815,7 @@ export function DubVerseEditor({
                     onDragEnd={() => setDraggedVoice(null)}
                     className="px-2 py-0.5 rounded text-[11px] font-medium bg-slate-700 text-slate-300 cursor-grab active:cursor-grabbing border border-slate-600 hover:border-cyan-500/60 hover:text-cyan-300 select-none"
                   >
-                    {v.label}
+                    {t(v.label)}
                   </div>
                 ))}
                 <span className="text-[10px] text-slate-600 ml-1">drag to segment</span>
@@ -8089,26 +8122,26 @@ export function DubVerseEditor({
                 { id: 'library',    label: 'Voice Library' },
                 { id: 'testclips',  label: 'Test Clips',   feature: 'customVoices' },
                 { id: 'ei-library', label: 'E.I. Library', feature: 'emotionalIntelligence' },
-              ] as const).filter((t) => !('feature' in t) || hasFeature(t.feature as any)).map((t) => (
+              ] as const).filter((tab) => !('feature' in tab) || hasFeature(tab.feature as any)).map((tab) => (
                 <button
                   type="button"
-                  key={t.id}
+                  key={tab.id}
                   onClick={() => {
-                    if (t.id === 'studio') {
+                    if (tab.id === 'studio') {
                       router.push('/studio')
                       return
                     }
-                    setRightPanelTab(t.id)
+                    setRightPanelTab(tab.id)
                   }}
                   className={cn(
                     'text-xs px-3 py-1 rounded-md transition-colors',
-                    rightPanelTab === t.id
+                    rightPanelTab === tab.id
                       ? 'bg-slate-700 text-white'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
                   )}
                 >
-                  {t.label}
-                  {t.id === 'quality' && qcReport && (qcReport.grade === 'D' || qcReport.grade === 'F') && (
+                  {t(tab.label)}
+                  {tab.id === 'quality' && qcReport && (qcReport.grade === 'D' || qcReport.grade === 'F') && (
                     <span className="ml-1.5 inline-block w-1.5 h-1.5 rounded-full bg-red-500" />
                   )}
                 </button>
@@ -9382,10 +9415,10 @@ export function DubVerseEditor({
             <div className="flex items-center justify-between mb-4">
               <span className="text-sm font-semibold text-cyan-400 flex items-center gap-2">
                 <Music2 className="h-4 w-4" />
-                Pitch — Segment {pitchPopupIndex + 1}
+                {t('Pitch — Segment {n}', { n: pitchPopupIndex + 1 })}
                 {stagedVoices[keyAt(pitchPopupIndex)] && (
                   <span className="text-[10px] font-normal text-slate-400">
-                    ({VOICE_OPTIONS.find(v => v.key === stagedVoices[keyAt(pitchPopupIndex)])?.label})
+                    ({t(VOICE_OPTIONS.find(v => v.key === stagedVoices[keyAt(pitchPopupIndex)])?.label ?? '')})
                   </span>
                 )}
               </span>
@@ -9784,8 +9817,8 @@ export function DubVerseEditor({
                 localStorage.setItem('dubverse.editor.followPlayhead', next ? '1' : '0')
               }}
               title={followPlayhead
-                ? 'Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.'
-                : 'Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.'}
+                ? t('Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.')
+                : t('Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.')}
               className={cn(
                 'h-7 px-2 rounded text-[11px] font-medium transition-colors whitespace-nowrap',
                 followPlayhead
@@ -9793,26 +9826,26 @@ export function DubVerseEditor({
                   : 'text-slate-500 hover:text-slate-300 border border-transparent',
               )}
             >
-              {followPlayhead ? '⇢ always' : '⇢ on play'}
+              {followPlayhead ? t('⇢ always') : t('⇢ on play')}
             </button>
             <div className="w-px h-5 bg-white/10 mx-1" />
             {([
-              { id: 'chord',      label: '🎼 Chord',      feature: 'emotionalCurveEditor' },
-              { id: 'advanced',   label: '🎛 Advanced',   feature: 'emotionalCurveEditor' },
-              { id: 'characters', label: '🎭 Characters', feature: 'characterProfiles' },
-            ] as const).filter(t => hasFeature(t.feature as any)).map(t => (
+              { id: 'chord',      icon: '🎼', label: 'Chord',      feature: 'emotionalCurveEditor' },
+              { id: 'advanced',   icon: '🎛', label: 'Advanced',   feature: 'emotionalCurveEditor' },
+              { id: 'characters', icon: '🎭', label: 'Characters', feature: 'characterProfiles' },
+            ] as const).filter(tab => hasFeature(tab.feature as any)).map(tab => (
               <button
-                key={t.id}
+                key={tab.id}
                 type="button"
-                onClick={() => setVideoSubTab(prev => prev === t.id ? null : t.id)}
+                onClick={() => setVideoSubTab(prev => prev === tab.id ? null : tab.id)}
                 className="text-xs px-2.5 py-1 rounded-md transition-all font-medium"
                 style={{
-                  background: videoSubTab === t.id ? 'rgba(167,139,250,0.15)' : 'transparent',
-                  color: videoSubTab === t.id ? '#a78bfa' : '#64748b',
-                  border: `1px solid ${videoSubTab === t.id ? 'rgba(167,139,250,0.35)' : 'transparent'}`,
+                  background: videoSubTab === tab.id ? 'rgba(167,139,250,0.15)' : 'transparent',
+                  color: videoSubTab === tab.id ? '#a78bfa' : '#64748b',
+                  border: `1px solid ${videoSubTab === tab.id ? 'rgba(167,139,250,0.35)' : 'transparent'}`,
                 }}
               >
-                {t.label}
+                {tab.icon} {t(tab.label)}
               </button>
             ))}
             <div className="w-px h-5 bg-white/10 mx-1" />
@@ -9826,7 +9859,7 @@ export function DubVerseEditor({
                 a.download = `${title || jobId}_dubbed.mp4`
                 a.click()
               }}
-              title={activeDubbedVideoUrl ?? dubbedVideoUrl ? 'Download dubbed video' : 'No dubbed video yet'}
+              title={activeDubbedVideoUrl ?? dubbedVideoUrl ? t('Download dubbed video') : t('No dubbed video yet')}
               className="text-xs px-2.5 py-1 rounded-md transition-all font-medium flex items-center gap-1.5"
               style={{
                 background: 'transparent',
@@ -9836,7 +9869,7 @@ export function DubVerseEditor({
                 opacity: (activeDubbedVideoUrl ?? dubbedVideoUrl) ? 1 : 0.45,
               }}
             >
-              ⬇ Download
+              ⬇ {t('Download')}
             </button>
           </div>
         </div>
@@ -12586,7 +12619,7 @@ export function DubVerseEditor({
               segments over to make space, then refits the audio at a natural pace.
             </p>
             <div className="flex items-center gap-2 mb-4">
-              <span className="text-xs text-neutral-500 shrink-0">Make room:</span>
+              <span className="text-xs text-neutral-500 shrink-0">{t('Make room:')}</span>
               {[1, 2, 3].map(m => (
                 <button
                   key={m}

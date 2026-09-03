@@ -133,7 +133,7 @@ export default function CollaboratePage() {
                     {member.role === 'owner' ? (
                       <span className={`flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full border ${cfg.color}`}>
                         <RoleIcon className="h-3 w-3" />
-                        {cfg.label}
+                        {t(cfg.label)}
                       </span>
                     ) : (
                       <select
@@ -201,7 +201,7 @@ export default function CollaboratePage() {
                       </div>
                     </div>
                     <span className={`text-[11px] px-2 py-0.5 rounded-full border font-medium ${roleConfig.color}`}>
-                      {roleConfig.label}
+                      {t(roleConfig.label)}
                     </span>
                   </div>
                 </div>
@@ -290,7 +290,7 @@ export default function CollaboratePage() {
                   <div key={role} className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
                     <span className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-0.5 rounded-full border ${cfg.color}`}>
                       <Icon className="h-3 w-3" />
-                      {cfg.label}
+                      {t(cfg.label)}
                     </span>
                     <ul className="space-y-1">
                       {perms[role].map(p => (

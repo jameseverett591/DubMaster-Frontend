@@ -100,7 +100,7 @@ export function StudioModeSelector({ editorMode, onEditorModeChange, onStartProj
             </div>
 
             <div className="pt-4 border-t border-border/50">
-              <p className="text-xs text-muted-foreground mb-3">Best for:</p>
+              <p className="text-xs text-muted-foreground mb-3">{t('Best for:')}</p>
               <div className="flex flex-wrap gap-2">
                 <Badge variant="secondary" className="text-xs">{t('Social Media')}</Badge>
                 <Badge variant="secondary" className="text-xs">{t('Quick Clips')}</Badge>
@@ -169,7 +169,7 @@ export function StudioModeSelector({ editorMode, onEditorModeChange, onStartProj
             </div>
 
             <div className="pt-4 border-t border-border/50">
-              <p className="text-xs text-muted-foreground mb-3">Best for:</p>
+              <p className="text-xs text-muted-foreground mb-3">{t('Best for:')}</p>
               <div className="flex flex-wrap gap-2">
                 <Badge variant="secondary" className="text-xs">{t('Films & Documentaries')}</Badge>
                 <Badge variant="secondary" className="text-xs">{t('Professional Content')}</Badge>
