@@ -25,6 +25,7 @@ LANGUAGE_NAMES: Dict[str, str] = {
     "te": "Telugu",
     "gu": "Gujarati",
     "mr": "Marathi",
+    "pa": "Punjabi",
     "si": "Sinhala",
     # Middle East / Central Asia
     "ar": "Arabic",
