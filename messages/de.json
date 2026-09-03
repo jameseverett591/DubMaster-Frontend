@@ -1113,6 +1113,11 @@
     "Waiting": "Wartet",
     "Waveform audio editor": "Wellenform-Audioeditor",
     "Widescreen": "Breitbild",
-    "per film": "pro Film"
+    "per film": "pro Film",
+    "⇢ always": "⇢ immer",
+    "⇢ on play": "⇢ bei Wiedergabe",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Immer folgen: Die Zeitleiste zentriert sich auch bei Sprüngen und Suchen im pausierten Zustand neu. Deaktivieren, um die Ansicht beim Bearbeiten stabil zu halten.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Nur während der Wiedergabe folgen: Die Zeitleiste bleibt im pausierten Zustand, wo Sie sie gelassen haben. Aktivieren, damit sie sich auch bei Suchen neu zentriert.",
+    "No dubbed video yet": "Noch kein synchronisiertes Video"
   }
 }

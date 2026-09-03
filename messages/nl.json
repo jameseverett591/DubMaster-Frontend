@@ -1111,6 +1111,11 @@
     "Voice Cloning:": "Stemkloning:",
     "Waiting": "Wachten",
     "Waveform audio editor": "Golfvorm-audio-editor",
-    "Widescreen": "Breedbeeld"
+    "Widescreen": "Breedbeeld",
+    "⇢ always": "⇢ altijd",
+    "⇢ on play": "⇢ tijdens afspelen",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Altijd volgen: de tijdlijn centreert ook opnieuw bij zoeken en springen tijdens pauze. Schakel uit om de weergave stil te houden tijdens bewerken.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Alleen volgen tijdens afspelen: de tijdlijn blijft staan waar je hem tijdens pauze hebt gelaten. Schakel in om ook bij zoeken opnieuw te centreren.",
+    "No dubbed video yet": "Nog geen nagesynchroniseerde video"
   }
 }

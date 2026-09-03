@@ -1127,6 +1127,11 @@
     "Waiting": "Đang chờ",
     "Waveform audio editor": "Trình chỉnh sửa dạng sóng âm thanh",
     "Widescreen": "Màn hình rộng",
-    "per film": "mỗi phim"
+    "per film": "mỗi phim",
+    "⇢ always": "⇢ luôn luôn",
+    "⇢ on play": "⇢ khi phát",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Luôn theo dõi: dòng thời gian cũng tự căn giữa lại khi tua và nhảy trong lúc tạm dừng. Tắt để giữ khung nhìn cố định khi chỉnh sửa.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Chỉ theo dõi khi phát: dòng thời gian giữ nguyên vị trí bạn để khi tạm dừng. Bật để nó cũng căn giữa lại khi tua.",
+    "No dubbed video yet": "Chưa có video lồng tiếng"
   }
 }

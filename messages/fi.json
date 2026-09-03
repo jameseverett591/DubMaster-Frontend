@@ -1129,6 +1129,11 @@
     "Waiting": "Odottaa",
     "Waveform audio editor": "Äänen aaltomuoto-editori",
     "Widescreen": "Laajakuva",
-    "per film": "per elokuva"
+    "per film": "per elokuva",
+    "⇢ always": "⇢ aina",
+    "⇢ on play": "⇢ toistettaessa",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Seuraa aina: aikajana keskittyy uudelleen myös haku- ja hyppytilanteissa tauolla. Poista käytöstä pitääksesi näkymän paikallaan muokatessa.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Seuraa vain toiston aikana: aikajana pysyy siellä, minne se jätettiin tauon aikana. Ota käyttöön, jotta se keskittyy uudelleen myös hauissa.",
+    "No dubbed video yet": "Ei vielä jälkiäänitettyä videota"
   }
 }

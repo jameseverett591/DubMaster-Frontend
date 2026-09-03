@@ -1131,6 +1131,11 @@
     "Waiting": "Ожидание",
     "Waveform audio editor": "Редактор аудиоволны",
     "Widescreen": "Широкий формат",
-    "per film": "за фильм"
+    "per film": "за фильм",
+    "⇢ always": "⇢ всегда",
+    "⇢ on play": "⇢ при воспроизведении",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Всегда следовать: шкала времени также центрируется при перемотке и переходах на паузе. Отключите, чтобы вид оставался неподвижным при редактировании.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Следовать только при воспроизведении: шкала времени остаётся там, где вы её оставили на паузе. Включите, чтобы она также центрировалась при перемотке.",
+    "No dubbed video yet": "Дублированного видео пока нет"
   }
 }

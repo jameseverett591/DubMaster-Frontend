@@ -1131,6 +1131,11 @@
     "Waiting": "انتظار میں",
     "Waveform audio editor": "ویوفارم آڈیو ایڈیٹر",
     "Widescreen": "وائیڈ اسکرین",
-    "per film": "فی فلم"
+    "per film": "فی فلم",
+    "⇢ always": "⇢ ہمیشہ",
+    "⇢ on play": "⇢ چلانے پر",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "ہمیشہ پیروی: ٹائم لائن موقوف کے دوران تلاش اور چھلانگ پر بھی دوبارہ مرکز ہوتی ہے۔ ترمیم کے دوران منظر کو ساکن رکھنے کے لیے اسے بند کریں۔",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "صرف چلانے کے دوران پیروی: ٹائم لائن وہیں رہتی ہے جہاں آپ نے موقوف کے دوران چھوڑی تھی۔ تلاش پر بھی دوبارہ مرکز کرنے کے لیے اسے آن کریں۔",
+    "No dubbed video yet": "ابھی تک کوئی ڈب شدہ ویڈیو نہیں"
   }
 }

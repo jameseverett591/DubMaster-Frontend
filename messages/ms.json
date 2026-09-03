@@ -1125,6 +1125,11 @@
     "Waiting": "Menunggu",
     "Waveform audio editor": "Editor bentuk gelombang audio",
     "Widescreen": "Skrin Lebar",
-    "per film": "setiap filem"
+    "per film": "setiap filem",
+    "⇢ always": "⇢ sentiasa",
+    "⇢ on play": "⇢ semasa main",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Sentiasa ikut: garis masa turut berpusat semula semasa cari dan lompat walaupun dijeda. Matikan untuk mengekalkan paparan pegun semasa mengedit.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Ikut semasa main sahaja: garis masa kekal di tempat anda tinggalkan semasa dijeda. Hidupkan supaya ia turut berpusat semula semasa mencari.",
+    "No dubbed video yet": "Belum ada video yang didublat"
   }
 }

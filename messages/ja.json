@@ -1131,6 +1131,11 @@
     "Waiting": "待機中",
     "Waveform audio editor": "波形オーディオエディタ",
     "Widescreen": "ワイドスクリーン",
-    "per film": "1作品あたり"
+    "per film": "1作品あたり",
+    "⇢ always": "⇢ 常に",
+    "⇢ on play": "⇢ 再生時",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "常に追従：一時停止中でもシークやジャンプでタイムラインが再センタリングされます。編集中に表示を固定するにはオフにしてください。",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "再生中のみ追従：一時停止中はタイムラインが置いた位置のままになります。シーク時にも再センタリングするにはオンにしてください。",
+    "No dubbed video yet": "まだ吹き替え動画がありません"
   }
 }

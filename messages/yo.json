@@ -1130,6 +1130,11 @@
     "Waiting": "Ń Dúró Dè",
     "Waveform audio editor": "Olùṣàtúnṣe ìrísí-ìgbì ohùn",
     "Widescreen": "Ojú Ìwọ̀n Gbòòrò",
-    "per film": "fún fíìmù kọ̀ọ̀kan"
+    "per film": "fún fíìmù kọ̀ọ̀kan",
+    "⇢ always": "⇢ nígbà gbogbo",
+    "⇢ on play": "⇢ nígbà ìṣeré",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Títẹ̀lé nígbà gbogbo: ìlà àkókò náà tún máa dojúkọ àárín nígbà wíwá àti fífò bí a tilẹ̀ dúró. Pa á kúrò láti jẹ́ kí ìwòye dúró jẹ́ẹ́ nígbà àtúnṣe.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Títẹ̀lé nígbà ìṣeré nìkan: ìlà àkókò máa dúró síbi tí o ti fi sílẹ̀ nígbà tí a dúró. Ṣí i láti jẹ́ kí ó tún dojúkọ àárín nígbà wíwá pẹ̀lú.",
+    "No dubbed video yet": "Kò tíì sí fídíò tí a túmọ̀"
   }
 }

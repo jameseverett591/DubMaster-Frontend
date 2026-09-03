@@ -1128,6 +1128,11 @@
     "Waiting": "En espera",
     "Waveform audio editor": "Editor de audio con forma de onda",
     "Widescreen": "Pantalla ancha",
-    "per film": "por película"
+    "per film": "por película",
+    "⇢ always": "⇢ siempre",
+    "⇢ on play": "⇢ al reproducir",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Siguiendo siempre: la línea de tiempo también se recentra al buscar o saltar mientras está en pausa. Desactívalo para mantener la vista fija mientras editas.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Siguiendo solo durante la reproducción: la línea de tiempo permanece donde la dejaste al pausar. Actívalo para que también se recentre al buscar.",
+    "No dubbed video yet": "Aún no hay video doblado"
   }
 }

@@ -1131,6 +1131,11 @@
     "Waiting": "در انتظار",
     "Waveform audio editor": "ویرایشگر صوتی موج‌نما",
     "Widescreen": "صفحه‌عریض",
-    "per film": "به ازای هر فیلم"
+    "per film": "به ازای هر فیلم",
+    "⇢ always": "⇢ همیشه",
+    "⇢ on play": "⇢ هنگام پخش",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "پیروی همیشگی: در حالت مکث نیز خط زمانی هنگام جست‌وجو و پرش دوباره مرکز می‌شود. برای ثابت نگه‌داشتن نما هنگام ویرایش آن را خاموش کنید.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "پیروی فقط هنگام پخش: در حالت مکث، خط زمانی همان‌جا که رهایش کرده‌اید می‌ماند. برای مرکز شدن دوباره هنگام جست‌وجو نیز آن را روشن کنید.",
+    "No dubbed video yet": "هنوز ویدیوی دوبله‌شده‌ای وجود ندارد"
   }
 }

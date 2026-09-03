@@ -1117,6 +1117,11 @@
     "Voice Cloning:": "Kloning Suara:",
     "Waiting": "Menunggu",
     "Waveform audio editor": "Editor gelombang audio",
-    "Widescreen": "Layar Lebar"
+    "Widescreen": "Layar Lebar",
+    "⇢ always": "⇢ selalu",
+    "⇢ on play": "⇢ saat memutar",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Selalu mengikuti: linimasa juga akan berpusat ulang saat mencari dan melompat meski sedang dijeda. Matikan untuk menjaga tampilan tetap diam saat mengedit.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Mengikuti hanya saat pemutaran: linimasa tetap di tempat Anda meninggalkannya saat dijeda. Aktifkan agar juga berpusat ulang saat mencari.",
+    "No dubbed video yet": "Belum ada video yang di-dubbing"
   }
 }

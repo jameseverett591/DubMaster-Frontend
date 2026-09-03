@@ -1131,6 +1131,11 @@
     "Waiting": "प्रतीक्षारत",
     "Waveform audio editor": "वेवफ़ॉर्म ऑडियो एडिटर",
     "Widescreen": "वाइडस्क्रीन",
-    "per film": "प्रति फ़िल्म"
+    "per film": "प्रति फ़िल्म",
+    "⇢ always": "⇢ हमेशा",
+    "⇢ on play": "⇢ चलाते समय",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "हमेशा फ़ॉलो करें: रोके जाने पर भी सीक और जंप के समय टाइमलाइन फिर से केंद्रित होती है। संपादन के दौरान दृश्य को स्थिर रखने के लिए इसे बंद करें।",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "केवल प्लेबैक के दौरान फ़ॉलो करें: रोके जाने पर टाइमलाइन वहीं रहती है जहाँ आपने छोड़ी थी। सीक पर भी फिर से केंद्रित करने के लिए इसे चालू करें।",
+    "No dubbed video yet": "अभी तक कोई डब की गई वीडियो नहीं है"
   }
 }

@@ -1131,6 +1131,11 @@
     "Waiting": "অপেক্ষমাণ",
     "Waveform audio editor": "ওয়েভফর্ম অডিও এডিটর",
     "Widescreen": "ওয়াইডস্ক্রিন",
-    "per film": "প্রতি ফিল্ম"
+    "per film": "প্রতি ফিল্ম",
+    "⇢ always": "⇢ সবসময়",
+    "⇢ on play": "⇢ প্লে করার সময়",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "সবসময় অনুসরণ: থামানো অবস্থায়ও সিক এবং জাম্পে টাইমলাইন পুনরায় কেন্দ্রীভূত হয়। সম্পাদনার সময় দৃশ্য স্থির রাখতে এটি বন্ধ করুন।",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "শুধু প্লেব্যাকের সময় অনুসরণ: থামানো অবস্থায় টাইমলাইন যেখানে রেখেছেন সেখানেই থাকে। সিকেও পুনরায় কেন্দ্রীভূত করতে এটি চালু করুন।",
+    "No dubbed video yet": "এখনো কোনো ডাব করা ভিডিও নেই"
   }
 }

@@ -1129,6 +1129,11 @@
     "Waiting": "Na-eche",
     "Waveform audio editor": "Ihe ndozi ụdị ebili ụda",
     "Widescreen": "Ihuenyo Sara Mbara",
-    "per film": "kwa fim"
+    "per film": "kwa fim",
+    "⇢ always": "⇢ mgbe niile",
+    "⇢ on play": "⇢ mgbe a na-akpọ ya",
+    "Following always — the timeline also re-centres on seeks and jumps while paused. Turn it off to keep the view still while editing.": "Iso mgbe niile: ihe ndozi oge na-emegharịkwa n'etiti mgbe ị na-achọ ma ọ bụ na-awụfe n'oge ọ kwụsịrị. Menyụọ ya iji mee ka ọdịdị ya guzosie ike n'oge ndezi.",
+    "Following during playback only — the timeline stays where you put it while paused. Turn it on to re-centre on seeks too.": "Iso naanị mgbe a na-akpọ ya: ihe ndozi oge na-anọgide n'ebe ị hapụrụ ya mgbe ọ kwụsịrị. Gbanye ya ka o wee megharịkwa n'etiti mgbe ị na-achọ.",
+    "No dubbed video yet": "Enwebeghị vidiyo a tụgharịrị"
   }
 }
