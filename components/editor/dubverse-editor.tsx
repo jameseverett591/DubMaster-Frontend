@@ -1287,10 +1287,20 @@ export function DubVerseEditor({
     })
   }, [qcReport, updateSegment])
 
+  // Tracks the token last baked into the video src, so onAuthStateChange below
+  // can tell a genuine rotation from a redundant re-emit of the same session.
+  // getSession() — called on every apiClient request, so on every autosave —
+  // can re-fire this listener with an UNCHANGED token; reloading the video
+  // unconditionally there turned every segment edit into a picture dropout.
+  const lastVideoTokenRef = useRef<string | null>(null)
+
   useEffect(() => {
     const supabase = createClient()
     supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.access_token) apiClient.setToken(session.access_token)
+      if (session?.access_token) {
+        apiClient.setToken(session.access_token)
+        lastVideoTokenRef.current = session.access_token
+      }
       const user = session?.user
       if (!user) return
       const name = (user.user_metadata?.full_name as string | undefined) || user.email || ''
@@ -1312,8 +1322,16 @@ export function DubVerseEditor({
         // Updating the API client alone left the element holding the dead token,
         // so it 401d and the picture stopped loading — which stops the video
         // clock, which freezes the needle while the audio plays on.
+        //
+        // ONLY on a genuine rotation. getSession() runs on every apiClient
+        // request — every autosave — and can re-emit this event with the SAME
+        // token. Reloading unconditionally meant every segment add/edit blanked
+        // the picture until it re-buffered, sometimes repeatedly if a second
+        // edit landed before the first reload's loadedmetadata fired.
+        const tokenChanged = session.access_token !== lastVideoTokenRef.current
+        lastVideoTokenRef.current = session.access_token
         const v = videoRef.current
-        if (v && v.src && v.src.includes('access_token=')) {
+        if (tokenChanged && v && v.src && v.src.includes('access_token=')) {
           const at = v.currentTime
           const wasPlaying = !v.paused
           v.src = apiClient.refreshMediaUrl(v.src)
