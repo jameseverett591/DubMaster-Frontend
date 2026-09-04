@@ -3399,6 +3399,18 @@ class DubbingService:
     ) -> None:
         path = os.path.join(output_dir, "segments.json")
         snapshot_path = os.path.join(output_dir, "segments_snapshot.json")
+
+        # Preserve user/editor state that should survive regeneration, e.g. scene
+        # boundaries persisted via PUT /scenes/{job_id}. Without this, a rerun
+        # overwrites segments.json and the next mux/load cycle loses the layout.
+        existing_scenes = None
+        try:
+            with open(path, "r", encoding="utf-8") as _f:
+                _existing = json.load(_f)
+                existing_scenes = _existing.get("scenes")
+        except Exception:
+            pass
+
         payload = {
             "job_id": job_id,
             "language": language,
@@ -3417,6 +3429,8 @@ class DubbingService:
                 for seg in audio_segments
             ],
         }
+        if existing_scenes is not None:
+            payload["scenes"] = existing_scenes
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
         shutil.copy2(path, snapshot_path)
