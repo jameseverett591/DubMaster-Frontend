@@ -4605,7 +4605,23 @@ class DubbingService:
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         data["last_remixed_at"] = datetime.utcnow().isoformat() + "Z"
-        atomic_write_json(segments_path, data)
+
+        # Re-read scenes under the per-job lock before writing so a concurrent
+        # editor update is not overwritten by the stale scenes read at the start.
+        lock = await self._get_segments_file_lock(job_id)
+        async with lock:
+            def _do_write() -> None:
+                try:
+                    with open(segments_path, "r", encoding="utf-8") as _f:
+                        _latest = json.load(_f)
+                        _latest_scenes = _latest.get("scenes")
+                except Exception:
+                    _latest_scenes = None
+                if _latest_scenes is not None:
+                    data["scenes"] = _latest_scenes
+                atomic_write_json(segments_path, data)
+
+            await asyncio.to_thread(_do_write)
 
         logger.info(f"[REMIX] job={job_id} segments={len(merge_segments)} elapsed={elapsed_ms}ms")
         return {
