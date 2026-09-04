@@ -4598,44 +4598,34 @@ class DubbingService:
             raise RuntimeError(f"Remix failed: could not merge {len(merge_segments)} segments for job {job_id}")
 
         output_video = os.path.join(output_dir, f"dubbed_{language}.mp4")
-        scenes = data.get("scenes") or []
-        scenes_moved = any(
-            float(s.get("source_start", s.get("start", 0))) != float(s.get("start", 0)) or
-            float(s.get("source_end", s.get("end", 0))) != float(s.get("end", 0))
-            for s in scenes
-        )
-        if scenes_moved:
-            if accompaniment_path:
-                logger.warning("[REMIX] Scenes have been moved; separated accompaniment is not yet supported in scene-based mux. Using dubbed audio only.")
-            ok = await asyncio.to_thread(
-                self._replace_audio_in_video_with_scenes, video_path, merged_audio, output_video, scenes
-            )
-        else:
-            ok = await asyncio.to_thread(
-                self._replace_audio_in_video, video_path, merged_audio, output_video, accompaniment_path, scenes
-            )
-        if not ok:
-            raise RuntimeError(f"Remix failed: could not mux audio into video for job {job_id}")
-
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        data["last_remixed_at"] = datetime.utcnow().isoformat() + "Z"
-
-        # Re-read scenes under the per-job lock before writing so a concurrent
-        # editor update is not overwritten by the stale scenes read at the start.
+        # Hold the per-job lock while reading scenes, muxing, and writing
+        # segments.json so the remix MP4 and the persisted scene layout agree.
         lock = await self._get_segments_file_lock(job_id)
         async with lock:
-            def _do_write() -> None:
-                try:
-                    with open(segments_path, "r", encoding="utf-8") as _f:
-                        _latest = json.load(_f)
-                        _latest_scenes = _latest.get("scenes")
-                except Exception:
-                    _latest_scenes = None
-                if _latest_scenes is not None:
-                    data["scenes"] = _latest_scenes
-                atomic_write_json(segments_path, data)
+            _latest_scenes = self._read_existing_scenes(output_dir)
+            scenes = _latest_scenes if _latest_scenes is not None else (data.get("scenes") or [])
+            scenes_moved = any(
+                float(s.get("source_start", s.get("start", 0))) != float(s.get("start", 0)) or
+                float(s.get("source_end", s.get("end", 0))) != float(s.get("end", 0))
+                for s in scenes
+            )
+            if scenes_moved:
+                if accompaniment_path:
+                    logger.warning("[REMIX] Scenes have been moved; separated accompaniment is not yet supported in scene-based mux. Using dubbed audio only.")
+                ok = await asyncio.to_thread(
+                    self._replace_audio_in_video_with_scenes, video_path, merged_audio, output_video, scenes
+                )
+            else:
+                ok = await asyncio.to_thread(
+                    self._replace_audio_in_video, video_path, merged_audio, output_video, accompaniment_path, scenes
+                )
+            if not ok:
+                raise RuntimeError(f"Remix failed: could not mux audio into video for job {job_id}")
 
-            await asyncio.to_thread(_do_write)
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            data["last_remixed_at"] = datetime.utcnow().isoformat() + "Z"
+            data["scenes"] = scenes
+            await asyncio.to_thread(atomic_write_json, segments_path, data)
 
         logger.info(f"[REMIX] job={job_id} segments={len(merge_segments)} elapsed={elapsed_ms}ms")
         return {
