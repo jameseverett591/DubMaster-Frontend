@@ -1700,6 +1700,7 @@ class DubbingService:
                 # and a regenerated segment are levelled identically.
                 await asyncio.to_thread(self._ensure_min_loudness, final_path)
 
+                _audio_filename = os.path.basename(final_path)
                 audio_segments.append({
                     "transcript_index": i,
                     "text": text,
@@ -1707,6 +1708,8 @@ class DubbingService:
                     "voice_id": raw.get("voice_id", ""),
                     "speed": raw.get("speed", 1.0),
                     "path": final_path,
+                    "audio_url": _audio_filename,
+                    "committed_audio_url": _audio_filename,
                     "start": _placed_start,
                     "end": _placed_start + actual_duration,
                     "duration": actual_duration,
@@ -1805,7 +1808,17 @@ class DubbingService:
 
             # accompaniment_path was set earlier from the Demucs run at the top
             output_video = os.path.join(output_dir, f"dubbed_{target_norm}.mp4")
-            scenes = data.get("scenes") or []
+            # `data` was not in scope here; load persisted scenes from segments.json
+            # if a previous run/editor state exists, otherwise start with an empty list.
+            _scenes_data_path = os.path.join(output_dir, "segments.json")
+            _scenes_data: Dict = {}
+            if os.path.exists(_scenes_data_path):
+                try:
+                    with open(_scenes_data_path, "r", encoding="utf-8") as _sdf:
+                        _scenes_data = json.load(_sdf)
+                except Exception:
+                    pass
+            scenes = _scenes_data.get("scenes") or []
             scenes_moved = any(
                 float(s.get("source_start", s.get("start", 0))) != float(s.get("start", 0)) or
                 float(s.get("source_end", s.get("end", 0))) != float(s.get("end", 0))
@@ -2708,8 +2721,16 @@ class DubbingService:
             _n = min(_overlap, _a_end - _a_start, _b_end - _b_start)
             if _n <= 0:
                 continue
-            _auto_fade.setdefault(_ai, [0.0, 0.0])[1] = max(_auto_fade[_ai][1], _n)
-            _auto_fade.setdefault(_bi, [0.0, 0.0])[0] = max(_auto_fade[_bi][0], _n)
+            # Explicitly create keys before the RHS runs. The one-liner
+            # `_auto_fade.setdefault(...)[...] = max(_auto_fade[...][...], ...)`
+            # evaluates the value (RHS) before the target setdefault, so a missing
+            # key raises KeyError. This path hit segment index 172 in production.
+            if _ai not in _auto_fade:
+                _auto_fade[_ai] = [0.0, 0.0]
+            if _bi not in _auto_fade:
+                _auto_fade[_bi] = [0.0, 0.0]
+            _auto_fade[_ai][1] = max(_auto_fade[_ai][1], _n)
+            _auto_fade[_bi][0] = max(_auto_fade[_bi][0], _n)
 
         for _idx, (seg, data) in enumerate(zip(segments_sorted, decoded)):
             if data is None or not len(data):
@@ -2789,7 +2810,7 @@ class DubbingService:
                 return True
             logger.warning("[MERGE] numpy mixdown unavailable/failed — falling back to ffmpeg amix")
         except Exception as e:
-            logger.warning(f"[MERGE] mixdown failed ({e}) — falling back to ffmpeg amix")
+            logger.exception(f"[MERGE] mixdown failed ({type(e).__name__}: {e!r}) — falling back to ffmpeg amix")
         try:
             segments_sorted = sorted(segments, key=lambda x: x["start"])
             if not segments_sorted:
@@ -2876,7 +2897,7 @@ class DubbingService:
             return os.path.exists(output_path)
             
         except Exception as e:
-            logger.error(f"Merge error: {e}")
+            logger.exception(f"Merge error: {e}")
             return False
     
     def _simple_concat_segments(
@@ -2936,7 +2957,7 @@ class DubbingService:
             return os.path.exists(output_path)
             
         except Exception as e:
-            logger.error(f"Simple concat error: {e}")
+            logger.exception(f"Simple concat error: {e}")
             return False
     
     def _replace_audio_in_video(
