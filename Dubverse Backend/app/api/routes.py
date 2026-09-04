@@ -6963,10 +6963,16 @@ async def update_scenes(job_id: str, body: Dict[str, Any] = Body(default={})):
     scenes = body.get("scenes")
     if not isinstance(scenes, list):
         raise HTTPException(status_code=422, detail="scenes must be a list")
-    with open(segments_path, "r", encoding="utf-8") as f:
-        data = _json.load(f)
-    data["scenes"] = scenes
-    atomic_write_json(segments_path, data)
+    lock = await dubbing_service._get_segments_file_lock(job_id)
+    async with lock:
+
+        def _update_scenes() -> None:
+            with open(segments_path, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+            data["scenes"] = scenes
+            atomic_write_json(segments_path, data)
+
+        await asyncio.to_thread(_update_scenes)
     return {"status": "ok", "job_id": job_id, "scenes": scenes}
 
 

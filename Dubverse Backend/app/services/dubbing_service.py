@@ -190,6 +190,17 @@ class DubbingService:
     def __init__(self):
         self.dubbed_dir = settings.DUBBED_DIR
         os.makedirs(self.dubbed_dir, exist_ok=True)
+        # One lock per job for segments.json read-modify-write cycles. Without
+        # this, a rerun can read stale scenes, then an editor PUT /scenes writes
+        # new scenes, then the rerun writes the stale scenes back and loses them.
+        self._segment_file_locks: Dict[str, asyncio.Lock] = {}
+
+    async def _get_segments_file_lock(self, job_id: str) -> asyncio.Lock:
+        lock = self._segment_file_locks.get(job_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._segment_file_locks[job_id] = lock
+        return lock
 
     def _get_tts_provider(self, target_language: str = "en"):
         """Return the active TTS service based on TTS_PROVIDER env/config.
@@ -1857,7 +1868,7 @@ class DubbingService:
                         engine_summary = next(iter(unique_engines))
                     else:
                         engine_summary = "mixed"
-                self._write_segments_json(
+                await self._write_segments_json(
                     job_id, target_norm, audio_segments, output_dir,
                     video_path=video_path,
                     accompaniment_path=accompaniment_path,
@@ -3387,7 +3398,7 @@ class DubbingService:
     # Segment editor support
     # ------------------------------------------------------------------
 
-    def _write_segments_json(
+    async def _write_segments_json(
         self,
         job_id: str,
         language: str,
@@ -3397,51 +3408,64 @@ class DubbingService:
         accompaniment_path: Optional[str] = None,
         video_duration: float = 0.0,
     ) -> None:
-        path = os.path.join(output_dir, "segments.json")
-        snapshot_path = os.path.join(output_dir, "segments_snapshot.json")
+        """Write segments.json while holding the per-job lock.
 
-        # Preserve user/editor state that should survive regeneration, e.g. scene
-        # boundaries persisted via PUT /scenes/{job_id}. Without this, a rerun
-        # overwrites segments.json and the next mux/load cycle loses the layout.
-        existing_scenes = None
-        try:
-            with open(path, "r", encoding="utf-8") as _f:
-                _existing = json.load(_f)
-                existing_scenes = _existing.get("scenes")
-        except Exception:
-            pass
+        The lock protects the read-modify-write of existing scenes so that a
+        concurrent PUT /scenes cannot be overwritten by a rerun that read the
+        file before the editor's scenes were persisted.
+        """
+        lock = await self._get_segments_file_lock(job_id)
+        async with lock:
 
-        payload = {
-            "job_id": job_id,
-            "language": language,
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-            "video_path": video_path,
-            "accompaniment_path": accompaniment_path,
-            "video_duration": video_duration,
-            "segments": [
-                {
-                    **seg,
-                    "locked": False,
-                    "candidates": [],
-                    "edit_history": [],
-                    "qc_findings": [],
+            def _do_write() -> Dict:
+                path = os.path.join(output_dir, "segments.json")
+                snapshot_path = os.path.join(output_dir, "segments_snapshot.json")
+
+                # Preserve user/editor state that should survive regeneration, e.g. scene
+                # boundaries persisted via PUT /scenes/{job_id}. Without this, a rerun
+                # overwrites segments.json and the next mux/load cycle loses the layout.
+                existing_scenes = None
+                try:
+                    with open(path, "r", encoding="utf-8") as _f:
+                        _existing = json.load(_f)
+                        existing_scenes = _existing.get("scenes")
+                except Exception:
+                    pass
+
+                payload = {
+                    "job_id": job_id,
+                    "language": language,
+                    "generated_at": datetime.utcnow().isoformat() + "Z",
+                    "video_path": video_path,
+                    "accompaniment_path": accompaniment_path,
+                    "video_duration": video_duration,
+                    "segments": [
+                        {
+                            **seg,
+                            "locked": False,
+                            "candidates": [],
+                            "edit_history": [],
+                            "qc_findings": [],
+                        }
+                        for seg in audio_segments
+                    ],
                 }
-                for seg in audio_segments
-            ],
-        }
-        if existing_scenes is not None:
-            payload["scenes"] = existing_scenes
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, ensure_ascii=False)
-        shutil.copy2(path, snapshot_path)
-        logger.info(f"[SEGMENTS] Wrote {len(audio_segments)} segments to {path}")
-        from app.services.segment_validation import validate_segments
-        validate_segments(job_id, payload["segments"])
+                if existing_scenes is not None:
+                    payload["scenes"] = existing_scenes
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2, ensure_ascii=False)
+                shutil.copy2(path, snapshot_path)
+                logger.info(f"[SEGMENTS] Wrote {len(audio_segments)} segments to {path}")
+                from app.services.segment_validation import validate_segments
+                validate_segments(job_id, payload["segments"])
+                return payload
+
+            payload = await asyncio.to_thread(_do_write)
+
         try:
             from app.services.supabase_client import upsert_segments
-            loop = asyncio.get_running_loop()
-            loop.create_task(upsert_segments(job_id, payload["segments"]))
-        except RuntimeError:
+            asyncio.create_task(upsert_segments(job_id, payload["segments"]))
+        except Exception:
             pass  # No running event loop — skip Supabase upsert
 
     class NuanceTranslator:
