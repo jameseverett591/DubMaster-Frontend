@@ -1220,7 +1220,18 @@ async def _run_diarization_with_heartbeat(
 
 async def _get_runpod_file_url(job_id: str, video_path: str) -> str:
     """
-    Return a publicly accessible URL for the video file so RunPod can download it.
+    Return a publicly accessible URL RunPod can download from — audio only.
+
+    RunPod's own pipeline (download, decode, separate, transcribe, diarize)
+    never reads a single video frame; only the backend's later mux step
+    touches the video, and that reads it back from its own permanent R2 copy
+    (still uploaded below, unchanged) — not from whatever URL this function
+    hands to RunPod. Sending audio only cuts the worker's download (and its
+    decode step, whose demux cost tracks input size) from the full source —
+    300-800MB for a feature — down to just the audio track, typically a
+    fraction of that. A 364MB film's download+extract measured ~46 minutes
+    before any real work (separation/transcription/diarization) started;
+    this is the fix.
 
     Prefers Cloudflare R2 (stable, no tunnel required).
     Raises RuntimeError if R2 is not configured or all upload attempts fail.
@@ -1229,87 +1240,163 @@ async def _get_runpod_file_url(job_id: str, video_path: str) -> str:
     r2_key_id   = os.getenv("R2_ACCESS_KEY_ID", "")
     r2_secret   = os.getenv("R2_SECRET_ACCESS_KEY", "")
     r2_account  = os.getenv("R2_ACCOUNT_ID", "")
-    r2_pub_url  = os.getenv("R2_PUBLIC_URL", "").rstrip("/")
 
-    if r2_bucket and r2_key_id and r2_secret and r2_account:
-        import re
-        import boto3
-        from botocore.config import Config
-        from botocore.exceptions import ClientError
-
-        endpoint = f"https://{r2_account}.r2.cloudflarestorage.com"
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=endpoint,
-            aws_access_key_id=r2_key_id,
-            aws_secret_access_key=r2_secret,
-            config=Config(signature_version="s3v4"),
-            region_name="auto",
+    if not (r2_bucket and r2_key_id and r2_secret and r2_account):
+        raise RuntimeError(
+            "No video URL available for RunPod: configure R2_BUCKET_NAME / R2_ACCESS_KEY_ID / "
+            "R2_SECRET_ACCESS_KEY / R2_ACCOUNT_ID in .env."
         )
 
-        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(video_path).name)
-        object_key = f"{job_id}/{safe_name}"
+    import re
+    import boto3
+    from botocore.config import Config
+    from botocore.exceptions import ClientError
+
+    endpoint = f"https://{r2_account}.r2.cloudflarestorage.com"
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=r2_key_id,
+        aws_secret_access_key=r2_secret,
+        config=Config(signature_version="s3v4"),
+        region_name="auto",
+    )
+
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(video_path).name)
+    video_key = f"{job_id}/{safe_name}"
+
+    # --- Permanent source backup — unchanged from before this function did
+    # the audio split. Other code reads this same key later (media serving,
+    # re-runs); RunPod is no longer one of those readers, but the
+    # upload/skip-if-exists behavior here has to stay exactly as it was for
+    # everything else that depends on it. ---
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: s3.head_object(Bucket=r2_bucket, Key=video_key),
+        )
+        logger.info(f"Job {job_id}: video already in R2 at {video_key}, skipping upload")
+    except ClientError as head_err:
+        if head_err.response["Error"]["Code"] != "404":
+            # ERROR, not WARNING: a 404 means "not uploaded yet" and is
+            # normal. Anything else — a scoped-down token returning 403,
+            # say — means this check can never succeed, so every job
+            # silently re-uploads its entire source forever. The dubs all
+            # still work, so nothing else would ever surface it.
+            logger.error(
+                f"Job {job_id}: head_object FAILED ({head_err}) — the "
+                f"skip-reupload check is disabled, every job will "
+                f"re-transfer its source",
+                exc_info=True,
+            )
+        # 404 = not in R2 yet, fall through to upload loop
         last_r2_err = None
-
-        # Check if already in R2 from direct upload — skip re-upload if so
-        try:
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: s3.head_object(Bucket=r2_bucket, Key=object_key),
-            )
-            logger.info(f"Job {job_id}: video already in R2 at {object_key}, skipping upload")
-            url = s3.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": r2_bucket, "Key": object_key},
-                ExpiresIn=7200,
-            )
-            return url
-        except ClientError as head_err:
-            if head_err.response["Error"]["Code"] != "404":
-                # ERROR, not WARNING: a 404 means "not uploaded yet" and is
-                # normal. Anything else — a scoped-down token returning 403,
-                # say — means this check can never succeed, so every job
-                # silently re-uploads its entire source forever. The dubs all
-                # still work, so nothing else would ever surface it.
-                logger.error(
-                    f"Job {job_id}: head_object FAILED ({head_err}) — the "
-                    f"skip-reupload check is disabled, every job will "
-                    f"re-transfer its source",
-                    exc_info=True,
-                )
-            # 404 = not in R2 yet, fall through to upload loop
-
         for attempt in range(1, 4):
             try:
-                logger.info(f"Job {job_id}: uploading video to R2 (attempt {attempt}/3) → {r2_bucket}/{object_key}")
+                logger.info(f"Job {job_id}: uploading video to R2 (attempt {attempt}/3) → {r2_bucket}/{video_key}")
                 await asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda: s3.upload_file(
                         video_path,
                         r2_bucket,
-                        object_key,
+                        video_key,
                         ExtraArgs={"ContentType": "video/mp4"},
                     ),
                 )
-                url = s3.generate_presigned_url(
-                    "get_object",
-                    Params={"Bucket": r2_bucket, "Key": object_key},
-                    ExpiresIn=7200,
-                )
-                logger.info(f"Job {job_id}: R2 upload complete, presigned URL generated")
-                return url
+                logger.info(f"Job {job_id}: R2 video upload complete")
+                break
             except Exception as r2_err:
                 last_r2_err = r2_err
-                logger.warning(f"Job {job_id}: R2 upload attempt {attempt}/3 failed: {r2_err}")
+                logger.warning(f"Job {job_id}: R2 video upload attempt {attempt}/3 failed: {r2_err}")
                 if attempt < 3:
                     await asyncio.sleep(2)
+        else:
+            raise RuntimeError(f"R2 video upload failed after 3 attempts: {last_r2_err}")
 
-        raise RuntimeError(f"R2 upload failed after 3 attempts: {last_r2_err}")
+    # --- Audio-only handoff for RunPod ---
+    #
+    # -acodec copy is a container remux, not a re-encode: near-instant
+    # regardless of video length, bit-identical audio, and produces a file
+    # that's just the audio track with none of the video weight. .mka
+    # (Matroska) accepts any input audio codec without transcoding — uploads
+    # span MP4/WebM/MOV, whose audio isn't always AAC, so a codec-specific
+    # container (.m4a etc.) would fail to remux some of them.
+    audio_key = f"{job_id}/audio_{Path(safe_name).stem}.mka"
 
-    raise RuntimeError(
-        "No video URL available for RunPod: configure R2_BUCKET_NAME / R2_ACCESS_KEY_ID / "
-        "R2_SECRET_ACCESS_KEY / R2_ACCOUNT_ID in .env."
-    )
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: s3.head_object(Bucket=r2_bucket, Key=audio_key),
+        )
+        logger.info(f"Job {job_id}: audio already in R2 at {audio_key}, skipping extraction")
+        return s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": r2_bucket, "Key": audio_key},
+            ExpiresIn=7200,
+        )
+    except ClientError as head_err:
+        if head_err.response["Error"]["Code"] != "404":
+            logger.warning(f"Job {job_id}: audio head_object check failed ({head_err}) — re-extracting")
+
+    with tempfile.NamedTemporaryFile(suffix=".mka", delete=False) as tmp:
+        tmp_audio_path = tmp.name
+    try:
+        cmd = [
+            "ffmpeg", "-y", "-i", video_path,
+            "-vn", "-map", "0:a:0", "-acodec", "copy",
+            tmp_audio_path,
+        ]
+        proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, timeout=300)
+        if proc.returncode != 0 or not os.path.exists(tmp_audio_path) or os.path.getsize(tmp_audio_path) < 1000:
+            # Stream-copy fails for the rare audio codec Matroska can't
+            # carry as-is. Re-encode to Opus rather than fail the whole job
+            # over a transfer optimization.
+            logger.warning(
+                f"Job {job_id}: audio stream-copy failed "
+                f"({proc.stderr.decode(errors='ignore')[:300]}), re-encoding instead"
+            )
+            cmd = [
+                "ffmpeg", "-y", "-i", video_path,
+                "-vn", "-map", "0:a:0", "-c:a", "libopus", "-b:a", "96k",
+                tmp_audio_path,
+            ]
+            proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, timeout=600)
+            if proc.returncode != 0 or not os.path.exists(tmp_audio_path) or os.path.getsize(tmp_audio_path) < 1000:
+                raise RuntimeError(
+                    f"Audio extraction failed for RunPod handoff: "
+                    f"{proc.stderr.decode(errors='ignore')[:300]}"
+                )
+
+        last_r2_err = None
+        for attempt in range(1, 4):
+            try:
+                logger.info(f"Job {job_id}: uploading audio to R2 (attempt {attempt}/3) → {r2_bucket}/{audio_key}")
+                await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: s3.upload_file(
+                        tmp_audio_path,
+                        r2_bucket,
+                        audio_key,
+                        ExtraArgs={"ContentType": "audio/x-matroska"},
+                    ),
+                )
+                logger.info(f"Job {job_id}: audio upload complete, presigned URL generated")
+                return s3.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": r2_bucket, "Key": audio_key},
+                    ExpiresIn=7200,
+                )
+            except Exception as r2_err:
+                last_r2_err = r2_err
+                logger.warning(f"Job {job_id}: audio R2 upload attempt {attempt}/3 failed: {r2_err}")
+                if attempt < 3:
+                    await asyncio.sleep(2)
+        raise RuntimeError(f"Audio R2 upload failed after 3 attempts: {last_r2_err}")
+    finally:
+        try:
+            os.unlink(tmp_audio_path)
+        except OSError:
+            pass
 
 
 async def _delete_runpod_file(job_id: str, video_path: str) -> None:

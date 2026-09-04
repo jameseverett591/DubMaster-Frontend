@@ -340,8 +340,46 @@ export function UserDashboard() {
                         key={job.job_id}
                         className="group relative bg-[#0F172A]/50 border border-[#1E293B] hover:border-[#A855F7]/30 rounded-xl p-4 transition-all duration-200"
                       >
+                        <div className="absolute top-2 right-2 z-10">
+                          {confirmDeleteId === job.job_id ? (
+                            <div className="flex items-center gap-1 bg-[#0F172A] border border-[#1E293B] rounded-lg px-1.5 py-1">
+                              <span className="text-[10px] text-[#94A3B8] pl-0.5">{t('Delete?')}</span>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => handleDeleteJob(job.job_id)}
+                                disabled={deletingId === job.job_id}
+                                className="h-6 px-1.5 text-red-400 hover:text-red-300 hover:bg-red-500/10 text-xs"
+                              >
+                                {deletingId === job.job_id ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  "Yes"
+                                )}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => setConfirmDeleteId(null)}
+                                className="h-6 px-1.5 text-[#64748B] hover:text-white text-xs"
+                              >
+                                No
+                              </Button>
+                            </div>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => setConfirmDeleteId(job.job_id)}
+                              className="h-7 w-7 p-0 text-[#334155] hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition-opacity"
+                              aria-label={t('Delete job')}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
+                        </div>
                         <div className="flex items-start justify-between gap-4">
-                          <div className="flex-1 min-w-0">
+                          <div className="flex-1 min-w-0 pr-8">
                             <div className="flex items-center gap-2 flex-wrap mb-2">
                               <p className="text-white font-medium text-sm truncate max-w-xs">
                                 {job.video_filename}
@@ -394,45 +432,6 @@ export function UserDashboard() {
                                 </span>
                               )}
                             </div>
-                          </div>
-
-                          <div className="flex-shrink-0">
-                            {confirmDeleteId === job.job_id ? (
-                              <div className="flex items-center gap-2">
-                                <span className="text-xs text-[#94A3B8]">{t('Delete?')}</span>
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  onClick={() => handleDeleteJob(job.job_id)}
-                                  disabled={deletingId === job.job_id}
-                                  className="h-7 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 text-xs"
-                                >
-                                  {deletingId === job.job_id ? (
-                                    <Loader2 className="h-3 w-3 animate-spin" />
-                                  ) : (
-                                    "Yes"
-                                  )}
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  onClick={() => setConfirmDeleteId(null)}
-                                  className="h-7 px-2 text-[#64748B] hover:text-white text-xs"
-                                >
-                                  No
-                                </Button>
-                              </div>
-                            ) : (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => setConfirmDeleteId(job.job_id)}
-                                className="h-8 w-8 p-0 text-[#334155] hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition-opacity"
-                                aria-label={t('Delete job')}
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </Button>
-                            )}
                           </div>
                         </div>
                       </div>
