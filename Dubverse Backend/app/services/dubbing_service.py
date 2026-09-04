@@ -198,6 +198,7 @@ def atomic_write_json(path: str, data, indent: int = 2) -> None:
 
 
 _SEGMENTS_FILE_LOCK_TIMEOUT = 30.0
+_SEGMENTS_MUX_RETRIES = 3
 
 
 def _lock_fd(
@@ -1980,13 +1981,21 @@ class DubbingService:
 
             # accompaniment_path was set earlier from the Demucs run at the top
             output_video = os.path.join(output_dir, f"dubbed_{target_norm}.mp4")
-            # Hold the per-job lock while reading scenes, muxing, and writing
-            # segments.json so the generated MP4 and the persisted scene layout
-            # are guaranteed to agree. A concurrent PUT /scenes cannot slip in
-            # between the read and the write.
+            # Read the current scene layout, release the lock for the long
+            # FFmpeg mux, then re-acquire and re-read before writing. A
+            # concurrent PUT /scenes therefore never has to wait on the full
+            # render, and the persisted segments.json always reflects the
+            # latest scene layout. If scenes change while muxing, retry once
+            # with the latest layout so the generated MP4 stays in sync.
             lock = await self._get_segments_file_lock(job_id)
-            async with lock:
-                scenes = self._read_existing_scenes(output_dir) or []
+            scenes: List[Dict] = []
+            for attempt in range(1, _SEGMENTS_MUX_RETRIES + 1):
+                async with lock:
+                    _latest_scenes = self._read_existing_scenes(output_dir)
+                    if _latest_scenes is not None:
+                        scenes = _latest_scenes
+                    elif not scenes:
+                        scenes = []
                 scenes_moved = any(
                     float(s.get("source_start", s.get("start", 0))) != float(s.get("start", 0)) or
                     float(s.get("source_end", s.get("end", 0))) != float(s.get("end", 0))
@@ -2005,13 +2014,24 @@ class DubbingService:
                     )
                 if not success:
                     raise RuntimeError("Failed to mux dubbed audio into the video (ffmpeg error).")
-                payload = await asyncio.to_thread(
-                    self._write_segments_json_locked,
-                    job_id, target_norm, audio_segments, output_dir, scenes,
-                    video_path=video_path,
-                    accompaniment_path=accompaniment_path,
-                    video_duration=video_duration,
-                )
+
+                async with lock:
+                    _latest_scenes = self._read_existing_scenes(output_dir)
+                    if _latest_scenes is not None and _latest_scenes != scenes:
+                        if attempt < _SEGMENTS_MUX_RETRIES:
+                            logger.info(f"[DUB] Scene layout changed during mux; retrying with latest scenes (attempt {attempt})")
+                            scenes = _latest_scenes
+                            continue
+                        logger.warning(f"[DUB] Scene layout changed during mux; using latest scenes after {attempt} attempts")
+                        scenes = _latest_scenes
+                    payload = await asyncio.to_thread(
+                        self._write_segments_json_locked,
+                        job_id, target_norm, audio_segments, output_dir, scenes,
+                        video_path=video_path,
+                        accompaniment_path=accompaniment_path,
+                        video_duration=video_duration,
+                    )
+                break
 
             _stage_t["mux"] = time.monotonic()
             logger.info(
@@ -4759,12 +4779,19 @@ class DubbingService:
             raise RuntimeError(f"Remix failed: could not merge {len(merge_segments)} segments for job {job_id}")
 
         output_video = os.path.join(output_dir, f"dubbed_{language}.mp4")
-        # Hold the per-job lock while reading scenes, muxing, and writing
-        # segments.json so the remix MP4 and the persisted scene layout agree.
+        # Read the current scene layout, release the lock for the long FFmpeg
+        # mux, then re-acquire and re-read before writing. This keeps scene
+        # edits from blocking on the render and prevents a rerun/remix from
+        # overwriting a concurrent PUT /scenes.
         lock = await self._get_segments_file_lock(job_id)
-        async with lock:
-            _latest_scenes = self._read_existing_scenes(output_dir)
-            scenes = _latest_scenes if _latest_scenes is not None else (data.get("scenes") or [])
+        scenes: List[Dict] = []
+        for attempt in range(1, _SEGMENTS_MUX_RETRIES + 1):
+            async with lock:
+                _latest_scenes = self._read_existing_scenes(output_dir)
+                if _latest_scenes is not None:
+                    scenes = _latest_scenes
+                elif not scenes:
+                    scenes = data.get("scenes") or []
             scenes_moved = any(
                 float(s.get("source_start", s.get("start", 0))) != float(s.get("start", 0)) or
                 float(s.get("source_end", s.get("end", 0))) != float(s.get("end", 0))
@@ -4783,10 +4810,22 @@ class DubbingService:
             if not ok:
                 raise RuntimeError(f"Remix failed: could not mux audio into video for job {job_id}")
 
-            elapsed_ms = int((time.monotonic() - t0) * 1000)
-            data["last_remixed_at"] = datetime.utcnow().isoformat() + "Z"
-            data["scenes"] = scenes
-            await asyncio.to_thread(atomic_write_json, segments_path, data)
+            async with lock:
+                with open(segments_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                _latest_scenes = data.get("scenes")
+                if _latest_scenes is not None and _latest_scenes != scenes:
+                    if attempt < _SEGMENTS_MUX_RETRIES:
+                        logger.info(f"[REMIX] Scene layout changed during mux; retrying with latest scenes (attempt {attempt})")
+                        scenes = _latest_scenes
+                        continue
+                    logger.warning(f"[REMIX] Scene layout changed during mux; using latest scenes after {attempt} attempts")
+                    scenes = _latest_scenes
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                data["last_remixed_at"] = datetime.utcnow().isoformat() + "Z"
+                data["scenes"] = scenes
+                await asyncio.to_thread(atomic_write_json, segments_path, data)
+            break
 
         logger.info(f"[REMIX] job={job_id} segments={len(merge_segments)} elapsed={elapsed_ms}ms")
         return {
