@@ -1819,33 +1819,39 @@ class DubbingService:
 
             # accompaniment_path was set earlier from the Demucs run at the top
             output_video = os.path.join(output_dir, f"dubbed_{target_norm}.mp4")
-            # `data` was not in scope here; load persisted scenes from segments.json
-            # if a previous run/editor state exists, otherwise start with an empty list.
-            _scenes_data_path = os.path.join(output_dir, "segments.json")
-            _scenes_data: Dict = {}
-            if os.path.exists(_scenes_data_path):
-                try:
-                    with open(_scenes_data_path, "r", encoding="utf-8") as _sdf:
-                        _scenes_data = json.load(_sdf)
-                except Exception:
-                    pass
-            scenes = _scenes_data.get("scenes") or []
-            scenes_moved = any(
-                float(s.get("source_start", s.get("start", 0))) != float(s.get("start", 0)) or
-                float(s.get("source_end", s.get("end", 0))) != float(s.get("end", 0))
-                for s in scenes
-            )
-            if scenes_moved:
-                if accompaniment_path:
-                    logger.warning("[DUB] Scenes have been moved; separated accompaniment is not yet supported in scene-based mux. Using dubbed audio only.")
-                success = await asyncio.to_thread(
-                    self._replace_audio_in_video_with_scenes, video_path, merged_audio, output_video, scenes,
+            # Hold the per-job lock while reading scenes, muxing, and writing
+            # segments.json so the generated MP4 and the persisted scene layout
+            # are guaranteed to agree. A concurrent PUT /scenes cannot slip in
+            # between the read and the write.
+            lock = await self._get_segments_file_lock(job_id)
+            async with lock:
+                scenes = self._read_existing_scenes(output_dir) or []
+                scenes_moved = any(
+                    float(s.get("source_start", s.get("start", 0))) != float(s.get("start", 0)) or
+                    float(s.get("source_end", s.get("end", 0))) != float(s.get("end", 0))
+                    for s in scenes
                 )
-            else:
-                success = await asyncio.to_thread(
-                    self._replace_audio_in_video, video_path, merged_audio, output_video,
-                    accompaniment_path, scenes,
+                if scenes_moved:
+                    if accompaniment_path:
+                        logger.warning("[DUB] Scenes have been moved; separated accompaniment is not yet supported in scene-based mux. Using dubbed audio only.")
+                    success = await asyncio.to_thread(
+                        self._replace_audio_in_video_with_scenes, video_path, merged_audio, output_video, scenes,
+                    )
+                else:
+                    success = await asyncio.to_thread(
+                        self._replace_audio_in_video, video_path, merged_audio, output_video,
+                        accompaniment_path, scenes,
+                    )
+                if not success:
+                    raise RuntimeError("Failed to mux dubbed audio into the video (ffmpeg error).")
+                payload = await asyncio.to_thread(
+                    self._write_segments_json_locked,
+                    job_id, target_norm, audio_segments, output_dir, scenes,
+                    video_path=video_path,
+                    accompaniment_path=accompaniment_path,
+                    video_duration=video_duration,
                 )
+
             _stage_t["mux"] = time.monotonic()
             logger.info(
                 f"[STAGE] mux: {_stage_t['mux'] - _stage_t['merge']:.1f}s"
@@ -1859,28 +1865,24 @@ class DubbingService:
                 f"segments={len(transcript)}"
             )
 
-            if success:
-                logger.info(f"Dubbed video created: {output_video}")
-                engine_summary = "unknown"
-                if tts_engines:
-                    unique_engines = set(tts_engines)
-                    if len(unique_engines) == 1:
-                        engine_summary = next(iter(unique_engines))
-                    else:
-                        engine_summary = "mixed"
-                await self._write_segments_json(
-                    job_id, target_norm, audio_segments, output_dir,
-                    video_path=video_path,
-                    accompaniment_path=accompaniment_path,
-                    video_duration=video_duration,
-                )
-                return {
-                    "output_path": output_video,
-                    "tts_engine": engine_summary,
-                    "segment_engines": segment_engines,
-                }
-
-            raise RuntimeError("Failed to mux dubbed audio into the video (ffmpeg error).")
+            logger.info(f"Dubbed video created: {output_video}")
+            engine_summary = "unknown"
+            if tts_engines:
+                unique_engines = set(tts_engines)
+                if len(unique_engines) == 1:
+                    engine_summary = next(iter(unique_engines))
+                else:
+                    engine_summary = "mixed"
+            try:
+                from app.services.supabase_client import upsert_segments
+                asyncio.create_task(upsert_segments(job_id, payload["segments"]))
+            except Exception:
+                pass
+            return {
+                "output_path": output_video,
+                "tts_engine": engine_summary,
+                "segment_engines": segment_engines,
+            }
                 
         except Exception as e:
             logger.exception(f"Dubbing error: {e}")
@@ -3398,6 +3400,58 @@ class DubbingService:
     # Segment editor support
     # ------------------------------------------------------------------
 
+    def _read_existing_scenes(self, output_dir: str) -> Optional[List[Dict]]:
+        """Read the current `scenes` list from segments.json, if any."""
+        path = os.path.join(output_dir, "segments.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f).get("scenes")
+        except Exception:
+            return None
+
+    def _write_segments_json_locked(
+        self,
+        job_id: str,
+        language: str,
+        audio_segments: List[Dict],
+        output_dir: str,
+        scenes: Optional[List[Dict]],
+        video_path: str = "",
+        accompaniment_path: Optional[str] = None,
+        video_duration: float = 0.0,
+    ) -> Dict:
+        """Write segments.json. Caller must hold the per-job lock."""
+        path = os.path.join(output_dir, "segments.json")
+        snapshot_path = os.path.join(output_dir, "segments_snapshot.json")
+
+        payload = {
+            "job_id": job_id,
+            "language": language,
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "video_path": video_path,
+            "accompaniment_path": accompaniment_path,
+            "video_duration": video_duration,
+            "segments": [
+                {
+                    **seg,
+                    "locked": False,
+                    "candidates": [],
+                    "edit_history": [],
+                    "qc_findings": [],
+                }
+                for seg in audio_segments
+            ],
+        }
+        if scenes is not None:
+            payload["scenes"] = scenes
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+        shutil.copy2(path, snapshot_path)
+        logger.info(f"[SEGMENTS] Wrote {len(audio_segments)} segments to {path}")
+        from app.services.segment_validation import validate_segments
+        validate_segments(job_id, payload["segments"])
+        return payload
+
     async def _write_segments_json(
         self,
         job_id: str,
@@ -3416,52 +3470,12 @@ class DubbingService:
         """
         lock = await self._get_segments_file_lock(job_id)
         async with lock:
-
-            def _do_write() -> Dict:
-                path = os.path.join(output_dir, "segments.json")
-                snapshot_path = os.path.join(output_dir, "segments_snapshot.json")
-
-                # Preserve user/editor state that should survive regeneration, e.g. scene
-                # boundaries persisted via PUT /scenes/{job_id}. Without this, a rerun
-                # overwrites segments.json and the next mux/load cycle loses the layout.
-                existing_scenes = None
-                try:
-                    with open(path, "r", encoding="utf-8") as _f:
-                        _existing = json.load(_f)
-                        existing_scenes = _existing.get("scenes")
-                except Exception:
-                    pass
-
-                payload = {
-                    "job_id": job_id,
-                    "language": language,
-                    "generated_at": datetime.utcnow().isoformat() + "Z",
-                    "video_path": video_path,
-                    "accompaniment_path": accompaniment_path,
-                    "video_duration": video_duration,
-                    "segments": [
-                        {
-                            **seg,
-                            "locked": False,
-                            "candidates": [],
-                            "edit_history": [],
-                            "qc_findings": [],
-                        }
-                        for seg in audio_segments
-                    ],
-                }
-                if existing_scenes is not None:
-                    payload["scenes"] = existing_scenes
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, indent=2, ensure_ascii=False)
-                shutil.copy2(path, snapshot_path)
-                logger.info(f"[SEGMENTS] Wrote {len(audio_segments)} segments to {path}")
-                from app.services.segment_validation import validate_segments
-                validate_segments(job_id, payload["segments"])
-                return payload
-
-            payload = await asyncio.to_thread(_do_write)
-
+            scenes = self._read_existing_scenes(output_dir)
+            payload = await asyncio.to_thread(
+                self._write_segments_json_locked,
+                job_id, language, audio_segments, output_dir, scenes,
+                video_path, accompaniment_path, video_duration,
+            )
         try:
             from app.services.supabase_client import upsert_segments
             asyncio.create_task(upsert_segments(job_id, payload["segments"]))
