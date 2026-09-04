@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
-import { Loader2, Film } from "lucide-react"
+import { Loader2, Film, Trash2 } from "lucide-react"
 import { apiClient } from "@/lib/api-client"
 import { createClient } from "@/lib/supabase/client"
 import { expiryLevel, daysUntil } from "@/lib/plan-features"
@@ -34,6 +34,8 @@ export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   useEffect(() => {
     const supabase = createClient()
@@ -48,6 +50,19 @@ export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
 
   const openProject = (project: Project) => {
     router.push(`/editor/${project.job_id}`)
+  }
+
+  const handleDeleteProject = async (jobId: string) => {
+    setDeletingId(jobId)
+    try {
+      await apiClient.deleteJob(jobId)
+      setProjects(prev => prev.filter(p => p.job_id !== jobId))
+    } catch (err) {
+      console.error("Delete failed:", err)
+    } finally {
+      setDeletingId(null)
+      setConfirmDeleteId(null)
+    }
   }
 
   const formatDate = (iso: string) => {
@@ -138,8 +153,39 @@ export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
             </div>
 
             {/* Info */}
-            <div className="p-4">
-              <h3 className="font-medium text-foreground group-hover:text-primary truncate" title={project.title}>
+            <div className="relative p-4">
+              <div className="absolute top-2 right-2 z-10" onClick={(e) => e.stopPropagation()}>
+                {confirmDeleteId === project.job_id ? (
+                  <div className="flex items-center gap-1 rounded-lg border border-border/50 bg-card px-1.5 py-1">
+                    <span className="text-[10px] text-muted-foreground pl-0.5">{t('Delete?')}</span>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteProject(project.job_id)}
+                      disabled={deletingId === project.job_id}
+                      className="rounded px-1.5 py-0.5 text-xs text-red-400 hover:bg-red-500/10 hover:text-red-300"
+                    >
+                      {deletingId === project.job_id ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Yes'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteId(null)}
+                      className="rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground"
+                    >
+                      No
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeleteId(project.job_id)}
+                    aria-label={t('Delete job')}
+                    className="rounded-md bg-black/40 p-1.5 text-muted-foreground backdrop-blur-sm transition-colors hover:bg-red-500/20 hover:text-red-400"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+              <h3 className="font-medium text-foreground group-hover:text-primary truncate pr-8" title={project.title}>
                 {project.title || project.video_filename || project.job_id.slice(0, 8)}
               </h3>
               {/* Job id, in full. This is the handle used everywhere else —
