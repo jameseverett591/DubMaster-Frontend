@@ -12,6 +12,17 @@ from typing import Optional, List, Dict, Any, Tuple
 import asyncio
 import json
 import httpx
+import errno
+import threading
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore
 
 from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
@@ -186,19 +197,169 @@ def atomic_write_json(path: str, data, indent: int = 2) -> None:
         raise
 
 
+_SEGMENTS_FILE_LOCK_TIMEOUT = 30.0
+
+
+def _lock_fd(
+    fd: int,
+    timeout: float = _SEGMENTS_FILE_LOCK_TIMEOUT,
+    cancel_event: Optional[threading.Event] = None,
+) -> None:
+    """Acquire an advisory exclusive lock on a file descriptor."""
+    deadline = time.monotonic() + timeout
+    if msvcrt is not None:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise asyncio.CancelledError("Lock acquisition cancelled")
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as exc:
+                if exc.errno != errno.EACCES:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"Could not acquire segments file lock within {timeout}s"
+                    ) from exc
+                time.sleep(0.01)
+    elif fcntl is not None:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise asyncio.CancelledError("Lock acquisition cancelled")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EACCES):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"Could not acquire segments file lock within {timeout}s"
+                    ) from exc
+                time.sleep(0.01)
+
+
+def _unlock_fd(fd: int) -> None:
+    """Release an advisory lock on a file descriptor."""
+    if msvcrt is not None:
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    elif fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+class _SegmentFileLock:
+    """Per-job lock that serializes segments.json access across Uvicorn workers.
+
+    Uses an asyncio.Lock for process-level concurrency and an OS advisory file
+    lock so separate worker processes sharing the same filesystem cannot perform
+    overlapping read-modify-write cycles on the same job's segments.json.
+    """
+
+    __slots__ = (
+        "_lock_path",
+        "_local_lock",
+        "_cancel_event",
+        "_acquired_event",
+        "_release_event",
+        "_error",
+        "_fd",
+        "_thread",
+    )
+
+    def __init__(self, lock_path: str):
+        self._lock_path = lock_path
+        self._local_lock = asyncio.Lock()
+        self._cancel_event = threading.Event()
+        self._acquired_event = threading.Event()
+        self._release_event = threading.Event()
+        self._error: Optional[BaseException] = None
+        self._fd: Optional[int] = None
+        self._thread: Optional[threading.Thread] = None
+
+    async def __aenter__(self):
+        await self._local_lock.acquire()
+        self._cancel_event.clear()
+        self._acquired_event.clear()
+        self._release_event.clear()
+        self._error = None
+        self._fd = None
+        self._thread = threading.Thread(target=self._lock_holder, daemon=True)
+        self._thread.start()
+        try:
+            while not self._acquired_event.is_set() and self._error is None:
+                if self._cancel_event.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            if self._error is not None:
+                raise self._error
+            if not self._acquired_event.is_set():
+                raise asyncio.CancelledError("Lock acquisition cancelled")
+            return self
+        except BaseException:
+            self._cancel_event.set()
+            self._release_event.set()
+            if self._thread is not None:
+                self._thread.join(timeout=1.0)
+            self._thread = None
+            self._local_lock.release()
+            raise
+
+    async def __aexit__(self, exc_type, exc, tb):
+        try:
+            self._release_event.set()
+            if self._thread is not None:
+                await asyncio.to_thread(self._thread.join, timeout=2.0)
+                self._thread = None
+        finally:
+            self._local_lock.release()
+        return False
+
+    def _lock_holder(self) -> None:
+        lock_dir = os.path.dirname(self._lock_path) or "."
+        fd: Optional[int] = None
+        try:
+            os.makedirs(lock_dir, exist_ok=True)
+            fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT)
+            try:
+                _lock_fd(fd, cancel_event=self._cancel_event)
+                if self._cancel_event.is_set():
+                    _unlock_fd(fd)
+                    os.close(fd)
+                    return
+                self._fd = fd
+                self._acquired_event.set()
+                self._release_event.wait()
+            finally:
+                fd_to_close = self._fd if self._fd is not None else fd
+                self._fd = None
+                if fd_to_close is not None:
+                    try:
+                        _unlock_fd(fd_to_close)
+                    except OSError:
+                        pass
+                    try:
+                        os.close(fd_to_close)
+                    except OSError:
+                        pass
+        except BaseException as exc:
+            self._error = exc
+            self._acquired_event.set()
+
+
 class DubbingService:
     def __init__(self):
         self.dubbed_dir = settings.DUBBED_DIR
         os.makedirs(self.dubbed_dir, exist_ok=True)
-        # One lock per job for segments.json read-modify-write cycles. Without
-        # this, a rerun can read stale scenes, then an editor PUT /scenes writes
-        # new scenes, then the rerun writes the stale scenes back and loses them.
-        self._segment_file_locks: Dict[str, asyncio.Lock] = {}
+        # One lock per job for segments.json read-modify-write cycles. The lock
+        # is backed by an OS advisory file lock so separate Uvicorn workers
+        # sharing the same filesystem also serialize on the same job.
+        self._segment_file_locks: Dict[str, _SegmentFileLock] = {}
 
-    async def _get_segments_file_lock(self, job_id: str) -> asyncio.Lock:
+    async def _get_segments_file_lock(self, job_id: str) -> _SegmentFileLock:
         lock = self._segment_file_locks.get(job_id)
         if lock is None:
-            lock = asyncio.Lock()
+            lock_path = os.path.join(self.dubbed_dir, job_id, ".segments.lock")
+            lock = _SegmentFileLock(lock_path)
             self._segment_file_locks[job_id] = lock
         return lock
 
