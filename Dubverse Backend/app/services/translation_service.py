@@ -867,14 +867,17 @@ class TranslationService:
         # Select the translation prompt based on the requested dubbing style.
         # "literal" (default env fallback) preserves romanization and forbids natural rewrites.
         # "natural" allows localized role/address terms and spoken-English smoothing.
+        _is_literal = resolve_dubbing_style(dubbing_style) == "literal"
         _translation_system_prompt = get_translation_system_prompt(dubbing_style)
         system_prompt_parts = [_translation_system_prompt]
 
         # Optional per-job localization mappings (e.g., Brother Gen -> Broker).
-        _localized_mapping = build_localized_name_mapping_prompt(texts, extra=localized_aliases)
-        if _localized_mapping:
-            system_prompt_parts.append("")
-            system_prompt_parts.append(_localized_mapping)
+        # Only apply in natural mode; literal mode must preserve source names exactly.
+        if not _is_literal:
+            _localized_mapping = build_localized_name_mapping_prompt(texts, extra=localized_aliases)
+            if _localized_mapping:
+                system_prompt_parts.append("")
+                system_prompt_parts.append(_localized_mapping)
 
         # CHARACTER_REGISTRY injection suppressed — pre-baked character profiles caused
         # name hallucination (e.g. "Master Ip" -> "Brother Man"). Per-job character_profiles
@@ -1237,10 +1240,12 @@ class TranslationService:
             system_prompt_parts.append("")
             system_prompt_parts.append(name_mapping)
 
-        localized_mapping = build_localized_name_mapping_prompt(texts, extra=localized_aliases)
-        if localized_mapping:
-            system_prompt_parts.append("")
-            system_prompt_parts.append(localized_mapping)
+        # Localized role/address mappings are only appropriate for natural dubbing.
+        if not _gpt_is_literal:
+            localized_mapping = build_localized_name_mapping_prompt(texts, extra=localized_aliases)
+            if localized_mapping:
+                system_prompt_parts.append("")
+                system_prompt_parts.append(localized_mapping)
 
         # Per-job character profiles (Fix 2)
         if character_profiles:
