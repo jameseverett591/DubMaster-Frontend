@@ -168,14 +168,18 @@ def handler(event):
         if not os.path.exists(video_path):
             return {"error": f"video_path not found: {video_path}"}
 
-    # ── Step 2: Extract Audio ─────────────────────────────────────────────
-    logger.info("[2/4] Extracting audio")
-    t_ex = time.time()
-    extract_result = extract_audio(video_path)
-    timings["extract"] = round(time.time() - t_ex, 2)
-
-    if extract_result.get("status") != "ok":
-        return {"error": f"Audio extraction failed: {extract_result.get('reason', '')}"}
+    # ── Step 2: Extract Audio (lazily) ────────────────────────────────────
+    # Don't decode the original video into 16 kHz mono here if Demucs is going
+    # to do its own 44.1 kHz extraction anyway. We'll only fall back to this
+    # when source separation is disabled or fails.
+    extract_result = None
+    if "separate" not in steps:
+        logger.info("[2/4] Extracting audio")
+        t_ex = time.time()
+        extract_result = extract_audio(video_path)
+        timings["extract"] = round(time.time() - t_ex, 2)
+        if extract_result.get("status") != "ok":
+            return {"error": f"Audio extraction failed: {extract_result.get('reason', '')}"}
 
     # ── Step 3: Demucs Source Separation (vocals only) ───────────────────
     vocals_audio_path = None
@@ -202,16 +206,30 @@ def handler(event):
         else:
             logger.warning(f"Separation skipped ({sep_result.get('reason')}) — transcribing raw audio")
 
-    # Use separated vocals for transcription if available
-    transcription_source = extract_result
+    # Load separated vocals once and reuse for both transcription and diarization.
+    # Previously this file was decoded twice (once per stage), adding a redundant
+    # FFmpeg pass and memory copy for long-form audio.
+    vocal_extract = None
     if vocals_audio_path and os.path.exists(vocals_audio_path):
         t_load = time.time()
         vocal_extract = extract_audio(vocals_audio_path)
         if vocal_extract.get("status") == "ok":
-            transcription_source = vocal_extract
-            logger.info(f"Using separated vocals for transcription (load: {round(time.time()-t_load, 2)}s)")
+            logger.info(f"Using separated vocals for transcription & diarization (load: {round(time.time()-t_load, 2)}s)")
         else:
             logger.warning("Failed to load separated vocals — falling back to original audio")
+            vocal_extract = None
+
+    # If separated vocals were not produced or could not be loaded, decode the
+    # original source once for transcription/diarization.
+    if vocal_extract is None and extract_result is None:
+        logger.info("[2/4] Extracting audio (separation disabled/failed)")
+        t_ex = time.time()
+        extract_result = extract_audio(video_path)
+        timings["extract"] = round(time.time() - t_ex, 2)
+        if extract_result.get("status") != "ok":
+            return {"error": f"Audio extraction failed: {extract_result.get('reason', '')}"}
+
+    transcription_source = vocal_extract if vocal_extract is not None else extract_result
 
     # ── Step 4: Transcription ─────────────────────────────────────────────
     if "transcribe" in steps:
@@ -269,13 +287,10 @@ def handler(event):
     if "diarize" in steps:
         logger.info("[4/4] Running speaker diarization")
         t_di = time.time()
-        # Use separated vocals for diarization if available — cleaner signal for pyannote
-        diarize_source = extract_result
-        if vocals_audio_path and os.path.exists(vocals_audio_path):
-            vocal_extract_for_diarize = extract_audio(vocals_audio_path)
-            if vocal_extract_for_diarize.get("status") == "ok":
-                diarize_source = vocal_extract_for_diarize
-                logger.info("[DIARIZE] Using separated vocals as diarization source")
+        # Reuse the already-loaded vocals from the transcription step.
+        diarize_source = vocal_extract if vocal_extract is not None else extract_result
+        if vocal_extract is not None:
+            logger.info("[DIARIZE] Using separated vocals as diarization source")
         diarize_result = diarize_audio(diarize_source, job_id=job_id, min_speakers=min_speakers, max_speakers=max_speakers)
         timings["diarize"] = round(time.time() - t_di, 2)
 

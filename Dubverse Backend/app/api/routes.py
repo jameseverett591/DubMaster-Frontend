@@ -2473,31 +2473,29 @@ async def process_video_pipeline(job_id: str, video_path: str):
                 # ── Speech energy gate ──
                 # Zero out low-energy frames to suppress residual grunts/noise
                 # that Demucs couldn't fully remove from the vocals track.
+                # Vectorised over frames to avoid per-frame Python loops on long audio.
                 frame_size = int(0.03 * vocals_sr)  # 30ms frames
                 hop = frame_size
                 n_samples = vocals_waveform.shape[-1]
-                rms_values = []
-                for fi in range(0, n_samples - frame_size, hop):
-                    frame = vocals_waveform[0, fi:fi + frame_size]
-                    rms_values.append(frame.pow(2).mean().sqrt().item())
+                if hop > 0 and frame_size > 0 and n_samples >= frame_size:
+                    n_frames = (n_samples - frame_size) // hop + 1
+                    valid_len = n_frames * hop
+                    # unfold view of non-overlapping frames; in-place scaling zeros
+                    # the underlying gated tensor for low-RMS frames.
+                    gated = vocals_waveform.clone()
+                    frames = gated[..., :valid_len].unfold(-1, frame_size, hop)
+                    rms = frames.pow(2).mean(dim=-1).sqrt()
 
-                if rms_values:
-                    rms_tensor = torch.tensor(rms_values)
-                    # Use adaptive threshold: median + 1 std of non-silent frames
-                    non_silent = rms_tensor[rms_tensor > 0.001]
-                    if len(non_silent) > 10:
+                    non_silent = rms[rms > 0.001]
+                    if non_silent.numel() > 10:
                         threshold = float(non_silent.median() * 0.5)
                     else:
                         threshold = 0.01
 
-                    gated = vocals_waveform.clone()
-                    frames_zeroed = 0
-                    for fi_idx, fi in enumerate(range(0, n_samples - frame_size, hop)):
-                        if rms_values[fi_idx] < threshold:
-                            gated[0, fi:fi + frame_size] = 0.0
-                            frames_zeroed += 1
-
-                    total_frames = len(rms_values)
+                    mask = rms >= threshold
+                    frames *= mask.unsqueeze(-1)
+                    frames_zeroed = int((~mask).sum().item())
+                    total_frames = rms.shape[-1]
                     speech_pct = 100 * (1 - frames_zeroed / total_frames) if total_frames else 0
                     logger.info(
                         f"Job {job_id}: speech energy gate — threshold={threshold:.4f}, "
