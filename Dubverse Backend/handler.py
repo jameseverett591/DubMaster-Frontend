@@ -132,129 +132,6 @@ def _find_punctuation_split(
     return best
 
 
-def _split_text_by_ratios(
-    text: str,
-    ratios: list[float],
-    words: list[dict] | None = None,
-    seg_start: float | None = None,
-    seg_end: float | None = None,
-) -> list[tuple[str, float, float]]:
-    """
-    Split *text* into chunks at the given cumulative *ratios* (0 < r < 1).
-    Returns a list of (sub_text, sub_start, sub_end).
-
-    When word timestamps are available they drive both the text boundary and the
-    sub-segment timing. Otherwise timing is apportioned by character ratio and the
-    split is made at the nearest punctuation mark.
-    """
-    if not ratios:
-        return [(text, seg_start, seg_end)]
-
-    total_dur = (seg_end - seg_start) if (seg_start is not None and seg_end is not None) else 0.0
-
-    if words:
-        # Build word entries with char offsets so we can map a text split back
-        # to the word that produced it.
-        word_entries = []
-        offset = 0
-        for w in words:
-            wtext = w.get("word", "")
-            wstart = w.get("start", seg_start)
-            wend = w.get("end", wstart)
-            # Normalise missing word times by apportioning the segment duration.
-            if wstart is None or wend is None or wstart == wend:
-                if seg_start is not None and seg_end is not None:
-                    ratio_start = offset / max(len(text), 1)
-                    ratio_end = (offset + len(wtext)) / max(len(text), 1)
-                    wstart = seg_start + ratio_start * total_dur
-                    wend = seg_start + ratio_end * total_dur
-                else:
-                    wstart = wend = 0.0
-            word_entries.append(
-                {
-                    "word": wtext,
-                    "char_start": offset,
-                    "char_end": offset + len(wtext),
-                    "start": wstart,
-                    "end": wend,
-                }
-            )
-            offset += len(wtext)
-
-        total_chars = max(len(text), 1)
-        split_targets = [int(total_chars * min(max(r, 0.0), 0.999)) for r in ratios]
-        split_points = []
-        current_chars = 0
-        ti = 0
-        for we in word_entries:
-            current_chars = we["char_end"]
-            if ti < len(split_targets) and current_chars >= split_targets[ti]:
-                split_points.append(we["char_end"])
-                ti += 1
-
-        chunks = []
-        last = 0
-        for pt in split_points:
-            chunks.append(text[last:pt])
-            last = pt
-        chunks.append(text[last:])
-
-        # Build (text, start, end) for each chunk from the first/last word that
-        # falls inside it.
-        result = []
-        char_cursor = 0
-        for chunk in chunks:
-            chunk_words = [
-                w
-                for w in word_entries
-                if w["char_start"] >= char_cursor and w["char_end"] <= char_cursor + len(chunk)
-            ]
-            if chunk_words:
-                s = chunk_words[0]["start"]
-                e = chunk_words[-1]["end"]
-            else:
-                ratio = len(chunk) / max(total_chars, 1)
-                s = seg_start + (char_cursor / max(total_chars, 1)) * total_dur
-                e = s + ratio * total_dur
-            result.append((chunk, s, e))
-            char_cursor += len(chunk)
-        return result
-
-    # No word timestamps: punctuation-aware character split with proportional timing.
-    # Prefer a nearby sentence-ending mark; if none is close, fall back to a
-    # closer comma/space boundary so we don't split mid-clause just to reach a
-    # far-away period.
-    total_chars = max(len(text), 1)
-    split_points = []
-    for r in ratios:
-        target = int(total_chars * min(max(r, 0.0), 0.999))
-        max_dist = max(6, int(target * 0.25))
-        split_idx = _find_punctuation_split(text, target, _SENTENCE_END_PUNCT, max_dist=max_dist)
-        if split_idx == target:
-            split_idx = _find_punctuation_split(text, target, _WORD_BOUNDARY_PUNCT)
-        split_idx = max(1, min(split_idx, total_chars - 1))
-        split_points.append(split_idx)
-    split_points = sorted(set(split_points))
-
-    chunks = []
-    last = 0
-    for pt in split_points:
-        chunks.append(text[last:pt])
-        last = pt
-    chunks.append(text[last:])
-
-    result = []
-    cursor = seg_start if seg_start is not None else 0.0
-    for chunk in chunks:
-        ratio = len(chunk) / max(total_chars, 1)
-        dur = total_dur * ratio
-        s = cursor
-        e = cursor + dur
-        result.append((chunk, s, e))
-        cursor = e
-    return result
-
-
 def _split_long_segment(
     seg: dict,
     speaker: str | None = None,
@@ -358,7 +235,6 @@ def _split_segment_by_diarization(
     t_start = float(seg.get("start", 0))
     t_end = float(seg.get("end", t_start))
     text = (seg.get("text") or "").strip()
-    words = seg.get("words")
 
     if not text:
         out = dict(seg)
@@ -385,6 +261,8 @@ def _split_segment_by_diarization(
         else:
             merged.append(inv)
     intervals = merged
+    # Drop zero-length turns so we do not create empty output segments.
+    intervals = [i for i in intervals if i[1] > i[0]]
 
     # No usable diarization: split long segments by punctuation, keep one speaker.
     if not intervals:
@@ -394,30 +272,62 @@ def _split_segment_by_diarization(
     if len(intervals) == 1:
         return _split_long_segment(seg, intervals[0][2], max_duration, max_chars)
 
-    # Multiple speakers: split text across the intervals.
-    speech_time = sum(inv[1] - inv[0] for inv in intervals)
-    if speech_time <= 0:
-        speech_time = t_end - t_start
+    # Multiple speakers: allocate text proportionally to each interval and split at
+    # natural punctuation boundaries when possible.  This preserves the exact number
+    # of speaker turns instead of collapsing ratios into fewer chunks.
+    total_speech = sum(i[1] - i[0] for i in intervals)
+    chars_total = max(len(text), 1)
+    num_intervals = len(intervals)
+    split_points: list[int] = []
+    prev_point = 0
+    cum_speech = 0.0
+    search_end = chars_total - 1
+    for i in range(num_intervals - 1):
+        cum_speech += intervals[i][1] - intervals[i][0]
+        ratio = cum_speech / total_speech
+        raw_target = int(chars_total * min(ratio, 0.999))
+        # Leave at least one character for every remaining interval.
+        max_target = chars_total - (num_intervals - 1 - i)
+        target = min(max(raw_target, prev_point + 1), max_target)
 
-    ratios = []
-    cum = 0.0
-    for inv in intervals[:-1]:
-        cum += inv[1] - inv[0]
-        ratios.append(min(cum / speech_time, 0.999))
+        max_dist = max(3, int((search_end - prev_point) * 0.15))
+        best = target
+        best_dist = float("inf")
+        for j in range(prev_point, search_end):
+            if text[j] in _SENTENCE_END_PUNCT:
+                dist = abs((j + 1) - target)
+                if dist <= max_dist and dist < best_dist:
+                    best = j + 1
+                    best_dist = dist
+        if best == target or best_dist == float("inf"):
+            for j in range(prev_point, search_end):
+                if text[j] in _WORD_BOUNDARY_PUNCT:
+                    dist = abs((j + 1) - target)
+                    if dist < best_dist:
+                        best = j + 1
+                        best_dist = dist
+        best = max(prev_point + 1, min(best, search_end))
+        split_points.append(best)
+        prev_point = best
 
-    chunks = _split_text_by_ratios(text, ratios, words, t_start, t_end)
+    chunks = []
+    last = 0
+    for pt in split_points:
+        chunks.append(text[last:pt])
+        last = pt
+    chunks.append(text[last:])
 
     out = []
-    for (chunk_text, chunk_start, chunk_end), (s, e, sp) in zip(chunks, intervals):
-        if not chunk_text.strip():
+    for chunk, (s, e, sp) in zip(chunks, intervals):
+        if not chunk.strip():
             continue
         # Skip fragments that are too short to be meaningful speech.
-        if (float(chunk_end) - float(chunk_start)) < 0.25 and len(chunk_text.strip()) < 2:
+        if (float(e) - float(s)) < 0.25 and len(chunk.strip()) < 2:
             continue
         sub = dict(seg)
-        sub["text"] = chunk_text.strip()
-        sub["start"] = round(float(chunk_start), 3)
-        sub["end"] = round(float(chunk_end), 3)
+        sub["text"] = chunk.strip()
+        sub["start"] = round(float(s), 3)
+        sub["end"] = round(float(e), 3)
         sub["speaker"] = sp
         sub.pop("words", None)
         # A single speaker may still have a long monologue; split it further.
