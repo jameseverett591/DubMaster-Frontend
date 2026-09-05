@@ -27,6 +27,53 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# STEP 0 — Dubbing style and localization configuration
+# ---------------------------------------------------------------------------
+
+# "natural"  = localized, conversational English dubbing (e.g. Brother Gen -> Broker,
+#              San Gu -> Auntie, disciples -> students when context fits).
+# "literal"  = word-for-word, preserve romanization, no localization.
+DEFAULT_DUBBING_STYLE = os.getenv("DUBBING_STYLE", "natural").lower().strip()
+
+# Optional JSON mapping of source terms/names to localized English forms.
+# Example: {"Brother Gen": "Broker", "San Gu": "Auntie", "disciples": "students"}
+LOCALIZED_NAMES: Dict[str, str] = {}
+try:
+    _raw = os.getenv("DUBBING_LOCALIZED_NAMES", "{}").strip()
+    if _raw:
+        _parsed = json.loads(_raw)
+        if isinstance(_parsed, dict):
+            LOCALIZED_NAMES = {str(k): str(v) for k, v in _parsed.items()}
+except Exception:
+    logger.warning("[POLICY] Could not parse DUBBING_LOCALIZED_NAMES JSON; ignoring")
+
+
+def resolve_dubbing_style(style: Optional[str]) -> str:
+    """Return a valid dubbing style, falling back to the env default."""
+    if style and style.lower().strip() in {"natural", "literal"}:
+        return style.lower().strip()
+    return DEFAULT_DUBBING_STYLE if DEFAULT_DUBBING_STYLE in {"natural", "literal"} else "natural"
+
+
+def get_localized_names(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Return merged localization map (env + per-request override)."""
+    merged = dict(LOCALIZED_NAMES)
+    if extra:
+        merged.update({str(k): str(v) for k, v in extra.items()})
+    return merged
+
+
+def get_dubbing_system_prompt(style: Optional[str] = None) -> str:
+    """Select the adaptation/system prompt for the requested dubbing style."""
+    return NATURAL_DUBBING_SYSTEM_PROMPT if resolve_dubbing_style(style) == "natural" else DUBBING_SYSTEM_PROMPT
+
+
+def get_translation_system_prompt(style: Optional[str] = None) -> str:
+    """Select the translation prompt for the requested dubbing style."""
+    return NATURAL_TRANSLATION_SYSTEM_PROMPT if resolve_dubbing_style(style) == "natural" else LITERAL_TRANSLATION_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
 # STEP 1 — Global Dubbing System Prompt
 # ---------------------------------------------------------------------------
 
@@ -64,6 +111,113 @@ CRITICAL RULES:
 - Do not invent off-screen dialogue.
 - Preserve pacing suitable for cinematic dubbing.
 - Each segment is a SEPARATE utterance — never merge, never cross-reference."""
+
+
+NATURAL_DUBBING_SYSTEM_PROMPT = """You are a professional cinematic dubbing adapter.
+
+Your job is to adapt dialogue for spoken film dubbing in natural, conversational English.
+
+CRITICAL RULES:
+- Never add information not explicitly present.
+- Never invent dialogue.
+- Preserve exact semantic meaning.
+- Preserve emotional intent.
+- Preserve character personality.
+- Prefer short conversational English.
+- Keep dialogue concise.
+- Optimize for spoken performance.
+- Preserve lip-sync suitability.
+- Avoid exposition.
+- Avoid formal phrasing.
+- Avoid unnecessary filler words.
+- Avoid idioms unless culturally necessary.
+- Do NOT invent off-screen dialogue or imagined responses.
+- Do NOT add reactions, acknowledgements, or filler.
+- Do NOT merge segments or cross-reference dialogue between segments.
+- Do NOT prefix lines with character names or speaker tags.
+- Each segment is independent. Only adapt the text provided for that segment.
+- ONLY work with the text explicitly provided in the input. Do NOT use external knowledge of movies, books, historical facts, or cultural context.
+- Established proper names (Ip Man, Wing Chun, Master Chin, etc.) must be preserved EXACTLY. Do NOT "correct" their romanization.
+- Relationship and role terms may be localized to natural English when the context is clear: e.g., "Brother Gen" (a real-estate broker showing a property) may become "Broker"; "San Gu" (an older female neighbor/landlady) may become "Auntie"; "disciples" in a martial-arts school context may become "students". Choose the natural English form that fits the scene and speaker relationship.
+- Tokens like [[ENTITY:n]] are protected placeholders. Preserve them EXACTLY. Do NOT replace them with real names.
+- Do not generate acknowledgements or filler reactions.
+- Do not invent off-screen dialogue.
+- Preserve pacing suitable for cinematic dubbing.
+- Each segment is a SEPARATE utterance — never merge, never cross-reference."""
+
+
+LITERAL_TRANSLATION_SYSTEM_PROMPT = (
+    "You are a professional subtitler and translator.\n\n"
+    "Your ONLY job is to produce a FAITHFUL, MEANING-ACCURATE translation.\n\n"
+    "ABSOLUTE RULES:\n"
+    "- Translate the EXACT meaning of each word. Do NOT substitute synonyms.\n"
+    "  Example: '神秘' = 'secretive' — do NOT change it to 'mysterious'.\n"
+    "- Do NOT paraphrase, adapt, or rewrite for 'naturalness'.\n"
+    "- Do NOT add, remove, or combine any words beyond what is needed to form a grammatical sentence.\n"
+    "- Each input line starts with a marker like [[SEG-a3f9c2]]. Your answer for that line MUST start with the EXACT SAME marker, unchanged, followed by your translation.\n"
+    "  Answer EVERY marker exactly once, one per output line. NEVER merge two markers'\n"
+    "  content into one answer line, NEVER skip a marker, NEVER invent a marker that\n"
+    "  wasn't in the input.\n"
+    "- Do NOT prefix lines with speaker names (e.g. NEVER write 'Ip Man: ...').\n"
+    "- Do NOT echo the timing value (e.g. '(1.2s)') in your answer — but DO echo the marker.\n"
+    "- XGLO###X and XFUZ###X tokens (e.g. XGLO135X, XFUZ002X) are glossary placeholders.\n"
+    "  Preserve them CHARACTER-FOR-CHARACTER. Do NOT rename, reformat, or convert them.\n"
+    "  WRONG: ENTITY:135  RIGHT: XGLO135X\n"
+    "- [[ENTITY:n]] tokens are also protected placeholders — keep them EXACTLY.\n"
+    "- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.\n"
+    "- NEVER invent character names. Use only names that appear in the source text.\n"
+    "- NEVER hallucinate. ONLY translate what is written.\n\n"
+    "CHINESE IDIOM RULE (critical for accuracy):\n"
+    "Four-character set phrases (成語/chengyu) and Cantonese fixed expressions MUST be\n"
+    "translated by their ESTABLISHED MEANING, never character-by-character.\n"
+    "Rendering each character literally will produce nonsense — always use the phrase meaning.\n"
+    "Examples:\n"
+    "  推三阻四 → 'making excuses' or 'keep dodging'  (NOT 'push three block four')\n"
+    "  不打不相識 → 'you can't be friends without a fight'  (NOT 'no hit no know each other')\n"
+    "  步步為營 → 'advance cautiously'  (NOT 'step by step make camp')\n"
+    "  馬到成功 → 'immediate success'  (NOT 'horse arrive become success')\n"
+    "If a phrase is a known chengyu or set expression, translate its meaning, not its words."
+)
+
+
+NATURAL_TRANSLATION_SYSTEM_PROMPT = (
+    "You are a professional cinematic dubbing translator.\n\n"
+    "Your job is to produce a FAITHFUL but NATURAL spoken-English dubbing translation.\n\n"
+    "ABSOLUTE RULES:\n"
+    "- Preserve the exact meaning and emotional intent of every line.\n"
+    "- You MAY rephrase for natural spoken English, choose fitting synonyms, and localize address/role terms when the scene clearly supports it.\n"
+    "- Do NOT add, remove, or combine any utterances beyond what is needed for a grammatical, speakable line.\n"
+    "- Each input line starts with a marker like [[SEG-a3f9c2]]. Your answer for that line MUST start with the EXACT SAME marker, unchanged, followed by your translation.\n"
+    "  Answer EVERY marker exactly once, one per output line. NEVER merge two markers'\n"
+    "  content into one answer line, NEVER skip a marker, NEVER invent a marker that\n"
+    "  wasn't in the input.\n"
+    "- Do NOT prefix lines with speaker names (e.g. NEVER write 'Ip Man: ...').\n"
+    "- Do NOT echo the timing value (e.g. '(1.2s)') in your answer — but DO echo the marker.\n"
+    "- XGLO###X and XFUZ###X tokens (e.g. XGLO135X, XFUZ002X) are glossary placeholders.\n"
+    "  Preserve them CHARACTER-FOR-CHARACTER. Do NOT rename, reformat, or convert them.\n"
+    "  WRONG: ENTITY:135  RIGHT: XGLO135X\n"
+    "- [[ENTITY:n]] tokens are also protected placeholders — keep them EXACTLY.\n"
+    "- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.\n"
+    "- NEVER invent character names. Use only names that appear in the source text or the name/localization mappings provided below.\n"
+    "- NEVER hallucinate. ONLY translate what is written.\n\n"
+    "LOCALIZATION GUIDE:\n"
+    "- Established proper names (Ip Man, Wing Chun, Master Chin, etc.) must be preserved EXACTLY.\n"
+    "- Address and role terms may be localized to natural English when context is clear. Examples:\n"
+    "  * A man showing a property or acting as an agent → 'Broker' rather than 'Brother Gen'.\n"
+    "  * An older female neighbor/landlady/family friend → 'Auntie' rather than 'San Gu' or 'Third Aunt'.\n"
+    "  * Students/apprentices in a martial-arts school → 'students' is acceptable if it fits the scene.\n"
+    "- Choose the form that sounds most natural to a native English film-dub audience without adding information.\n\n"
+    "CHINESE IDIOM RULE (critical for accuracy):\n"
+    "Four-character set phrases (成語/chengyu) and Cantonese fixed expressions MUST be\n"
+    "translated by their ESTABLISHED MEANING, never character-by-character.\n"
+    "Rendering each character literally will produce nonsense — always use the phrase meaning.\n"
+    "Examples:\n"
+    "  推三阻四 → 'making excuses' or 'keep dodging'  (NOT 'push three block four')\n"
+    "  不打不相識 → 'you can't be friends without a fight'  (NOT 'no hit no know each other')\n"
+    "  步步為營 → 'advance cautiously'  (NOT 'step by step make camp')\n"
+    "  馬到成功 → 'immediate success'  (NOT 'horse arrive become success')\n"
+    "If a phrase is a known chengyu or set expression, translate its meaning, not its words."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +436,25 @@ def build_name_mapping_prompt(source_texts: list) -> str:
     for alias, canonical in sorted(detected):
         lines.append(f'- "{alias}" → "{canonical}"')
     lines.append("Do NOT change romanization. Do NOT use alternate spellings from your training data.")
+    return "\n".join(lines)
+
+
+def build_localized_name_mapping_prompt(source_texts: list, extra: Optional[Dict[str, str]] = None) -> str:
+    """Return a prompt section listing role/address terms that may be localized for natural dubbing."""
+    names = get_localized_names(extra)
+    if not names:
+        return ""
+    blob = "\n".join(str(t) for t in (source_texts or []))
+    detected = []
+    for source, target in names.items():
+        if source in blob:
+            detected.append((source, target))
+    if not detected:
+        return ""
+    lines = ["LOCALIZED ROLE/ADDRESS TERMS — use these natural English forms when the scene supports them:"]
+    for source, target in detected:
+        lines.append(f'- "{source}" may be rendered as "{target}" when context fits.')
+    lines.append("Do NOT invent other names or roles; preserve established proper names exactly.")
     return "\n".join(lines)
 
 

@@ -820,6 +820,8 @@ class DubbingService:
         adaptation_selections: Optional[Dict[str, str]] = None,
         traits_mapping: Optional[Dict[str, List[str]]] = None,
         character_profiles: Optional[List[Dict]] = None,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> Optional[Dict[str, str]]:
         logger.info(f"Starting dubbing for job {job_id}")
         logger.info(f"Voice mapping received: {voice_mapping}")
@@ -1006,6 +1008,8 @@ class DubbingService:
                     target_norm,
                     character_profiles=character_profiles,
                     velma_context=_velma_context,
+                    dubbing_style=dubbing_style,
+                    localized_aliases=localized_aliases,
                 )
                 logger.info(f"Translation complete for {len(transcript)} segments")
                 if transcript:

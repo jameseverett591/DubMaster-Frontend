@@ -4354,6 +4354,8 @@ async def process_dubbing_pipeline(
     adaptation_selections: dict | None = None,
     traits_mapping: dict | None = None,
     character_profiles: list | None = None,
+    dubbing_style: str | None = None,
+    localized_aliases: dict | None = None,
 ):
     try:
         if source_lang != target_lang:
@@ -4383,6 +4385,8 @@ async def process_dubbing_pipeline(
             adaptation_selections=adaptation_selections,
             traits_mapping=traits_mapping,
             character_profiles=character_profiles,
+            dubbing_style=dubbing_style,
+            localized_aliases=localized_aliases,
         )
 
         if dubbed_video:
@@ -4651,6 +4655,8 @@ async def dub_video(request: DubRequest, http_request: Request, background_tasks
         adaptation_selections=request.adaptation_selections,
         traits_mapping=job.traits_mapping,
         character_profiles=request.character_profiles or job.character_profiles,
+        dubbing_style=request.dubbing_style,
+        localized_aliases=request.localized_aliases,
     )
 
     return DubResponse(
@@ -4745,6 +4751,8 @@ async def translate_only(request: DubRequest, http_request: Request):
             target_lang,
             character_profiles=request.character_profiles or (job.character_profiles if job else None),
             velma_context=_velma_context,
+            dubbing_style=request.dubbing_style,
+            localized_aliases=request.localized_aliases,
         )
 
         _NOISE_WORDS = {
@@ -4873,6 +4881,8 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
         adaptation_selections=request.adaptation_selections,
         traits_mapping=job.traits_mapping,
         character_profiles=request.character_profiles or job.character_profiles,
+        dubbing_style=request.dubbing_style,
+        localized_aliases=request.localized_aliases,
     )
 
     return DubResponse(
@@ -6533,6 +6543,8 @@ async def retranslate_job(job_id: str, request: Request):
             target_lang,
             character_profiles=getattr(job, "character_profiles", None),
             velma_context=velma_context,
+            dubbing_style=getattr(job, "dubbing_style", None),
+            localized_aliases=getattr(job, "localized_aliases", None),
         )
     except Exception as exc:
         logger.error(f"[RETRANSLATE] Translation failed for job {job_id}: {exc}")

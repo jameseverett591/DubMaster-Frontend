@@ -25,6 +25,9 @@ from app.services.adaptation_engine.policy import (
     protect_entities,
     restore_entities,
     build_name_mapping_prompt,
+    build_localized_name_mapping_prompt,
+    get_translation_system_prompt,
+    get_dubbing_system_prompt,
     fix_translation_names,
 )
 
@@ -550,6 +553,8 @@ class TranslationService:
         target_language: str,
         character_profiles: Optional[List[Dict]] = None,
         velma_context: Optional[Dict] = None,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> List[Dict]:
         # Load the glossary for the incoming source language so every downstream
         # call to _apply_glossary_pre/_post uses the correct language-specific terms.
@@ -650,6 +655,8 @@ class TranslationService:
                     segments, target_norm, source_norm,
                     character_profiles=character_profiles,
                     velma_context=velma_context,
+                    dubbing_style=dubbing_style,
+                    localized_aliases=localized_aliases,
                 )
                 if result is not None:
                     translated = result
@@ -663,6 +670,8 @@ class TranslationService:
                 result = await self._translate_segments_gpt(
                     segments, target_norm, source_norm,
                     character_profiles=character_profiles,
+                    dubbing_style=dubbing_style,
+                    localized_aliases=localized_aliases,
                 )
                 if result is not None:
                     return result
@@ -748,6 +757,8 @@ class TranslationService:
         source_language: str = "yue",
         character_profiles: Optional[List[Dict]] = None,
         velma_context: Optional[Dict] = None,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> Optional[List[Dict]]:
         """
         Translate segments using Claude via the Anthropic API.
@@ -769,7 +780,8 @@ class TranslationService:
                 chunk = segments[start:start + _CHUNK_SIZE]
                 chunk_result = _aligned(
                     await self._translate_segments_claude(
-                        chunk, target_language, source_language, character_profiles
+                        chunk, target_language, source_language, character_profiles,
+                        dubbing_style=dubbing_style, localized_aliases=localized_aliases,
                     ),
                     chunk, "Claude", start,
                 )
@@ -788,7 +800,8 @@ class TranslationService:
                     )
                     chunk_result = _aligned(
                         await self._translate_segments_claude(
-                            chunk, target_language, source_language, character_profiles
+                            chunk, target_language, source_language, character_profiles,
+                            dubbing_style=dubbing_style, localized_aliases=localized_aliases,
                         ),
                         chunk, "Claude (retry)", start,
                     )
@@ -799,7 +812,8 @@ class TranslationService:
                     )
                     chunk_result = _aligned(
                         await self._translate_segments_gpt(
-                            chunk, target_language, source_language, character_profiles
+                            chunk, target_language, source_language, character_profiles,
+                            dubbing_style=dubbing_style, localized_aliases=localized_aliases,
                         ),
                         chunk, "GPT-4", start,
                     )
@@ -851,44 +865,17 @@ class TranslationService:
                 for i, p in enumerate(protected)
             )
 
-        # Literal translation system prompt — does NOT use DUBBING_SYSTEM_PROMPT because
-        # that prompt instructs the model to "prefer short conversational English" and
-        # "optimize for spoken performance", which causes synonym substitution and
-        # paraphrasing that breaks fidelity to the source script.
-        _LITERAL_TRANSLATION_SYSTEM_PROMPT = (
-            "You are a professional subtitler and translator.\n\n"
-            "Your ONLY job is to produce a FAITHFUL, MEANING-ACCURATE translation.\n\n"
-            "ABSOLUTE RULES:\n"
-            "- Translate the EXACT meaning of each word. Do NOT substitute synonyms.\n"
-            "  Example: '神秘' = 'secretive' — do NOT change it to 'mysterious'.\n"
-            "- Do NOT paraphrase, adapt, or rewrite for 'naturalness'.\n"
-            "- Do NOT add, remove, or combine any words beyond what is needed to form a grammatical sentence.\n"
-            "- Each input line starts with a marker like [[SEG-a3f9c2]]. Your answer for that\n"
-            "  line MUST start with the EXACT SAME marker, unchanged, followed by your translation.\n"
-            "  Answer EVERY marker exactly once, one per output line. NEVER merge two markers'\n"
-            "  content into one answer line, NEVER skip a marker, NEVER invent a marker that\n"
-            "  wasn't in the input.\n"
-            "- Do NOT prefix lines with speaker names (e.g. NEVER write 'Ip Man: ...').\n"
-            "- Do NOT echo the timing value (e.g. '(1.2s)') in your answer — but DO echo the marker.\n"
-            "- XGLO###X and XFUZ###X tokens (e.g. XGLO135X, XFUZ002X) are glossary placeholders.\n"
-            "  Preserve them CHARACTER-FOR-CHARACTER. Do NOT rename, reformat, or convert them.\n"
-            "  WRONG: ENTITY:135  RIGHT: XGLO135X\n"
-            "- [[ENTITY:n]] tokens are also protected placeholders — keep them EXACTLY.\n"
-            "- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.\n"
-            "- NEVER invent character names. Use only names that appear in the source text.\n"
-            "- NEVER hallucinate. ONLY translate what is written.\n\n"
-            "CHINESE IDIOM RULE (critical for accuracy):\n"
-            "Four-character set phrases (成語/chengyu) and Cantonese fixed expressions MUST be\n"
-            "translated by their ESTABLISHED MEANING, never character-by-character.\n"
-            "Rendering each character literally will produce nonsense — always use the phrase meaning.\n"
-            "Examples:\n"
-            "  推三阻四 → 'making excuses' or 'keep dodging'  (NOT 'push three block four')\n"
-            "  不打不相識 → 'you can't be friends without a fight'  (NOT 'no hit no know each other')\n"
-            "  步步為營 → 'advance cautiously'  (NOT 'step by step make camp')\n"
-            "  馬到成功 → 'immediate success'  (NOT 'horse arrive become success')\n"
-            "If a phrase is a known chengyu or set expression, translate its meaning, not its words."
-        )
-        system_prompt_parts = [_LITERAL_TRANSLATION_SYSTEM_PROMPT]
+        # Select the translation prompt based on the requested dubbing style.
+        # "literal" (default env fallback) preserves romanization and forbids natural rewrites.
+        # "natural" allows localized role/address terms and spoken-English smoothing.
+        _translation_system_prompt = get_translation_system_prompt(dubbing_style)
+        system_prompt_parts = [_translation_system_prompt]
+
+        # Optional per-job localization mappings (e.g., Brother Gen -> Broker).
+        _localized_mapping = build_localized_name_mapping_prompt(texts, extra=localized_aliases)
+        if _localized_mapping:
+            system_prompt_parts.append("")
+            system_prompt_parts.append(_localized_mapping)
 
         # CHARACTER_REGISTRY injection suppressed — pre-baked character profiles caused
         # name hallucination (e.g. "Master Ip" -> "Brother Man"). Per-job character_profiles
@@ -1079,7 +1066,8 @@ class TranslationService:
                 result: List[Dict] = []
                 for i, seg in enumerate(segments):
                     single = await self._translate_segments_claude(
-                        [seg], target_language, source_language, character_profiles, velma_context
+                        [seg], target_language, source_language, character_profiles, velma_context,
+                        dubbing_style=dubbing_style, localized_aliases=localized_aliases,
                     )
                     if single is None:
                         logger.error(
@@ -1167,6 +1155,8 @@ class TranslationService:
         source_language: str = "yue",
         character_profiles: Optional[List[Dict]] = None,
         allow_recursive: bool = True,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> Optional[List[Dict]]:
         """
         Translate segments using GPT-4 via Azure OpenAI or OpenAI API.
@@ -1224,7 +1214,7 @@ class TranslationService:
             )
 
         # Build centralized system prompt from policy layer
-        system_prompt_parts = [DUBBING_SYSTEM_PROMPT]
+        system_prompt_parts = [get_dubbing_system_prompt(dubbing_style)]
 
         detected_profile = detect_character_from_text("\n".join(texts))
         if detected_profile:
@@ -1235,6 +1225,11 @@ class TranslationService:
         if name_mapping:
             system_prompt_parts.append("")
             system_prompt_parts.append(name_mapping)
+
+        localized_mapping = build_localized_name_mapping_prompt(texts, extra=localized_aliases)
+        if localized_mapping:
+            system_prompt_parts.append("")
+            system_prompt_parts.append(localized_mapping)
 
         # Per-job character profiles (Fix 2)
         if character_profiles:
@@ -1364,6 +1359,8 @@ class TranslationService:
                         single = await self._translate_segments_gpt(
                             [seg], target_language, source_language, character_profiles,
                             allow_recursive=False,
+                            dubbing_style=dubbing_style,
+                            localized_aliases=localized_aliases,
                         )
                     else:
                         # Base case: the single-segment GPT call already failed;
