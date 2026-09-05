@@ -4659,8 +4659,16 @@ async def dub_video(request: DubRequest, http_request: Request, background_tasks
 
     # === DubMaster pipeline (default) ===
     job.dubbing_engine = "dubmaster"
-    job.dubbing_style = request.dubbing_style or job.dubbing_style or "natural"
-    job.localized_aliases = request.localized_aliases or job.localized_aliases
+    job.dubbing_style = (
+        request.dubbing_style
+        if request.dubbing_style is not None
+        else (job.dubbing_style or "natural")
+    )
+    job.localized_aliases = (
+        request.localized_aliases
+        if request.localized_aliases is not None
+        else job.localized_aliases
+    )
 
     await job_manager.update_job_status(
         request.job_id,
@@ -4762,6 +4770,19 @@ async def translate_only(request: DubRequest, http_request: Request):
         seg["segment_id"] = str(i)
         seg["source_text"] = seg.get("text", "")
 
+    _effective_dubbing_style = (
+        request.dubbing_style
+        if request.dubbing_style is not None
+        else (job.dubbing_style or "natural")
+    )
+    _effective_localized_aliases = (
+        request.localized_aliases
+        if request.localized_aliases is not None
+        else job.localized_aliases
+    )
+    job.dubbing_style = _effective_dubbing_style
+    job.localized_aliases = _effective_localized_aliases
+
     if source_lang != target_lang:
         _velma_context = None
         _velma_path = os.path.join("data", "velma", f"{request.job_id}.json")
@@ -4778,8 +4799,8 @@ async def translate_only(request: DubRequest, http_request: Request):
             target_lang,
             character_profiles=request.character_profiles or (job.character_profiles if job else None),
             velma_context=_velma_context,
-            dubbing_style=request.dubbing_style,
-            localized_aliases=request.localized_aliases,
+            dubbing_style=_effective_dubbing_style,
+            localized_aliases=_effective_localized_aliases,
         )
 
         _NOISE_WORDS = {
@@ -4798,9 +4819,6 @@ async def translate_only(request: DubRequest, http_request: Request):
         # characters instead of the English translation.
         for s in transcript_dicts:
             s.pop("words", None)
-
-    job.dubbing_style = request.dubbing_style or job.dubbing_style or "natural"
-    job.localized_aliases = request.localized_aliases or job.localized_aliases
 
     output_dir = os.path.join(settings.DUBBED_DIR, request.job_id)
     os.makedirs(output_dir, exist_ok=True)
@@ -4893,8 +4911,16 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
             source_lang = "auto"
     source_lang = normalize_language_code(source_lang, allow_auto=True)
 
-    job.dubbing_style = request.dubbing_style or job.dubbing_style or "natural"
-    job.localized_aliases = request.localized_aliases or job.localized_aliases
+    job.dubbing_style = (
+        request.dubbing_style
+        if request.dubbing_style is not None
+        else (job.dubbing_style or "natural")
+    )
+    job.localized_aliases = (
+        request.localized_aliases
+        if request.localized_aliases is not None
+        else job.localized_aliases
+    )
 
     await job_manager.update_job_status(
         request.job_id,

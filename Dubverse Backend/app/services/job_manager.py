@@ -130,7 +130,7 @@ class JobManager:
                 video_filename=video_filename,
                 video_path=video_path,
                 video_size=video_size,
-                dubbing_style=dubbing_style,
+                dubbing_style=dubbing_style or "natural",
                 localized_aliases=localized_aliases,
                 created_at=datetime.now(),
                 updated_at=datetime.now(),
