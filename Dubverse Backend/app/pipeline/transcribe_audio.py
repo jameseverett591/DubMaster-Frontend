@@ -29,6 +29,30 @@ def build_initial_prompt(character_roster: list | None = None) -> str:
 
 INITIAL_PROMPT = build_initial_prompt()
 
+# Phrases Whisper frequently hallucinates from silence, music, SFX, or generic
+# subtitle boilerplate.  Stored lowercase; matched after stripping trailing
+# punctuation and lower-casing the segment text.
+_HALLUCINATION_PHRASES = {
+    "thanks for watching",
+    "thank you for watching",
+    "please subscribe",
+    "don't forget to subscribe",
+    "like and subscribe",
+    "subtitles by",
+    "subtitle by",
+    "amara.org",
+    "i bear witness there is no god but god",
+    "there is no god but god",
+    "allahu akbar",
+    "subhanallah",
+    "mashallah",
+    "bismillah",
+    "in the name of allah",
+    "assalamu alaikum",
+    "alhamdulillah",
+    "la ilaha illallah",
+}
+
 _WHISPER_MODEL = None
 
 
@@ -97,6 +121,7 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
     """
     import re as _re
     filtered = []
+    _seen_texts: Dict[str, float] = {}
     for seg in raw_segments:
         text = seg["text"].strip()
         if not text or _re.fullmatch(r'[\s\W]*', text):
@@ -118,6 +143,25 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
             logger.info(
                 f"[HALLUCINATION] Rejected sub-300ms segment ({_dur*1000:.0f}ms): "
                 f"'{text[:60]}' at {seg.get('start','?')}-{seg.get('end','?')}"
+            )
+            continue
+
+        # Whisper's per-segment no_speech_prob is a strong signal for
+        # hallucinations forced onto silence, music, or SFX.  Real speech
+        # almost always has no_speech_prob < 0.5; anything higher with
+        # low logprob is a phantom.
+        _avg_lp = seg.get("avg_logprob", 0.0)
+        _nsp = seg.get("no_speech_prob")
+        if _nsp is not None and _nsp > 0.55:
+            logger.info(
+                f"[HALLUCINATION] Rejected high no_speech_prob ({_nsp:.2f}): "
+                f"'{text[:60]}' at {seg.get('start', '?')}-{seg.get('end', '?')}"
+            )
+            continue
+        if _nsp is not None and _nsp > 0.35 and _avg_lp < -0.6:
+            logger.info(
+                f"[HALLUCINATION] Rejected no_speech_prob={_nsp:.2f} with low logprob ({_avg_lp:.2f}): "
+                f"'{text[:60]}' at {seg.get('start', '?')}-{seg.get('end', '?')}"
             )
             continue
 
@@ -147,23 +191,15 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
             )
             continue
 
-        # Reject known YouTube/subtitle boilerplate hallucinations that Whisper
-        # produces when processing near-silence or background music in CJK audio.
-        _HALLUCINATION_PHRASES = {
-            "thanks for watching",
-            "thank you for watching",
-            "please subscribe",
-            "don't forget to subscribe",
-            "like and subscribe",
-            "subtitles by",
-            "subtitle by",
-            "amara.org",
-        }
-        if text.lower().rstrip('!.,') in _HALLUCINATION_PHRASES or any(
-            ph in text.lower() for ph in _HALLUCINATION_PHRASES
+        # Reject known YouTube/subtitle boilerplate and religious-phrase
+        # hallucinations that Whisper produces from near-silence or background
+        # music (e.g. the shahada / "Allahu Akbar" loop).
+        _norm_text = text.lower().rstrip('!.，。,')
+        if _norm_text in _HALLUCINATION_PHRASES or any(
+            ph in _norm_text for ph in _HALLUCINATION_PHRASES
         ):
             logger.info(
-                f"[HALLUCINATION] Rejected boilerplate phrase: '{text}' "
+                f"[HALLUCINATION] Rejected known hallucination phrase: '{text}' "
                 f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
             )
             continue
@@ -221,6 +257,28 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
                     f"at {seg.get('start','?')}-{seg.get('end','?')}"
                 )
                 continue
+
+        # Reject Arabic-script text unless the source language is an Arabic-script
+        # language.  This catches the standalone "الله." hallucination and similar
+        # script mismatches regardless of segment duration.
+        _ARABIC_LANGS = {"ar", "fa", "ur", "ps", "ku", "sd", "ug"}
+        if _re.search(r'[\u0600-\u06ff\u0750-\u077f]', text) and source_language not in _ARABIC_LANGS:
+            logger.info(
+                f"[HALLUCINATION] Rejected Arabic-script segment in non-Arabic audio: '{text[:60]}' "
+                f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
+            )
+            continue
+
+        # Reject exact-text duplicates that Whisper emits from sustained silence
+        # or looping noise within a short window (e.g. repeated "I bear witness...").
+        _dur = float(seg.get("end", 0)) - float(seg.get("start", 0))
+        if text in _seen_texts and (seg.get("start", 0) - _seen_texts[text] < 60.0) and _dur < 5.0:
+            logger.info(
+                f"[HALLUCINATION] Rejected repeated text within 60s: '{text[:60]}' "
+                f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
+            )
+            continue
+        _seen_texts[text] = seg.get("start", 0)
 
         if strict:
             dur = seg["end"] - seg["start"]
@@ -438,10 +496,10 @@ def transcribe_audio(
             vad_threshold = float(os.getenv("VAD_THRESHOLD", "0.20"))
             use_vad = vad_threshold > 0
         else:
-            # Cantonese previously disabled VAD (0.0) but this causes hallucinations
-            # on silence/SFX regions. Use a moderate threshold — the two-pass gap
-            # recovery will catch real dialogue that VAD aggressively clips.
-            vad_threshold = 0.15 if _is_yue else 0.05
+            # A permissive VAD threshold (0.05) lets Whisper transcribe silence and
+            # music, producing the classic religious-phrase hallucinations on quiet
+            # intros. 0.15 is still conservative enough to keep normal dialogue.
+            vad_threshold = 0.15
             use_vad = True
 
         segments, info = _do_transcribe(use_vad, vad_threshold)
@@ -481,6 +539,8 @@ def transcribe_audio(
                     "text": seg.text,
                     "confidence": confidence,
                     "avg_logprob": avg_lp,
+                    "no_speech_prob": getattr(seg, "no_speech_prob", None),
+                    "compression_ratio": getattr(seg, "compression_ratio", None),
                     "words": word_list,
                 })
             return raw
@@ -665,6 +725,12 @@ def transcribe_audio(
 
         # ---------- Filter repetition loops ----------
         raw_segments = _filter_repetition_loops(raw_segments)
+
+        # Final hallucination pass: two-pass gap recovery can re-introduce loops or
+        # known phrases that the initial VAD pass suppressed.  Run a non-strict
+        # filter over the merged result before timestamp bleed correction.
+        _final_lang = whisper_language or info.language or ""
+        raw_segments = _filter_hallucinations(raw_segments, strict=False, source_language=_final_lang)
 
         # ---------- Fix Whisper timestamp bleed ----------
         raw_segments = _fix_timestamp_bleed(raw_segments)
