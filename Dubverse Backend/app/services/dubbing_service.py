@@ -1872,6 +1872,8 @@ class DubbingService:
                     video_path=video_path,
                     accompaniment_path=accompaniment_path,
                     video_duration=video_duration,
+                    dubbing_style=dubbing_style,
+                    localized_aliases=localized_aliases,
                 )
                 return {
                     "output_path": output_video,
@@ -3406,6 +3408,8 @@ class DubbingService:
         video_path: str = "",
         accompaniment_path: Optional[str] = None,
         video_duration: float = 0.0,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> None:
         path = os.path.join(output_dir, "segments.json")
         snapshot_path = os.path.join(output_dir, "segments_snapshot.json")
