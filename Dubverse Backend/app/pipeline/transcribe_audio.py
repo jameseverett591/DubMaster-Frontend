@@ -120,13 +120,18 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
       - Short single-word Latin text that looks like noise (e.g. "pave", "the")
     """
     import re as _re
+    _CJK_LANGS = {"zh", "yue", "ja", "ko", "cmn"}
+    _ARABIC_LANGS = {"ar", "fa", "ur", "ps", "ku", "sd", "ug"}
     filtered = []
     _seen_texts: Dict[str, float] = {}
     for seg in raw_segments:
         text = seg["text"].strip()
+        _avg_lp = seg.get("avg_logprob", 0.0)
+        _nsp = seg.get("no_speech_prob")
+        _suspicious = (_nsp is not None and _nsp > 0.3) or _avg_lp < -0.5
         if not text or _re.fullmatch(r'[\s\W]*', text):
             continue
-        if filtered and text == filtered[-1]["text"].strip():
+        if filtered and text == filtered[-1]["text"].strip() and _suspicious:
             continue
         if len(text) <= 1:
             continue
@@ -150,8 +155,6 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
         # hallucinations forced onto silence, music, or SFX.  Real speech
         # almost always has no_speech_prob < 0.5; anything higher with
         # low logprob is a phantom.
-        _avg_lp = seg.get("avg_logprob", 0.0)
-        _nsp = seg.get("no_speech_prob")
         if _nsp is not None and _nsp > 0.55:
             logger.info(
                 f"[HALLUCINATION] Rejected high no_speech_prob ({_nsp:.2f}): "
@@ -181,10 +184,18 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
 
         # Reject short single-word Latin-script hallucinations.
         # Whisper often produces nonsense English words during fight scenes
-        # or silent moments (e.g. "pave", "the", "you").  Real dialogue
-        # in CJK audio won't be a single short English word.
+        # or silent moments (e.g. "pave", "the", "you").  This must not
+        # discard valid code-switched words ("OK", "Yes", "Bye") in CJK
+        # audio, so we only drop the short word when the ASR confidence or
+        # no-speech signal is suspicious.
         words = text.split()
-        if len(words) == 1 and _re.fullmatch(r'[a-zA-Z]+', text) and len(text) <= 5:
+        if (
+            source_language in _CJK_LANGS
+            and len(words) == 1
+            and _re.fullmatch(r'[a-zA-Z]+', text)
+            and len(text) <= 5
+            and _suspicious
+        ):
             logger.info(
                 f"[HALLUCINATION] Rejected short Latin word: '{text}' "
                 f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
@@ -210,18 +221,20 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
         # Reject segments with NO CJK characters when the source language
         # is CJK.  Catches ALL wrong-script hallucinations: Cyrillic (Согон!),
         # Telugu, Latin, Arabic, Devanagari, etc.
-        _CJK_LANGS = {"zh", "yue", "ja", "ko", "cmn"}
         if source_language in _CJK_LANGS:
             cjk_chars = len(_re.findall(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', text))
             non_space = len(_re.findall(r'\S', text))
             cjk_ratio = cjk_chars / max(non_space, 1)
 
-            # PRIMARY: reject any segment with zero CJK characters when transcribing
-            # CJK audio.  Real Cantonese/Mandarin dialogue always contains CJK chars.
-            # Pure-Latin/Cyrillic/etc. output is a hallucination produced by Whisper
-            # when it encounters fight sounds, music, or silence — e.g. "Always a
-            # stunner", "Groove", "Согон!".  This is the strongest signal we have.
-            if cjk_chars == 0 and len(text.strip()) > 1:
+            # PRIMARY: reject zero-CJK segments in CJK audio, but only when they are
+            # long enough to be wrong-script hallucinations ("Always a stunner",
+            # "Groove", "Согон!") AND have a suspicious confidence/no-speech signal.
+            # This preserves valid short code-switched words like "OK", "Yes", "Bye".
+            if (
+                cjk_chars == 0
+                and len(text.strip()) > 6
+                and _suspicious
+            ):
                 logger.info(
                     f"[HALLUCINATION] Rejected zero-CJK segment in {source_language} audio: "
                     f"'{text[:60]}' at {seg.get('start', '?')}-{seg.get('end', '?')}"
@@ -230,10 +243,12 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
 
             # SECONDARY: mixed-script garbage — some CJK but ratio too low.
             # Catches "而已 ੁ ੀ ਗ਼" where a stray CJK word is buried in Gurmukhi noise.
+            # Only trigger when there is at least one CJK char, so pure code-switched
+            # Latin words (e.g. "OK", "Yes", "Bye") are not discarded.
             min_ratio = 0.3
             if source_language == "yue":
                 min_ratio = 0.15
-            if cjk_ratio < min_ratio and cjk_chars < 6 and len(text.strip()) > 1:
+            if 0 < cjk_chars < 6 and cjk_ratio < min_ratio and _suspicious:
                 logger.info(
                     f"[HALLUCINATION] Rejected low-CJK-ratio segment ({cjk_ratio:.0%}): '{text[:60]}' "
                     f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
@@ -261,7 +276,6 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
         # Reject Arabic-script text unless the source language is an Arabic-script
         # language.  This catches the standalone "الله." hallucination and similar
         # script mismatches regardless of segment duration.
-        _ARABIC_LANGS = {"ar", "fa", "ur", "ps", "ku", "sd", "ug"}
         if _re.search(r'[\u0600-\u06ff\u0750-\u077f]', text) and source_language not in _ARABIC_LANGS:
             logger.info(
                 f"[HALLUCINATION] Rejected Arabic-script segment in non-Arabic audio: '{text[:60]}' "
@@ -271,8 +285,15 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
 
         # Reject exact-text duplicates that Whisper emits from sustained silence
         # or looping noise within a short window (e.g. repeated "I bear witness...").
+        # Only drop duplicates with a suspicious ASR signal, so genuine repeated
+        # dialogue (e.g. a refrain or echo) is not removed from the transcript.
         _dur = float(seg.get("end", 0)) - float(seg.get("start", 0))
-        if text in _seen_texts and (seg.get("start", 0) - _seen_texts[text] < 60.0) and _dur < 5.0:
+        if (
+            text in _seen_texts
+            and (seg.get("start", 0) - _seen_texts[text] < 60.0)
+            and _dur < 5.0
+            and _suspicious
+        ):
             logger.info(
                 f"[HALLUCINATION] Rejected repeated text within 60s: '{text[:60]}' "
                 f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
