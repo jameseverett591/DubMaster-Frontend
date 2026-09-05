@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Optional
 from datetime import datetime
 import asyncio
 import logging
