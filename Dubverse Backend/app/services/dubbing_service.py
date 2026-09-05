@@ -198,7 +198,6 @@ def atomic_write_json(path: str, data, indent: int = 2) -> None:
 
 
 _SEGMENTS_FILE_LOCK_TIMEOUT = 30.0
-_SEGMENTS_MUX_MAX_ITERATIONS = 3
 _SEGMENTS_MUX_TIMEOUT_SECONDS = 300.0
 
 
@@ -1985,10 +1984,11 @@ class DubbingService:
             # Read the current scene layout, release the lock for the long
             # FFmpeg mux, then re-acquire and re-read before writing. A
             # concurrent PUT /scenes therefore never has to wait on the full
-            # render. If scenes change while muxing, retry with the latest
-            # layout so the generated MP4 and persisted segments.json stay in
-            # sync; if the layout keeps changing, keep the rendered scenes so
-            # the served MP4 never describes a layout it was not built with.
+            # render. If scenes change while muxing, re-render with the latest
+            # layout until the output and segments.json agree. If the layout
+            # keeps changing and the overall mux budget runs out, preserve the
+            # editor's latest acknowledged scene layout rather than overwriting
+            # it with an older rendered snapshot.
             lock = await self._get_segments_file_lock(job_id)
             scenes: List[Dict] = []
             mux_start = time.monotonic()
@@ -2024,11 +2024,12 @@ class DubbingService:
                     _latest_scenes = self._read_existing_scenes(output_dir)
                     if _latest_scenes is not None and _latest_scenes != scenes:
                         elapsed = time.monotonic() - mux_start
-                        if iteration < _SEGMENTS_MUX_MAX_ITERATIONS and elapsed < _SEGMENTS_MUX_TIMEOUT_SECONDS:
+                        if elapsed < _SEGMENTS_MUX_TIMEOUT_SECONDS:
                             logger.info(f"[DUB] Scene layout changed during mux; retrying with latest scenes (iteration {iteration})")
                             scenes = _latest_scenes
                             continue
-                        logger.warning(f"[DUB] Scene layout still changing after {iteration} mux iterations; keeping rendered scenes")
+                        logger.warning(f"[DUB] Scene layout still changing after {iteration} mux iterations ({elapsed:.1f}s); preserving latest scene edit")
+                        scenes = _latest_scenes
                     payload = await asyncio.to_thread(
                         self._write_segments_json_locked,
                         job_id, target_norm, audio_segments, output_dir, scenes,
@@ -4787,10 +4788,10 @@ class DubbingService:
         # Read the current scene layout, release the lock for the long FFmpeg
         # mux, then re-acquire and re-read before writing. This keeps scene
         # edits from blocking on the render. If scenes change while muxing,
-        # retry with the latest layout so the generated MP4 and persisted
-        # segments.json stay in sync; if the layout keeps changing, keep the
-        # rendered scenes so the served MP4 never describes a layout it was
-        # not built with.
+        # re-render with the latest layout until the output and segments.json
+        # agree. If the layout keeps changing and the overall mux budget runs
+        # out, preserve the editor's latest acknowledged scene layout rather
+        # than overwriting it with an older rendered snapshot.
         lock = await self._get_segments_file_lock(job_id)
         scenes: List[Dict] = []
         mux_start = time.monotonic()
@@ -4827,11 +4828,12 @@ class DubbingService:
                 _latest_scenes = data.get("scenes")
                 if _latest_scenes is not None and _latest_scenes != scenes:
                     elapsed = time.monotonic() - mux_start
-                    if iteration < _SEGMENTS_MUX_MAX_ITERATIONS and elapsed < _SEGMENTS_MUX_TIMEOUT_SECONDS:
+                    if elapsed < _SEGMENTS_MUX_TIMEOUT_SECONDS:
                         logger.info(f"[REMIX] Scene layout changed during mux; retrying with latest scenes (iteration {iteration})")
                         scenes = _latest_scenes
                         continue
-                    logger.warning(f"[REMIX] Scene layout still changing after {iteration} mux iterations; keeping rendered scenes")
+                    logger.warning(f"[REMIX] Scene layout still changing after {iteration} mux iterations ({elapsed:.1f}s); preserving latest scene edit")
+                    scenes = _latest_scenes
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
                 data["last_remixed_at"] = datetime.utcnow().isoformat() + "Z"
                 data["scenes"] = scenes
