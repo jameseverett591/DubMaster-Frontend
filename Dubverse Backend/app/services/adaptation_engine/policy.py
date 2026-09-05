@@ -177,7 +177,7 @@ LITERAL_TRANSLATION_SYSTEM_PROMPT = (
     "  Answer EVERY marker exactly once, one per output line. NEVER merge two markers'\n"
     "  content into one answer line, NEVER skip a marker, NEVER invent a marker that\n"
     "  wasn't in the input.\n"
-    "- Do NOT prefix lines with speaker names (e.g. NEVER write 'Ip Man: ...').\n"
+    "- Do NOT prefix lines with speaker names or vocative addresses (e.g. NEVER write 'Ip Man: ...' or 'San Gu, ...').\n"
     "- Do NOT echo the timing value (e.g. '(1.2s)') in your answer — but DO echo the marker.\n"
     "- XGLO###X and XFUZ###X tokens (e.g. XGLO135X, XFUZ002X) are glossary placeholders.\n"
     "  Preserve them CHARACTER-FOR-CHARACTER. Do NOT rename, reformat, or convert them.\n"
@@ -210,7 +210,7 @@ NATURAL_TRANSLATION_SYSTEM_PROMPT = (
     "  Answer EVERY marker exactly once, one per output line. NEVER merge two markers'\n"
     "  content into one answer line, NEVER skip a marker, NEVER invent a marker that\n"
     "  wasn't in the input.\n"
-    "- Do NOT prefix lines with speaker names (e.g. NEVER write 'Ip Man: ...').\n"
+    "- Do NOT prefix lines with speaker names or vocative addresses (e.g. NEVER write 'Ip Man: ...' or 'San Gu, ...').\n"
     "- Do NOT echo the timing value (e.g. '(1.2s)') in your answer — but DO echo the marker.\n"
     "- XGLO###X and XFUZ###X tokens (e.g. XGLO135X, XFUZ002X) are glossary placeholders.\n"
     "  Preserve them CHARACTER-FOR-CHARACTER. Do NOT rename, reformat, or convert them.\n"
@@ -225,7 +225,8 @@ NATURAL_TRANSLATION_SYSTEM_PROMPT = (
     "  * A man showing a property or acting as an agent → 'Broker' rather than 'Brother Gen'.\n"
     "  * An older female neighbor/landlady/family friend → 'Auntie' rather than 'San Gu' or 'Third Aunt'.\n"
     "  * Students/apprentices in a martial-arts school → 'students' is acceptable if it fits the scene.\n"
-    "- Choose the form that sounds most natural to a native English film-dub audience without adding information.\n\n"
+    "- Choose the form that sounds most natural to a native English film-dub audience without adding information.\n"
+    "- Preserve the original speaker/subject relationship. If a line is spoken by a character (e.g. San Gu describing a space), do NOT rewrite it as if another character is addressing them.\n\n"
     "CHINESE IDIOM RULE (critical for accuracy):\n"
     "Four-character set phrases (成語/chengyu) and Cantonese fixed expressions MUST be\n"
     "translated by their ESTABLISHED MEANING, never character-by-character.\n"
@@ -502,7 +503,7 @@ NO_HALLUCINATION_GUARDS = """HALLUCINATION GUARDS:
 - Do NOT continue unfinished thoughts from the source.
 - Do NOT create conversational filler.
 - Do NOT append emotional commentary.
-- Do NOT prepend speaker tags or stage directions.
+- Do NOT prepend speaker tags, stage directions, or vocative character names (e.g. 'San Gu, ...') unless that name appears verbatim at the start of the source line as a spoken address.
 - Do NOT expand the line beyond what the source explicitly conveys.
 - Do NOT invent backstory or context not present in the source.
 - Do NOT translate literally word-for-word if it breaks natural rhythm; instead, preserve intent with natural phrasing.

@@ -1478,6 +1478,7 @@ class DubbingService:
             # the previous segment (overlap detection).
             # ------------------------------------------------------------------
             audio_segments = []
+            _flagged_div_groups: set = set()
 
             for i, segment in enumerate(transcript):
                 raw = tts_results[i]
@@ -1693,12 +1694,17 @@ class DubbingService:
                         })
                     _div_score, _div_reason = divergence_scores[i]
                     if _div_score is not None and _div_score < MEANING_DIVERGENCE_THRESHOLD:
-                        _flags.append({
-                            "code": "meaning_divergence",
-                            "score": _div_score,
-                            "reason": _div_reason,
-                            "threshold": MEANING_DIVERGENCE_THRESHOLD,
-                        })
+                        # Only flag the first segment of a split/original group so split
+                        # fragments don't all carry the same scene-level reason.
+                        _div_grp_key = segment.get("original_segment_id") or segment.get("segment_id") or str(i)
+                        if _div_grp_key not in _flagged_div_groups:
+                            _flagged_div_groups.add(_div_grp_key)
+                            _flags.append({
+                                "code": "meaning_divergence",
+                                "score": _div_score,
+                                "reason": _div_reason,
+                                "threshold": MEANING_DIVERGENCE_THRESHOLD,
+                            })
 
                 # Same gain floor as the editor's regenerate path, so a fresh dub
                 # and a regenerated segment are levelled identically.
