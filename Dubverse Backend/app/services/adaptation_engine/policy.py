@@ -506,7 +506,6 @@ NO_HALLUCINATION_GUARDS = """HALLUCINATION GUARDS:
 - Do NOT prepend speaker tags, stage directions, or vocative character names (e.g. 'San Gu, ...') unless that name appears verbatim at the start of the source line as a spoken address.
 - Do NOT expand the line beyond what the source explicitly conveys.
 - Do NOT invent backstory or context not present in the source.
-- Do NOT translate literally word-for-word if it breaks natural rhythm; instead, preserve intent with natural phrasing.
 - Do NOT merge adjacent segments or reference dialogue outside the current segment.
 - Do NOT hallucinate off-screen speakers or add imagined responses."""
 
