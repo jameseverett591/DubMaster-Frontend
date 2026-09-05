@@ -232,7 +232,7 @@ def transcribe_cantonese(
         # ── Filter repetition loops in merged output ──
         from app.pipeline.transcribe_audio import _filter_repetition_loops, _filter_hallucinations
         merged = _filter_repetition_loops(merged)
-        merged = _filter_hallucinations(merged, strict=False, source_language=language)
+        merged = _filter_hallucinations(merged, strict=False, source_language=language, whisper_source=False)
 
         # ── Persist output ──
         import json

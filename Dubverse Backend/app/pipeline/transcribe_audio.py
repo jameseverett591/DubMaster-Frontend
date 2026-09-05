@@ -110,20 +110,26 @@ def _find_gaps(segments: List[Dict], duration: float, min_gap: float) -> List[tu
     return gaps
 
 
-def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, source_language: str = "") -> List[Dict]:
+def _filter_hallucinations(
+    raw_segments: List[Dict],
+    strict: bool = False,
+    source_language: str = "",
+    whisper_source: bool = True,
+) -> List[Dict]:
     """
     Filter likely hallucination segments.
-    When strict=True (used for no-VAD gap pass), also reject:
-      - segments shorter than 0.3s
-      - segments with avg_logprob < -1.0
-    Non-strict mode also rejects:
-      - Short single-word Latin text that looks like noise (e.g. "pave", "the")
+
+    When whisper_source=True we apply Whisper-specific heuristics (sub-300ms
+    rejection, repetitive-character noise, short Latin words, low-confidence
+    short CJK). When whisper_source=False we keep only the source-agnostic
+    filters (denylist phrases, script mismatch, Arabic-script guard, and
+    no_speech_prob where available) so non-Whisper engines like Tencent or
+    Paraformer are not over-filtered.
     """
     import re as _re
     _CJK_LANGS = {"zh", "yue", "ja", "ko", "cmn"}
     _ARABIC_LANGS = {"ar", "fa", "ur", "ps", "ku", "sd", "ug"}
     filtered = []
-    _seen_texts: Dict[str, float] = {}
     for seg in raw_segments:
         text = seg["text"].strip()
         _avg_lp = seg.get("avg_logprob", 0.0)
@@ -131,25 +137,24 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
         _suspicious = (_nsp is not None and _nsp > 0.3) or _avg_lp < -0.5
         if not text or _re.fullmatch(r'[\s\W]*', text):
             continue
-        if filtered and text == filtered[-1]["text"].strip() and _suspicious:
-            continue
         if len(text) <= 1:
             continue
 
-        # Unconditional minimum-duration guard — must run before every other filter.
-        # No real phoneme can be produced in under 300ms: even the shortest stop
-        # consonant + vowel pair (e.g. 打, 的) takes ~120ms of frication + release.
-        # Sub-300ms segments are always Whisper hallucinations produced when it
-        # forces a transcription onto a single click, breath, or frame boundary
-        # artifact.  The 0:43 "Leopard skin" / "Now play this game" phantom slot
-        # (42.88–42.94s, 60ms) is a canonical example.
         _dur = float(seg.get("end", 0)) - float(seg.get("start", 0))
-        if _dur < 0.3:
-            logger.info(
-                f"[HALLUCINATION] Rejected sub-300ms segment ({_dur*1000:.0f}ms): "
-                f"'{text[:60]}' at {seg.get('start','?')}-{seg.get('end','?')}"
-            )
-            continue
+
+        # Whisper-specific heuristics.  Do not run on merged multi-engine output
+        # because Tencent/Paraformer can legitimately produce short/repeated
+        # interjections that look like Whisper noise.
+        if whisper_source:
+            # Unconditional minimum-duration guard — no real phoneme can be produced
+            # in under 300ms. Sub-300ms segments are almost always Whisper
+            # hallucinations forced onto clicks, breaths, or frame boundaries.
+            if _dur < 0.3:
+                logger.info(
+                    f"[HALLUCINATION] Rejected sub-300ms segment ({_dur*1000:.0f}ms): "
+                    f"'{text[:60]}' at {seg.get('start','?')}-{seg.get('end','?')}"
+                )
+                continue
 
         # Whisper's per-segment no_speech_prob is a strong signal for
         # hallucinations forced onto silence, music, or SFX.  Real speech
@@ -168,39 +173,59 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
             )
             continue
 
-        # Reject repetitive single-character hallucinations produced by Whisper
-        # when processing fight grunts, screams, or impact noise — e.g.
-        # "Aaaaaaaaaaaaa", "hhhhhhhh", "eeeeeeee".  Real speech has varied chars.
-        stripped = text.replace(' ', '')
-        if len(stripped) >= 4:
-            unique_ratio = len(set(stripped.lower())) / len(stripped)
-            if unique_ratio < 0.25:   # >75% of chars are the same 1-2 characters
+        # Whisper-specific heuristics that are unsafe for multi-engine merged
+        # output (Tencent/Paraformer can legitimately produce short or repeated
+        # interjections that look like Whisper noise).
+        if whisper_source:
+            # Reject repetitive single-character hallucinations produced by Whisper
+            # when processing fight grunts, screams, or impact noise — e.g.
+            # "Aaaaaaaaaaaaa", "hhhhhhhh", "eeeeeeee".  Real speech has varied chars.
+            stripped = text.replace(' ', '')
+            if len(stripped) >= 4:
+                unique_ratio = len(set(stripped.lower())) / len(stripped)
+                if unique_ratio < 0.25:   # >75% of chars are the same 1-2 characters
+                    logger.info(
+                        f"[HALLUCINATION] Rejected repetitive-char segment "
+                        f"(unique_ratio={unique_ratio:.2f}): '{text[:40]}' "
+                        f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
+                    )
+                    continue
+
+            # Reject short single-word Latin-script hallucinations.
+            # Whisper often produces nonsense English words during fight scenes
+            # or silent moments (e.g. "pave", "the", "you").  This must not
+            # discard valid code-switched words ("OK", "Yes", "Bye") in CJK
+            # audio, so we only drop the short word when the ASR confidence or
+            # no-speech signal is suspicious.
+            words = text.split()
+            if (
+                source_language in _CJK_LANGS
+                and len(words) == 1
+                and _re.fullmatch(r'[a-zA-Z]+', text)
+                and len(text) <= 5
+                and _suspicious
+            ):
                 logger.info(
-                    f"[HALLUCINATION] Rejected repetitive-char segment "
-                    f"(unique_ratio={unique_ratio:.2f}): '{text[:40]}' "
+                    f"[HALLUCINATION] Rejected short Latin word: '{text}' "
                     f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
                 )
                 continue
 
-        # Reject short single-word Latin-script hallucinations.
-        # Whisper often produces nonsense English words during fight scenes
-        # or silent moments (e.g. "pave", "the", "you").  This must not
-        # discard valid code-switched words ("OK", "Yes", "Bye") in CJK
-        # audio, so we only drop the short word when the ASR confidence or
-        # no-speech signal is suspicious.
-        words = text.split()
-        if (
-            source_language in _CJK_LANGS
-            and len(words) == 1
-            and _re.fullmatch(r'[a-zA-Z]+', text)
-            and len(text) <= 5
-            and _suspicious
-        ):
-            logger.info(
-                f"[HALLUCINATION] Rejected short Latin word: '{text}' "
-                f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
-            )
-            continue
+            # Short isolated CJK hallucinations (e.g. 老闆 during a table-break silence):
+            # Whisper produces real CJK text but with low confidence on very short segments.
+            if source_language in _CJK_LANGS:
+                dur = float(seg.get("end", 0)) - float(seg.get("start", 0))
+                avg_lp = seg.get("avg_logprob", 0.0)
+                word_count = len(seg.get("text", "").split())
+                if dur < 2.0 and word_count <= 2 and avg_lp < -0.8:
+                    logger.info(
+                        f"[HALLUCINATION] Rejected short low-confidence CJK segment "
+                        f"({dur:.2f}s, lp={avg_lp:.2f}): '{seg.get('text','')[:60]}' "
+                        f"at {seg.get('start','?')}-{seg.get('end','?')}"
+                    )
+                    continue
+
+        # Source-agnostic filters: apply to both Whisper and merged output.
 
         # Reject known YouTube/subtitle boilerplate and religious-phrase
         # hallucinations that Whisper produces from near-silence or background
@@ -218,9 +243,6 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
         # Reject segments that are entirely non-CJK (Latin/Cyrillic/etc.) when
         # the source language is a CJK language (Chinese, Japanese, Korean).
         # This catches Cyrillic/Latin hallucinations like "Сого́н!" in Cantonese audio.
-        # Reject segments with NO CJK characters when the source language
-        # is CJK.  Catches ALL wrong-script hallucinations: Cyrillic (Согон!),
-        # Telugu, Latin, Arabic, Devanagari, etc.
         if source_language in _CJK_LANGS:
             cjk_chars = len(_re.findall(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', text))
             non_space = len(_re.findall(r'\S', text))
@@ -255,24 +277,6 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
                 )
                 continue
 
-        # Short isolated CJK hallucinations (e.g. 老闆 during a table-break silence):
-        # Whisper produces real CJK text but with low confidence on very short segments.
-        # Apply a moderate logprob threshold when the segment is short (< 2s) and
-        # the word count is low (≤ 2 words).  Threshold -0.8 is stricter than the
-        # strict-mode -1.2 but lenient enough to keep genuine short utterances
-        # like 好呀 (Sure) or 夠了 (That's enough) that Whisper hears clearly.
-        if source_language in _CJK_LANGS:
-            dur = float(seg.get("end", 0)) - float(seg.get("start", 0))
-            avg_lp = seg.get("avg_logprob", 0.0)
-            word_count = len(seg.get("text", "").split())
-            if dur < 2.0 and word_count <= 2 and avg_lp < -0.8:
-                logger.info(
-                    f"[HALLUCINATION] Rejected short low-confidence CJK segment "
-                    f"({dur:.2f}s, lp={avg_lp:.2f}): '{seg.get('text','')[:60]}' "
-                    f"at {seg.get('start','?')}-{seg.get('end','?')}"
-                )
-                continue
-
         # Reject Arabic-script text unless the source language is an Arabic-script
         # language.  This catches the standalone "الله." hallucination and similar
         # script mismatches regardless of segment duration.
@@ -282,24 +286,6 @@ def _filter_hallucinations(raw_segments: List[Dict], strict: bool = False, sourc
                 f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
             )
             continue
-
-        # Reject exact-text duplicates that Whisper emits from sustained silence
-        # or looping noise within a short window (e.g. repeated "I bear witness...").
-        # Only drop duplicates with a suspicious ASR signal, so genuine repeated
-        # dialogue (e.g. a refrain or echo) is not removed from the transcript.
-        _dur = float(seg.get("end", 0)) - float(seg.get("start", 0))
-        if (
-            text in _seen_texts
-            and (seg.get("start", 0) - _seen_texts[text] < 60.0)
-            and _dur < 5.0
-            and _suspicious
-        ):
-            logger.info(
-                f"[HALLUCINATION] Rejected repeated text within 60s: '{text[:60]}' "
-                f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
-            )
-            continue
-        _seen_texts[text] = seg.get("start", 0)
 
         if strict:
             dur = seg["end"] - seg["start"]
