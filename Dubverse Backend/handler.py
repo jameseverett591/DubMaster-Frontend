@@ -104,8 +104,18 @@ _MAX_SEGMENT_DURATION = float(os.getenv("HANDLER_MAX_SEGMENT_DURATION", "12.0"))
 _MAX_SEGMENT_CHARS = int(os.getenv("HANDLER_MAX_SEGMENT_CHARS", "90"))
 
 
-def _find_punctuation_split(text: str, target_idx: int, punct: str) -> int:
-    """Return a split index near *target_idx* that falls after a punctuation char."""
+def _find_punctuation_split(
+    text: str,
+    target_idx: int,
+    punct: str,
+    max_dist: int | None = None,
+) -> int:
+    """Return a split index near *target_idx* that falls after a punctuation char.
+
+    If *max_dist* is set, only consider punctuation within that character distance.
+    This prevents a far-away sentence-ending mark from overriding a closer word
+    boundary when the real target is in the middle of a clause.
+    """
     if not text or target_idx <= 0 or target_idx >= len(text):
         return target_idx
     best = target_idx
@@ -114,6 +124,8 @@ def _find_punctuation_split(text: str, target_idx: int, punct: str) -> int:
         if ch in punct:
             idx = i + 1
             dist = abs(idx - target_idx)
+            if max_dist is not None and dist > max_dist:
+                continue
             if dist < best_dist:
                 best = idx
                 best_dist = dist
@@ -209,11 +221,15 @@ def _split_text_by_ratios(
         return result
 
     # No word timestamps: punctuation-aware character split with proportional timing.
+    # Prefer a nearby sentence-ending mark; if none is close, fall back to a
+    # closer comma/space boundary so we don't split mid-clause just to reach a
+    # far-away period.
     total_chars = max(len(text), 1)
     split_points = []
     for r in ratios:
         target = int(total_chars * min(max(r, 0.0), 0.999))
-        split_idx = _find_punctuation_split(text, target, _SENTENCE_END_PUNCT)
+        max_dist = max(6, int(target * 0.25))
+        split_idx = _find_punctuation_split(text, target, _SENTENCE_END_PUNCT, max_dist=max_dist)
         if split_idx == target:
             split_idx = _find_punctuation_split(text, target, _WORD_BOUNDARY_PUNCT)
         split_idx = max(1, min(split_idx, total_chars - 1))
@@ -281,31 +297,27 @@ def _split_long_segment(
     if last < len(text):
         chunks_raw.append(text[last:])
 
-    final_chunks = []
+    out: list[dict] = []
     for chunk in chunks_raw:
         chunk_dur = duration * (len(chunk) / max(len(text), 1))
         if chunk_dur > max_duration or len(chunk) > max_chars:
             sub_seg = dict(seg)
             sub_seg["text"] = chunk
+            sub_seg["start"] = t_start
             sub_seg["end"] = t_start + chunk_dur
-            final_chunks.extend(
+            out.extend(
                 _split_long_segment(sub_seg, speaker, max_duration, max_chars)
             )
         else:
-            final_chunks.append((chunk, t_start, t_start + chunk_dur))
+            if chunk.strip():
+                sub = dict(seg)
+                sub["text"] = chunk.strip()
+                sub["start"] = round(float(t_start), 3)
+                sub["end"] = round(float(t_start + chunk_dur), 3)
+                sub["speaker"] = speaker or sub.get("speaker", "SPEAKER_00")
+                sub.pop("words", None)
+                out.append(sub)
         t_start += chunk_dur
-
-    out = []
-    for chunk_text, s, e in final_chunks:
-        if not chunk_text.strip():
-            continue
-        sub = dict(seg)
-        sub["text"] = chunk_text.strip()
-        sub["start"] = round(float(s), 3)
-        sub["end"] = round(float(e), 3)
-        sub["speaker"] = speaker or sub.get("speaker", "SPEAKER_00")
-        sub.pop("words", None)
-        out.append(sub)
     return out
 
 

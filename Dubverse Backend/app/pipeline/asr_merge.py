@@ -127,8 +127,8 @@ def merge_asr_results(
             p_conf = best_match.get("confidence", 0.0)
 
             if p_conf >= _PARAFORMER_CONFIDENCE_THRESHOLD:
-                # Rule B + high confidence: use Paraformer text, Tencent timestamps
-                # Keep Tencent speaker/words as hints for the downstream diarization split.
+                # Rule B + high confidence: use Paraformer text, Tencent timestamps.
+                # Only keep word timestamps if they came from the same source as the text.
                 merged.append({
                     "start": t_seg["start"],       # Rule C: Tencent timestamps
                     "end": t_seg["end"],
@@ -136,7 +136,7 @@ def merge_asr_results(
                     "confidence": p_conf,
                     "source": "paraformer+tencent_ts",
                     "speaker_id": t_seg.get("speaker_id"),
-                    "words": best_match.get("words") or t_seg.get("words"),
+                    "words": best_match.get("words"),
                 })
                 logger.debug(
                     f"[ASR-MERGE] Merged (paraformer text): "
