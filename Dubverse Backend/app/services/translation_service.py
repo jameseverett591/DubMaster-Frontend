@@ -28,6 +28,7 @@ from app.services.adaptation_engine.policy import (
     build_localized_name_mapping_prompt,
     get_translation_system_prompt,
     get_dubbing_system_prompt,
+    resolve_dubbing_style,
     fix_translation_names,
 )
 
@@ -992,12 +993,23 @@ class TranslationService:
 
         system_prompt = "\n".join(system_prompt_parts)
 
+        _is_literal = resolve_dubbing_style(dubbing_style) == "literal"
         def _build_user_prompt(marked_lines: str) -> str:
+            if _is_literal:
+                return (
+                    f"Translate these spoken {lang_name} dialogue lines to {target_name} word-for-word.\n\n"
+                    f"Rules:\n"
+                    f"- Translate LITERALLY. Do NOT substitute synonyms, paraphrase, or rewrite for 'naturalness'.\n"
+                    f"- Keep the exact meaning of each word. 'Secretive' must stay 'secretive', not 'mysterious'.\n"
+                    f"- Preserve every line. Do NOT drop, merge, or skip any [[SEG-...]] marked line.\n"
+                    f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
+                    f"{marked_lines}"
+                )
             return (
-                f"Translate these spoken {lang_name} dialogue lines to {target_name} word-for-word.\n\n"
+                f"Translate these spoken {lang_name} dialogue lines to natural {target_name} for a cinematic dubbed track.\n\n"
                 f"Rules:\n"
-                f"- Translate LITERALLY. Do NOT substitute synonyms, paraphrase, or rewrite for 'naturalness'.\n"
-                f"- Keep the exact meaning of each word. 'Secretive' must stay 'secretive', not 'mysterious'.\n"
+                f"- You MAY rephrase for natural spoken English and use the localized name/role mappings below.\n"
+                f"- Do NOT add, remove, or combine utterances beyond what is needed for a grammatical, speakable line.\n"
                 f"- Preserve every line. Do NOT drop, merge, or skip any [[SEG-...]] marked line.\n"
                 f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
                 f"{marked_lines}"

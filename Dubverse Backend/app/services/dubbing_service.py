@@ -3428,6 +3428,8 @@ class DubbingService:
             "video_path": video_path,
             "accompaniment_path": accompaniment_path,
             "video_duration": video_duration,
+            "dubbing_style": dubbing_style,
+            "localized_aliases": localized_aliases,
             "segments": [
                 {
                     **seg,

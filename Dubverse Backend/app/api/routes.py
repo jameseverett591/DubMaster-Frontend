@@ -285,6 +285,12 @@ async def _rehydrate_job(job_id: str):
                         job.voice_mapping = meta["voice_mapping"]
                     if "traits_mapping" in meta:
                         job.traits_mapping = meta["traits_mapping"]
+                    if "dubbing_style" in meta and meta["dubbing_style"]:
+                        job.dubbing_style = meta["dubbing_style"]
+                    if "localized_aliases" in meta:
+                        job.localized_aliases = meta["localized_aliases"]
+                    if "character_profiles" in meta:
+                        job.character_profiles = meta["character_profiles"]
                 except Exception as e:
                     logger.warning(f"Job {job_id}: failed to restore voice/traits mapping: {e}")
 
@@ -665,18 +671,23 @@ def _smooth_speaker_assignments(segments):
 def _normalize_speaker_labels(segments):
     mapping = {}
     idx = 1
+    # First pass: assign canonical 1-indexed labels only to non-empty speakers.
     for seg in segments:
         speaker = seg.speaker
         if not speaker:
-            # Leave missing/empty labels as None; downstream defaults them to
-            # speaker-1 on demand. This prevents a transient empty first segment
-            # from stealing speaker-1 and forcing every real speaker to speaker-2.
-            seg.speaker = None
             continue
         if speaker not in mapping:
             mapping[speaker] = f"speaker-{idx}"
             idx += 1
         seg.speaker = mapping[speaker]
+    # Second pass: coalesce any remaining unlabeled segments to a string speaker
+    # so they don't cross API/persistence boundaries as null.
+    prev = "speaker-1"
+    for seg in segments:
+        if not seg.speaker:
+            seg.speaker = prev
+        else:
+            prev = seg.speaker
     return segments
 
 
@@ -4648,6 +4659,8 @@ async def dub_video(request: DubRequest, http_request: Request, background_tasks
 
     # === DubMaster pipeline (default) ===
     job.dubbing_engine = "dubmaster"
+    job.dubbing_style = request.dubbing_style or job.dubbing_style or "natural"
+    job.localized_aliases = request.localized_aliases or job.localized_aliases
 
     await job_manager.update_job_status(
         request.job_id,
@@ -4669,8 +4682,8 @@ async def dub_video(request: DubRequest, http_request: Request, background_tasks
         adaptation_selections=request.adaptation_selections,
         traits_mapping=job.traits_mapping,
         character_profiles=request.character_profiles or job.character_profiles,
-        dubbing_style=request.dubbing_style,
-        localized_aliases=request.localized_aliases,
+        dubbing_style=job.dubbing_style,
+        localized_aliases=job.localized_aliases,
     )
 
     return DubResponse(
@@ -4786,6 +4799,9 @@ async def translate_only(request: DubRequest, http_request: Request):
         for s in transcript_dicts:
             s.pop("words", None)
 
+    job.dubbing_style = request.dubbing_style or job.dubbing_style or "natural"
+    job.localized_aliases = request.localized_aliases or job.localized_aliases
+
     output_dir = os.path.join(settings.DUBBED_DIR, request.job_id)
     os.makedirs(output_dir, exist_ok=True)
     segments_path = os.path.join(output_dir, "segments.json")
@@ -4795,6 +4811,8 @@ async def translate_only(request: DubRequest, http_request: Request):
         "source_language": source_lang,
         "generated_at": "",
         "translated_only": True,
+        "dubbing_style": job.dubbing_style,
+        "localized_aliases": job.localized_aliases,
         "segments": [
             {
                 **seg,
@@ -4875,6 +4893,9 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
             source_lang = "auto"
     source_lang = normalize_language_code(source_lang, allow_auto=True)
 
+    job.dubbing_style = request.dubbing_style or job.dubbing_style or "natural"
+    job.localized_aliases = request.localized_aliases or job.localized_aliases
+
     await job_manager.update_job_status(
         request.job_id,
         JobStatus.SYNTHESIZING,
@@ -4895,8 +4916,8 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
         adaptation_selections=request.adaptation_selections,
         traits_mapping=job.traits_mapping,
         character_profiles=request.character_profiles or job.character_profiles,
-        dubbing_style=request.dubbing_style,
-        localized_aliases=request.localized_aliases,
+        dubbing_style=job.dubbing_style,
+        localized_aliases=job.localized_aliases,
     )
 
     return DubResponse(
