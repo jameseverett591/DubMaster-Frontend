@@ -285,6 +285,11 @@ def _split_long_segment(
     if not boundaries:
         # No punctuation: split in half by character count and recurse.
         mid = len(text) // 2
+        if mid < 1 or mid >= len(text):
+            # Cannot split any further; return as-is to avoid infinite recursion.
+            out = dict(seg)
+            out["speaker"] = speaker or out.get("speaker", "SPEAKER_00")
+            return [out]
         boundaries = [mid]
 
     # Build chunks; if a chunk is still too long, recurse.
