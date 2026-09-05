@@ -18,13 +18,16 @@ from app.config import get_settings
 from app.utils.language import normalize_language_code, LANGUAGE_NAMES
 from app.services.glossary import get_glossary, build_phonetic_index, _cjk_pinyin, _is_cjk
 from app.services.adaptation_engine.policy import (
-    DUBBING_SYSTEM_PROMPT,
     NO_HALLUCINATION_GUARDS,
     get_character_profile,
     detect_character_from_text,
     protect_entities,
     restore_entities,
     build_name_mapping_prompt,
+    build_localized_name_mapping_prompt,
+    get_translation_system_prompt,
+    resolve_dubbing_style,
+    get_localized_names,
     fix_translation_names,
 )
 
@@ -47,6 +50,27 @@ SLOW_SPEECH_RATE    = float(os.getenv("DUBMASTER_SLOW_SPEECH_RATE",    "2.5"))  
 MAX_SPEED_RATIO     = float(os.getenv("DUBMASTER_MAX_SPEED_RATIO",     "1.15")) # 15% above natural
 MIN_SPEED_RATIO     = float(os.getenv("DUBMASTER_MIN_SPEED_RATIO",     "0.85")) # 15% below natural
 _CHARS_PER_SECOND   = float(os.getenv("DUBMASTER_CHARS_PER_SECOND",   "14.0")) # chars/sec
+
+
+def _apply_source_aliases(
+    text: str,
+    dubbing_style: Optional[str] = None,
+    localized_aliases: Optional[Dict[str, str]] = None,
+) -> str:
+    """Pre-replace source role/address terms with their localized English forms
+    before generic MT engines see the text. Only runs for the 'natural' dubbing
+    style; literal mode must preserve the original source wording.
+    """
+    if resolve_dubbing_style(dubbing_style) != "natural":
+        return text
+    names = get_localized_names(localized_aliases)
+    if not names:
+        return text
+    # Longest sources first so shorter ones don't clobber parts of longer ones.
+    for source, target in sorted(names.items(), key=lambda kv: len(kv[0]), reverse=True):
+        if source in text:
+            text = text.replace(source, target)
+    return text
 # Shortest window a split sentence may be given. Below this, TTS overhead —
 # articulation, the pause after a full stop — dominates the budget and no
 # rewording fits: "I'm Jin Shan Zhao." measures 1.29s and was being handed 0.68s.
@@ -550,6 +574,8 @@ class TranslationService:
         target_language: str,
         character_profiles: Optional[List[Dict]] = None,
         velma_context: Optional[Dict] = None,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> List[Dict]:
         # Load the glossary for the incoming source language so every downstream
         # call to _apply_glossary_pre/_post uses the correct language-specific terms.
@@ -650,6 +676,8 @@ class TranslationService:
                     segments, target_norm, source_norm,
                     character_profiles=character_profiles,
                     velma_context=velma_context,
+                    dubbing_style=dubbing_style,
+                    localized_aliases=localized_aliases,
                 )
                 if result is not None:
                     translated = result
@@ -663,6 +691,8 @@ class TranslationService:
                 result = await self._translate_segments_gpt(
                     segments, target_norm, source_norm,
                     character_profiles=character_profiles,
+                    dubbing_style=dubbing_style,
+                    localized_aliases=localized_aliases,
                 )
                 if result is not None:
                     return result
@@ -670,7 +700,11 @@ class TranslationService:
 
         # DeepL: does not support Cantonese as source, so skip for yue content.
         if self.deepl_api_key and not is_cantonese:
-            result = await self._translate_segments_deepl_batch(segments, source_norm, target_norm)
+            result = await self._translate_segments_deepl_batch(
+                segments, source_norm, target_norm,
+                dubbing_style=dubbing_style,
+                localized_aliases=localized_aliases,
+            )
             glossary_baselines = [
                 self._apply_glossary_post(*self._apply_glossary_pre(seg.get("text", ""))[:2])
                 for seg in segments
@@ -690,13 +724,19 @@ class TranslationService:
         # Google Cloud: supports yue-HK source explicitly.
         if self.google_api_key:
             result = await self._translate_segments_google_cloud(
-                segments, effective_source, target_norm
+                segments, effective_source, target_norm,
+                dubbing_style=dubbing_style,
+                localized_aliases=localized_aliases,
             )
             if result is not None:
                 return result
 
         # Last resort: free Google Translate via deep_translator (scraping)
-        return await self._translate_segments_batch(segments, source_norm, target_norm)
+        return await self._translate_segments_batch(
+            segments, source_norm, target_norm,
+            dubbing_style=dubbing_style,
+            localized_aliases=localized_aliases,
+        )
 
     # ── Batch-translation line markers ────────────────────────────────────────
     # Shared by _translate_segments_claude and _translate_segments_gpt. Both send
@@ -748,6 +788,8 @@ class TranslationService:
         source_language: str = "yue",
         character_profiles: Optional[List[Dict]] = None,
         velma_context: Optional[Dict] = None,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> Optional[List[Dict]]:
         """
         Translate segments using Claude via the Anthropic API.
@@ -769,7 +811,8 @@ class TranslationService:
                 chunk = segments[start:start + _CHUNK_SIZE]
                 chunk_result = _aligned(
                     await self._translate_segments_claude(
-                        chunk, target_language, source_language, character_profiles
+                        chunk, target_language, source_language, character_profiles,
+                        dubbing_style=dubbing_style, localized_aliases=localized_aliases,
                     ),
                     chunk, "Claude", start,
                 )
@@ -788,7 +831,8 @@ class TranslationService:
                     )
                     chunk_result = _aligned(
                         await self._translate_segments_claude(
-                            chunk, target_language, source_language, character_profiles
+                            chunk, target_language, source_language, character_profiles,
+                            dubbing_style=dubbing_style, localized_aliases=localized_aliases,
                         ),
                         chunk, "Claude (retry)", start,
                     )
@@ -799,7 +843,8 @@ class TranslationService:
                     )
                     chunk_result = _aligned(
                         await self._translate_segments_gpt(
-                            chunk, target_language, source_language, character_profiles
+                            chunk, target_language, source_language, character_profiles,
+                            dubbing_style=dubbing_style, localized_aliases=localized_aliases,
                         ),
                         chunk, "GPT-4", start,
                     )
@@ -851,44 +896,20 @@ class TranslationService:
                 for i, p in enumerate(protected)
             )
 
-        # Literal translation system prompt — does NOT use DUBBING_SYSTEM_PROMPT because
-        # that prompt instructs the model to "prefer short conversational English" and
-        # "optimize for spoken performance", which causes synonym substitution and
-        # paraphrasing that breaks fidelity to the source script.
-        _LITERAL_TRANSLATION_SYSTEM_PROMPT = (
-            "You are a professional subtitler and translator.\n\n"
-            "Your ONLY job is to produce a FAITHFUL, MEANING-ACCURATE translation.\n\n"
-            "ABSOLUTE RULES:\n"
-            "- Translate the EXACT meaning of each word. Do NOT substitute synonyms.\n"
-            "  Example: '神秘' = 'secretive' — do NOT change it to 'mysterious'.\n"
-            "- Do NOT paraphrase, adapt, or rewrite for 'naturalness'.\n"
-            "- Do NOT add, remove, or combine any words beyond what is needed to form a grammatical sentence.\n"
-            "- Each input line starts with a marker like [[SEG-a3f9c2]]. Your answer for that\n"
-            "  line MUST start with the EXACT SAME marker, unchanged, followed by your translation.\n"
-            "  Answer EVERY marker exactly once, one per output line. NEVER merge two markers'\n"
-            "  content into one answer line, NEVER skip a marker, NEVER invent a marker that\n"
-            "  wasn't in the input.\n"
-            "- Do NOT prefix lines with speaker names (e.g. NEVER write 'Ip Man: ...').\n"
-            "- Do NOT echo the timing value (e.g. '(1.2s)') in your answer — but DO echo the marker.\n"
-            "- XGLO###X and XFUZ###X tokens (e.g. XGLO135X, XFUZ002X) are glossary placeholders.\n"
-            "  Preserve them CHARACTER-FOR-CHARACTER. Do NOT rename, reformat, or convert them.\n"
-            "  WRONG: ENTITY:135  RIGHT: XGLO135X\n"
-            "- [[ENTITY:n]] tokens are also protected placeholders — keep them EXACTLY.\n"
-            "- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.\n"
-            "- NEVER invent character names. Use only names that appear in the source text.\n"
-            "- NEVER hallucinate. ONLY translate what is written.\n\n"
-            "CHINESE IDIOM RULE (critical for accuracy):\n"
-            "Four-character set phrases (成語/chengyu) and Cantonese fixed expressions MUST be\n"
-            "translated by their ESTABLISHED MEANING, never character-by-character.\n"
-            "Rendering each character literally will produce nonsense — always use the phrase meaning.\n"
-            "Examples:\n"
-            "  推三阻四 → 'making excuses' or 'keep dodging'  (NOT 'push three block four')\n"
-            "  不打不相識 → 'you can't be friends without a fight'  (NOT 'no hit no know each other')\n"
-            "  步步為營 → 'advance cautiously'  (NOT 'step by step make camp')\n"
-            "  馬到成功 → 'immediate success'  (NOT 'horse arrive become success')\n"
-            "If a phrase is a known chengyu or set expression, translate its meaning, not its words."
-        )
-        system_prompt_parts = [_LITERAL_TRANSLATION_SYSTEM_PROMPT]
+        # Select the translation prompt based on the requested dubbing style.
+        # "literal" (default env fallback) preserves romanization and forbids natural rewrites.
+        # "natural" allows localized role/address terms and spoken-English smoothing.
+        _is_literal = resolve_dubbing_style(dubbing_style) == "literal"
+        _translation_system_prompt = get_translation_system_prompt(dubbing_style)
+        system_prompt_parts = [_translation_system_prompt]
+
+        # Optional per-job localization mappings (e.g., Brother Gen -> Broker).
+        # Only apply in natural mode; literal mode must preserve source names exactly.
+        if not _is_literal:
+            _localized_mapping = build_localized_name_mapping_prompt(texts, extra=localized_aliases)
+            if _localized_mapping:
+                system_prompt_parts.append("")
+                system_prompt_parts.append(_localized_mapping)
 
         # CHARACTER_REGISTRY injection suppressed — pre-baked character profiles caused
         # name hallucination (e.g. "Master Ip" -> "Brother Man"). Per-job character_profiles
@@ -1005,12 +1026,23 @@ class TranslationService:
 
         system_prompt = "\n".join(system_prompt_parts)
 
+        _is_literal = resolve_dubbing_style(dubbing_style) == "literal"
         def _build_user_prompt(marked_lines: str) -> str:
+            if _is_literal:
+                return (
+                    f"Translate these spoken {lang_name} dialogue lines to {target_name} word-for-word.\n\n"
+                    f"Rules:\n"
+                    f"- Translate LITERALLY. Do NOT substitute synonyms, paraphrase, or rewrite for 'naturalness'.\n"
+                    f"- Keep the exact meaning of each word. 'Secretive' must stay 'secretive', not 'mysterious'.\n"
+                    f"- Preserve every line. Do NOT drop, merge, or skip any [[SEG-...]] marked line.\n"
+                    f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
+                    f"{marked_lines}"
+                )
             return (
-                f"Translate these spoken {lang_name} dialogue lines to {target_name} word-for-word.\n\n"
+                f"Translate these spoken {lang_name} dialogue lines to natural {target_name} for a cinematic dubbed track.\n\n"
                 f"Rules:\n"
-                f"- Translate LITERALLY. Do NOT substitute synonyms, paraphrase, or rewrite for 'naturalness'.\n"
-                f"- Keep the exact meaning of each word. 'Secretive' must stay 'secretive', not 'mysterious'.\n"
+                f"- You MAY rephrase for natural spoken English and use the localized name/role mappings below.\n"
+                f"- Do NOT add, remove, or combine utterances beyond what is needed for a grammatical, speakable line.\n"
                 f"- Preserve every line. Do NOT drop, merge, or skip any [[SEG-...]] marked line.\n"
                 f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
                 f"{marked_lines}"
@@ -1079,7 +1111,8 @@ class TranslationService:
                 result: List[Dict] = []
                 for i, seg in enumerate(segments):
                     single = await self._translate_segments_claude(
-                        [seg], target_language, source_language, character_profiles, velma_context
+                        [seg], target_language, source_language, character_profiles, velma_context,
+                        dubbing_style=dubbing_style, localized_aliases=localized_aliases,
                     )
                     if single is None:
                         logger.error(
@@ -1135,6 +1168,8 @@ class TranslationService:
                             original_text,
                             source_language,
                             target_language,
+                            dubbing_style=dubbing_style,
+                            localized_aliases=localized_aliases,
                         )
                         if retranslated and not _cjk_re.search(retranslated):
                             result[i] = {
@@ -1167,6 +1202,8 @@ class TranslationService:
         source_language: str = "yue",
         character_profiles: Optional[List[Dict]] = None,
         allow_recursive: bool = True,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> Optional[List[Dict]]:
         """
         Translate segments using GPT-4 via Azure OpenAI or OpenAI API.
@@ -1224,7 +1261,8 @@ class TranslationService:
             )
 
         # Build centralized system prompt from policy layer
-        system_prompt_parts = [DUBBING_SYSTEM_PROMPT]
+        _gpt_is_literal = resolve_dubbing_style(dubbing_style) == "literal"
+        system_prompt_parts = [get_translation_system_prompt(dubbing_style)]
 
         detected_profile = detect_character_from_text("\n".join(texts))
         if detected_profile:
@@ -1235,6 +1273,13 @@ class TranslationService:
         if name_mapping:
             system_prompt_parts.append("")
             system_prompt_parts.append(name_mapping)
+
+        # Localized role/address mappings are only appropriate for natural dubbing.
+        if not _gpt_is_literal:
+            localized_mapping = build_localized_name_mapping_prompt(texts, extra=localized_aliases)
+            if localized_mapping:
+                system_prompt_parts.append("")
+                system_prompt_parts.append(localized_mapping)
 
         # Per-job character profiles (Fix 2)
         if character_profiles:
@@ -1286,6 +1331,16 @@ class TranslationService:
         system_prompt = "\n".join(system_prompt_parts)
 
         def _build_user_prompt(marked_lines: str) -> str:
+            if _gpt_is_literal:
+                return (
+                    f"Translate these spoken {lang_name} dialogue lines to {target_name} word-for-word.\n\n"
+                    f"Rules:\n"
+                    f"- Translate LITERALLY. Do NOT substitute synonyms, paraphrase, or rewrite for 'naturalness'.\n"
+                    f"- Keep the exact meaning of each word.\n"
+                    f"- Preserve every line. Do NOT drop, merge, or skip any [[SEG-...]] marked line.\n"
+                    f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
+                    f"{marked_lines}"
+                )
             return (
                 f"Translate these spoken {lang_name} dialogue lines to natural {target_name} for voice actors.\n\n"
                 f"Preserve meaning, emotion, and character voice. "
@@ -1364,6 +1419,8 @@ class TranslationService:
                         single = await self._translate_segments_gpt(
                             [seg], target_language, source_language, character_profiles,
                             allow_recursive=False,
+                            dubbing_style=dubbing_style,
+                            localized_aliases=localized_aliases,
                         )
                     else:
                         # Base case: the single-segment GPT call already failed;
@@ -1484,12 +1541,17 @@ class TranslationService:
         segments: List[Dict],
         source_language: str,
         target_language: str,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> List[Dict]:
         """
         Send all segment texts in a single DeepL API request (multi-text batch).
         Uses the current header-based auth required since Nov 2025.
         """
-        texts = [seg.get("text", "") for seg in segments]
+        texts = [
+            _apply_source_aliases(seg.get("text", ""), dubbing_style, localized_aliases)
+            for seg in segments
+        ]
 
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
@@ -1525,6 +1587,7 @@ class TranslationService:
         for i, seg in enumerate(segments):
             raw = (translations[i]["text"] if i < len(translations) else None) or protected[i]
             final = self._apply_glossary_post(raw, replacements_per_seg[i])
+            final = fix_translation_names(final)
             final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
             for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
             result.append({**seg, "original_text": seg.get("text", ""), "text": final})
@@ -1536,13 +1599,18 @@ class TranslationService:
         segments: List[Dict],
         source_language: str,
         target_language: str,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> Optional[List[Dict]]:
         """
         Translate via the official Google Cloud Translation API v2 (paid).
         Supports multiple 'q' values in one request for batch translation.
         Returns None on failure so the caller can fall through to the next engine.
         """
-        texts = [seg.get("text", "") for seg in segments]
+        texts = [
+            _apply_source_aliases(seg.get("text", ""), dubbing_style, localized_aliases)
+            for seg in segments
+        ]
 
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
@@ -1617,6 +1685,7 @@ class TranslationService:
                     else protected[i]
                 )
                 final = self._apply_glossary_post(raw, replacements_per_seg[i])
+                final = fix_translation_names(final)
                 final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
                 for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
                 if raw.strip() != protected[i].strip():
@@ -1636,12 +1705,17 @@ class TranslationService:
         segments: List[Dict],
         source_language: str,
         target_language: str,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> List[Dict]:
         """
         Translate all segment texts in a single batch call via deep_translator.
         One HTTP request instead of N, so Google's rate limit is not triggered.
         """
-        texts = [seg.get("text", "") for seg in segments]
+        texts = [
+            _apply_source_aliases(seg.get("text", ""), dubbing_style, localized_aliases)
+            for seg in segments
+        ]
 
         # Apply glossary pre-pass on every text
         protected: List[str] = []
@@ -1719,6 +1793,7 @@ class TranslationService:
             else:
                 raw_translated = translated_map.get(i) or protected[i]
                 final = self._apply_glossary_post(raw_translated, replacements_per_seg[i])
+                final = fix_translation_names(final)
                 final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
                 for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
                 if raw_translated.strip() != protected[i].strip():
@@ -1852,10 +1927,16 @@ class TranslationService:
         self,
         text: str,
         source_language: str,
-        target_language: str
+        target_language: str,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> str:
         if not text.strip():
             return text
+
+        # Natural style: pre-localize role/address terms so generic MT engines
+        # do not leave them as literal romanizations.
+        text = _apply_source_aliases(text, dubbing_style, localized_aliases)
 
         # Protect glossary terms with placeholders before translation
         protected_text, replacements, _fuzz_single = self._apply_glossary_pre(text)
@@ -1878,7 +1959,7 @@ class TranslationService:
             for _w in _v_warns: logger.warning("[VERIFY] single: %s", "; ".join(_v_warns))
             logger.debug(f"Glossary: restored terms -> '{translated[:80]}'")
 
-        return translated
+        return fix_translation_names(translated)
     
     async def _translate_with_deepl(
         self,

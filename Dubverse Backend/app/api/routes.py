@@ -285,6 +285,12 @@ async def _rehydrate_job(job_id: str):
                         job.voice_mapping = meta["voice_mapping"]
                     if "traits_mapping" in meta:
                         job.traits_mapping = meta["traits_mapping"]
+                    if "dubbing_style" in meta and meta["dubbing_style"]:
+                        job.dubbing_style = meta["dubbing_style"]
+                    if "localized_aliases" in meta:
+                        job.localized_aliases = meta["localized_aliases"]
+                    if "character_profiles" in meta:
+                        job.character_profiles = meta["character_profiles"]
                 except Exception as e:
                     logger.warning(f"Job {job_id}: failed to restore voice/traits mapping: {e}")
 
@@ -665,12 +671,23 @@ def _smooth_speaker_assignments(segments):
 def _normalize_speaker_labels(segments):
     mapping = {}
     idx = 1
+    # First pass: assign canonical 1-indexed labels only to non-empty speakers.
     for seg in segments:
-        speaker = seg.speaker or "speaker-1"
+        speaker = seg.speaker
+        if not speaker:
+            continue
         if speaker not in mapping:
             mapping[speaker] = f"speaker-{idx}"
             idx += 1
         seg.speaker = mapping[speaker]
+    # Second pass: coalesce any remaining unlabeled segments to a string speaker
+    # so they don't cross API/persistence boundaries as null.
+    prev = "speaker-1"
+    for seg in segments:
+        if not seg.speaker:
+            seg.speaker = prev
+        else:
+            prev = seg.speaker
     return segments
 
 
@@ -745,6 +762,7 @@ def _merge_close_transcript_segments(
     max_merged_chars: int = 220,
     max_merge_count: int = 8,
     max_merged_duration: float = 14.0,
+    max_chars_per_second: float = 6.0,
 ) -> list[TranscriptSegment]:
     if not segments:
         return segments
@@ -767,11 +785,18 @@ def _merge_close_transcript_segments(
         candidate_text = (prev.text or "").rstrip() + " " + (seg.text or "").lstrip()
         merged_duration = float(seg.end) - float(prev.start)
 
+        # Guard: a merged segment's text must plausibly fit its audio slot.
+        # CJK source chars map ~1:1 to syllables; natural speech is ~4-6 chars/sec.
+        # This prevents the "0.5s slot holding 50+ characters" over-merge pattern.
+        max_allowed_chars = max_merged_chars
+        if merged_duration > 0:
+            max_allowed_chars = min(max_allowed_chars, int(merged_duration * max_chars_per_second) + 2)
+
         if (
             prev_speaker == seg_speaker
             and gap >= 0.0
             and gap < max_gap
-            and len(prev.text or "") <= max_merged_chars
+            and len(candidate_text) <= max_allowed_chars
             and merge_counts[-1] < max_merge_count
             and merged_duration <= max_merged_duration
         ):
@@ -1220,7 +1245,18 @@ async def _run_diarization_with_heartbeat(
 
 async def _get_runpod_file_url(job_id: str, video_path: str) -> str:
     """
-    Return a publicly accessible URL for the video file so RunPod can download it.
+    Return a publicly accessible URL RunPod can download from — audio only.
+
+    RunPod's own pipeline (download, decode, separate, transcribe, diarize)
+    never reads a single video frame; only the backend's later mux step
+    touches the video, and that reads it back from its own permanent R2 copy
+    (still uploaded below, unchanged) — not from whatever URL this function
+    hands to RunPod. Sending audio only cuts the worker's download (and its
+    decode step, whose demux cost tracks input size) from the full source —
+    300-800MB for a feature — down to just the audio track, typically a
+    fraction of that. A 364MB film's download+extract measured ~46 minutes
+    before any real work (separation/transcription/diarization) started;
+    this is the fix.
 
     Prefers Cloudflare R2 (stable, no tunnel required).
     Raises RuntimeError if R2 is not configured or all upload attempts fail.
@@ -1229,87 +1265,163 @@ async def _get_runpod_file_url(job_id: str, video_path: str) -> str:
     r2_key_id   = os.getenv("R2_ACCESS_KEY_ID", "")
     r2_secret   = os.getenv("R2_SECRET_ACCESS_KEY", "")
     r2_account  = os.getenv("R2_ACCOUNT_ID", "")
-    r2_pub_url  = os.getenv("R2_PUBLIC_URL", "").rstrip("/")
 
-    if r2_bucket and r2_key_id and r2_secret and r2_account:
-        import re
-        import boto3
-        from botocore.config import Config
-        from botocore.exceptions import ClientError
-
-        endpoint = f"https://{r2_account}.r2.cloudflarestorage.com"
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=endpoint,
-            aws_access_key_id=r2_key_id,
-            aws_secret_access_key=r2_secret,
-            config=Config(signature_version="s3v4"),
-            region_name="auto",
+    if not (r2_bucket and r2_key_id and r2_secret and r2_account):
+        raise RuntimeError(
+            "No video URL available for RunPod: configure R2_BUCKET_NAME / R2_ACCESS_KEY_ID / "
+            "R2_SECRET_ACCESS_KEY / R2_ACCOUNT_ID in .env."
         )
 
-        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(video_path).name)
-        object_key = f"{job_id}/{safe_name}"
+    import re
+    import boto3
+    from botocore.config import Config
+    from botocore.exceptions import ClientError
+
+    endpoint = f"https://{r2_account}.r2.cloudflarestorage.com"
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=r2_key_id,
+        aws_secret_access_key=r2_secret,
+        config=Config(signature_version="s3v4"),
+        region_name="auto",
+    )
+
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(video_path).name)
+    video_key = f"{job_id}/{safe_name}"
+
+    # --- Permanent source backup — unchanged from before this function did
+    # the audio split. Other code reads this same key later (media serving,
+    # re-runs); RunPod is no longer one of those readers, but the
+    # upload/skip-if-exists behavior here has to stay exactly as it was for
+    # everything else that depends on it. ---
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: s3.head_object(Bucket=r2_bucket, Key=video_key),
+        )
+        logger.info(f"Job {job_id}: video already in R2 at {video_key}, skipping upload")
+    except ClientError as head_err:
+        if head_err.response["Error"]["Code"] != "404":
+            # ERROR, not WARNING: a 404 means "not uploaded yet" and is
+            # normal. Anything else — a scoped-down token returning 403,
+            # say — means this check can never succeed, so every job
+            # silently re-uploads its entire source forever. The dubs all
+            # still work, so nothing else would ever surface it.
+            logger.error(
+                f"Job {job_id}: head_object FAILED ({head_err}) — the "
+                f"skip-reupload check is disabled, every job will "
+                f"re-transfer its source",
+                exc_info=True,
+            )
+        # 404 = not in R2 yet, fall through to upload loop
         last_r2_err = None
-
-        # Check if already in R2 from direct upload — skip re-upload if so
-        try:
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: s3.head_object(Bucket=r2_bucket, Key=object_key),
-            )
-            logger.info(f"Job {job_id}: video already in R2 at {object_key}, skipping upload")
-            url = s3.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": r2_bucket, "Key": object_key},
-                ExpiresIn=7200,
-            )
-            return url
-        except ClientError as head_err:
-            if head_err.response["Error"]["Code"] != "404":
-                # ERROR, not WARNING: a 404 means "not uploaded yet" and is
-                # normal. Anything else — a scoped-down token returning 403,
-                # say — means this check can never succeed, so every job
-                # silently re-uploads its entire source forever. The dubs all
-                # still work, so nothing else would ever surface it.
-                logger.error(
-                    f"Job {job_id}: head_object FAILED ({head_err}) — the "
-                    f"skip-reupload check is disabled, every job will "
-                    f"re-transfer its source",
-                    exc_info=True,
-                )
-            # 404 = not in R2 yet, fall through to upload loop
-
         for attempt in range(1, 4):
             try:
-                logger.info(f"Job {job_id}: uploading video to R2 (attempt {attempt}/3) → {r2_bucket}/{object_key}")
+                logger.info(f"Job {job_id}: uploading video to R2 (attempt {attempt}/3) → {r2_bucket}/{video_key}")
                 await asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda: s3.upload_file(
                         video_path,
                         r2_bucket,
-                        object_key,
+                        video_key,
                         ExtraArgs={"ContentType": "video/mp4"},
                     ),
                 )
-                url = s3.generate_presigned_url(
-                    "get_object",
-                    Params={"Bucket": r2_bucket, "Key": object_key},
-                    ExpiresIn=7200,
-                )
-                logger.info(f"Job {job_id}: R2 upload complete, presigned URL generated")
-                return url
+                logger.info(f"Job {job_id}: R2 video upload complete")
+                break
             except Exception as r2_err:
                 last_r2_err = r2_err
-                logger.warning(f"Job {job_id}: R2 upload attempt {attempt}/3 failed: {r2_err}")
+                logger.warning(f"Job {job_id}: R2 video upload attempt {attempt}/3 failed: {r2_err}")
                 if attempt < 3:
                     await asyncio.sleep(2)
+        else:
+            raise RuntimeError(f"R2 video upload failed after 3 attempts: {last_r2_err}")
 
-        raise RuntimeError(f"R2 upload failed after 3 attempts: {last_r2_err}")
+    # --- Audio-only handoff for RunPod ---
+    #
+    # -acodec copy is a container remux, not a re-encode: near-instant
+    # regardless of video length, bit-identical audio, and produces a file
+    # that's just the audio track with none of the video weight. .mka
+    # (Matroska) accepts any input audio codec without transcoding — uploads
+    # span MP4/WebM/MOV, whose audio isn't always AAC, so a codec-specific
+    # container (.m4a etc.) would fail to remux some of them.
+    audio_key = f"{job_id}/audio_{Path(safe_name).stem}.mka"
 
-    raise RuntimeError(
-        "No video URL available for RunPod: configure R2_BUCKET_NAME / R2_ACCESS_KEY_ID / "
-        "R2_SECRET_ACCESS_KEY / R2_ACCOUNT_ID in .env."
-    )
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: s3.head_object(Bucket=r2_bucket, Key=audio_key),
+        )
+        logger.info(f"Job {job_id}: audio already in R2 at {audio_key}, skipping extraction")
+        return s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": r2_bucket, "Key": audio_key},
+            ExpiresIn=7200,
+        )
+    except ClientError as head_err:
+        if head_err.response["Error"]["Code"] != "404":
+            logger.warning(f"Job {job_id}: audio head_object check failed ({head_err}) — re-extracting")
+
+    with tempfile.NamedTemporaryFile(suffix=".mka", delete=False) as tmp:
+        tmp_audio_path = tmp.name
+    try:
+        cmd = [
+            "ffmpeg", "-y", "-i", video_path,
+            "-vn", "-map", "0:a:0", "-acodec", "copy",
+            tmp_audio_path,
+        ]
+        proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, timeout=300)
+        if proc.returncode != 0 or not os.path.exists(tmp_audio_path) or os.path.getsize(tmp_audio_path) < 1000:
+            # Stream-copy fails for the rare audio codec Matroska can't
+            # carry as-is. Re-encode to Opus rather than fail the whole job
+            # over a transfer optimization.
+            logger.warning(
+                f"Job {job_id}: audio stream-copy failed "
+                f"({proc.stderr.decode(errors='ignore')[:300]}), re-encoding instead"
+            )
+            cmd = [
+                "ffmpeg", "-y", "-i", video_path,
+                "-vn", "-map", "0:a:0", "-c:a", "libopus", "-b:a", "96k",
+                tmp_audio_path,
+            ]
+            proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, timeout=600)
+            if proc.returncode != 0 or not os.path.exists(tmp_audio_path) or os.path.getsize(tmp_audio_path) < 1000:
+                raise RuntimeError(
+                    f"Audio extraction failed for RunPod handoff: "
+                    f"{proc.stderr.decode(errors='ignore')[:300]}"
+                )
+
+        last_r2_err = None
+        for attempt in range(1, 4):
+            try:
+                logger.info(f"Job {job_id}: uploading audio to R2 (attempt {attempt}/3) → {r2_bucket}/{audio_key}")
+                await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: s3.upload_file(
+                        tmp_audio_path,
+                        r2_bucket,
+                        audio_key,
+                        ExtraArgs={"ContentType": "audio/x-matroska"},
+                    ),
+                )
+                logger.info(f"Job {job_id}: audio upload complete, presigned URL generated")
+                return s3.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": r2_bucket, "Key": audio_key},
+                    ExpiresIn=7200,
+                )
+            except Exception as r2_err:
+                last_r2_err = r2_err
+                logger.warning(f"Job {job_id}: audio R2 upload attempt {attempt}/3 failed: {r2_err}")
+                if attempt < 3:
+                    await asyncio.sleep(2)
+        raise RuntimeError(f"Audio R2 upload failed after 3 attempts: {last_r2_err}")
+    finally:
+        try:
+            os.unlink(tmp_audio_path)
+        except OSError:
+            pass
 
 
 async def _delete_runpod_file(job_id: str, video_path: str) -> None:
@@ -4267,6 +4379,8 @@ async def process_dubbing_pipeline(
     adaptation_selections: dict | None = None,
     traits_mapping: dict | None = None,
     character_profiles: list | None = None,
+    dubbing_style: str | None = None,
+    localized_aliases: dict | None = None,
 ):
     try:
         if source_lang != target_lang:
@@ -4296,6 +4410,8 @@ async def process_dubbing_pipeline(
             adaptation_selections=adaptation_selections,
             traits_mapping=traits_mapping,
             character_profiles=character_profiles,
+            dubbing_style=dubbing_style,
+            localized_aliases=localized_aliases,
         )
 
         if dubbed_video:
@@ -4543,6 +4659,16 @@ async def dub_video(request: DubRequest, http_request: Request, background_tasks
 
     # === DubMaster pipeline (default) ===
     job.dubbing_engine = "dubmaster"
+    job.dubbing_style = (
+        request.dubbing_style
+        if request.dubbing_style is not None
+        else (job.dubbing_style or "natural")
+    )
+    job.localized_aliases = (
+        request.localized_aliases
+        if request.localized_aliases is not None
+        else job.localized_aliases
+    )
 
     await job_manager.update_job_status(
         request.job_id,
@@ -4564,6 +4690,8 @@ async def dub_video(request: DubRequest, http_request: Request, background_tasks
         adaptation_selections=request.adaptation_selections,
         traits_mapping=job.traits_mapping,
         character_profiles=request.character_profiles or job.character_profiles,
+        dubbing_style=job.dubbing_style,
+        localized_aliases=job.localized_aliases,
     )
 
     return DubResponse(
@@ -4642,6 +4770,19 @@ async def translate_only(request: DubRequest, http_request: Request):
         seg["segment_id"] = str(i)
         seg["source_text"] = seg.get("text", "")
 
+    _effective_dubbing_style = (
+        request.dubbing_style
+        if request.dubbing_style is not None
+        else (job.dubbing_style or "natural")
+    )
+    _effective_localized_aliases = (
+        request.localized_aliases
+        if request.localized_aliases is not None
+        else job.localized_aliases
+    )
+    job.dubbing_style = _effective_dubbing_style
+    job.localized_aliases = _effective_localized_aliases
+
     if source_lang != target_lang:
         _velma_context = None
         _velma_path = os.path.join("data", "velma", f"{request.job_id}.json")
@@ -4658,6 +4799,8 @@ async def translate_only(request: DubRequest, http_request: Request):
             target_lang,
             character_profiles=request.character_profiles or (job.character_profiles if job else None),
             velma_context=_velma_context,
+            dubbing_style=_effective_dubbing_style,
+            localized_aliases=_effective_localized_aliases,
         )
 
         _NOISE_WORDS = {
@@ -4686,6 +4829,8 @@ async def translate_only(request: DubRequest, http_request: Request):
         "source_language": source_lang,
         "generated_at": "",
         "translated_only": True,
+        "dubbing_style": job.dubbing_style,
+        "localized_aliases": job.localized_aliases,
         "segments": [
             {
                 **seg,
@@ -4766,6 +4911,17 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
             source_lang = "auto"
     source_lang = normalize_language_code(source_lang, allow_auto=True)
 
+    job.dubbing_style = (
+        request.dubbing_style
+        if request.dubbing_style is not None
+        else (job.dubbing_style or "natural")
+    )
+    job.localized_aliases = (
+        request.localized_aliases
+        if request.localized_aliases is not None
+        else job.localized_aliases
+    )
+
     await job_manager.update_job_status(
         request.job_id,
         JobStatus.SYNTHESIZING,
@@ -4786,6 +4942,8 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
         adaptation_selections=request.adaptation_selections,
         traits_mapping=job.traits_mapping,
         character_profiles=request.character_profiles or job.character_profiles,
+        dubbing_style=job.dubbing_style,
+        localized_aliases=job.localized_aliases,
     )
 
     return DubResponse(
@@ -6446,6 +6604,8 @@ async def retranslate_job(job_id: str, request: Request):
             target_lang,
             character_profiles=getattr(job, "character_profiles", None),
             velma_context=velma_context,
+            dubbing_style=getattr(job, "dubbing_style", None),
+            localized_aliases=getattr(job, "localized_aliases", None),
         )
     except Exception as exc:
         logger.error(f"[RETRANSLATE] Translation failed for job {job_id}: {exc}")

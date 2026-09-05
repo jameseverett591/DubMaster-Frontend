@@ -149,7 +149,15 @@ def handler(event):
     # ── Step 1: Download (if URL) ─────────────────────────────────────────
     if video_path.startswith("http"):
         import urllib.request
-        local_path = f"/tmp/{job_id}_video.mp4"
+        from urllib.parse import urlparse
+        # The backend now hands this an audio-only file (see
+        # _get_runpod_file_url in routes.py) — usually .mka, sometimes still
+        # a video container for a caller that hasn't been updated. Derive
+        # the extension from the URL rather than hardcoding .mp4: ffmpeg
+        # sniffs by content, not name, so a mismatch wasn't fatal, but a
+        # video-named file holding audio-only bytes is confusing to debug.
+        _url_ext = os.path.splitext(urlparse(video_path).path)[1] or ".mp4"
+        local_path = f"/tmp/{job_id}_source{_url_ext}"
         logger.info(f"[1/4] Downloading {video_path} → {local_path}")
         t_dl = time.time()
         urllib.request.urlretrieve(video_path, local_path)

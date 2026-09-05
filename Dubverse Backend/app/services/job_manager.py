@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Optional
 from datetime import datetime
 import asyncio
 import logging
@@ -64,6 +64,8 @@ async def _upsert_job(job) -> None:
             "transcript_duration": job.transcript.duration if job.transcript else None,
             "transcript_text": job.transcript.text if job.transcript else None,
             "speaker_profiles": job.transcript.speaker_profiles if job.transcript else None,
+            "dubbing_style": job.dubbing_style,
+            "localized_aliases": job.localized_aliases,
             "dubbed_video_url": job.dubbed_video_url,
             "tts_engine": job.tts_engine,
             "segment_tts_engines": job.segment_tts_engines,
@@ -115,7 +117,9 @@ class JobManager:
         video_filename: str,
         video_path: str,
         video_size: int,
-        user_id: str = ""
+        user_id: str = "",
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> Job:
         async with self._lock:
             job = Job(
@@ -126,6 +130,8 @@ class JobManager:
                 video_filename=video_filename,
                 video_path=video_path,
                 video_size=video_size,
+                dubbing_style=dubbing_style or "natural",
+                localized_aliases=localized_aliases,
                 created_at=datetime.now(),
                 updated_at=datetime.now(),
             )

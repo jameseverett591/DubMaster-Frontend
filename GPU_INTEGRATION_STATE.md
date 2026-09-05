@@ -27,13 +27,13 @@
 ### 5. RunPod Configuration
 - Endpoint ID: `mbjktrbdi22aw1`
 - Template ID: `m5q9puning`
-- API Key: `rpa_IBQ59UVECDJLA06FX9ZJBEG7BLEHJA1KYL2SGYUAcox2zf`
+- API Key: `<REDACTED — was committed in plaintext since 2026-05-31 (17c73b97); rotate in RunPod dashboard, do not restore the value here>`
 - GPUs: A40, A5000, RTX 4090
 - Workers: 0-1, 60s idle timeout, 10min execution timeout, flashboot on
 - Env vars set on template: HF_TOKEN, WHISPER_MODEL=medium, WHISPER_LANGUAGE=yue, diarization settings
 
 ### 6. .env Updates (C:\DEV\Dubverse\.env)
-- `RUNPOD_API_KEY=rpa_IBQ59UVECDJLA06FX9ZJBEG7BLEHJA1KYL2SGYUAcox2zf`
+- `RUNPOD_API_KEY=<REDACTED — see note above; set the real value only in .env, never in a tracked file>`
 - `RUNPOD_ENDPOINT_ID=mbjktrbdi22aw1`
 - `PUBLIC_BASE_URL=` (EMPTY — needs ngrok URL)
 - `PROCESSING_MODE=cpu` (needs changing to `gpu` or `auto`)

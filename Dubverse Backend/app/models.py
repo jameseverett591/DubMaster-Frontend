@@ -104,6 +104,8 @@ class Job(BaseModel):
     voice_mapping: Optional[Dict[str, str]] = None     # e.g. {"speaker-1": "male-2", "speaker-2": "female-1"}
     traits_mapping: Optional[Dict[str, List[str]]] = None  # e.g. {"speaker-1": ["calm", "weary", "paternal"]}
     character_profiles: Optional[List[Dict]] = None  # per-job character profiles [{name, traits, speech_style}]
+    dubbing_style: Optional[str] = None  # "natural" (localized dub) or "literal" (word-for-word); routes default to "natural"
+    localized_aliases: Optional[Dict[str, str]] = None  # e.g. {"Brother Gen": "Broker", "San Gu": "Auntie"}
 
     dubbed_video_url: Optional[str] = None
     tts_engine: Optional[str] = None
@@ -166,6 +168,8 @@ class DubRequest(BaseModel):
     vozo_user_prompt: Optional[str] = None  # translation guidance for Vozo
     adaptation_selections: Optional[Dict[str, str]] = None  # segment_id → "faithful"|"performable"|"sync_fit"
     character_profiles: Optional[List[Dict]] = None  # [{name, traits, speech_style}]
+    dubbing_style: Optional[str] = None  # "natural" (localized dub) or "literal" (word-for-word); routes default to persisted job value then "natural"
+    localized_aliases: Optional[Dict[str, str]] = None  # e.g. {"Brother Gen": "Broker", "San Gu": "Auntie"}
 
 
 class AdaptVariant(BaseModel):
