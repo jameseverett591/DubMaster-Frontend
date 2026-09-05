@@ -27,6 +27,7 @@ from app.services.adaptation_engine.policy import (
     build_localized_name_mapping_prompt,
     get_translation_system_prompt,
     resolve_dubbing_style,
+    get_localized_names,
     fix_translation_names,
 )
 
@@ -49,6 +50,27 @@ SLOW_SPEECH_RATE    = float(os.getenv("DUBMASTER_SLOW_SPEECH_RATE",    "2.5"))  
 MAX_SPEED_RATIO     = float(os.getenv("DUBMASTER_MAX_SPEED_RATIO",     "1.15")) # 15% above natural
 MIN_SPEED_RATIO     = float(os.getenv("DUBMASTER_MIN_SPEED_RATIO",     "0.85")) # 15% below natural
 _CHARS_PER_SECOND   = float(os.getenv("DUBMASTER_CHARS_PER_SECOND",   "14.0")) # chars/sec
+
+
+def _apply_source_aliases(
+    text: str,
+    dubbing_style: Optional[str] = None,
+    localized_aliases: Optional[Dict[str, str]] = None,
+) -> str:
+    """Pre-replace source role/address terms with their localized English forms
+    before generic MT engines see the text. Only runs for the 'natural' dubbing
+    style; literal mode must preserve the original source wording.
+    """
+    if resolve_dubbing_style(dubbing_style) != "natural":
+        return text
+    names = get_localized_names(localized_aliases)
+    if not names:
+        return text
+    # Longest sources first so shorter ones don't clobber parts of longer ones.
+    for source, target in sorted(names.items(), key=lambda kv: len(kv[0]), reverse=True):
+        if source in text:
+            text = text.replace(source, target)
+    return text
 # Shortest window a split sentence may be given. Below this, TTS overhead —
 # articulation, the pause after a full stop — dominates the budget and no
 # rewording fits: "I'm Jin Shan Zhao." measures 1.29s and was being handed 0.68s.
@@ -678,7 +700,11 @@ class TranslationService:
 
         # DeepL: does not support Cantonese as source, so skip for yue content.
         if self.deepl_api_key and not is_cantonese:
-            result = await self._translate_segments_deepl_batch(segments, source_norm, target_norm)
+            result = await self._translate_segments_deepl_batch(
+                segments, source_norm, target_norm,
+                dubbing_style=dubbing_style,
+                localized_aliases=localized_aliases,
+            )
             glossary_baselines = [
                 self._apply_glossary_post(*self._apply_glossary_pre(seg.get("text", ""))[:2])
                 for seg in segments
@@ -698,13 +724,19 @@ class TranslationService:
         # Google Cloud: supports yue-HK source explicitly.
         if self.google_api_key:
             result = await self._translate_segments_google_cloud(
-                segments, effective_source, target_norm
+                segments, effective_source, target_norm,
+                dubbing_style=dubbing_style,
+                localized_aliases=localized_aliases,
             )
             if result is not None:
                 return result
 
         # Last resort: free Google Translate via deep_translator (scraping)
-        return await self._translate_segments_batch(segments, source_norm, target_norm)
+        return await self._translate_segments_batch(
+            segments, source_norm, target_norm,
+            dubbing_style=dubbing_style,
+            localized_aliases=localized_aliases,
+        )
 
     # ── Batch-translation line markers ────────────────────────────────────────
     # Shared by _translate_segments_claude and _translate_segments_gpt. Both send
@@ -1136,6 +1168,8 @@ class TranslationService:
                             original_text,
                             source_language,
                             target_language,
+                            dubbing_style=dubbing_style,
+                            localized_aliases=localized_aliases,
                         )
                         if retranslated and not _cjk_re.search(retranslated):
                             result[i] = {
@@ -1507,12 +1541,17 @@ class TranslationService:
         segments: List[Dict],
         source_language: str,
         target_language: str,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> List[Dict]:
         """
         Send all segment texts in a single DeepL API request (multi-text batch).
         Uses the current header-based auth required since Nov 2025.
         """
-        texts = [seg.get("text", "") for seg in segments]
+        texts = [
+            _apply_source_aliases(seg.get("text", ""), dubbing_style, localized_aliases)
+            for seg in segments
+        ]
 
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
@@ -1548,6 +1587,7 @@ class TranslationService:
         for i, seg in enumerate(segments):
             raw = (translations[i]["text"] if i < len(translations) else None) or protected[i]
             final = self._apply_glossary_post(raw, replacements_per_seg[i])
+            final = fix_translation_names(final)
             final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
             for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
             result.append({**seg, "original_text": seg.get("text", ""), "text": final})
@@ -1559,13 +1599,18 @@ class TranslationService:
         segments: List[Dict],
         source_language: str,
         target_language: str,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> Optional[List[Dict]]:
         """
         Translate via the official Google Cloud Translation API v2 (paid).
         Supports multiple 'q' values in one request for batch translation.
         Returns None on failure so the caller can fall through to the next engine.
         """
-        texts = [seg.get("text", "") for seg in segments]
+        texts = [
+            _apply_source_aliases(seg.get("text", ""), dubbing_style, localized_aliases)
+            for seg in segments
+        ]
 
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
@@ -1640,6 +1685,7 @@ class TranslationService:
                     else protected[i]
                 )
                 final = self._apply_glossary_post(raw, replacements_per_seg[i])
+                final = fix_translation_names(final)
                 final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
                 for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
                 if raw.strip() != protected[i].strip():
@@ -1659,12 +1705,17 @@ class TranslationService:
         segments: List[Dict],
         source_language: str,
         target_language: str,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> List[Dict]:
         """
         Translate all segment texts in a single batch call via deep_translator.
         One HTTP request instead of N, so Google's rate limit is not triggered.
         """
-        texts = [seg.get("text", "") for seg in segments]
+        texts = [
+            _apply_source_aliases(seg.get("text", ""), dubbing_style, localized_aliases)
+            for seg in segments
+        ]
 
         # Apply glossary pre-pass on every text
         protected: List[str] = []
@@ -1742,6 +1793,7 @@ class TranslationService:
             else:
                 raw_translated = translated_map.get(i) or protected[i]
                 final = self._apply_glossary_post(raw_translated, replacements_per_seg[i])
+                final = fix_translation_names(final)
                 final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
                 for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
                 if raw_translated.strip() != protected[i].strip():
@@ -1875,10 +1927,16 @@ class TranslationService:
         self,
         text: str,
         source_language: str,
-        target_language: str
+        target_language: str,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> str:
         if not text.strip():
             return text
+
+        # Natural style: pre-localize role/address terms so generic MT engines
+        # do not leave them as literal romanizations.
+        text = _apply_source_aliases(text, dubbing_style, localized_aliases)
 
         # Protect glossary terms with placeholders before translation
         protected_text, replacements, _fuzz_single = self._apply_glossary_pre(text)
@@ -1901,7 +1959,7 @@ class TranslationService:
             for _w in _v_warns: logger.warning("[VERIFY] single: %s", "; ".join(_v_warns))
             logger.debug(f"Glossary: restored terms -> '{translated[:80]}'")
 
-        return translated
+        return fix_translation_names(translated)
     
     async def _translate_with_deepl(
         self,
