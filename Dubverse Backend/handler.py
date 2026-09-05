@@ -5,6 +5,7 @@ import logging
 import asyncio
 import json
 import os
+import re
 import time
 
 try:
@@ -92,20 +93,273 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def _assign_speaker(transcript_seg, diarization_segments):
-    """Best-overlap speaker assignment for a single transcript segment."""
+# Punctuation used to split long transcript segments into natural phrases.
+_SENTENCE_END_PUNCT = "。！？.?!；;"
+_WORD_BOUNDARY_PUNCT = "，,、 "
+
+# Maximum duration/length of a transcript segment before we force a phrase split.
+# Keeping segments under these limits prevents a single ASR block from spanning
+# multiple speaker turns and makes downstream translation/TTS timing sane.
+_MAX_SEGMENT_DURATION = float(os.getenv("HANDLER_MAX_SEGMENT_DURATION", "12.0"))
+_MAX_SEGMENT_CHARS = int(os.getenv("HANDLER_MAX_SEGMENT_CHARS", "90"))
+
+
+def _find_punctuation_split(
+    text: str,
+    target_idx: int,
+    punct: str,
+    max_dist: int | None = None,
+) -> int:
+    """Return a split index near *target_idx* that falls after a punctuation char.
+
+    If *max_dist* is set, only consider punctuation within that character distance.
+    This prevents a far-away sentence-ending mark from overriding a closer word
+    boundary when the real target is in the middle of a clause.
+    """
+    if not text or target_idx <= 0 or target_idx >= len(text):
+        return target_idx
+    best = target_idx
+    best_dist = abs(target_idx - best)
+    for i, ch in enumerate(text):
+        if ch in punct:
+            idx = i + 1
+            dist = abs(idx - target_idx)
+            if max_dist is not None and dist > max_dist:
+                continue
+            if dist < best_dist:
+                best = idx
+                best_dist = dist
+    return best
+
+
+def _split_long_segment(
+    seg: dict,
+    speaker: str | None = None,
+    max_duration: float = _MAX_SEGMENT_DURATION,
+    max_chars: int = _MAX_SEGMENT_CHARS,
+) -> list[dict]:
+    """Recursively split a single long segment by natural phrase boundaries."""
+    t_start = float(seg.get("start", 0))
+    t_end = float(seg.get("end", t_start))
+    text = seg.get("text", "")
+    duration = t_end - t_start
+
+    if duration <= max_duration and len(text) <= max_chars:
+        out = dict(seg)
+        out["speaker"] = speaker or out.get("speaker", "SPEAKER_00")
+        return [out]
+
+    # Prefer sentence-ending punctuation, then weaker boundaries.
+    boundaries = sorted(
+        set(m.end() for m in re.finditer(rf"[{re.escape(_SENTENCE_END_PUNCT)}]+", text))
+    )
+    if len(boundaries) < 2:
+        boundaries = sorted(
+            set(boundaries) | set(m.end() for m in re.finditer(rf"[{re.escape(_WORD_BOUNDARY_PUNCT)}]+", text))
+        )
+    boundaries = [b for b in boundaries if 0 < b < len(text)]
+
+    if not boundaries:
+        # No punctuation: split in half by character count and recurse.
+        mid = len(text) // 2
+        if mid < 1 or mid >= len(text):
+            # Cannot split any further; return as-is to avoid infinite recursion.
+            out = dict(seg)
+            out["speaker"] = speaker or out.get("speaker", "SPEAKER_00")
+            return [out]
+        boundaries = [mid]
+
+    # Build chunks; if a chunk is still too long, recurse.
+    chunks_raw = []
+    last = 0
+    for b in boundaries:
+        if b > last:
+            chunks_raw.append(text[last:b])
+            last = b
+    if last < len(text):
+        chunks_raw.append(text[last:])
+
+    out: list[dict] = []
+    for chunk in chunks_raw:
+        chunk_dur = duration * (len(chunk) / max(len(text), 1))
+        if chunk_dur > max_duration or len(chunk) > max_chars:
+            sub_seg = dict(seg)
+            sub_seg["text"] = chunk
+            sub_seg["start"] = t_start
+            sub_seg["end"] = t_start + chunk_dur
+            out.extend(
+                _split_long_segment(sub_seg, speaker, max_duration, max_chars)
+            )
+        else:
+            if chunk.strip():
+                sub = dict(seg)
+                sub["text"] = chunk.strip()
+                sub["start"] = round(float(t_start), 3)
+                sub["end"] = round(float(t_start + chunk_dur), 3)
+                sub["speaker"] = speaker or sub.get("speaker", "SPEAKER_00")
+                sub.pop("words", None)
+                out.append(sub)
+        t_start += chunk_dur
+    return out
+
+
+def _speaker_overlap(seg: dict, diarization_segments: list[dict]) -> str:
+    """Return the diarization speaker with the largest absolute overlap."""
     best_overlap = 0.0
-    assigned_speaker = "SPEAKER_00"
-    t_start = float(transcript_seg.get("start", 0))
-    t_end = float(transcript_seg.get("end", t_start))
+    assigned = "SPEAKER_00"
+    t_start = float(seg.get("start", 0))
+    t_end = float(seg.get("end", t_start))
     for d_seg in diarization_segments:
         d_start = float(d_seg.get("start", 0))
         d_end = float(d_seg.get("end", 0))
         overlap = max(0.0, min(t_end, d_end) - max(t_start, d_start))
         if overlap > best_overlap:
             best_overlap = overlap
-            assigned_speaker = d_seg.get("speaker", "SPEAKER_00")
-    return assigned_speaker
+            assigned = d_seg.get("speaker", "SPEAKER_00")
+    return assigned
+
+
+def _split_segment_by_diarization(
+    seg: dict,
+    diarization_segments: list[dict],
+    max_duration: float = _MAX_SEGMENT_DURATION,
+    max_chars: int = _MAX_SEGMENT_CHARS,
+) -> list[dict]:
+    """
+    Split a transcript segment along diarization speaker boundaries and assign
+    each piece the corresponding speaker.
+
+    If the segment contains no diarization overlaps, or diarization collapsed to a
+    single speaker, we still force a phrase-level split when the segment is too long.
+    """
+    t_start = float(seg.get("start", 0))
+    t_end = float(seg.get("end", t_start))
+    text = (seg.get("text") or "").strip()
+
+    if not text:
+        out = dict(seg)
+        out["speaker"] = _speaker_overlap(out, diarization_segments)
+        return [out]
+
+    # Intersect diarization turns with this segment.
+    intervals = []
+    for d in diarization_segments:
+        ds = float(d.get("start", 0))
+        de = float(d.get("end", 0))
+        sp = d.get("speaker") or "SPEAKER_00"
+        if de <= t_start or ds >= t_end:
+            continue
+        intervals.append([max(ds, t_start), min(de, t_end), sp])
+
+    intervals.sort(key=lambda x: x[0])
+
+    # Merge adjacent or overlapping turns from the same speaker.
+    merged = []
+    for inv in intervals:
+        if merged and inv[2] == merged[-1][2] and inv[0] <= merged[-1][1] + 0.25:
+            merged[-1][1] = max(merged[-1][1], inv[1])
+        else:
+            merged.append(inv)
+    intervals = merged
+    # Drop zero-length turns so we do not create empty output segments.
+    intervals = [i for i in intervals if i[1] > i[0]]
+
+    chars_total = max(len(text), 1)
+
+    # No usable diarization: split long segments by punctuation, keep one speaker.
+    if not intervals:
+        return _split_long_segment(seg, _speaker_overlap(seg, diarization_segments), max_duration, max_chars)
+
+    # Single speaker for this interval: still split if the segment is too long.
+    if len(intervals) == 1:
+        return _split_long_segment(seg, intervals[0][2], max_duration, max_chars)
+
+    # Not enough characters to assign one per speaker turn.  Fall back to the
+    # dominant speaker so we keep all text instead of dropping trailing turns.
+    if len(intervals) > chars_total:
+        speakers = {}
+        for s, e, sp in intervals:
+            speakers[sp] = speakers.get(sp, 0.0) + (e - s)
+        dominant = max(speakers, key=speakers.get)
+        return _split_long_segment(seg, dominant, max_duration, max_chars)
+
+    # Multiple speakers: allocate text proportionally to each interval and split at
+    # natural punctuation boundaries when possible.  This preserves the exact number
+    # of speaker turns instead of collapsing ratios into fewer chunks.
+    total_speech = sum(i[1] - i[0] for i in intervals)
+    num_intervals = len(intervals)
+    split_points: list[int] = []
+    prev_point = 0
+    cum_speech = 0.0
+    search_end = chars_total - 1
+    for i in range(num_intervals - 1):
+        cum_speech += intervals[i][1] - intervals[i][0]
+        ratio = cum_speech / total_speech
+        raw_target = int(chars_total * min(ratio, 0.999))
+        # Leave at least one character for every remaining interval.
+        max_target = chars_total - (num_intervals - 1 - i)
+        target = min(max(raw_target, prev_point + 1), max_target)
+
+        max_dist = max(3, int((search_end - prev_point) * 0.15))
+        best = target
+        best_dist = float("inf")
+        for j in range(prev_point, search_end):
+            if text[j] in _SENTENCE_END_PUNCT:
+                dist = abs((j + 1) - target)
+                if dist <= max_dist and dist < best_dist:
+                    best = j + 1
+                    best_dist = dist
+        if best == target or best_dist == float("inf"):
+            for j in range(prev_point, search_end):
+                if text[j] in _WORD_BOUNDARY_PUNCT:
+                    dist = abs((j + 1) - target)
+                    if dist < best_dist:
+                        best = j + 1
+                        best_dist = dist
+        best = max(prev_point + 1, min(best, search_end))
+        split_points.append(best)
+        prev_point = best
+
+    chunks = []
+    last = 0
+    for pt in split_points:
+        chunks.append(text[last:pt])
+        last = pt
+    chunks.append(text[last:])
+
+    out = []
+    for chunk, (s, e, sp) in zip(chunks, intervals):
+        if not chunk.strip():
+            continue
+        # Skip fragments that are too short to be meaningful speech.
+        if (float(e) - float(s)) < 0.25 and len(chunk.strip()) < 2:
+            continue
+        sub = dict(seg)
+        sub["text"] = chunk.strip()
+        sub["start"] = round(float(s), 3)
+        sub["end"] = round(float(e), 3)
+        sub["speaker"] = sp
+        sub.pop("words", None)
+        # A single speaker may still have a long monologue; split it further.
+        sub_dur = sub["end"] - sub["start"]
+        if sub_dur > max_duration or len(sub["text"]) > max_chars:
+            out.extend(_split_long_segment(sub, sp, max_duration, max_chars))
+        else:
+            out.append(sub)
+    return out
+
+
+def _assign_and_split_segments(
+    transcript_segments: list[dict],
+    diarization_segments: list[dict],
+    max_duration: float = _MAX_SEGMENT_DURATION,
+    max_chars: int = _MAX_SEGMENT_CHARS,
+) -> list[dict]:
+    """Assign speakers and split any transcript segments that span turns."""
+    out = []
+    for seg in transcript_segments:
+        out.extend(_split_segment_by_diarization(seg, diarization_segments, max_duration, max_chars))
+    return out
 
 
 def handler(event):
@@ -310,13 +564,23 @@ def handler(event):
 
     # ── Speaker Assignment ────────────────────────────────────────────────
     if diarization_segments:
-        for seg in segments:
-            seg["speaker"] = _assign_speaker(seg, diarization_segments)
+        before = len(segments)
+        segments = _assign_and_split_segments(segments, diarization_segments)
         unique = len(set(s.get("speaker") for s in segments))
-        logger.info(f"Speaker assignment complete: {unique} unique speaker(s) across {len(segments)} segments")
+        logger.info(
+            f"Speaker assignment complete: {unique} unique speaker(s) across "
+            f"{len(segments)} segments (before split: {before})"
+        )
     else:
-        for seg in segments:
-            seg.setdefault("speaker", "SPEAKER_00")
+        # No diarization: still split any ASR monster segments by punctuation so
+        # translation/TTS timing doesn't collapse multiple turns into one block.
+        before = len(segments)
+        segments = _assign_and_split_segments(segments, [])
+        unique = len(set(s.get("speaker") for s in segments))
+        logger.info(
+            f"Speaker assignment (no diarization): {unique} default speaker(s) across "
+            f"{len(segments)} segments (before split: {before})"
+        )
 
     # ── Confidence Tiering ────────────────────────────────────────────────
     # Tag each segment so the editor can route low-confidence ones to review.
