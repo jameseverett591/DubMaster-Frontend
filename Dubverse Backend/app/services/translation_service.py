@@ -18,7 +18,6 @@ from app.config import get_settings
 from app.utils.language import normalize_language_code, LANGUAGE_NAMES
 from app.services.glossary import get_glossary, build_phonetic_index, _cjk_pinyin, _is_cjk
 from app.services.adaptation_engine.policy import (
-    DUBBING_SYSTEM_PROMPT,
     NO_HALLUCINATION_GUARDS,
     get_character_profile,
     detect_character_from_text,
@@ -27,7 +26,6 @@ from app.services.adaptation_engine.policy import (
     build_name_mapping_prompt,
     build_localized_name_mapping_prompt,
     get_translation_system_prompt,
-    get_dubbing_system_prompt,
     resolve_dubbing_style,
     fix_translation_names,
 )
@@ -1226,7 +1224,8 @@ class TranslationService:
             )
 
         # Build centralized system prompt from policy layer
-        system_prompt_parts = [get_dubbing_system_prompt(dubbing_style)]
+        _gpt_is_literal = resolve_dubbing_style(dubbing_style) == "literal"
+        system_prompt_parts = [get_translation_system_prompt(dubbing_style)]
 
         detected_profile = detect_character_from_text("\n".join(texts))
         if detected_profile:
@@ -1293,6 +1292,16 @@ class TranslationService:
         system_prompt = "\n".join(system_prompt_parts)
 
         def _build_user_prompt(marked_lines: str) -> str:
+            if _gpt_is_literal:
+                return (
+                    f"Translate these spoken {lang_name} dialogue lines to {target_name} word-for-word.\n\n"
+                    f"Rules:\n"
+                    f"- Translate LITERALLY. Do NOT substitute synonyms, paraphrase, or rewrite for 'naturalness'.\n"
+                    f"- Keep the exact meaning of each word.\n"
+                    f"- Preserve every line. Do NOT drop, merge, or skip any [[SEG-...]] marked line.\n"
+                    f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
+                    f"{marked_lines}"
+                )
             return (
                 f"Translate these spoken {lang_name} dialogue lines to natural {target_name} for voice actors.\n\n"
                 f"Preserve meaning, emotion, and character voice. "
