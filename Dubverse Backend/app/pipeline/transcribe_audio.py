@@ -283,8 +283,15 @@ def _filter_hallucinations(
 
         # Reject Arabic-script text unless the source language is an Arabic-script
         # language.  This catches the standalone "الله." hallucination and similar
-        # script mismatches regardless of segment duration.
-        if _re.search(r'[\u0600-\u06ff\u0750-\u077f]', text) and source_language not in _ARABIC_LANGS:
+        # script mismatches regardless of segment duration. In merged multi-engine
+        # output, only trigger on Whisper segments or segments with a suspicious
+        # ASR signal, so valid Arabic-script code-switching from another engine
+        # is not discarded.
+        if (
+            _re.search(r'[\u0600-\u06ff\u0750-\u077f]', text)
+            and source_language not in _ARABIC_LANGS
+            and (whisper_source or _suspicious)
+        ):
             logger.info(
                 f"[HALLUCINATION] Rejected Arabic-script segment in non-Arabic audio: '{text[:60]}' "
                 f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
