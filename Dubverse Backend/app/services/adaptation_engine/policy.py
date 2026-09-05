@@ -35,6 +35,24 @@ logger = logging.getLogger(__name__)
 # "literal"  = word-for-word, preserve romanization, no localization.
 DEFAULT_DUBBING_STYLE = os.getenv("DUBBING_STYLE", "natural").lower().strip()
 
+# Backend-default localized forms for common address/role terms that recur in
+# period martial-arts dubs (e.g. Ip Man 2).  Env var DUBBING_LOCALIZED_NAMES
+# and per-request localized_aliases both override these defaults.
+DEFAULT_LOCALIZED_NAMES: Dict[str, str] = {
+    # Address terms
+    "根哥": "Broker",
+    "Brother Gen": "Broker",
+    "三姑": "Auntie",
+    "San Gu": "Auntie",
+    "徒弟": "students",
+    "disciples": "students",
+    # Proper names (canonical localization)
+    "永成": "Wensing",
+    "Yong Cheng": "Wensing",
+    "Wing Ching": "Wensing",
+    "Wing Sing": "Wensing",
+}
+
 # Optional JSON mapping of source terms/names to localized English forms.
 # Example: {"Brother Gen": "Broker", "San Gu": "Auntie", "disciples": "students"}
 LOCALIZED_NAMES: Dict[str, str] = {}
@@ -56,8 +74,9 @@ def resolve_dubbing_style(style: Optional[str]) -> str:
 
 
 def get_localized_names(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-    """Return merged localization map (env + per-request override)."""
-    merged = dict(LOCALIZED_NAMES)
+    """Return merged localization map (defaults + env + per-request override)."""
+    merged = dict(DEFAULT_LOCALIZED_NAMES)
+    merged.update(LOCALIZED_NAMES)
     if extra:
         merged.update({str(k): str(v) for k, v in extra.items()})
     return merged

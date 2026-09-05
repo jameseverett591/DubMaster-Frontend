@@ -279,7 +279,7 @@ class DubbingService:
             merged_text = prev["text"].rstrip() + " " + seg.get("text", "").lstrip()
             merged_duration = float(seg.get("end", 0)) - float(prev.get("start", 0))
 
-            if same_speaker and gap > 0.3 and gap < max_gap and len(prev["text"]) <= MAX_MERGED_CHARS and merge_counts[-1] < MAX_MERGE_COUNT and merged_duration <= MAX_MERGED_DURATION:
+            if same_speaker and gap >= 0.0 and gap < max_gap and len(merged_text) <= MAX_MERGED_CHARS and merge_counts[-1] < MAX_MERGE_COUNT and merged_duration <= MAX_MERGED_DURATION:
                 # Merge: extend the previous segment
                 prev["text"]  = merged_text
                 prev["end"]   = seg.get("end", prev["end"])

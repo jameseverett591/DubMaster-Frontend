@@ -666,7 +666,13 @@ def _normalize_speaker_labels(segments):
     mapping = {}
     idx = 1
     for seg in segments:
-        speaker = seg.speaker or "speaker-1"
+        speaker = seg.speaker
+        if not speaker:
+            # Leave missing/empty labels as None; downstream defaults them to
+            # speaker-1 on demand. This prevents a transient empty first segment
+            # from stealing speaker-1 and forcing every real speaker to speaker-2.
+            seg.speaker = None
+            continue
         if speaker not in mapping:
             mapping[speaker] = f"speaker-{idx}"
             idx += 1
@@ -745,6 +751,7 @@ def _merge_close_transcript_segments(
     max_merged_chars: int = 220,
     max_merge_count: int = 8,
     max_merged_duration: float = 14.0,
+    max_chars_per_second: float = 6.0,
 ) -> list[TranscriptSegment]:
     if not segments:
         return segments
@@ -767,11 +774,18 @@ def _merge_close_transcript_segments(
         candidate_text = (prev.text or "").rstrip() + " " + (seg.text or "").lstrip()
         merged_duration = float(seg.end) - float(prev.start)
 
+        # Guard: a merged segment's text must plausibly fit its audio slot.
+        # CJK source chars map ~1:1 to syllables; natural speech is ~4-6 chars/sec.
+        # This prevents the "0.5s slot holding 50+ characters" over-merge pattern.
+        max_allowed_chars = max_merged_chars
+        if merged_duration > 0:
+            max_allowed_chars = min(max_allowed_chars, int(merged_duration * max_chars_per_second) + 2)
+
         if (
             prev_speaker == seg_speaker
             and gap >= 0.0
             and gap < max_gap
-            and len(prev.text or "") <= max_merged_chars
+            and len(candidate_text) <= max_allowed_chars
             and merge_counts[-1] < max_merge_count
             and merged_duration <= max_merged_duration
         ):
