@@ -230,10 +230,14 @@ def _filter_hallucinations(
         # Reject known YouTube/subtitle boilerplate and religious-phrase
         # hallucinations that Whisper produces from near-silence or background
         # music (e.g. the shahada / "Allahu Akbar" loop).
+        # In merged multi-engine output, only trigger this on segments that already
+        # have a suspicious ASR signal, so a non-Whisper engine returning dialogue that
+        # happens to contain one of these phrases is not dropped.
         _norm_text = text.lower().rstrip('!.，。,')
-        if _norm_text in _HALLUCINATION_PHRASES or any(
-            ph in _norm_text for ph in _HALLUCINATION_PHRASES
-        ):
+        if (
+            _norm_text in _HALLUCINATION_PHRASES
+            or any(ph in _norm_text for ph in _HALLUCINATION_PHRASES)
+        ) and (whisper_source or _suspicious):
             logger.info(
                 f"[HALLUCINATION] Rejected known hallucination phrase: '{text}' "
                 f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
