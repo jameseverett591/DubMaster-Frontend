@@ -168,14 +168,18 @@ def handler(event):
         if not os.path.exists(video_path):
             return {"error": f"video_path not found: {video_path}"}
 
-    # ── Step 2: Extract Audio ─────────────────────────────────────────────
-    logger.info("[2/4] Extracting audio")
-    t_ex = time.time()
-    extract_result = extract_audio(video_path)
-    timings["extract"] = round(time.time() - t_ex, 2)
-
-    if extract_result.get("status") != "ok":
-        return {"error": f"Audio extraction failed: {extract_result.get('reason', '')}"}
+    # ── Step 2: Extract Audio (lazily) ────────────────────────────────────
+    # Don't decode the original video into 16 kHz mono here if Demucs is going
+    # to do its own 44.1 kHz extraction anyway. We'll only fall back to this
+    # when source separation is disabled or fails.
+    extract_result = None
+    if "separate" not in steps:
+        logger.info("[2/4] Extracting audio")
+        t_ex = time.time()
+        extract_result = extract_audio(video_path)
+        timings["extract"] = round(time.time() - t_ex, 2)
+        if extract_result.get("status") != "ok":
+            return {"error": f"Audio extraction failed: {extract_result.get('reason', '')}"}
 
     # ── Step 3: Demucs Source Separation (vocals only) ───────────────────
     vocals_audio_path = None
@@ -214,6 +218,16 @@ def handler(event):
         else:
             logger.warning("Failed to load separated vocals — falling back to original audio")
             vocal_extract = None
+
+    # If separated vocals were not produced or could not be loaded, decode the
+    # original source once for transcription/diarization.
+    if vocal_extract is None and extract_result is None:
+        logger.info("[2/4] Extracting audio (separation disabled/failed)")
+        t_ex = time.time()
+        extract_result = extract_audio(video_path)
+        timings["extract"] = round(time.time() - t_ex, 2)
+        if extract_result.get("status") != "ok":
+            return {"error": f"Audio extraction failed: {extract_result.get('reason', '')}"}
 
     transcription_source = vocal_extract if vocal_extract is not None else extract_result
 
