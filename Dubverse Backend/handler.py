@@ -264,6 +264,8 @@ def _split_segment_by_diarization(
     # Drop zero-length turns so we do not create empty output segments.
     intervals = [i for i in intervals if i[1] > i[0]]
 
+    chars_total = max(len(text), 1)
+
     # No usable diarization: split long segments by punctuation, keep one speaker.
     if not intervals:
         return _split_long_segment(seg, _speaker_overlap(seg, diarization_segments), max_duration, max_chars)
@@ -272,11 +274,19 @@ def _split_segment_by_diarization(
     if len(intervals) == 1:
         return _split_long_segment(seg, intervals[0][2], max_duration, max_chars)
 
+    # Not enough characters to assign one per speaker turn.  Fall back to the
+    # dominant speaker so we keep all text instead of dropping trailing turns.
+    if len(intervals) > chars_total:
+        speakers = {}
+        for s, e, sp in intervals:
+            speakers[sp] = speakers.get(sp, 0.0) + (e - s)
+        dominant = max(speakers, key=speakers.get)
+        return _split_long_segment(seg, dominant, max_duration, max_chars)
+
     # Multiple speakers: allocate text proportionally to each interval and split at
     # natural punctuation boundaries when possible.  This preserves the exact number
     # of speaker turns instead of collapsing ratios into fewer chunks.
     total_speech = sum(i[1] - i[0] for i in intervals)
-    chars_total = max(len(text), 1)
     num_intervals = len(intervals)
     split_points: list[int] = []
     prev_point = 0
