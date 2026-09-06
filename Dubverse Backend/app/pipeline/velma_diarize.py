@@ -9,6 +9,7 @@ Triage provides the authoritative speaker assignments and scene metadata.
 STT provides the emotion labels (Triage ignores emotion_signal in its config).
 Emotions are merged onto Triage segments by closest start_ms match (±300ms).
 """
+import copy
 import json
 import os
 import logging
@@ -101,9 +102,19 @@ FILM_DUBBING_CONFIG = {
 }
 
 
-def _call_triage(audio_path: str, api_key: str, job_id: str) -> dict:
+def _call_triage(audio_path: str, api_key: str, job_id: str, *, num_speakers: int = 0, language: str | None = None) -> dict:
     """Call velma-2-batch (Triage) for transcript + scene context."""
-    config_json = json.dumps(FILM_DUBBING_CONFIG)
+    config = copy.deepcopy(FILM_DUBBING_CONFIG)
+    if language:
+        config["stt"]["language"] = language
+        logger.info(f"[VELMA] Job {job_id}: triage language hint set to {language!r}")
+    # num_speakers is accepted by this wrapper but Velma's public BatchConfig/STTOptions
+    # does not document a speaker-count hint. Log it rather than risk a 400/422 by
+    # sending an unknown field; if Modulate support confirms a hidden key we can wire it.
+    if num_speakers and 1 <= num_speakers <= 10:
+        logger.info(f"[VELMA] Job {job_id}: expected_speakers={num_speakers} — not forwarded; no documented Velma STT field")
+
+    config_json = json.dumps(config)
     with open(audio_path, "rb") as f:
         resp = requests.post(
             VELMA_BATCH_URL,
@@ -117,19 +128,23 @@ def _call_triage(audio_path: str, api_key: str, job_id: str) -> dict:
     return resp.json()
 
 
-def _call_stt_emotions(audio_path: str, api_key: str, job_id: str) -> dict:
+def _call_stt_emotions(audio_path: str, api_key: str, job_id: str, *, language: str | None = None) -> dict:
     """Call velma-2-stt-batch with emotion_signal=true for per-utterance emotion labels."""
     try:
+        data = {
+            "speaker_diarization": "true",
+            "emotion_signal": "true",
+            "accent_signal": "true",
+        }
+        if language:
+            data["language"] = language
+            logger.info(f"[VELMA] Job {job_id}: stt language hint set to {language!r}")
         with open(audio_path, "rb") as f:
             resp = requests.post(
                 VELMA_STT_URL,
                 headers={"X-API-Key": api_key},
                 files={"upload_file": ("audio.wav", f, "audio/wav")},
-                data={
-                    "speaker_diarization": "true",
-                    "emotion_signal": "true",
-                    "accent_signal": "true",
-                },
+                data=data,
                 timeout=300,
             )
         if resp.status_code == 200:
@@ -162,9 +177,16 @@ def _merge_emotion(seg_start_ms: int, emotion_index: dict, tolerance_ms: int = 3
     return None
 
 
-def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
+def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0, language: str | None = None) -> dict:
     """
     Send audio to Velma and return diarized segments with emotions + scene context.
+
+    Args:
+        audio_path: path to the audio file to upload.
+        job_id: job identifier for logging.
+        num_speakers: expected number of speakers (currently unused — Velma's public
+            API does not document a speaker-count hint field).
+        language: optional ISO/BCP-47 source-language hint (e.g. "yue" for Cantonese).
 
     Runs two API calls in parallel:
     - Triage (velma-2-batch): authoritative speaker diarization + scene context
@@ -198,8 +220,8 @@ def velma_diarize(audio_path: str, job_id: str, num_speakers: int = 0) -> dict:
         logger.info(f"[VELMA] Job {job_id}: running Triage + STT-emotion in parallel")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            triage_future = pool.submit(_call_triage, audio_path, api_key, job_id)
-            stt_future    = pool.submit(_call_stt_emotions, audio_path, api_key, job_id)
+            triage_future = pool.submit(_call_triage, audio_path, api_key, job_id, num_speakers=num_speakers, language=language)
+            stt_future    = pool.submit(_call_stt_emotions, audio_path, api_key, job_id, language=language)
             triage_data = triage_future.result()  # raises on HTTP error
             stt_data    = stt_future.result()     # never raises — returns {} on failure
 
