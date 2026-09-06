@@ -875,6 +875,9 @@ class DubbingService:
             output_dir = os.path.join(self.dubbed_dir, job_id)
             os.makedirs(output_dir, exist_ok=True)
 
+            # Normalize source language early so pre-translation cleanup can use it.
+            source_norm = normalize_language_code(source_language, allow_auto=True)
+
             # --- Recover per-segment voice assignments from a previous dub ---
             # This makes the speaker->voice mapping survive re-diarization or
             # reprocessing even when speaker labels get renumbered.
@@ -1004,7 +1007,6 @@ class DubbingService:
             else:
                 logger.info("[VOICE-CLONE] Preset-only mode — no vocals or non-Fish provider")
 
-            source_norm = normalize_language_code(source_language, allow_auto=True)
             target_norm = normalize_language_code(target_language, strict=True)
 
             if source_norm != source_language or target_norm != target_language:
