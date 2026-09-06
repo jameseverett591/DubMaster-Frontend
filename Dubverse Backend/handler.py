@@ -283,7 +283,21 @@ def _split_segment_by_diarization(
     # turns, silently collapsing real multi-speaker Cantonese dialogue into
     # one dominant voice.
     avg_turn_duration = (t_end - t_start) / len(intervals)
-    if avg_turn_duration < 0.8:
+    chars_total = max(len(text), 1)
+    # Second guard, independent of the duration check above: the proportional
+    # allocation below needs at least one character per interval to produce
+    # valid, non-overlapping slices (see max_target's "- (num_intervals - 1 - i)"
+    # term). Real turns average >=0.8s can still fail this on a very short
+    # transcription (e.g. one-word interjections back to back), and without
+    # this check max_target goes negative, corrupting split points into chunks
+    # that come out empty and get silently dropped at the chunk.strip() filter
+    # below — those speakers' dialogue vanishes rather than misattributes.
+    # This is a hard mathematical precondition of the algorithm, not a
+    # language-sensitivity issue: it only fires when there isn't even 1
+    # character per turn, which is rare for genuine multi-turn dialogue in any
+    # script, unlike the old bug which fired on any Cantonese segment with
+    # more turns than its (naturally low) character count.
+    if avg_turn_duration < 0.8 or len(intervals) > chars_total:
         speakers = {}
         for s, e, sp in intervals:
             speakers[sp] = speakers.get(sp, 0.0) + (e - s)
@@ -293,7 +307,6 @@ def _split_segment_by_diarization(
     # Multiple speakers: allocate text proportionally to each interval and split at
     # natural punctuation boundaries when possible.  This preserves the exact number
     # of speaker turns instead of collapsing ratios into fewer chunks.
-    chars_total = max(len(text), 1)
     total_speech = sum(i[1] - i[0] for i in intervals)
     num_intervals = len(intervals)
     split_points: list[int] = []
