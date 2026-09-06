@@ -253,13 +253,10 @@ def split_translated_sentences(segments: list) -> list:
                 "auto_split":          True,
                 "original_segment_id": orig_id,
                 "split_index":         i,
-                # There's no clean way to slice the original-language line 1:1 per
-                # English sentence — one source utterance can split into several
-                # English sentences with no real boundary in the source. Keep the
-                # full original text on the first sub-segment only; repeating it
-                # identically on every sibling misleadingly implies each one has
-                # its own distinct source line.
-                **({} if i == 0 else {"source_text": "", "original_text": ""}),
+                # The parent segment's source text is the source line for the
+                # whole split group; repeat it on every child so the Script view
+                # never shows blank source rows.
+
             })
             cursor = seg_end
     return out
