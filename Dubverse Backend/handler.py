@@ -265,8 +265,6 @@ def _split_segment_by_diarization(
     # Drop zero-length turns so we do not create empty output segments.
     intervals = [i for i in intervals if i[1] > i[0]]
 
-    chars_total = max(len(text), 1)
-
     # No usable diarization: split long segments by punctuation, keep one speaker.
     if not intervals:
         return _split_long_segment(seg, _speaker_overlap(seg, diarization_segments), max_duration, max_chars)
@@ -275,9 +273,17 @@ def _split_segment_by_diarization(
     if len(intervals) == 1:
         return _split_long_segment(seg, intervals[0][2], max_duration, max_chars)
 
-    # Not enough characters to assign one per speaker turn.  Fall back to the
-    # dominant speaker so we keep all text instead of dropping trailing turns.
-    if len(intervals) > chars_total:
+    # Turns averaging under 0.8s are more likely diarization noise than real
+    # speaker changes — fall back to the dominant speaker rather than splitting
+    # on jitter. Time-based, not character-count-based: a character-count
+    # guard here (len(intervals) > chars_total) was language-biased — CJK text
+    # conveys a full exchange in far fewer characters than the English
+    # equivalent, so it tripped constantly on Cantonese/Chinese segments and
+    # almost never on English ones for the identical number of real speaker
+    # turns, silently collapsing real multi-speaker Cantonese dialogue into
+    # one dominant voice.
+    avg_turn_duration = (t_end - t_start) / len(intervals)
+    if avg_turn_duration < 0.8:
         speakers = {}
         for s, e, sp in intervals:
             speakers[sp] = speakers.get(sp, 0.0) + (e - s)
@@ -287,6 +293,7 @@ def _split_segment_by_diarization(
     # Multiple speakers: allocate text proportionally to each interval and split at
     # natural punctuation boundaries when possible.  This preserves the exact number
     # of speaker turns instead of collapsing ratios into fewer chunks.
+    chars_total = max(len(text), 1)
     total_speech = sum(i[1] - i[0] for i in intervals)
     num_intervals = len(intervals)
     split_points: list[int] = []
