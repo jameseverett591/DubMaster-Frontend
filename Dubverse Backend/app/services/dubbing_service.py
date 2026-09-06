@@ -1759,6 +1759,7 @@ class DubbingService:
                 audio_segments.append({
                     "transcript_index": i,
                     "text": text,
+                    "source_text": segment.get("source_text", ""),
                     "speaker": speaker,
                     "voice_id": raw.get("voice_id", ""),
                     "speed": raw.get("speed", 1.0),
