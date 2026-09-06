@@ -3,6 +3,7 @@ print("handler.py: starting...", flush=True)
 
 import logging
 import asyncio
+import glob
 import json
 import os
 import re
@@ -387,6 +388,21 @@ def handler(event):
     _exact_speakers = min_speakers if min_speakers == max_speakers and min_speakers > 0 else None
     job_id         = job_input.get("job_id", event.get("id", "local"))
     steps          = job_input.get("steps", ["separate", "transcribe", "diarize"])
+
+    # RunPod can reuse a warm container.  Remove any stale per-job artifacts
+    # from an earlier invocation before this job writes to the same paths.
+    for _stale in glob.glob(f"/tmp/{job_id}_*") + [
+        f"data/transcripts/{job_id}.json",
+        f"data/diarization/{job_id}.json",
+        f"data/separated/{job_id}_accompaniment.wav",
+        f"data/separated/{job_id}_vocals.wav",
+    ]:
+        try:
+            if os.path.exists(_stale):
+                os.remove(_stale)
+                logger.info(f"[CLEANUP] Removed stale artifact: {_stale}")
+        except OSError:
+            pass
 
     # RunPod template env vars are static. Apply per-job env vars sent by the
     # backend so ASR/diarization settings can be pinned per job.

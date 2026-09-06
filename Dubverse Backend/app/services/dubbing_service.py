@@ -328,7 +328,13 @@ class DubbingService:
     _MAX_BORROW = 0.2
 
     # Patterns that identify non-dialogue hallucination segments that must be
-    # dropped before translation and TTS.
+    # dropped before translation and TTS.  Includes the classic Whisper/ASR
+    # religious-phrase hallucinations (shahada, takbir, etc.) in both the original
+    # transliterations and common English translations.
+    #
+    # We split them because the religious phrases / Arabic-script guard is only
+    # safe to apply to Whisper-sourced segments — those same phrases can be
+    # legitimate dialogue in other ASR engines or human-translated source text.
     _HALLUCINATION_PATTERNS = [
         r"thanks\s+for\s+watching",
         r"subscribe",
@@ -341,22 +347,35 @@ class DubbingService:
         r"^[\s\d一二三四五六七八九十,，、\.。]+$",
         r"(\b\w+\b\s+){2,}\1",  # Repetitive word patterns (e.g., "said said said")
     ]
+    _WHISPER_HALLUCINATION_PATTERNS = [
+        # Religious-phrase hallucinations (case-insensitive) — only applied when
+        # the segment's source metadata says it came from Whisper.
+        r"\b(allahu\s+akbar|allah\s+(is\s+great|is\s+the\s+greatest)|god\s+is\s+(great|the\s+greatest)|in\s+the\s+name\s+of\s+(allah|god)|subhanallah|mashallah|bismillah|alhamdulillah|assalamu\s+alaikum|la\s+ilaha\s+illallah)\b",
+        r"\b(i\s+(bear\s+witness|testify)\s+(that\s+)?(there\s+is\s+no\s+(god|deity)\s+but\s+(god|allah)|muhammad\s+(is\s+)?(god'?s?\s+messenger|the\s+messenger\s+of\s+god)))\b",
+        r"\b(muhammad\s+(is\s+)?(god'?s?\s+messenger|the\s+messenger\s+of\s+god)|muhammad\s+is\s+his\s+servant\s+and\s+messenger|praise\s+be\s+to\s+allah|glory\s+be\s+to\s+allah)\b",
+    ]
 
-    def _strip_hallucinations(self, transcript: List[Dict]) -> List[Dict]:
+    def _strip_hallucinations(self, transcript: List[Dict], source_language: Optional[str] = None) -> List[Dict]:
         """
         Remove segments that are YouTube/video watermarks or Whisper
         hallucinations rather than actual dialogue.
 
-        Two rules:
+        Rules:
         1. Text matches a known hallucination pattern (case-insensitive).
         2. Transcript language is CJK but the segment contains only Latin
            characters and no CJK — indicates Whisper hallucinated English
            text from background noise.
+        3. Segment contains Arabic script when the source language is not an
+           Arabic-script language — catches the standalone "الله" / takbir
+           hallucinations on non-Arabic source audio.
         """
         import re
 
         if not transcript:
             return transcript
+
+        _ARABIC_LANGS = {"ar", "fa", "ur", "ps", "ku", "sd", "ug"}
+        _src_norm = (source_language or "").lower().strip()
 
         # Determine transcript language from the majority of segments.
         cjk_re = re.compile(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]')
@@ -366,14 +385,28 @@ class DubbingService:
         hallucination_re = re.compile(
             "|".join(self._HALLUCINATION_PATTERNS), re.IGNORECASE
         )
+        whisper_hallucination_re = re.compile(
+            "|".join(self._WHISPER_HALLUCINATION_PATTERNS), re.IGNORECASE
+        )
+        arabic_re = re.compile(r'[\u0600-\u06ff\u0750-\u077f]')
 
         cleaned = []
         for seg in transcript:
             text = (seg.get("text") or "").strip()
             if not text:
                 continue
+
+            # Source-aware guard: religious-phrase / Arabic-script filters only run
+            # on Whisper-sourced (or unknown-source) segments, so non-Whisper ASR
+            # engines and legitimate translated dialogue are not over-filtered.
+            _seg_source = (seg.get("source") or "").lower()
+            is_whisper = not _seg_source or "whisper" in _seg_source
+
             if hallucination_re.search(text):
                 logger.info(f"[CLEAN] Dropped hallucination: {text[:60]!r}")
+                continue
+            if is_whisper and whisper_hallucination_re.search(text):
+                logger.info(f"[CLEAN] Dropped Whisper religious-phrase hallucination: {text[:60]!r}")
                 continue
             # Drop only short non-CJK snippets in a mostly-CJK transcript. Longer Latin
             # text is kept (bilingual films, English-dubbed source) — dropping all Latin
@@ -385,6 +418,16 @@ class DubbingService:
                 and len(text.strip()) <= int(os.getenv("DUBBING_LATIN_DROP_MAX_CHARS", "24"))
             ):
                 logger.info(f"[CLEAN] Dropped short wrong-script segment: {text[:60]!r}")
+                continue
+            # Arabic script in a non-Arabic source is almost always a Whisper
+            # hallucination forced onto silence/SFX.  Only apply to Whisper-sourced
+            # segments so non-Whisper Arabic code-switching is preserved.
+            if (
+                is_whisper
+                and arabic_re.search(text)
+                and _src_norm not in _ARABIC_LANGS
+            ):
+                logger.info(f"[CLEAN] Dropped Arabic-script segment in non-Arabic audio: {text[:60]!r}")
                 continue
             cleaned.append(seg)
 
@@ -832,6 +875,9 @@ class DubbingService:
             output_dir = os.path.join(self.dubbed_dir, job_id)
             os.makedirs(output_dir, exist_ok=True)
 
+            # Normalize source language early so pre-translation cleanup can use it.
+            source_norm = normalize_language_code(source_language, allow_auto=True)
+
             # --- Recover per-segment voice assignments from a previous dub ---
             # This makes the speaker->voice mapping survive re-diarization or
             # reprocessing even when speaker labels get renumbered.
@@ -929,7 +975,7 @@ class DubbingService:
             #     )
 
             # Strip YouTube watermarks and Whisper hallucinations.
-            transcript = self._strip_hallucinations(transcript)
+            transcript = self._strip_hallucinations(transcript, source_language=source_norm)
 
             # Clamp Whisper end timestamps that are unrealistically long
             # (short utterances inside fight scenes get huge VAD windows).
@@ -961,7 +1007,6 @@ class DubbingService:
             else:
                 logger.info("[VOICE-CLONE] Preset-only mode — no vocals or non-Fish provider")
 
-            source_norm = normalize_language_code(source_language, allow_auto=True)
             target_norm = normalize_language_code(target_language, strict=True)
 
             if source_norm != source_language or target_norm != target_language:

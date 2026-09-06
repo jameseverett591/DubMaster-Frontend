@@ -54,6 +54,10 @@ class TranscriptSegment(BaseModel):
     velma_deepfake_score: Optional[float] = None
     # True for subtitle/credit/narration segments that should not be dubbed.
     is_credit: bool = False
+    # ASR engine provenance (e.g. "whisper", "tencent_only", "paraformer_only").
+    # Preserved so downstream hallucination filters can distinguish Whisper
+    # hallucinations from legitimate non-Whisper dialogue.
+    source: Optional[str] = None
 
 
 class Transcript(BaseModel):
