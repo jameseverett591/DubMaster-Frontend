@@ -136,6 +136,7 @@ def _seg_dict_to_model(seg: dict) -> TranscriptSegment:
         velma_emotion=seg.get("velma_emotion"),
         velma_accent=seg.get("velma_accent"),
         velma_deepfake_score=seg.get("velma_deepfake_score"),
+        source=seg.get("source"),
     )
 
 
@@ -491,6 +492,7 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, **
                         start=dk["start"],
                         end=dk["end"],
                         speaker=dk["speaker"],
+                        source=raw_segments[0].get("source"),
                     )
                 )
 
@@ -592,6 +594,7 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, **
                     start=sl["start"],
                     end=sl["end"],
                     speaker=sl.get("speaker") or "speaker-1",
+                    source=seg.get("source"),
                 )
             )
         return out
@@ -811,6 +814,7 @@ def _merge_close_transcript_segments(
                 velma_emotion=prev.velma_emotion,
                 velma_accent=prev.velma_accent,
                 velma_deepfake_score=prev.velma_deepfake_score,
+                source=prev.source,
             )
             merge_counts[-1] += 1
         else:
@@ -2003,6 +2007,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
                 velma_emotion=s.velma_emotion,
                 velma_accent=s.velma_accent,
                 velma_deepfake_score=s.velma_deepfake_score,
+                source=s.source,
                 is_credit=s.is_credit,
             )
             for s in segments
@@ -2049,6 +2054,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
                 confidence=_conf,
                 confidence_tier=_tier,
                 words=_words,
+                source=seg.source if isinstance(seg, TranscriptSegment) else seg.get("source"),
                 velma_emotion=best_match.get("emotion") if best_match else None,
                 velma_accent=best_match.get("accent") if best_match else None,
                 velma_deepfake_score=best_match.get("deepfake_score") if best_match else None,
@@ -2728,6 +2734,7 @@ async def process_video_pipeline(job_id: str, video_path: str):
                                             start=seg.start,
                                             end=seg.end,
                                             speaker=seg.speaker,
+                                            source=seg.source,
                                         )
                                         logger.info(
                                             f"Job {job_id}: seg {i} ({seg.speaker}) "
@@ -3341,6 +3348,7 @@ async def get_transcript(job_id: str):
                     "start": seg.start,
                     "end": seg.end,
                     "speaker": seg.speaker,
+                    "source": seg.source,
                     "confidence": seg.confidence,
                     "confidence_tier": seg.confidence_tier,
                     "words": [w.model_dump() for w in seg.words] if seg.words else None,
@@ -4581,6 +4589,7 @@ async def dub_video(request: DubRequest, http_request: Request, background_tasks
             "start": seg.start,
             "end": seg.end,
             "speaker": seg.speaker,
+            "source": seg.source,
             "velma_emotion": seg.velma_emotion,
             "velma_accent": seg.velma_accent,
             "velma_deepfake_score": seg.velma_deepfake_score,
@@ -4735,6 +4744,7 @@ async def translate_only(request: DubRequest, http_request: Request):
             "start": seg.start,
             "end": seg.end,
             "speaker": seg.speaker,
+            "source": seg.source,
             "velma_emotion": seg.velma_emotion,
             "velma_accent": seg.velma_accent,
         }
