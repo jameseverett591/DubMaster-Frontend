@@ -331,6 +331,10 @@ class DubbingService:
     # dropped before translation and TTS.  Includes the classic Whisper/ASR
     # religious-phrase hallucinations (shahada, takbir, etc.) in both the original
     # transliterations and common English translations.
+    #
+    # We split them because the religious phrases / Arabic-script guard is only
+    # safe to apply to Whisper-sourced segments — those same phrases can be
+    # legitimate dialogue in other ASR engines or human-translated source text.
     _HALLUCINATION_PATTERNS = [
         r"thanks\s+for\s+watching",
         r"subscribe",
@@ -342,7 +346,10 @@ class DubbingService:
         r"\[laughter\]",
         r"^[\s\d一二三四五六七八九十,，、\.。]+$",
         r"(\b\w+\b\s+){2,}\1",  # Repetitive word patterns (e.g., "said said said")
-        # Religious-phrase hallucinations (case-insensitive).
+    ]
+    _WHISPER_HALLUCINATION_PATTERNS = [
+        # Religious-phrase hallucinations (case-insensitive) — only applied when
+        # the segment's source metadata says it came from Whisper.
         r"\b(allahu\s+akbar|allah\s+(is\s+great|is\s+the\s+greatest)|god\s+is\s+(great|the\s+greatest)|in\s+the\s+name\s+of\s+(allah|god)|subhanallah|mashallah|bismillah|alhamdulillah|assalamu\s+alaikum|la\s+ilaha\s+illallah)\b",
         r"\b(i\s+(bear\s+witness|testify)\s+(that\s+)?(there\s+is\s+no\s+(god|deity)\s+but\s+(god|allah)|muhammad\s+(is\s+)?(god'?s?\s+messenger|the\s+messenger\s+of\s+god)))\b",
         r"\b(muhammad\s+(is\s+)?(god'?s?\s+messenger|the\s+messenger\s+of\s+god)|muhammad\s+is\s+his\s+servant\s+and\s+messenger|praise\s+be\s+to\s+allah|glory\s+be\s+to\s+allah)\b",
@@ -378,6 +385,9 @@ class DubbingService:
         hallucination_re = re.compile(
             "|".join(self._HALLUCINATION_PATTERNS), re.IGNORECASE
         )
+        whisper_hallucination_re = re.compile(
+            "|".join(self._WHISPER_HALLUCINATION_PATTERNS), re.IGNORECASE
+        )
         arabic_re = re.compile(r'[\u0600-\u06ff\u0750-\u077f]')
 
         cleaned = []
@@ -385,8 +395,18 @@ class DubbingService:
             text = (seg.get("text") or "").strip()
             if not text:
                 continue
+
+            # Source-aware guard: religious-phrase / Arabic-script filters only run
+            # on Whisper-sourced (or unknown-source) segments, so non-Whisper ASR
+            # engines and legitimate translated dialogue are not over-filtered.
+            _seg_source = (seg.get("source") or "").lower()
+            is_whisper = not _seg_source or "whisper" in _seg_source
+
             if hallucination_re.search(text):
                 logger.info(f"[CLEAN] Dropped hallucination: {text[:60]!r}")
+                continue
+            if is_whisper and whisper_hallucination_re.search(text):
+                logger.info(f"[CLEAN] Dropped Whisper religious-phrase hallucination: {text[:60]!r}")
                 continue
             # Drop only short non-CJK snippets in a mostly-CJK transcript. Longer Latin
             # text is kept (bilingual films, English-dubbed source) — dropping all Latin
@@ -400,9 +420,11 @@ class DubbingService:
                 logger.info(f"[CLEAN] Dropped short wrong-script segment: {text[:60]!r}")
                 continue
             # Arabic script in a non-Arabic source is almost always a Whisper
-            # hallucination forced onto silence/SFX.
+            # hallucination forced onto silence/SFX.  Only apply to Whisper-sourced
+            # segments so non-Whisper Arabic code-switching is preserved.
             if (
-                arabic_re.search(text)
+                is_whisper
+                and arabic_re.search(text)
                 and _src_norm not in _ARABIC_LANGS
             ):
                 logger.info(f"[CLEAN] Dropped Arabic-script segment in non-Arabic audio: {text[:60]!r}")
