@@ -41,13 +41,33 @@ _HALLUCINATION_PHRASES = {
     "subtitles by",
     "subtitle by",
     "amara.org",
+    # Whisper often hallucinates the Islamic shahada / takbir from silence/SFX.
+    # Include both the original phrases and common English translations/transliterations
+    # so translations to English/Spanish/French/etc. still match the source hallucination.
     "i bear witness there is no god but god",
+    "i bear witness that there is no god but allah",
     "there is no god but god",
+    "there is no god but allah",
+    "there is no deity but god",
     "allahu akbar",
+    "allah is great",
+    "allah is the greatest",
+    "god is great",
+    "god is the greatest",
+    "i testify that muhammad is god's messenger",
+    "i testify that muhammad is the messenger of god",
+    "i bear witness that muhammad is god's messenger",
+    "i bear witness that muhammad is the messenger of god",
+    "muhammad is god's messenger",
+    "muhammad is the messenger of god",
+    "muhammad is his servant and messenger",
+    "praise be to allah",
+    "glory be to allah",
     "subhanallah",
     "mashallah",
     "bismillah",
     "in the name of allah",
+    "in the name of god",
     "assalamu alaikum",
     "alhamdulillah",
     "la ilaha illallah",
@@ -119,12 +139,14 @@ def _filter_hallucinations(
     """
     Filter likely hallucination segments.
 
-    When whisper_source=True we apply Whisper-specific heuristics (sub-300ms
-    rejection, repetitive-character noise, short Latin words, low-confidence
-    short CJK). When whisper_source=False we keep only the source-agnostic
-    filters (denylist phrases, script mismatch, Arabic-script guard, and
-    no_speech_prob where available) so non-Whisper engines like Tencent or
-    Paraformer are not over-filtered.
+    The *whisper_source* flag is a default for segments that don't carry an
+    explicit "source" field.  When a segment's source contains "whisper" (or
+    the flag is True) we apply Whisper-specific heuristics (sub-300ms rejection,
+    repetitive-character noise, short Latin words, short low-confidence CJK) and
+    an unconditional phrase denylist.  For non-Whisper segments the same denylist
+    and script guards are only triggered by a suspicious ASR signal (high
+    no_speech_prob or low logprob) so engines like Tencent/Paraformer are not
+    over-filtered.
     """
     import re as _re
     _CJK_LANGS = {"zh", "yue", "ja", "ko", "cmn"}
@@ -135,6 +157,11 @@ def _filter_hallucinations(
         _avg_lp = seg.get("avg_logprob", 0.0)
         _nsp = seg.get("no_speech_prob")
         _suspicious = (_nsp is not None and _nsp > 0.3) or _avg_lp < -0.5
+        # Per-segment source wins over the function-level default.  This lets the
+        # Cantonese merge filter keep Tencent/Paraformer segments while still
+        # hard-rejecting any Whisper segment that carries a classic hallucination.
+        _seg_source = (seg.get("source") or "").lower()
+        _is_whisper = whisper_source or ("whisper" in _seg_source)
         if not text or _re.fullmatch(r'[\s\W]*', text):
             continue
         if len(text) <= 1:
@@ -142,10 +169,10 @@ def _filter_hallucinations(
 
         _dur = float(seg.get("end", 0)) - float(seg.get("start", 0))
 
-        # Whisper-specific heuristics.  Do not run on merged multi-engine output
+        # Whisper-specific heuristics.  Do not run on non-Whisper merged output
         # because Tencent/Paraformer can legitimately produce short/repeated
         # interjections that look like Whisper noise.
-        if whisper_source:
+        if _is_whisper:
             # Unconditional minimum-duration guard — no real phoneme can be produced
             # in under 300ms. Sub-300ms segments are almost always Whisper
             # hallucinations forced onto clicks, breaths, or frame boundaries.
@@ -176,7 +203,7 @@ def _filter_hallucinations(
         # Whisper-specific heuristics that are unsafe for multi-engine merged
         # output (Tencent/Paraformer can legitimately produce short or repeated
         # interjections that look like Whisper noise).
-        if whisper_source:
+        if _is_whisper:
             # Reject repetitive single-character hallucinations produced by Whisper
             # when processing fight grunts, screams, or impact noise — e.g.
             # "Aaaaaaaaaaaaa", "hhhhhhhh", "eeeeeeee".  Real speech has varied chars.
@@ -237,7 +264,7 @@ def _filter_hallucinations(
         if (
             _norm_text in _HALLUCINATION_PHRASES
             or any(ph in _norm_text for ph in _HALLUCINATION_PHRASES)
-        ) and (whisper_source or _suspicious):
+        ) and (_is_whisper or _suspicious):
             logger.info(
                 f"[HALLUCINATION] Rejected known hallucination phrase: '{text}' "
                 f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
@@ -290,7 +317,7 @@ def _filter_hallucinations(
         if (
             _re.search(r'[\u0600-\u06ff\u0750-\u077f]', text)
             and source_language not in _ARABIC_LANGS
-            and (whisper_source or _suspicious)
+            and (_is_whisper or _suspicious)
         ):
             logger.info(
                 f"[HALLUCINATION] Rejected Arabic-script segment in non-Arabic audio: '{text[:60]}' "
@@ -560,6 +587,7 @@ def transcribe_audio(
                     "no_speech_prob": getattr(seg, "no_speech_prob", None),
                     "compression_ratio": getattr(seg, "compression_ratio", None),
                     "words": word_list,
+                    "source": "whisper",
                 })
             return raw
 
@@ -718,6 +746,7 @@ def transcribe_audio(
                             "confidence": round(max(0.0, min(1.0, 1.0 + avg_lp)), 3),
                             "avg_logprob": avg_lp,
                             "words": word_list,
+                            "source": "whisper",
                         })
                 # Strict filtering for noisy no-VAD segments
                 gap_filtered = _filter_hallucinations(gap_segments_all, strict=True, source_language=_detected_lang)
