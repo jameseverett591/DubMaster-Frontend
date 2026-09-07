@@ -36,6 +36,7 @@ def _is_cantonese(source_language: Optional[str]) -> bool:
 def _load_audio_file(audio_path: str) -> Tuple[np.ndarray, int]:
     """Load a WAV/audio file and return a 1-D float32 numpy array + sample rate."""
     import soundfile as sf
+    import torch
     import torchaudio
 
     audio_np, sample_rate = sf.read(audio_path, dtype="float32")
