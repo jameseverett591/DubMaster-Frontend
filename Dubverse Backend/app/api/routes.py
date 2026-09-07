@@ -441,23 +441,44 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
 
     unique_speakers = len(speaker_map)
 
-    def _scope_words(words, window_start, window_end):
-        """Return word alignments whose start time falls inside the child window.
+    def _assign_words_to_windows(words, windows):
+        """Assign each parent word to exactly one child window.
 
-        Using start-time containment instead of overlap ensures a word that
-        straddles a diarization boundary is assigned to exactly one child.
+        Words are allocated by best overlap; ties and zero-overlap words go to
+        the nearest window by start time. This prevents boundary duplication while
+        keeping alignments from being silently dropped.
         """
-        if not words:
-            return None
-        scoped = []
+        if not words or not windows:
+            return [None] * len(windows)
+        assigned: List[List] = [[] for _ in windows]
         for w in words:
             if isinstance(w, dict):
                 ws = w.get("start", 0.0)
+                we = w.get("end", 0.0)
             else:
                 ws = getattr(w, "start", 0.0)
-            if window_start <= ws < window_end:
-                scoped.append(w)
-        return scoped or None
+                we = getattr(w, "end", 0.0)
+            best_idx, best_overlap = 0, -1.0
+            for idx, win in enumerate(windows):
+                win_s = win.get("start", 0.0) if isinstance(win, dict) else getattr(win, "start", 0.0)
+                win_e = win.get("end", 0.0) if isinstance(win, dict) else getattr(win, "end", 0.0)
+                overlap = max(0.0, min(we, win_e) - max(ws, win_s))
+                if overlap > best_overlap:
+                    best_overlap, best_idx = overlap, idx
+            if best_overlap > 0.0:
+                assigned[best_idx].append(w)
+            else:
+                # No overlap: fall back to nearest window by start time so words
+                # before the first or after the last retained diarization window
+                # still have an alignment home.
+                nearest_idx, nearest_dist = 0, float("inf")
+                for idx, win in enumerate(windows):
+                    win_s = win.get("start", 0.0) if isinstance(win, dict) else getattr(win, "start", 0.0)
+                    dist = abs(ws - win_s)
+                    if dist < nearest_dist:
+                        nearest_dist, nearest_idx = dist, idx
+                assigned[nearest_idx].append(w)
+        return [a or None for a in assigned]
 
     # ── Split single-blob transcripts using diarization timestamps ──
     # ONLY split when ASR returns exactly 1 segment (a true blob).
@@ -485,6 +506,7 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
             total_dur += max(0.0, float(duration))
 
         if dia_kept:
+            blob_word_lists = _assign_words_to_windows(raw_segments[0].get("words"), dia_kept)
             idx = 0
             n_tokens = len(blob_tokens)
             for j, dk in enumerate(dia_kept):
@@ -513,7 +535,7 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
                         speaker=dk["speaker"],
                         confidence=_parent.get("confidence"),
                         confidence_tier=_parent.get("confidence_tier"),
-                        words=_scope_words(_parent.get("words"), dk["start"], dk["end"]),
+                        words=blob_word_lists[j],
                         velma_emotion=_parent.get("velma_emotion"),
                         velma_accent=_parent.get("velma_accent"),
                         velma_deepfake_score=_parent.get("velma_deepfake_score"),
@@ -612,8 +634,9 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
             sl["text"] = seg_text[prev:end].strip()
             prev = end
 
+        per_seg_word_lists = _assign_words_to_windows(seg.get("words"), slices)
         out = []
-        for sl in slices:
+        for idx, sl in enumerate(slices):
             out.append(
                 TranscriptSegment(
                     text=sl.get("text", ""),
@@ -622,7 +645,7 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
                     speaker=sl.get("speaker") or "speaker-1",
                     confidence=seg.get("confidence"),
                     confidence_tier=seg.get("confidence_tier"),
-                    words=_scope_words(seg.get("words"), sl["start"], sl["end"]),
+                    words=per_seg_word_lists[idx],
                     velma_emotion=seg.get("velma_emotion"),
                     velma_accent=seg.get("velma_accent"),
                     velma_deepfake_score=seg.get("velma_deepfake_score"),
