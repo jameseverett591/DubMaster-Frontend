@@ -7341,6 +7341,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         seg["text_locked"] = text_locked
     if paired_with_next is not None:
         seg["paired_with_next"] = paired_with_next
+    # Committing a reviewed segment clears the low-confidence translation flag
+    # so the next render pass will synthesise its audio.
+    seg["translation_flagged"] = False
+    seg["flag_reason"] = None
     data["segments"] = segs
     atomic_write_json(segments_path, data)
     return {"status": "ok", "job_id": job_id, "index": index}
