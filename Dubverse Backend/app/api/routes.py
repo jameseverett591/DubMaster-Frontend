@@ -1573,9 +1573,12 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
     # configured we log that it is worker-inherited, so a future variance
     # investigation starts with the answer instead of a mystery.
     gpu_env_vars.setdefault("WHISPER_MODEL", os.environ.get("WHISPER_MODEL", "large-v3"))
-    # pyannote on the worker's CUDA path collapses to one speaker; force CPU
-    # diarization while keeping GPU transcription/separation.
-    gpu_env_vars["DIARIZATION_DEVICE"] = "cpu"
+    # pyannote on CUDA used to collapse to one speaker on some inputs; keep CPU
+    # as the safe default. DIARIZATION_DEVICE can be set to "cuda" on the backend
+    # to opt in to GPU diarization for A/B testing once the handler.py guards are
+    # confirmed to prevent collapse on Cantonese.
+    _diarization_device = os.environ.get("DIARIZATION_DEVICE", "cpu").lower()
+    gpu_env_vars["DIARIZATION_DEVICE"] = _diarization_device
     _unpinned = [k for k in ("VAD_THRESHOLD",) if k not in gpu_env_vars]
     logger.info(
         f"Job {job_id}: ASR settings pinned — "
@@ -2179,11 +2182,13 @@ async def _runpod_diarize_fallback(
         source_path = _vocals_or_video(video_path, job_id)
         file_url = await _get_runpod_file_url(job_id, source_path)
 
+    _diarization_device_local = os.environ.get("DIARIZATION_DEVICE", "cpu").lower()
     env_vars = {
         "DIARIZATION_MIN_SPEAKERS": str(min_speakers),
         "DIARIZATION_MAX_SPEAKERS": str(max_speakers),
-        # Force CPU diarization on the worker to avoid CUDA collapsing speakers.
-        "DIARIZATION_DEVICE": "cpu",
+        # CPU is the safe default; set DIARIZATION_DEVICE=cuda on the backend to
+        # opt in to GPU diarization once the handler.py guards are confirmed stable.
+        "DIARIZATION_DEVICE": _diarization_device_local,
     }
     # The diarization-only job still needs the Hugging Face token to load
     # pyannote/speaker-diarization-3.1 on the worker.
