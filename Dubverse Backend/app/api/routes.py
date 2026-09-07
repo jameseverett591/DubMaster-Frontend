@@ -1767,7 +1767,8 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
                 _vocals_stem if _have_vocals else None,
             )
             velma_result = await asyncio.to_thread(
-                velma_diarize, velma_audio_path, job_id, _exp_spk_f0
+                velma_diarize, velma_audio_path, job_id, _exp_spk_f0,
+                language=job_source_lang or None,
             )
         except Exception as _velma_err:
             logger.warning(f"Job {job_id}: Velma diarization failed: {_velma_err}")
@@ -2624,7 +2625,8 @@ async def process_video_pipeline(job_id: str, video_path: str):
                             _velma_source_audio, video_path, job_id, vocals_path
                         )
                         velma_result = await asyncio.to_thread(
-                            velma_diarize, velma_audio_path, job_id, _exp_spk
+                            velma_diarize, velma_audio_path, job_id, _exp_spk,
+                            language=_job_src_lang or None,
                         )
                     except Exception as _velma_err:
                         logger.warning(f"Job {job_id}: Velma diarization failed: {_velma_err}")
