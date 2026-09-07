@@ -1916,14 +1916,13 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         rescued = _assign_speakers_from_diarization(
             raw_segments, diarization_segments, preserve_unsplit=True
         )
-        if rescued:
+        if rescued and len(rescued) > len(segments):
             rescued = _smooth_speaker_assignments(rescued)
             rescued = _normalize_speaker_labels(rescued)
-            if len(rescued) != len(segments):
-                logger.info(
-                    f"Job {job_id}: per-segment diarization rescue split "
-                    f"{len(segments)} segments into {len(rescued)} segments"
-                )
+            logger.info(
+                f"Job {job_id}: per-segment diarization rescue split "
+                f"{len(segments)} segments into {len(rescued)} segments"
+            )
             segments = rescued
 
     # F0 fallback: if diarization collapsed everything to 1 speaker but the user
