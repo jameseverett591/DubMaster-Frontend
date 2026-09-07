@@ -33,6 +33,14 @@ def _is_cantonese(source_language: Optional[str]) -> bool:
     return (source_language or "").lower().strip().replace("_", "-") in _CANTONESE_LANGS
 
 
+def _normalize_language(source_language: Optional[str]) -> str:
+    """Map Cantonese locale variants to the base `yue` code used by engines."""
+    lang = (source_language or "").lower().strip().replace("_", "-")
+    if lang in _CANTONESE_LANGS:
+        return "yue"
+    return source_language or "yue"
+
+
 def _prepare_audio_file(extract_result: Dict[str, Any]) -> Optional[str]:
     """
     Save waveform tensor to a temporary WAV file for engines that need a file path.
@@ -103,7 +111,7 @@ def transcribe_cantonese(
     engines = [e.strip().lower() for e in engines_str.split(",") if e.strip()]
     whisper_gap_fill = os.getenv("CANTONESE_ASR_WHISPER_GAP_FILL", "1") == "1"
 
-    language = os.getenv("WHISPER_LANGUAGE", source_language or "yue")
+    language = _normalize_language(os.getenv("WHISPER_LANGUAGE") or source_language)
 
     logger.info(
         f"[CANTONESE-ASR] Starting multi-engine pipeline: {engines}, "
@@ -142,6 +150,7 @@ def transcribe_cantonese(
 
                 wenet_result = transcribe_with_wenetspeech_yue(
                     extract_result,
+                    audio_path=audio_file,
                     source_language=source_language,
                     job_id=job_id,
                 )
@@ -224,7 +233,7 @@ def transcribe_cantonese(
             try:
                 from app.pipeline.transcribe_audio import transcribe_audio
 
-                whisper_result = transcribe_audio(extract_result, job_id, source_language=source_language)
+                whisper_result = transcribe_audio(extract_result, job_id, source_language=language)
                 if whisper_result.get("status") == "ok":
                     import json
                     transcript_path = whisper_result.get("transcript_path")

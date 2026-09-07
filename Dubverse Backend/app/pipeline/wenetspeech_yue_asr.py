@@ -33,6 +33,31 @@ def _is_cantonese(source_language: Optional[str]) -> bool:
     return (source_language or "").lower().strip().replace("_", "-") in _CANTONESE_LANGS
 
 
+def _load_audio_file(audio_path: str) -> Tuple[np.ndarray, int]:
+    """Load a WAV/audio file and return a 1-D float32 numpy array + sample rate."""
+    import soundfile as sf
+    import torchaudio
+
+    audio_np, sample_rate = sf.read(audio_path, dtype="float32")
+    if audio_np.ndim == 0:
+        audio_np = np.array([audio_np.item()], dtype=np.float32)
+    elif audio_np.ndim > 1:
+        audio_np = audio_np.mean(axis=1).astype(np.float32)
+
+    if sample_rate != _SAMPLE_RATE:
+        logger.info(f"[WENET] Resampling audio from {sample_rate} Hz to {_SAMPLE_RATE} Hz")
+        audio_t = torch.from_numpy(audio_np).unsqueeze(0)
+        audio_t = torchaudio.functional.resample(audio_t, sample_rate, _SAMPLE_RATE)
+        audio_np = audio_t.squeeze(0).numpy()
+        sample_rate = _SAMPLE_RATE
+
+    max_val = float(np.max(np.abs(audio_np))) if audio_np.size else 0.0
+    if max_val > 1.0:
+        audio_np = audio_np / max_val
+
+    return audio_np, sample_rate
+
+
 def _get_audio_samples(extract_result: Dict[str, Any]) -> Tuple[np.ndarray, int]:
     """Convert extract_result audio to a 1-D float32 numpy array at the original sample rate."""
     import torch
@@ -194,7 +219,7 @@ def _whisper_confidence_pass(
     """Run faster-whisper on each VAD chunk and return confidence features only."""
     from app.pipeline.transcribe_audio import INITIAL_PROMPT, get_whisper_model
 
-    model = get_whisper_model()
+    model = get_whisper_model(source_language=language)
     whisper_lang = "yue" if _is_cantonese(language) else (language or "yue")
     whisper_kwargs = dict(
         language=whisper_lang,
@@ -300,12 +325,17 @@ def _post_process_wenet_text(text: str) -> str:
 
 def _transcribe(
     extract_result: Dict[str, Any],
+    audio_path: Optional[str] = None,
     source_language: Optional[str] = None,
     job_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Internal implementation: VAD → Wenet text + Whisper confidence."""
     recognizer = _get_wenet_model()
-    waveform, sample_rate = _get_audio_samples(extract_result)
+
+    if audio_path and os.path.exists(audio_path):
+        waveform, sample_rate = _load_audio_file(audio_path)
+    else:
+        waveform, sample_rate = _get_audio_samples(extract_result)
 
     logger.info(f"[WENET] job={job_id} language={source_language} waveform_samples={len(waveform)}")
 
@@ -326,7 +356,11 @@ def _transcribe(
         wenet_future = executor.submit(_wenet_decode, recognizer, samples_list)
         whisper_future = executor.submit(_whisper_confidence_pass, waveform, chunks, source_language or "yue", job_id)
         wenet_texts = wenet_future.result()
-        whisper_confs = whisper_future.result()
+        try:
+            whisper_confs = whisper_future.result()
+        except Exception:
+            logger.exception("[WENET-WHISPER] Confidence pass failed; keeping WenetSpeech output")
+            whisper_confs = [{} for _ in chunks]
 
     segments: List[Dict[str, Any]] = []
     for chunk, wenet_text, conf in zip(chunks, wenet_texts, whisper_confs):
@@ -355,6 +389,7 @@ def _transcribe(
 
 def transcribe_with_wenetspeech_yue(
     extract_result: Dict[str, Any],
+    audio_path: Optional[str] = None,
     source_language: Optional[str] = None,
     job_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -371,7 +406,7 @@ def transcribe_with_wenetspeech_yue(
         }
 
     try:
-        return _transcribe(extract_result, source_language=source_language, job_id=job_id)
+        return _transcribe(extract_result, audio_path=audio_path, source_language=source_language, job_id=job_id)
     except Exception as e:
         logger.error(f"[WENET] job={job_id} failed: {e}", exc_info=True)
         return {
