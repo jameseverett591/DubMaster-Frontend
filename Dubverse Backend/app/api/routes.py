@@ -137,6 +137,8 @@ def _seg_dict_to_model(seg: dict) -> TranscriptSegment:
         velma_accent=seg.get("velma_accent"),
         velma_deepfake_score=seg.get("velma_deepfake_score"),
         source=seg.get("source"),
+        translation_flagged=bool(seg.get("translation_flagged", False)),
+        flag_reason=seg.get("flag_reason"),
     )
 
 
@@ -486,13 +488,22 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
                         seg_text = " ".join(blob_tokens[idx: idx + take]).strip()
                         idx += take
 
+                _src = raw_segments[0]
                 split_segments.append(
                     TranscriptSegment(
                         text=seg_text,
                         start=dk["start"],
                         end=dk["end"],
                         speaker=dk["speaker"],
-                        source=raw_segments[0].get("source"),
+                        source=_src.get("source"),
+                        confidence=_src.get("confidence"),
+                        confidence_tier=_src.get("confidence_tier"),
+                        velma_emotion=_src.get("velma_emotion"),
+                        velma_accent=_src.get("velma_accent"),
+                        velma_deepfake_score=_src.get("velma_deepfake_score"),
+                        is_credit=bool(_src.get("is_credit", False)),
+                        translation_flagged=bool(_src.get("translation_flagged", False)),
+                        flag_reason=_src.get("flag_reason"),
                     )
                 )
 
@@ -585,9 +596,55 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
             end = split_points[j] if j < len(split_points) else n_chars
             sl["text"] = seg_text[prev:end].strip()
             prev = end
+            sl["words"] = []
+
+        # Tile the first/last slice out to the parent segment's actual
+        # boundaries. Slices are built only from diarization turns that
+        # overlap the ASR segment, clipped to it — if no turn covers the
+        # segment's leading or trailing edge (or the covering turn was
+        # dropped by the 0.2s minimum-duration filter above), the slices
+        # don't span the full seg_start..seg_end range. Without this, a
+        # word timestamped in that uncovered tail has no slice that
+        # actually overlaps it, and the nearest-distance fallback below
+        # would assign it to the closest slice regardless of how far away
+        # that is — unbounded. Extending the outer edges here means every
+        # word within [seg_start, seg_end] overlaps some slice, so the
+        # fallback is only ever needed for genuine jitter in the gaps
+        # *between* adjacent slices, which are inherently small.
+        slices[0]["start"] = seg_start
+        slices[-1]["end"] = seg_end
+
+        # Distribute word-level alignments across slices by time. A word is
+        # assigned to the slice it overlaps most; a word that falls in a gap
+        # between slices (ASR/diarization timestamp jitter) is assigned to
+        # the nearest slice by distance rather than silently dropped — losing
+        # word alignments here breaks per-word confidence/timing downstream.
+        parent_words = seg.get("words") or []
+        for w in parent_words:
+            w_start = float(w.get("start", 0.0) or 0.0)
+            w_end = float(w.get("end", w_start) or w_start)
+            best_idx, best_overlap = None, 0.0
+            for wi, sl in enumerate(slices):
+                ov = max(0.0, min(w_end, sl["end"]) - max(w_start, sl["start"]))
+                if ov > best_overlap:
+                    best_overlap = ov
+                    best_idx = wi
+            if best_idx is None:
+                best_idx = min(
+                    range(len(slices)),
+                    key=lambda wi: min(abs(w_start - slices[wi]["start"]), abs(w_start - slices[wi]["end"])),
+                )
+            slices[best_idx]["words"].append(w)
 
         out = []
         for sl in slices:
+            words_raw = sl.get("words") or None
+            words = (
+                [WordAlignment(word=w["word"], start=w["start"], end=w["end"],
+                                confidence=w.get("confidence", 0.5))
+                 for w in words_raw]
+                if words_raw else None
+            )
             out.append(
                 TranscriptSegment(
                     text=sl.get("text", ""),
@@ -595,6 +652,15 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
                     end=sl["end"],
                     speaker=sl.get("speaker") or "speaker-1",
                     source=seg.get("source"),
+                    confidence=seg.get("confidence"),
+                    confidence_tier=seg.get("confidence_tier"),
+                    words=words,
+                    velma_emotion=seg.get("velma_emotion"),
+                    velma_accent=seg.get("velma_accent"),
+                    velma_deepfake_score=seg.get("velma_deepfake_score"),
+                    is_credit=bool(seg.get("is_credit", False)),
+                    translation_flagged=bool(seg.get("translation_flagged", False)),
+                    flag_reason=seg.get("flag_reason"),
                 )
             )
         return out
@@ -821,6 +887,8 @@ def _merge_close_transcript_segments(
                 velma_accent=prev.velma_accent,
                 velma_deepfake_score=prev.velma_deepfake_score,
                 source=prev.source,
+                translation_flagged=prev.translation_flagged or seg.translation_flagged,
+                flag_reason=prev.flag_reason or seg.flag_reason,
             )
             merge_counts[-1] += 1
         else:
@@ -1879,7 +1947,15 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
                 f"{len(diar_speakers)} — re-assigning speakers from diarization"
             )
             raw_segments = [
-                {"text": s.text, "start": s.start, "end": s.end, "speaker": s.speaker}
+                {
+                    "text": s.text, "start": s.start, "end": s.end, "speaker": s.speaker,
+                    "confidence": s.confidence, "confidence_tier": s.confidence_tier,
+                    "words": [w.model_dump() for w in s.words] if s.words else None,
+                    "velma_emotion": s.velma_emotion, "velma_accent": s.velma_accent,
+                    "velma_deepfake_score": s.velma_deepfake_score, "is_credit": s.is_credit,
+                    "source": s.source, "translation_flagged": s.translation_flagged,
+                    "flag_reason": s.flag_reason,
+                }
                 for s in segments
             ]
             reassigned = _assign_speakers_from_diarization(raw_segments, diarization_segments)
@@ -1911,6 +1987,8 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
                     "velma_deepfake_score": s.velma_deepfake_score,
                     "is_credit": s.is_credit,
                     "source": s.source,
+                    "translation_flagged": s.translation_flagged,
+                    "flag_reason": s.flag_reason,
                 }
             )
         rescued = _assign_speakers_from_diarization(
@@ -3420,6 +3498,8 @@ async def get_transcript(job_id: str):
                     "velma_emotion": seg.velma_emotion,
                     "velma_accent": seg.velma_accent,
                     "velma_deepfake_score": seg.velma_deepfake_score,
+                    "translation_flagged": seg.translation_flagged,
+                    "flag_reason": seg.flag_reason,
                 }
                 for seg in job.transcript.segments
             ]
@@ -3536,6 +3616,8 @@ async def get_transcript_editor_format(job_id: str):
             "words": [],
             "is_edited": False,
             "status": "pending",
+            "translation_flagged": bool(seg.get("translation_flagged", False)),
+            "flag_reason": seg.get("flag_reason"),
         })
 
     return {
@@ -4883,8 +4965,11 @@ async def translate_only(request: DubRequest, http_request: Request):
         }
         transcript_dicts = [
             s for s in transcript_dicts
-            if s.get("text", "").strip()
-            and s.get("text", "").strip().lower().rstrip(".,!?") not in _NOISE_WORDS
+            if s.get("translation_flagged")
+            or (
+                s.get("text", "").strip()
+                and s.get("text", "").strip().lower().rstrip(".,!?") not in _NOISE_WORDS
+            )
         ]
 
         # Clear source-language word alignments — they don't match the
@@ -6647,6 +6732,8 @@ async def retranslate_job(job_id: str, request: Request):
                     "speaker": s.get("speaker", "speaker-1"),
                     "velma_emotion": s.get("velma_emotion"),
                     "velma_accent": s.get("velma_accent"),
+                    "confidence": s.get("confidence"),
+                    "confidence_tier": s.get("confidence_tier"),
                 })
             logger.info(f"[RETRANSLATE] Loaded {len(segments)} source segments from transcript file")
         except Exception as exc:
@@ -6795,6 +6882,11 @@ async def retranslate_job(job_id: str, request: Request):
                     base["start"] = sub_segs[0].get("start", base.get("start"))
                     base["end"] = sub_segs[0].get("end", base.get("end"))
                     base["original_text"] = base.get("original_text") or base["text"]
+                    # Fresh gate result from this retranslation, not whatever the
+                    # segment was flagged/cleared as before — a stale flag here
+                    # would either resurrect a cleared review or silently drop one.
+                    base["translation_flagged"] = bool(sub_segs[0].get("translation_flagged", False))
+                    base["flag_reason"] = sub_segs[0].get("flag_reason")
                     if base["text"] != _old_text:
                         _invalidate_audio(base)
                     new_disk_segs.append(base)
@@ -6812,6 +6904,8 @@ async def retranslate_job(job_id: str, request: Request):
                             "start":      sub.get("start", base.get("start")),
                             "end":        sub.get("end",   base.get("end")),
                             "auto_split": True,
+                            "translation_flagged": bool(sub.get("translation_flagged", False)),
+                            "flag_reason": sub.get("flag_reason"),
                         }))
             _seg_data["segments"] = new_disk_segs
             atomic_write_json(_segments_path, _seg_data)
@@ -7193,6 +7287,14 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     text = body.get("text")
     text_locked = body.get("text_locked")
     paired_with_next = body.get("paired_with_next")
+    # Explicit human-review signal, distinct from every other field in this
+    # payload. The editor sends this ONLY when the user actively reviews a
+    # translation_flagged segment — "approve as-is" (no text change) or
+    # "approve with edit" both send it. It must never be inferred from an
+    # ordinary field update (e.g. a routine committed_start_time/audio_url
+    # save from playback), or every unrelated save would silently release a
+    # low-confidence segment to TTS without anyone having looked at it.
+    clear_translation_flag = body.get("clear_translation_flag") is True
     # Chunk-lens staged-take promotion: the path of an auditioned-but-uncommitted
     # take (segment_NNNN_staged*.mp3) the user has chosen to keep. Sets BOTH
     # `path` (which remix_dub merges from) and `committed_audio_url` — a staged
@@ -7240,6 +7342,9 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         update_data["flag_status"] = flag_status
     if "correction_type" in body:
         update_data["correction_type"] = correction_type
+    if clear_translation_flag:
+        update_data["translation_flagged"] = False
+        update_data["flag_reason"] = None
     try:
         supabase_writer.table("segments").update(update_data).eq("job_id", job_id).eq("sequence", index).execute()
     except Exception as e:
@@ -7290,9 +7395,12 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         seg["text_locked"] = text_locked
     if paired_with_next is not None:
         seg["paired_with_next"] = paired_with_next
+    if clear_translation_flag:
+        seg["translation_flagged"] = False
+        seg["flag_reason"] = None
     data["segments"] = segs
     atomic_write_json(segments_path, data)
-    return {"status": "ok", "job_id": job_id, "index": index}
+    return {"status": "ok", "job_id": job_id, "index": index, "translation_flagged": seg.get("translation_flagged", False)}
 
 
 @router.post("/dub/discard-staged/{job_id}", dependencies=[Depends(_dep_job_access)])
