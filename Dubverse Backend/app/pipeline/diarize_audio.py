@@ -192,24 +192,25 @@ def diarize_audio(
                 ),
             }
 
-        # This stage runs on CPU only, and only after separation/transcription
-        # have already finished (they're sequential, not concurrent) — so the
-        # container-wide OMP/MKL/OPENBLAS/NUMEXPR thread caps (set to 8 in
-        # Dockerfile.gpu specifically to stop *concurrent* GPU-stage libraries
-        # from oversubscribing the worker's cores) are needlessly limiting
-        # diarization to a fraction of the worker's real CPU count. Bump
-        # PyTorch's own thread pool for just this stage; nothing else is
-        # running to contend with it. Verified on the full 105-minute film:
-        # CPU diarization alone took 1405s (57% of total pipeline time) capped
-        # at 8 threads.
+        # REVERTED (2026-09-07): raising this stage's thread count to
+        # os.cpu_count() (26 on the test worker) was meant to speed up CPU
+        # diarization, on the theory that it runs alone with nothing else
+        # competing for cores. Measured result on the full 105-minute film:
+        # diarize went from 1405s to 5024.97s — a 3.5x regression, not a
+        # speedup. Most likely cause: pyannote's own pipeline already spawns
+        # multiple internal threads per stage (embedding extraction,
+        # clustering), and forcing PyTorch's outer thread pool to 26
+        # oversubscribed against that internal parallelism — plus, now that
+        # transcription and diarization run concurrently (see handler.py),
+        # this stage is no longer actually alone; it competes with
+        # transcription's own CPU-side VAD/preprocessing work at the same
+        # time. Left as a no-op cap at 8 (matching the container-wide
+        # default) until a properly measured value is found.
         try:
             import torch as _torch_threads
-            _cpu_count = os.cpu_count() or 8
-            _diar_threads = int(os.getenv("DIARIZATION_CPU_THREADS", str(_cpu_count)))
-            _torch_threads.set_num_threads(_diar_threads)
-            logger.info(f"[DIARIZE] Using {_diar_threads} CPU threads for this stage (of {_cpu_count} available)")
+            _torch_threads.set_num_threads(int(os.getenv("DIARIZATION_CPU_THREADS", "8")))
         except Exception as _thread_err:
-            logger.warning(f"[DIARIZE] Could not raise thread count: {_thread_err}")
+            logger.warning(f"[DIARIZE] Could not set thread count: {_thread_err}")
 
         logger.info("[DIARIZE] Running pipeline inference...")
         # Constrain speaker count.  For known-N-speaker content set both
