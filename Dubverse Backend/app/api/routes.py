@@ -1917,7 +1917,10 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             raw_segments, diarization_segments, preserve_unsplit=True
         )
         if rescued and len(rescued) > len(segments):
-            rescued = _smooth_speaker_assignments(rescued)
+            # Re-normalize so the new diarization-derived speakers keep the
+            # same 1-indexed convention as the rest of the transcript, but do
+            # not re-run global smoothing here — it can overwrite short or
+            # rare-speaker assignments on segments that were already correct.
             rescued = _normalize_speaker_labels(rescued)
             logger.info(
                 f"Job {job_id}: per-segment diarization rescue split "
