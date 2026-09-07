@@ -3597,10 +3597,12 @@ async def get_transcript_editor_format(job_id: str):
             "end": seg.get("end", 0),
             "speaker_id": spk_id_map.get(spk_label, "spk_0"),
             "language": language,
-            "confidence": 1.0,
-            "words": [],
+            "confidence": seg.get("confidence") if seg.get("confidence") is not None else 1.0,
+            "words": seg.get("words") or [],
             "is_edited": False,
             "status": "pending",
+            "translation_flagged": seg.get("translation_flagged", False),
+            "flag_reason": seg.get("flag_reason"),
         })
 
     return {
