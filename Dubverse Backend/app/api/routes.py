@@ -444,9 +444,10 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
     def _assign_words_to_windows(words, windows):
         """Assign each parent word to exactly one child window.
 
-        Words are allocated by best overlap; ties and zero-overlap words go to
-        the nearest window by start time. This prevents boundary duplication while
-        keeping alignments from being silently dropped.
+        Words are allocated to the child whose time window has the largest
+        overlap. A word is only included if it actually overlaps the assigned
+        child; this prevents both boundary duplication and attaching words to
+        intervals that do not contain them.
         """
         if not words or not windows:
             return [None] * len(windows)
@@ -467,17 +468,6 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
                     best_overlap, best_idx = overlap, idx
             if best_overlap > 0.0:
                 assigned[best_idx].append(w)
-            else:
-                # No overlap: fall back to nearest window by start time so words
-                # before the first or after the last retained diarization window
-                # still have an alignment home.
-                nearest_idx, nearest_dist = 0, float("inf")
-                for idx, win in enumerate(windows):
-                    win_s = win.get("start", 0.0) if isinstance(win, dict) else getattr(win, "start", 0.0)
-                    dist = abs(ws - win_s)
-                    if dist < nearest_dist:
-                        nearest_dist, nearest_idx = dist, idx
-                assigned[nearest_idx].append(w)
         return [a or None for a in assigned]
 
     # ── Split single-blob transcripts using diarization timestamps ──

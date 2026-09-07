@@ -875,20 +875,15 @@ class TranslationService:
 
         texts = [seg.get("text", "") for seg in segments]
 
-        # Flag segments with missing or low ASR confidence for human review.
-        # Translation still runs so the editor has a draft, but TTS is blocked
-        # until the user commits the segment. Missing confidence is only treated
-        # as a flag when ASR provenance (source) is known; legacy persisted
-        # transcripts with neither field should remain renderable.
+        # Flag segments with low ASR confidence for human review. Translation
+        # still runs so the editor has a draft, but TTS is blocked until the
+        # user commits the segment. Missing confidence values are not treated as
+        # low confidence so legacy or source-only transcripts remain renderable.
         for seg in segments:
             _conf = seg.get("confidence")
-            _src = seg.get("source")
             if _conf is not None and _conf < LOW_CONFIDENCE_THRESHOLD:
                 seg["translation_flagged"] = True
                 seg["flag_reason"] = "low_asr_confidence"
-            elif _conf is None and _src:
-                seg["translation_flagged"] = True
-                seg["flag_reason"] = "unknown_asr_provenance"
 
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
