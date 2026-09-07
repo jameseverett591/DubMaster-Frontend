@@ -3,6 +3,7 @@ print("handler.py: starting...", flush=True)
 
 import logging
 import asyncio
+import concurrent.futures
 import glob
 import json
 import os
@@ -520,42 +521,68 @@ def handler(event):
             return {"error": f"Audio extraction failed: {extract_result.get('reason', '')}"}
 
     transcription_source = vocal_extract if vocal_extract is not None else extract_result
+    diarize_source = transcription_source
 
-    # ── Step 4: Transcription ─────────────────────────────────────────────
-    if "transcribe" in steps:
-        logger.info(f"[3b/4] Transcribing (language={language})")
-        t_tr = time.time()
+    # Set language env var before launching the parallel transcription/diarization
+    # tasks so both pick it up consistently.
+    prev_lang = os.environ.get("WHISPER_LANGUAGE")
+    if language:
+        os.environ["WHISPER_LANGUAGE"] = language
+    else:
+        os.environ.pop("WHISPER_LANGUAGE", None)
 
-        # Set language env var so both transcribe_audio and transcribe_cantonese pick it up.
-        # Always write it explicitly — even empty string — to prevent stale yue from a
-        # prior job on the same worker process bleeding into this transcription.
-        prev_lang = os.environ.get("WHISPER_LANGUAGE")
-        if language:
-            os.environ["WHISPER_LANGUAGE"] = language
-        else:
-            os.environ.pop("WHISPER_LANGUAGE", None)
+    # ── Step 4 + 5: Transcription and Speaker Diarization in parallel ─────
+    # Transcription is GPU-bound and diarization is CPU-bound by default; they
+    # use independent models and can run concurrently on the worker. This hides
+    # the CPU diarization time behind transcription on long-form content.
+    transcript_result: dict = {"status": "skipped"}
+    diarize_result: dict = {"status": "skipped"}
+    diarization_segments = []
 
-        _lang_norm = (language or "").lower().strip()
+    _lang_norm = (language or "").lower().strip()
+
+    def _run_transcribe():
+        t0 = time.time()
         if _lang_norm in _CJK_LANGS:
             # Multi-engine pipeline: Tencent → Paraformer → Whisper (with merge)
             # Passes separated vocals so Tencent/Paraformer get the cleanest signal
             logger.info(f"[TRANSCRIBE] CJK language '{language}' — using multi-engine Cantonese pipeline")
-            transcript_result = transcribe_cantonese(
+            result = transcribe_cantonese(
                 transcription_source,
                 vocals_path=vocals_audio_path,
                 job_id=job_id,
                 source_language=language,
             )
         else:
-            transcript_result = transcribe_audio(transcription_source, job_id=job_id, source_language=language)
+            result = transcribe_audio(transcription_source, job_id=job_id, source_language=language)
+        timings["transcribe"] = round(time.time() - t0, 2)
+        return result
 
-        if prev_lang is None:
-            os.environ.pop("WHISPER_LANGUAGE", None)
-        else:
-            os.environ["WHISPER_LANGUAGE"] = prev_lang
+    def _run_diarize():
+        if vocal_extract is not None:
+            logger.info("[DIARIZE] Using separated vocals as diarization source")
+        t0 = time.time()
+        result = diarize_audio(diarize_source, job_id=job_id, min_speakers=min_speakers, max_speakers=max_speakers)
+        timings["diarize"] = round(time.time() - t0, 2)
+        return result
 
-        timings["transcribe"] = round(time.time() - t_tr, 2)
+    if "transcribe" in steps or "diarize" in steps:
+        steps_run = [s for s in ("transcribe", "diarize") if s in steps]
+        logger.info(f"[3b/4]+[4/4] Running {', '.join(steps_run)} in parallel")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            tr_future = pool.submit(_run_transcribe) if "transcribe" in steps else None
+            di_future = pool.submit(_run_diarize) if "diarize" in steps else None
+            transcript_result = tr_future.result() if tr_future else {"status": "skipped"}
+            diarize_result = di_future.result() if di_future else {"status": "skipped"}
 
+    # Restore the previous WHISPER_LANGUAGE env var.
+    if prev_lang is None:
+        os.environ.pop("WHISPER_LANGUAGE", None)
+    else:
+        os.environ["WHISPER_LANGUAGE"] = prev_lang
+
+    # Process transcription output
+    if "transcribe" in steps:
         if transcript_result.get("status") != "ok":
             return {"error": f"Transcription failed: {transcript_result.get('reason', '')}"}
 
@@ -567,27 +594,17 @@ def handler(event):
             transcript_data = json.load(f)
 
         segments = transcript_data.get("segments", [])
-        logger.info(f"Transcription complete in {timings['transcribe']}s: {len(segments)} segments")
+        logger.info(f"Transcription complete in {timings.get('transcribe', 0)}s: {len(segments)} segments")
     else:
         transcript_data = {}
         segments = []
 
-    # ── Step 5: Speaker Diarization ───────────────────────────────────────
-    diarization_segments = []
+    # Process diarization output
     if "diarize" in steps:
-        logger.info("[4/4] Running speaker diarization")
-        t_di = time.time()
-        # Reuse the already-loaded vocals from the transcription step.
-        diarize_source = vocal_extract if vocal_extract is not None else extract_result
-        if vocal_extract is not None:
-            logger.info("[DIARIZE] Using separated vocals as diarization source")
-        diarize_result = diarize_audio(diarize_source, job_id=job_id, min_speakers=min_speakers, max_speakers=max_speakers)
-        timings["diarize"] = round(time.time() - t_di, 2)
-
         if diarize_result.get("status") == "ok":
             diarization_segments = diarize_result.get("segments", [])
             unique_diar = len(set(d.get("speaker") for d in diarization_segments))
-            logger.info(f"Diarization complete in {timings['diarize']}s: {len(diarization_segments)} turns, {unique_diar} speakers")
+            logger.info(f"Diarization complete in {timings.get('diarize', 0)}s: {len(diarization_segments)} turns, {unique_diar} speakers")
             # If user specified an exact count but pyannote returned fewer,
             # log a warning — the F0 fallback on the local backend will handle it.
             if _exact_speakers and unique_diar < _exact_speakers:
