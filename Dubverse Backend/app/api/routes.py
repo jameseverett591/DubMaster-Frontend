@@ -441,13 +441,14 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
 
     unique_speakers = len(speaker_map)
 
-    def _assign_words_to_windows(words, windows):
+    def _assign_words_to_windows(words, windows, gap_tolerance: float = 0.1):
         """Assign each parent word to exactly one child window.
 
         Words are allocated to the child whose time window has the largest
-        overlap. A word is only included if it actually overlaps the assigned
-        child; this prevents both boundary duplication and attaching words to
-        intervals that do not contain them.
+        overlap. Words with no overlap are only assigned to the nearest window
+        when the gap is small (within ``gap_tolerance``), preventing boundary
+        alignments from being lost while keeping far-off gap words out of a
+        child's alignment list.
         """
         if not words or not windows:
             return [None] * len(windows)
@@ -460,14 +461,21 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
                 ws = getattr(w, "start", 0.0)
                 we = getattr(w, "end", 0.0)
             best_idx, best_overlap = 0, -1.0
+            best_dist = float("inf")
             for idx, win in enumerate(windows):
                 win_s = win.get("start", 0.0) if isinstance(win, dict) else getattr(win, "start", 0.0)
                 win_e = win.get("end", 0.0) if isinstance(win, dict) else getattr(win, "end", 0.0)
                 overlap = max(0.0, min(we, win_e) - max(ws, win_s))
                 if overlap > best_overlap:
                     best_overlap, best_idx = overlap, idx
+                # Distance between word and window (0 when overlapping).
+                dist = max(0.0, win_s - we, ws - win_e)
+                if dist < best_dist:
+                    best_dist, best_idx_gap = dist, idx
             if best_overlap > 0.0:
                 assigned[best_idx].append(w)
+            elif best_dist <= gap_tolerance:
+                assigned[best_idx_gap].append(w)
         return [a or None for a in assigned]
 
     # ── Split single-blob transcripts using diarization timestamps ──
@@ -7356,10 +7364,12 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         seg["text_locked"] = text_locked
     if paired_with_next is not None:
         seg["paired_with_next"] = paired_with_next
-    # Committing a reviewed segment clears the low-confidence translation flag
-    # so the next render pass will synthesise its audio.
-    seg["translation_flagged"] = False
-    seg["flag_reason"] = None
+    # Only clear the low-confidence translation flag when the editor has actually
+    # reviewed the text (translated or adapted). Timing, pairing, and other
+    # metadata commits should not unilaterally unblock TTS for a flagged draft.
+    if text is not None or committed_adapted_text is not None:
+        seg["translation_flagged"] = False
+        seg["flag_reason"] = None
     data["segments"] = segs
     atomic_write_json(segments_path, data)
     return {"status": "ok", "job_id": job_id, "index": index}
