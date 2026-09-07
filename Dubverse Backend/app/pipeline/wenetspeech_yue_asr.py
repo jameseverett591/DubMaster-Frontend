@@ -36,6 +36,7 @@ def _is_cantonese(source_language: Optional[str]) -> bool:
 def _load_audio_file(audio_path: str) -> Tuple[np.ndarray, int]:
     """Load a WAV/audio file and return a 1-D float32 numpy array + sample rate."""
     import soundfile as sf
+    import torch
     import torchaudio
 
     audio_np, sample_rate = sf.read(audio_path, dtype="float32")
@@ -160,7 +161,6 @@ def _get_vad_chunks(waveform: np.ndarray) -> List[Dict[str, int]]:
         min_silence_duration_ms=int(os.getenv("WENET_VAD_MIN_SILENCE_MS", "150")),
         speech_pad_ms=int(os.getenv("WENET_VAD_SPEECH_PAD_MS", "400")),
         max_speech_duration_s=max_speech_s,
-        use_max_poss_sil_at_max_speech=True,
     )
 
     return get_speech_timestamps(waveform, vad_options, sampling_rate=_SAMPLE_RATE)
