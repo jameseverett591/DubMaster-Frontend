@@ -46,6 +46,10 @@ faster-whisper>=0.10.0
 funasr>=1.0.0
 modelscope>=1.9.0
 
+# WenetSpeech-Yue Cantonese ASR via sherpa-onnx (CPU-only CTC)
+sherpa-onnx>=1.11.1
+huggingface_hub>=0.20.0,<1.0.0
+
 # ============================================
 # TEXT-TO-SPEECH
 # ============================================

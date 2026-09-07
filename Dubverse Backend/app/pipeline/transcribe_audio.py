@@ -108,6 +108,9 @@ def _get_whisper_model():
     return _WHISPER_MODEL
 
 
+get_whisper_model = _get_whisper_model
+
+
 def _find_gaps(segments: List[Dict], duration: float, min_gap: float) -> List[tuple]:
     """Return list of (start, end) gaps longer than *min_gap* seconds."""
     gaps = []
