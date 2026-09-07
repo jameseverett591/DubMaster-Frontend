@@ -486,13 +486,21 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
                         seg_text = " ".join(blob_tokens[idx: idx + take]).strip()
                         idx += take
 
+                _parent = raw_segments[0]
                 split_segments.append(
                     TranscriptSegment(
                         text=seg_text,
                         start=dk["start"],
                         end=dk["end"],
                         speaker=dk["speaker"],
-                        source=raw_segments[0].get("source"),
+                        confidence=_parent.get("confidence"),
+                        confidence_tier=_parent.get("confidence_tier"),
+                        words=_parent.get("words"),
+                        velma_emotion=_parent.get("velma_emotion"),
+                        velma_accent=_parent.get("velma_accent"),
+                        velma_deepfake_score=_parent.get("velma_deepfake_score"),
+                        is_credit=_parent.get("is_credit", False),
+                        source=_parent.get("source"),
                     )
                 )
 
@@ -594,6 +602,13 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
                     start=sl["start"],
                     end=sl["end"],
                     speaker=sl.get("speaker") or "speaker-1",
+                    confidence=seg.get("confidence"),
+                    confidence_tier=seg.get("confidence_tier"),
+                    words=seg.get("words"),
+                    velma_emotion=seg.get("velma_emotion"),
+                    velma_accent=seg.get("velma_accent"),
+                    velma_deepfake_score=seg.get("velma_deepfake_score"),
+                    is_credit=seg.get("is_credit", False),
                     source=seg.get("source"),
                 )
             )
@@ -3420,6 +3435,8 @@ async def get_transcript(job_id: str):
                     "velma_emotion": seg.velma_emotion,
                     "velma_accent": seg.velma_accent,
                     "velma_deepfake_score": seg.velma_deepfake_score,
+                    "translation_flagged": seg.translation_flagged,
+                    "flag_reason": seg.flag_reason,
                 }
                 for seg in job.transcript.segments
             ]
@@ -3470,7 +3487,16 @@ async def get_transcript_editor_format(job_id: str):
         if not (job and job.transcript):
             raise HTTPException(status_code=404, detail="Transcript not available yet")
         segments_raw = [
-            {"text": s.text, "start": s.start, "end": s.end, "speaker": s.speaker}
+            {
+                "text": s.text,
+                "start": s.start,
+                "end": s.end,
+                "speaker": s.speaker,
+                "confidence": s.confidence,
+                "confidence_tier": s.confidence_tier,
+                "translation_flagged": s.translation_flagged,
+                "flag_reason": s.flag_reason,
+            }
             for s in job.transcript.segments
         ]
         duration = job.transcript.duration or 0
@@ -4660,6 +4686,8 @@ async def dub_video(request: DubRequest, http_request: Request, background_tasks
             "velma_deepfake_score": seg.velma_deepfake_score,
             "confidence": seg.confidence if getattr(seg, "confidence", None) is not None else _conf,
             "confidence_tier": seg.confidence_tier if getattr(seg, "confidence_tier", None) is not None else _tier,
+            "translation_flagged": seg.translation_flagged,
+            "flag_reason": seg.flag_reason,
         })
 
     detected_lang = job.transcript.language if job and job.transcript else None
@@ -4812,6 +4840,8 @@ async def translate_only(request: DubRequest, http_request: Request):
             "source": seg.source,
             "velma_emotion": seg.velma_emotion,
             "velma_accent": seg.velma_accent,
+            "translation_flagged": seg.translation_flagged,
+            "flag_reason": seg.flag_reason,
         }
         _key = f"{seg.start:.3f}_{seg.end:.3f}"
         if _key in _job_seg_lookup:
@@ -4883,8 +4913,11 @@ async def translate_only(request: DubRequest, http_request: Request):
         }
         transcript_dicts = [
             s for s in transcript_dicts
-            if s.get("text", "").strip()
-            and s.get("text", "").strip().lower().rstrip(".,!?") not in _NOISE_WORDS
+            if s.get("translation_flagged")
+            or (
+                s.get("text", "").strip()
+                and s.get("text", "").strip().lower().rstrip(".,!?") not in _NOISE_WORDS
+            )
         ]
 
         # Clear source-language word alignments — they don't match the
@@ -4966,6 +4999,8 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
             "source_text": getattr(seg, "source_text", None) or seg.text,
             "confidence": seg.confidence if getattr(seg, "confidence", None) is not None else _conf,
             "confidence_tier": seg.confidence_tier if getattr(seg, "confidence_tier", None) is not None else _tier,
+            "translation_flagged": seg.translation_flagged,
+            "flag_reason": seg.flag_reason,
         })
 
     try:

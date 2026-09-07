@@ -58,6 +58,11 @@ class TranscriptSegment(BaseModel):
     # Preserved so downstream hallucination filters can distinguish Whisper
     # hallucinations from legitimate non-Whisper dialogue.
     source: Optional[str] = None
+    # Set by translation_service when ASR confidence is missing or below the
+    # low-confidence threshold. The segment is still translated but TTS is
+    # blocked until a human editor reviews and commits it.
+    translation_flagged: bool = False
+    flag_reason: Optional[str] = None
 
 
 class Transcript(BaseModel):
