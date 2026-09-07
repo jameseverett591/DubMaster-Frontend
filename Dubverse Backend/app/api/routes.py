@@ -1577,7 +1577,12 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
     # as the safe default. DIARIZATION_DEVICE can be set to "cuda" on the backend
     # to opt in to GPU diarization for A/B testing once the handler.py guards are
     # confirmed to prevent collapse on Cantonese.
-    _diarization_device = os.environ.get("DIARIZATION_DEVICE", "cpu").lower()
+    _raw_di_device = os.environ.get("DIARIZATION_DEVICE", "cpu").strip().lower()
+    _diarization_device = _raw_di_device if _raw_di_device in ("cpu", "cuda") else "cpu"
+    if _diarization_device != _raw_di_device:
+        logger.warning(
+            f"Job {job_id}: ignoring invalid DIARIZATION_DEVICE={_raw_di_device!r}, using cpu"
+        )
     gpu_env_vars["DIARIZATION_DEVICE"] = _diarization_device
     _unpinned = [k for k in ("VAD_THRESHOLD",) if k not in gpu_env_vars]
     logger.info(
@@ -2182,7 +2187,14 @@ async def _runpod_diarize_fallback(
         source_path = _vocals_or_video(video_path, job_id)
         file_url = await _get_runpod_file_url(job_id, source_path)
 
-    _diarization_device_local = os.environ.get("DIARIZATION_DEVICE", "cpu").lower()
+    _raw_di_device_local = os.environ.get("DIARIZATION_DEVICE", "cpu").strip().lower()
+    _diarization_device_local = (
+        _raw_di_device_local if _raw_di_device_local in ("cpu", "cuda") else "cpu"
+    )
+    if _diarization_device_local != _raw_di_device_local:
+        logger.warning(
+            f"Job {job_id}: ignoring invalid DIARIZATION_DEVICE={_raw_di_device_local!r}, using cpu"
+        )
     env_vars = {
         "DIARIZATION_MIN_SPEAKERS": str(min_speakers),
         "DIARIZATION_MAX_SPEAKERS": str(max_speakers),
