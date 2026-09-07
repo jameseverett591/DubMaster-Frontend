@@ -441,6 +441,22 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
 
     unique_speakers = len(speaker_map)
 
+    def _scope_words(words, window_start, window_end):
+        """Return only word alignments that overlap the child time window."""
+        if not words:
+            return None
+        scoped = []
+        for w in words:
+            if isinstance(w, dict):
+                ws = w.get("start", 0.0)
+                we = w.get("end", 0.0)
+            else:
+                ws = getattr(w, "start", 0.0)
+                we = getattr(w, "end", 0.0)
+            if min(we, window_end) - max(ws, window_start) > 0.0:
+                scoped.append(w)
+        return scoped or None
+
     # ── Split single-blob transcripts using diarization timestamps ──
     # ONLY split when ASR returns exactly 1 segment (a true blob).
     # When Whisper produces multiple segments with timestamps, use
@@ -495,7 +511,7 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
                         speaker=dk["speaker"],
                         confidence=_parent.get("confidence"),
                         confidence_tier=_parent.get("confidence_tier"),
-                        words=_parent.get("words"),
+                        words=_scope_words(_parent.get("words"), dk["start"], dk["end"]),
                         velma_emotion=_parent.get("velma_emotion"),
                         velma_accent=_parent.get("velma_accent"),
                         velma_deepfake_score=_parent.get("velma_deepfake_score"),
@@ -604,7 +620,7 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
                     speaker=sl.get("speaker") or "speaker-1",
                     confidence=seg.get("confidence"),
                     confidence_tier=seg.get("confidence_tier"),
-                    words=seg.get("words"),
+                    words=_scope_words(seg.get("words"), sl["start"], sl["end"]),
                     velma_emotion=seg.get("velma_emotion"),
                     velma_accent=seg.get("velma_accent"),
                     velma_deepfake_score=seg.get("velma_deepfake_score"),
