@@ -441,14 +441,14 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
 
     unique_speakers = len(speaker_map)
 
-    def _assign_words_to_windows(words, windows, gap_tolerance: float = 0.1):
-        """Assign each parent word to exactly one child window.
+    def _assign_words_to_windows(words, windows):
+        """Assign every parent word to exactly one child window.
 
-        Words are allocated to the child whose time window has the largest
-        overlap. Words with no overlap are only assigned to the nearest window
-        when the gap is small (within ``gap_tolerance``), preventing boundary
-        alignments from being lost while keeping far-off gap words out of a
-        child's alignment list.
+        Each word is allocated to the child with the largest temporal overlap
+        (ties go to the first matching child). If a word does not overlap any
+        child, it is assigned to the nearest child and its timestamps are clamped
+        to that child's window. This guarantees no word is duplicated and no word
+        is returned with timestamps outside its owning segment.
         """
         if not words or not windows:
             return [None] * len(windows)
@@ -457,25 +457,47 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
             if isinstance(w, dict):
                 ws = w.get("start", 0.0)
                 we = w.get("end", 0.0)
+                word_text = w.get("word", "")
+                word_conf = w.get("confidence", 0.5)
             else:
                 ws = getattr(w, "start", 0.0)
                 we = getattr(w, "end", 0.0)
+                word_text = getattr(w, "word", "")
+                word_conf = getattr(w, "confidence", 0.5)
+
             best_idx, best_overlap = 0, -1.0
             best_dist = float("inf")
+            best_idx_gap = 0
             for idx, win in enumerate(windows):
                 win_s = win.get("start", 0.0) if isinstance(win, dict) else getattr(win, "start", 0.0)
                 win_e = win.get("end", 0.0) if isinstance(win, dict) else getattr(win, "end", 0.0)
                 overlap = max(0.0, min(we, win_e) - max(ws, win_s))
                 if overlap > best_overlap:
                     best_overlap, best_idx = overlap, idx
-                # Distance between word and window (0 when overlapping).
                 dist = max(0.0, win_s - we, ws - win_e)
                 if dist < best_dist:
                     best_dist, best_idx_gap = dist, idx
-            if best_overlap > 0.0:
-                assigned[best_idx].append(w)
-            elif best_dist <= gap_tolerance:
-                assigned[best_idx_gap].append(w)
+
+            chosen = best_idx if best_overlap > 0.0 else best_idx_gap
+            win = windows[chosen]
+            win_s = win.get("start", 0.0) if isinstance(win, dict) else getattr(win, "start", 0.0)
+            win_e = win.get("end", 0.0) if isinstance(win, dict) else getattr(win, "end", 0.0)
+
+            # Clamp word timestamps to the chosen child window.
+            if ws >= win_e:
+                new_s = new_e = win_e
+            elif we <= win_s:
+                new_s = new_e = win_s
+            else:
+                new_s = max(ws, win_s)
+                new_e = max(new_s, min(we, win_e))
+
+            assigned[chosen].append({
+                "word": word_text,
+                "start": new_s,
+                "end": new_e,
+                "confidence": word_conf,
+            })
         return [a or None for a in assigned]
 
     # ── Split single-blob transcripts using diarization timestamps ──
