@@ -128,7 +128,7 @@ def transcribe_cantonese(
         # one before starting the next.
         def _run_tencent():
             if "tencent" not in engines:
-                return []
+                return (False, [])
             try:
                 from app.pipeline.tencent_asr import transcribe_with_tencent
 
@@ -140,7 +140,7 @@ def transcribe_cantonese(
                 if tencent_result.get("status") == "ok":
                     segs = tencent_result.get("segments", [])
                     logger.info(f"[CANTONESE-ASR] Tencent: {len(segs)} segments")
-                    return segs
+                    return (True, segs)
                 else:
                     logger.info(
                         f"[CANTONESE-ASR] Tencent skipped: "
@@ -148,11 +148,11 @@ def transcribe_cantonese(
                     )
             except Exception as e:
                 logger.warning(f"[CANTONESE-ASR] Tencent failed: {e}")
-            return []
+            return (False, [])
 
         def _run_paraformer():
             if "paraformer" not in engines:
-                return []
+                return (False, [])
             try:
                 from app.pipeline.paraformer_asr import transcribe_with_paraformer
 
@@ -164,7 +164,7 @@ def transcribe_cantonese(
                 if paraformer_result.get("status") == "ok":
                     segs = paraformer_result.get("segments", [])
                     logger.info(f"[CANTONESE-ASR] Paraformer: {len(segs)} segments")
-                    return segs
+                    return (True, segs)
                 else:
                     logger.info(
                         f"[CANTONESE-ASR] Paraformer skipped: "
@@ -172,17 +172,19 @@ def transcribe_cantonese(
                     )
             except Exception as e:
                 logger.warning(f"[CANTONESE-ASR] Paraformer failed: {e}")
-            return []
+            return (False, [])
 
+        tencent_ok = False
+        paraformer_ok = False
         if "tencent" in engines or "paraformer" in engines:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                 t_future = pool.submit(_run_tencent) if "tencent" in engines else None
                 p_future = pool.submit(_run_paraformer) if "paraformer" in engines else None
-                tencent_segments = t_future.result() if t_future else []
-                paraformer_segments = p_future.result() if p_future else []
-            if tencent_segments:
+                tencent_ok, tencent_segments = t_future.result() if t_future else (False, [])
+                paraformer_ok, paraformer_segments = p_future.result() if p_future else (False, [])
+            if tencent_ok:
                 engines_used.append("tencent")
-            if paraformer_segments:
+            if paraformer_ok:
                 engines_used.append("paraformer")
         else:
             logger.info("[CANTONESE-ASR] Skipping Tencent and Paraformer (not in engine list)")
