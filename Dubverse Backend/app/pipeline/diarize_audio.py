@@ -192,6 +192,26 @@ def diarize_audio(
                 ),
             }
 
+        # REVERTED (2026-09-07): raising this stage's thread count to
+        # os.cpu_count() (26 on the test worker) was meant to speed up CPU
+        # diarization, on the theory that it runs alone with nothing else
+        # competing for cores. Measured result on the full 105-minute film:
+        # diarize went from 1405s to 5024.97s — a 3.5x regression, not a
+        # speedup. Most likely cause: pyannote's own pipeline already spawns
+        # multiple internal threads per stage (embedding extraction,
+        # clustering), and forcing PyTorch's outer thread pool to 26
+        # oversubscribed against that internal parallelism — plus, now that
+        # transcription and diarization run concurrently (see handler.py),
+        # this stage is no longer actually alone; it competes with
+        # transcription's own CPU-side VAD/preprocessing work at the same
+        # time. Left as a no-op cap at 8 (matching the container-wide
+        # default) until a properly measured value is found.
+        try:
+            import torch as _torch_threads
+            _torch_threads.set_num_threads(int(os.getenv("DIARIZATION_CPU_THREADS", "8")))
+        except Exception as _thread_err:
+            logger.warning(f"[DIARIZE] Could not set thread count: {_thread_err}")
+
         logger.info("[DIARIZE] Running pipeline inference...")
         # Constrain speaker count.  For known-N-speaker content set both
         # min_speakers and max_speakers to N so pyannote is forced to find

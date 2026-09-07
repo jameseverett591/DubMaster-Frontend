@@ -3,6 +3,7 @@ print("handler.py: starting...", flush=True)
 
 import logging
 import asyncio
+import concurrent.futures
 import glob
 import json
 import os
@@ -265,8 +266,6 @@ def _split_segment_by_diarization(
     # Drop zero-length turns so we do not create empty output segments.
     intervals = [i for i in intervals if i[1] > i[0]]
 
-    chars_total = max(len(text), 1)
-
     # No usable diarization: split long segments by punctuation, keep one speaker.
     if not intervals:
         return _split_long_segment(seg, _speaker_overlap(seg, diarization_segments), max_duration, max_chars)
@@ -275,9 +274,31 @@ def _split_segment_by_diarization(
     if len(intervals) == 1:
         return _split_long_segment(seg, intervals[0][2], max_duration, max_chars)
 
-    # Not enough characters to assign one per speaker turn.  Fall back to the
-    # dominant speaker so we keep all text instead of dropping trailing turns.
-    if len(intervals) > chars_total:
+    # Turns averaging under 0.8s are more likely diarization noise than real
+    # speaker changes — fall back to the dominant speaker rather than splitting
+    # on jitter. Time-based, not character-count-based: a character-count
+    # guard here (len(intervals) > chars_total) was language-biased — CJK text
+    # conveys a full exchange in far fewer characters than the English
+    # equivalent, so it tripped constantly on Cantonese/Chinese segments and
+    # almost never on English ones for the identical number of real speaker
+    # turns, silently collapsing real multi-speaker Cantonese dialogue into
+    # one dominant voice.
+    avg_turn_duration = (t_end - t_start) / len(intervals)
+    chars_total = max(len(text), 1)
+    # Second guard, independent of the duration check above: the proportional
+    # allocation below needs at least one character per interval to produce
+    # valid, non-overlapping slices (see max_target's "- (num_intervals - 1 - i)"
+    # term). Real turns average >=0.8s can still fail this on a very short
+    # transcription (e.g. one-word interjections back to back), and without
+    # this check max_target goes negative, corrupting split points into chunks
+    # that come out empty and get silently dropped at the chunk.strip() filter
+    # below — those speakers' dialogue vanishes rather than misattributes.
+    # This is a hard mathematical precondition of the algorithm, not a
+    # language-sensitivity issue: it only fires when there isn't even 1
+    # character per turn, which is rare for genuine multi-turn dialogue in any
+    # script, unlike the old bug which fired on any Cantonese segment with
+    # more turns than its (naturally low) character count.
+    if avg_turn_duration < 0.8 or len(intervals) > chars_total:
         speakers = {}
         for s, e, sp in intervals:
             speakers[sp] = speakers.get(sp, 0.0) + (e - s)
@@ -500,42 +521,68 @@ def handler(event):
             return {"error": f"Audio extraction failed: {extract_result.get('reason', '')}"}
 
     transcription_source = vocal_extract if vocal_extract is not None else extract_result
+    diarize_source = transcription_source
 
-    # ── Step 4: Transcription ─────────────────────────────────────────────
-    if "transcribe" in steps:
-        logger.info(f"[3b/4] Transcribing (language={language})")
-        t_tr = time.time()
+    # Set language env var before launching the parallel transcription/diarization
+    # tasks so both pick it up consistently.
+    prev_lang = os.environ.get("WHISPER_LANGUAGE")
+    if language:
+        os.environ["WHISPER_LANGUAGE"] = language
+    else:
+        os.environ.pop("WHISPER_LANGUAGE", None)
 
-        # Set language env var so both transcribe_audio and transcribe_cantonese pick it up.
-        # Always write it explicitly — even empty string — to prevent stale yue from a
-        # prior job on the same worker process bleeding into this transcription.
-        prev_lang = os.environ.get("WHISPER_LANGUAGE")
-        if language:
-            os.environ["WHISPER_LANGUAGE"] = language
-        else:
-            os.environ.pop("WHISPER_LANGUAGE", None)
+    # ── Step 4 + 5: Transcription and Speaker Diarization in parallel ─────
+    # Transcription is GPU-bound and diarization is CPU-bound by default; they
+    # use independent models and can run concurrently on the worker. This hides
+    # the CPU diarization time behind transcription on long-form content.
+    transcript_result: dict = {"status": "skipped"}
+    diarize_result: dict = {"status": "skipped"}
+    diarization_segments = []
 
-        _lang_norm = (language or "").lower().strip()
+    _lang_norm = (language or "").lower().strip()
+
+    def _run_transcribe():
+        t0 = time.time()
         if _lang_norm in _CJK_LANGS:
             # Multi-engine pipeline: Tencent → Paraformer → Whisper (with merge)
             # Passes separated vocals so Tencent/Paraformer get the cleanest signal
             logger.info(f"[TRANSCRIBE] CJK language '{language}' — using multi-engine Cantonese pipeline")
-            transcript_result = transcribe_cantonese(
+            result = transcribe_cantonese(
                 transcription_source,
                 vocals_path=vocals_audio_path,
                 job_id=job_id,
                 source_language=language,
             )
         else:
-            transcript_result = transcribe_audio(transcription_source, job_id=job_id, source_language=language)
+            result = transcribe_audio(transcription_source, job_id=job_id, source_language=language)
+        timings["transcribe"] = round(time.time() - t0, 2)
+        return result
 
-        if prev_lang is None:
-            os.environ.pop("WHISPER_LANGUAGE", None)
-        else:
-            os.environ["WHISPER_LANGUAGE"] = prev_lang
+    def _run_diarize():
+        if vocal_extract is not None:
+            logger.info("[DIARIZE] Using separated vocals as diarization source")
+        t0 = time.time()
+        result = diarize_audio(diarize_source, job_id=job_id, min_speakers=min_speakers, max_speakers=max_speakers)
+        timings["diarize"] = round(time.time() - t0, 2)
+        return result
 
-        timings["transcribe"] = round(time.time() - t_tr, 2)
+    if "transcribe" in steps or "diarize" in steps:
+        steps_run = [s for s in ("transcribe", "diarize") if s in steps]
+        logger.info(f"[3b/4]+[4/4] Running {', '.join(steps_run)} in parallel")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            tr_future = pool.submit(_run_transcribe) if "transcribe" in steps else None
+            di_future = pool.submit(_run_diarize) if "diarize" in steps else None
+            transcript_result = tr_future.result() if tr_future else {"status": "skipped"}
+            diarize_result = di_future.result() if di_future else {"status": "skipped"}
 
+    # Restore the previous WHISPER_LANGUAGE env var.
+    if prev_lang is None:
+        os.environ.pop("WHISPER_LANGUAGE", None)
+    else:
+        os.environ["WHISPER_LANGUAGE"] = prev_lang
+
+    # Process transcription output
+    if "transcribe" in steps:
         if transcript_result.get("status") != "ok":
             return {"error": f"Transcription failed: {transcript_result.get('reason', '')}"}
 
@@ -547,27 +594,17 @@ def handler(event):
             transcript_data = json.load(f)
 
         segments = transcript_data.get("segments", [])
-        logger.info(f"Transcription complete in {timings['transcribe']}s: {len(segments)} segments")
+        logger.info(f"Transcription complete in {timings.get('transcribe', 0)}s: {len(segments)} segments")
     else:
         transcript_data = {}
         segments = []
 
-    # ── Step 5: Speaker Diarization ───────────────────────────────────────
-    diarization_segments = []
+    # Process diarization output
     if "diarize" in steps:
-        logger.info("[4/4] Running speaker diarization")
-        t_di = time.time()
-        # Reuse the already-loaded vocals from the transcription step.
-        diarize_source = vocal_extract if vocal_extract is not None else extract_result
-        if vocal_extract is not None:
-            logger.info("[DIARIZE] Using separated vocals as diarization source")
-        diarize_result = diarize_audio(diarize_source, job_id=job_id, min_speakers=min_speakers, max_speakers=max_speakers)
-        timings["diarize"] = round(time.time() - t_di, 2)
-
         if diarize_result.get("status") == "ok":
             diarization_segments = diarize_result.get("segments", [])
             unique_diar = len(set(d.get("speaker") for d in diarization_segments))
-            logger.info(f"Diarization complete in {timings['diarize']}s: {len(diarization_segments)} turns, {unique_diar} speakers")
+            logger.info(f"Diarization complete in {timings.get('diarize', 0)}s: {len(diarization_segments)} turns, {unique_diar} speakers")
             # If user specified an exact count but pyannote returned fewer,
             # log a warning — the F0 fallback on the local backend will handle it.
             if _exact_speakers and unique_diar < _exact_speakers:

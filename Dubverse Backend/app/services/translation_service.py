@@ -14,6 +14,13 @@ logger = logging.getLogger(__name__)
 # adjacent lines into one answer (confirmed root cause, 2026-07-14).
 _MARKER_LINE_RE = re.compile(r"^\s*\[\[SEG-([0-9a-f]{6})\]\]\s*(.*)$")
 
+# Below this ASR confidence, a segment is still translated (never dropped —
+# dropping real dialogue is worse than a flagged one) but flagged for human
+# review before TTS. Missing confidence (None) is treated as low, not as
+# "trust it" — a null score means we have no evidence the source text is
+# right, e.g. a diarization-merged/garbled segment.
+LOW_CONFIDENCE_THRESHOLD = float(os.getenv("LOW_CONFIDENCE_THRESHOLD", "0.55"))
+
 from app.config import get_settings
 from app.utils.language import normalize_language_code, LANGUAGE_NAMES
 from app.services.glossary import get_glossary, build_phonetic_index, _cjk_pinyin, _is_cjk
@@ -253,13 +260,10 @@ def split_translated_sentences(segments: list) -> list:
                 "auto_split":          True,
                 "original_segment_id": orig_id,
                 "split_index":         i,
-                # There's no clean way to slice the original-language line 1:1 per
-                # English sentence — one source utterance can split into several
-                # English sentences with no real boundary in the source. Keep the
-                # full original text on the first sub-segment only; repeating it
-                # identically on every sibling misleadingly implies each one has
-                # its own distinct source line.
-                **({} if i == 0 else {"source_text": "", "original_text": ""}),
+                # The parent segment's source text is the source line for the
+                # whole split group; repeat it on every child so the Script view
+                # never shows blank source rows.
+
             })
             cursor = seg_end
     return out
@@ -598,6 +602,25 @@ class TranslationService:
 
         if source_norm == target_norm:
             return segments
+
+        # Pre-translation confidence gate. Every segment below threshold (or
+        # with no confidence at all) still gets translated — never dropped —
+        # but is flagged so dubbing_service withholds TTS until a human
+        # clears it via an explicit editor review action. Mutates the dicts
+        # in place: every output-construction path below spreads the
+        # original segment (`{**seg, ...}`), so these keys ride along
+        # regardless of which translation engine handles the segment.
+        for seg in segments:
+            conf = seg.get("confidence")
+            if conf is None:
+                seg["translation_flagged"] = True
+                seg["flag_reason"] = "unknown_asr_provenance"
+            elif conf < LOW_CONFIDENCE_THRESHOLD:
+                seg["translation_flagged"] = True
+                seg["flag_reason"] = "low_asr_confidence"
+            else:
+                seg.setdefault("translation_flagged", False)
+                seg.setdefault("flag_reason", None)
 
         # Cantonese detection: Whisper may tag it as "zh" or "yue".
         # Either way, use yue-HK as source for Google Cloud so the engine
