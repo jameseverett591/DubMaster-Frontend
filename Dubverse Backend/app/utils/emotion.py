@@ -75,6 +75,16 @@ def analyze_emotion(text: str) -> Dict[str, float]:
     t       = text.strip()
     t_lower = t.lower()
 
+    word_count = len(t.split())
+
+    # Single-word and two-word utterances ("Right.", "Yes.", "Okay then.") have
+    # no prosodic context for the TTS engine to anchor to.  Without a sentence
+    # rhythm the model defaults to maximum expressiveness — producing the
+    # "fighting-game shout" effect on bare reply words.  Force calm, stable
+    # delivery for anything this short.
+    if word_count <= 2:
+        return _settings(style=0.28, stability=0.68)
+
     # --- punctuation signals ---
     exclamations = t.count("!")
     questions    = t.count("?")
@@ -92,10 +102,6 @@ def analyze_emotion(text: str) -> Dict[str, float]:
     humble    = any(p in t_lower for p in _HUMBLE)
     surprise  = bool(tokens & _SURPRISE) or any(p in t_lower for p in _SURPRISE  if " " in p)
     authority = any(p in t_lower for p in _AUTHORITY)
-
-    # Short utterances (< 5 words) tend to be punchy — boost expressiveness
-    word_count = len(t.split())
-    short = word_count <= 4
 
     # ------------------------------------------------------------------
     # Map signals -> settings

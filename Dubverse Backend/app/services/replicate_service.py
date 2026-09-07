@@ -79,7 +79,7 @@ def _ensure_wav(audio_path: str) -> str:
 
 def cloud_transcribe(
     audio_path: str,
-    language: str = "yue",
+    language: str = "",
     job_id: str | None = None,
 ) -> Dict[str, Any]:
     """

@@ -1,249 +1,289 @@
-import logging
+﻿import logging
 import asyncio
 import re
+import secrets
 from typing import List, Dict, Optional, Tuple
 import os
 
 logger = logging.getLogger(__name__)
 
+# Matches a marked reply line like "[[SEG-a3f9c2]] translated text here".
+# See _generate_line_markers / _parse_marked_reply / _validate_marked_mapping —
+# these replace the old "1. 2. 3." numbered-line scheme, whose positional zip
+# back onto segments silently desynced text/timing whenever the LLM merged two
+# adjacent lines into one answer (confirmed root cause, 2026-07-14).
+_MARKER_LINE_RE = re.compile(r"^\s*\[\[SEG-([0-9a-f]{6})\]\]\s*(.*)$")
+
 from app.config import get_settings
 from app.utils.language import normalize_language_code, LANGUAGE_NAMES
+from app.services.glossary import get_glossary, build_phonetic_index, _cjk_pinyin, _is_cjk
+from app.services.adaptation_engine.policy import (
+    NO_HALLUCINATION_GUARDS,
+    get_character_profile,
+    detect_character_from_text,
+    protect_entities,
+    restore_entities,
+    build_name_mapping_prompt,
+    build_localized_name_mapping_prompt,
+    get_translation_system_prompt,
+    resolve_dubbing_style,
+    get_localized_names,
+    fix_translation_names,
+)
 
-# Glossary: maps source terms to their correct English translations.
-# These are protected from machine translation via placeholder tokens.
-GLOSSARY: Dict[str, str] = {
-    # Character names (including common Whisper mishearings)
-    "叶问": "Ip Man",
-    "葉問": "Ip Man",
-    "熱吻": "Ip Man",        # Whisper mishearing of 葉問
-    "叶师傅": "Master Ip",
-    "葉師傅": "Master Ip",
-    "金師傅": "Master Shin",
-    "金师傅": "Master Shin",
-    "金師父": "Master Shin",    # 父 variant (Whisper sometimes outputs 父 instead of 傅)
-    "金师父": "Master Shin",
-    "甘師傅": "Master Shin",    # Whisper mishearing: 甘 (gam) instead of 金 (gam) — homophones in Cantonese
-    "甘师傅": "Master Shin",
-    "甘師父": "Master Shin",
-    "甘师父": "Master Shin",
-    "甘師":   "Master Shin",    # Shortened variant Whisper sometimes produces
-    "金山找": "Master Shin",
-    # Additional phonetic variants Whisper produces for "Shin" (xīn/xìn sounds)
-    "心師傅": "Master Shin",    # xīn — most common "Xin" variant
-    "心师傅": "Master Shin",
-    "心師父": "Master Shin",
-    "心师父": "Master Shin",
-    "新師傅": "Master Shin",    # xīn — "new" character
-    "新师傅": "Master Shin",
-    "新師父": "Master Shin",
-    "新师父": "Master Shin",
-    "辛師傅": "Master Shin",    # xīn — "bitter" character
-    "辛师傅": "Master Shin",
-    "辛師父": "Master Shin",
-    "辛师父": "Master Shin",
-    "信師傅": "Master Shin",    # xìn — "trust" character
-    "信师傅": "Master Shin",
-    "信師父": "Master Shin",
-    "信师父": "Master Shin",
-    "星師傅": "Master Shin",    # xīng — "star" character (Whisper mishearing)
-    "星师傅": "Master Shin",
-    "星師父": "Master Shin",
-    "星师父": "Master Shin",
-    "三浦": "Miura",
-    "武痴林": "Lam",
-    "李钊": "Li Zhao",
-    # Family/address terms
-    "大哥": "Big brother",
-    "臭小子": "You little brat",
-    "沒事": "I'm fine",
-    "没事": "I'm fine",
-    "老婆大人": "My dear wife",
-    "老婆": "Honey",
-    "老公": "Honey",
-    "親愛的": "Darling",
-    "亲爱的": "Darling",
-    # Martial arts terms
-    "榮春": "Wing Chun",      # Whisper mishearing of 詠春
-    "永春": "Wing Chun",
-    "詠春": "Wing Chun",
-    "咏春拳": "Wing Chun",
-    "詠春拳": "Wing Chun",
-    "龄春": "Wing Chun",
-    "龄春, 燕文": "Wing Chun, Ip Man",
-    "看別人而已": "It's up to you.",
-    "看别人而已": "It's up to you.",
-    "看別人": "It's on you",
-    "打開吧": "",
-    "好的功夫是不分男女路友": "Good kung fu doesn't discriminate between men and women",
-    "套牌": "I'll pay",        # Whisper mishears 我付 (I'll pay) as 套牌
-    "藍北拳": "Northern Fist",   # Whisper mishearing: 藍 (laam) prepended to 北拳
-    "北拳": "Northern Fist",
-    "北權": "Northern Fist",    # Whisper mishearing
-    "南拳": "Southern Fist",
-    "南方權": "Southern Fist",  # Whisper mishearing
-    "输给南拳": "lost to Southern Fist",   # Simplified variant
-    "輸給了南拳": "lost to Southern Fist", # With 了 particle
-    "木人桩": "wooden dummy",
-    "木人樁": "wooden dummy",
-    "黐手": "chi sau",
-    "太极": "Tai Chi",
-    "太極": "Tai Chi",
-    "武术": "martial arts",
-    "武術": "martial arts",
-    "功夫": "kung fu",
-    "师傅": "master",
-    "師傅": "master",
-    "师父": "master",
-    "師父": "master",
-    # Idiomatic expressions
-    "不用說了": "That's enough",
-    "不用说了": "That's enough",
-    "小心你的嘴": "Mind your language",
-    "小心你的嘴巴": "Mind your language",
-    "看人家的": "It's up to you",
-    "看人家": "It's up to you",
-    "我付": "I'll pay",
-    "我來付": "I'll pay",
-    "我来付": "I'll pay",
-    "我埋單": "I'll pay",
-    "我埋单": "I'll pay",
-    "我付錢": "I'll pay",
-    "我付钱": "I'll pay",
-    "我請客": "It's my treat",
-    "我请客": "It's my treat",
-    # Whisper transcription artifacts and fight-scene mishearings
-    "男女路友": "male and female",   # 路友 is Whisper noise; real phrase is 男女的
-    "路友": "",                       # Remove stray 路友 artifact
-    "男女老友": "men and women",     # 老友 is Whisper mishearing; real phrase is 男女老幼
-    "我賠": "",                       # Fight grunt misheard — drop
-    "我赔": "",
-    "你跑": "",                       # Fight grunt misheard — drop
-    "我陪你": "",                     # Fight grunt misheard — full phrase drop (prevents "你" residue)
-    "我陪": "",                       # Fight grunt misheard — drop
-    "老闆": "",                       # CJK hallucination during table-break silence — drop
-    "老板": "",                       # Simplified variant
-    "看人的": "It's up to you",      # Whisper drops 家 → 看人的 instead of 看人家的
-    # Short expressions
-    "好呀": "Okay.",
-    "好了": "Alright.",
-    "好啊": "Okay.",
-    "请": "Please",
-    "請": "Please",
-    "爸爸": "Daddy",
-    "妈妈": "Mommy",
-    "媽媽": "Mommy",
-    "够了": "That's enough",
-    "夠了": "That's enough",
-    # Standalone phrases that free translation gets wrong
-    "看人家": "It's up to you.",
-    "看人家的": "It's up to you.",
-    "至於打成怎樣你一會兒就會知道": "You'll see how it goes in a moment.",
-    "至于打成怎样你一会儿就会知道": "You'll see how it goes in a moment.",
-    "我劈": "I'll fight you.",
-    "我告訴你再不出門的話": "I'm telling you, if you don't leave the house,",
-    "我告诉你再不出门的话": "I'm telling you, if you don't leave the house,",
-    "家裡的東西就會壞掉了": "everything in the house will be ruined.",
-    "家里的东西就会坏掉了": "everything in the house will be ruined.",
-    "家裡的東西就會爛了": "everything in the house will be ruined.",
-    "大哥没事吧": "Brother, are you okay?",
-    "大哥沒事吧": "Brother, are you okay?",
-    "金師傅沒事吧": "Master Shin, are you okay?",
-    "金师傅没事吧": "Master Shin, are you okay?",
-    "你没事吧": "Are you okay?",
-    "你沒事吧": "Are you okay?",
-    "厉害": "He's better",
-    "厲害": "He's better",
-    # Adjacent glossary concatenation fix (Wing Chun + Ip Man)
-    "榮春葉問": "Wing Chun, Ip Man",
-    "荣春叶问": "Wing Chun, Ip Man",
-    "詠春葉問": "Wing Chun, Ip Man",
-    "咏春叶问": "Wing Chun, Ip Man",
-    # Full phrase overrides (must appear before shorter substrings)
-    # Child's line: Whisper hears 出门/烂 but actual dialogue is about fighting.
-    # Combined form (if segments are merged):
-    "爸爸妈妈说你再不出门的话家里的东西就会烂了": "Mom said start fighting, or everything in the house will be broken",
-    "爸爸媽媽說你再不出門的話家裡的東西就會爛了": "Mom said start fighting, or everything in the house will be broken",
-    "妈妈说你再不出手的话家里的东西都要被打烂了": "Mom said start fighting, or everything in the house will be broken",
-    # Split form (individual Whisper segments):
-    "爸爸妈妈说你再不出门的话": "Mom said start fighting",
-    "爸爸媽媽說你再不出門的話": "Mom said start fighting",
-    "家里的东西就会烂了": "or everything in the house will be broken",
-    "家裡的東西就會爛了": "or everything in the house will be broken",
-    "好功夫是不會分男女路友的": "Kung fu doesn't discriminate between male and female",
-    "好功夫是不会分男女路友的": "Kung fu doesn't discriminate between male and female",
-    "金師傅 沒事吧": "Master Shin, are you okay?",
-    "金师傅 没事吧": "Master Shin, are you okay?",
-    "金師傅沒事吧": "Master Shin, are you okay?",
-    "金师傅没事吧": "Master Shin, are you okay?",
-    # Mixed traditional/simplified variants (Whisper vocal recovery mixes scripts)
-    "金師傅没事吧": "Master Shin, are you okay?",
-    "金师傅沒事吧": "Master Shin, are you okay?",
-    "金師傅 没事吧": "Master Shin, are you okay?",
-    "金师傅 沒事吧": "Master Shin, are you okay?",
-    # 師父 (father) variants — Whisper vocal recovery often outputs 父 instead of 傅
-    "金師父沒事吧": "Master Shin, are you okay?",
-    "金师父没事吧": "Master Shin, are you okay?",
-    "金師父 沒事吧": "Master Shin, are you okay?",
-    "金师父 没事吧": "Master Shin, are you okay?",
-    "金師父没事吧": "Master Shin, are you okay?",
-    "金师父沒事吧": "Master Shin, are you okay?",
-    # 甘 (Whisper mishearing of 金) variants
-    "甘師傅沒事吧": "Master Shin, are you okay?",
-    "甘师傅没事吧": "Master Shin, are you okay?",
-    "甘師父沒事吧": "Master Shin, are you okay?",
-    "甘师父没事吧": "Master Shin, are you okay?",
-    "甘師傅 沒事吧": "Master Shin, are you okay?",
-    "甘师傅 没事吧": "Master Shin, are you okay?",
-    "甘師父 沒事吧": "Master Shin, are you okay?",
-    "甘师父 没事吧": "Master Shin, are you okay?",
-    "甘師傅没事吧": "Master Shin, are you okay?",
-    "甘师傅沒事吧": "Master Shin, are you okay?",
-    "甘師父没事吧": "Master Shin, are you okay?",
-    "甘师父沒事吧": "Master Shin, are you okay?",
-    "怎麼樣 金師傅": "Master Shin, are you alright?",
-    "怎么样 金师傅": "Master Shin, are you alright?",
-    "怎麼樣金師傅": "Master Shin, are you alright?",
-    "怎么样金师傅": "Master Shin, are you alright?",
-    "怎麼樣金師傅沒事吧": "How's it going? Master Shin, are you okay?",
-    "怎么样金师傅没事吧": "How's it going? Master Shin, are you okay?",
-    # End section dialogue
-    "今天北拳": "Today, Northern Fist",
-    "今天被放權": "Today, Northern Fist",    # Whisper mishearing
-    "輸給南拳": "lost to Southern Fist",
-    "輸給南方權": "lost to Southern Fist",  # Whisper mishearing
-    "不是南北拳的問題": "It's not about Northern or Southern Fist",
-    "不是南北權的問題": "It's not about Northern or Southern Fist",  # Whisper mishearing
-    # Cantonese-specific final section (local Whisper outputs Cantonese, not Mandarin)
-    "點下金師父": "Master Shin, was my kung fu any good?",
-    "點下金師傅": "Master Shin, was my kung fu any good?",
-    "我啲功夫橫可以": "My kung fu's not bad, right?",
-    "唔用數啦": "That's enough.",
-    "唔用數": "That's enough.",
-    "今天北方拳": "Today, Northern Fist",
-    "輸俾南方拳": "lost to Southern Fist",
-    "輸俾南拳": "lost to Southern Fist",
-    "唔系南北拳㗎嘛": "It's not about Northern or Southern Fist",
-    "唔係南北拳㗎嘛": "It's not about Northern or Southern Fist",
-    "唔系南北拳": "It's not about Northern or Southern Fist",
-    "唔係南北拳": "It's not about Northern or Southern Fist",
-    "係你㗎笨": "It's your problem.",
-    "係你嘅問題": "It's your problem.",
-    "錯錯錯": "Wrong.",
-    # Cantonese deduplication
-    "大哥 大哥 大哥": "Big brother",
-    "大哥大哥大哥": "Big brother",
-    # Cantonese fight grunts (local Whisper catches these separately)
-    "我賠，": "",
-    "我赔，": "",
-    "行，": "",
-    # Phonetic-English identity entries — if Whisper outputs a romanized name
-    # instead of CJK (e.g. because initial_prompt didn't fully suppress it),
-    # these prevent DeepL from "translating" proper nouns into something wrong.
-    "Ip Man": "Ip Man",
-    "Wing Chun": "Wing Chun",
-    "Ip man": "Ip Man",
-    "wing chun": "Wing Chun",
-}
+# Split after .!? followed by whitespace + uppercase letter.
+# Em-dash variant catches ". — Next sentence" patterns from some LLM outputs.
+_SENTENCE_SPLIT_RE = re.compile(
+    r'(?<=[.!?])\s+(?=[A-Z])'
+    r'|\s+—\s+(?=[A-Z])'
+)
+
+# ── Natural speech rate constants ─────────────────────────────────────────────
+# All tunable via environment variables so RunPod instances can be dialled in
+# without a code deploy — just update the env var and restart the container.
+#
+# 14 chars/sec ≈ 3.5 words/sec at avg 4-char word+space — comfortable dubbed
+# dialogue pace matching the baseline set in the editor's handleGenerateSpeech.
+NATURAL_SPEECH_RATE = float(os.getenv("DUBMASTER_NATURAL_SPEECH_RATE", "3.5"))  # words/sec
+FAST_SPEECH_RATE    = float(os.getenv("DUBMASTER_FAST_SPEECH_RATE",    "4.5"))  # words/sec
+SLOW_SPEECH_RATE    = float(os.getenv("DUBMASTER_SLOW_SPEECH_RATE",    "2.5"))  # words/sec
+MAX_SPEED_RATIO     = float(os.getenv("DUBMASTER_MAX_SPEED_RATIO",     "1.15")) # 15% above natural
+MIN_SPEED_RATIO     = float(os.getenv("DUBMASTER_MIN_SPEED_RATIO",     "0.85")) # 15% below natural
+_CHARS_PER_SECOND   = float(os.getenv("DUBMASTER_CHARS_PER_SECOND",   "14.0")) # chars/sec
+
+
+def _apply_source_aliases(
+    text: str,
+    dubbing_style: Optional[str] = None,
+    localized_aliases: Optional[Dict[str, str]] = None,
+) -> str:
+    """Pre-replace source role/address terms with their localized English forms
+    before generic MT engines see the text. Only runs for the 'natural' dubbing
+    style; literal mode must preserve the original source wording.
+    """
+    if resolve_dubbing_style(dubbing_style) != "natural":
+        return text
+    names = get_localized_names(localized_aliases)
+    if not names:
+        return text
+    # Longest sources first so shorter ones don't clobber parts of longer ones.
+    for source, target in sorted(names.items(), key=lambda kv: len(kv[0]), reverse=True):
+        if source in text:
+            text = text.replace(source, target)
+    return text
+# Shortest window a split sentence may be given. Below this, TTS overhead —
+# articulation, the pause after a full stop — dominates the budget and no
+# rewording fits: "I'm Jin Shan Zhao." measures 1.29s and was being handed 0.68s.
+_MIN_CHILD_SLOT     = float(os.getenv("DUBMASTER_MIN_CHILD_SLOT",      "1.0"))  # seconds
+_MIN_SEGMENT_SECS   = float(os.getenv("DUBMASTER_MIN_SEGMENT_SECS",    "0.8"))  # absolute floor
+
+# Per-voice speaking-rate calibration.  The default _CHARS_PER_SECOND is a
+# global average; individual voices speak faster or slower.  After each TTS
+# generation we measure the actual duration and update the voice's rate via
+# an exponential moving average.  natural_duration() then uses the learned
+# rate so the shortener (ADAPT-FIT) triggers correctly for slow voices
+# instead of under-triggering and leaving the fit path to speed everything up.
+#
+# In-memory only — resets on container restart, but learns within a single
+# dubbing run (most speakers have multiple segments).  The EMA weight favours
+# stability: 0.3 new / 0.7 old, so a single outlier doesn't swing the estimate.
+_voice_rate_cache: Dict[str, float] = {}
+
+
+def natural_duration(text: str, voice_key: str = "") -> float:
+    """Minimum comfortable TTS duration for this text at natural speech rate.
+
+    When ``voice_key`` is provided and we have a calibrated rate for that
+    voice, the learned rate is used instead of the global default.  This
+    matters because a slow voice (e.g. 10 chars/s) needs more time than the
+    global 14 chars/s estimate predicts — without it, the shortener
+    under-triggers and the fit path compensates by speeding up the audio.
+    """
+    rate = _voice_rate_cache.get(voice_key, _CHARS_PER_SECOND) if voice_key else _CHARS_PER_SECOND
+    return max(_MIN_SEGMENT_SECS, len(text) / rate)
+
+
+def update_voice_rate(voice_key: str, text: str, actual_secs: float) -> None:
+    """Feed a measured TTS duration back into the per-voice rate calibration.
+
+    Called after each TTS generation with the text sent and the actual audio
+    duration measured.  Updates the voice's chars/sec estimate via EMA so
+    subsequent segments for the same voice get a more accurate natural_duration.
+    """
+    if not voice_key or actual_secs <= 0.1:
+        return
+    chars = len(text)
+    if chars < 5:  # too short to be a reliable sample
+        return
+    measured = chars / actual_secs
+    # Clamp to a sane range — 4 chars/s (very slow) to 25 chars/s (very fast)
+    measured = max(4.0, min(25.0, measured))
+    prev = _voice_rate_cache.get(voice_key)
+    if prev is None:
+        _voice_rate_cache[voice_key] = measured
+    else:
+        _voice_rate_cache[voice_key] = prev * 0.7 + measured * 0.3
+    logger.debug(
+        f"[VOICE-RATE] {voice_key}: measured={measured:.1f} cps, "
+        f"ema={_voice_rate_cache[voice_key]:.1f} cps (text={chars} chars, {actual_secs:.2f}s)"
+    )
+
+
+def get_voice_rate(voice_key: str) -> float:
+    """Return the calibrated chars/sec for a voice, or the global default."""
+    return _voice_rate_cache.get(voice_key, _CHARS_PER_SECOND) if voice_key else _CHARS_PER_SECOND
+
+
+def split_translated_sentences(segments: list) -> list:
+    """
+    Expand segments whose translated text spans multiple sentences into one
+    segment per sentence. Time windows are allocated proportionally by natural
+    speech duration (character-rate based), so each sentence gets time in
+    proportion to how long it takes to say — not raw character count.
+    Each sub-segment carries auto_split=True.
+    Non-split segments pass through unchanged.
+    """
+    # Mask title/honorific abbreviations before splitting so their periods
+    # are never treated as sentence boundaries.  Restored after split.
+    _TITLE_ABBREV_RE = re.compile(r'\b(Mr|Mrs|Ms|Dr|Prof|Jr|Sr|St|Lt|Sgt|Gen|Col|Maj|Capt)\.')
+    out: list = []
+    for seg in segments:
+        text = (seg.get("translated_text") or seg.get("text") or "").strip()
+        text = _TITLE_ABBREV_RE.sub(lambda m: m.group(1) + '\x00', text)
+        sentences = [s.replace('\x00', '.').strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
+        if len(sentences) <= 1:
+            out.append(seg)
+            continue
+        n       = len(sentences)
+        start   = float(seg.get("start", 0.0))
+        end     = float(seg.get("end", start))
+        duration = end - start
+        orig_id = seg.get("segment_id", "")
+
+        # Allocate time proportional to natural speaking duration per sentence.
+        # This ensures short sentences ("Yes.") and long ones get fair shares —
+        # raw character count underweights short function words.
+        nat_durs   = [natural_duration(s) for s in sentences]
+        total_nat  = sum(nat_durs)
+        fracs      = [d / total_nat for d in nat_durs]
+
+        # Don't split a window too tight to hold its own sentences.
+        #
+        # Speech duration does not shrink in proportion to a sentence's share of
+        # the text: "I'm Jin Shan Zhao." takes ~1.29s to say whether or not
+        # another sentence follows it. Allocating proportionally out of a 2.4s
+        # parent hands it 0.68s — a slot no natural delivery can fill, forcing
+        # 1.88x on the opening line of the film.
+        #
+        # It also hides the overrun from the shorten step. ADAPT-FIT compares
+        # natural_duration(text) against the slot; unsplit, this line is 3.71s
+        # against 2.4s and gets rewritten shorter by sync_fit at a natural pace,
+        # which is the whole design of 3ac884e7. Split, each child looks small
+        # against its own small slot, no swap fires, and speed does all the work.
+        #
+        # The test is an ABSOLUTE floor, not "shorter than its natural
+        # duration". Whenever the whole line overruns its window — routine for a
+        # dense Cantonese source — every child is short of its own natural
+        # duration, so a relative test refuses every split and leaves four
+        # sentences stacked in one bubble next to a two-word line. That is worse
+        # than a tight split: it is unreadable in the editor and unfixable per
+        # line.
+        #
+        # What genuinely cannot work is a slot too short to hold any delivery of
+        # a sentence, where TTS overhead (articulation, the pause after a full
+        # stop) dominates the budget. Below _MIN_CHILD_SLOT seconds no rewording
+        # helps.
+        #
+        # But refusing the WHOLE split on that basis is worse: one four-word
+        # trailing sentence ("Give it a try.", 0.73s of an 11s window) vetoed
+        # three perfectly good splits and left four sentences stacked in one
+        # bubble beside a two-word line — unreadable in the editor and
+        # unfixable per line. So coalesce undersized sentences into their
+        # neighbour instead, and only keep the parent whole when everything
+        # collapses back into a single group.
+        groups: list[list[str]] = []
+        group_nats: list[float] = []
+        for sentence, nat in zip(sentences, nat_durs):
+            slot = duration * (nat / total_nat)
+            if groups and slot < _MIN_CHILD_SLOT:
+                # Too small to stand alone — attach to the group before it.
+                groups[-1].append(sentence)
+                group_nats[-1] += nat
+            else:
+                groups.append([sentence])
+                group_nats.append(nat)
+
+        # A leading sentence can also be undersized; it has no predecessor, so
+        # fold it forward into the group that follows.
+        while len(groups) > 1 and duration * (group_nats[0] / total_nat) < _MIN_CHILD_SLOT:
+            groups[1] = groups[0] + groups[1]
+            group_nats[1] += group_nats[0]
+            groups.pop(0)
+            group_nats.pop(0)
+
+        if len(groups) <= 1:
+            logger.info(
+                f"[SPLIT] Kept segment whole ({duration:.2f}s window, "
+                f"{n} sentences needing {total_nat:.2f}s) — every child slot "
+                f"falls below the {_MIN_CHILD_SLOT:.2f}s floor"
+            )
+            out.append(seg)
+            continue
+
+        if len(groups) != n:
+            logger.info(
+                f"[SPLIT] {n} sentences → {len(groups)} segments "
+                f"({duration:.2f}s window) — short sentences coalesced to stay "
+                f"above the {_MIN_CHILD_SLOT:.2f}s floor"
+            )
+
+        sentences = [" ".join(g) for g in groups]
+        n         = len(sentences)
+        fracs     = [d / total_nat for d in group_nats]
+
+        cursor = start
+        for i, (sentence, frac) in enumerate(zip(sentences, fracs)):
+            seg_end = (cursor + duration * frac) if i < n - 1 else end
+            out.append({
+                **seg,
+                "text":                sentence,
+                "translated_text":     sentence,
+                "start":               round(cursor, 3),
+                "end":                 round(seg_end, 3),
+                "auto_split":          True,
+                "original_segment_id": orig_id,
+                "split_index":         i,
+                # There's no clean way to slice the original-language line 1:1 per
+                # English sentence — one source utterance can split into several
+                # English sentences with no real boundary in the source. Keep the
+                # full original text on the first sub-segment only; repeating it
+                # identically on every sibling misleadingly implies each one has
+                # its own distinct source line.
+                **({} if i == 0 else {"source_text": "", "original_text": ""}),
+            })
+            cursor = seg_end
+    return out
+
+
+def _aligned(result, chunk, provider: str, start: int):
+    """Return result only if it lines up 1:1 with the chunk that was sent.
+
+    Chunks are reassembled BY POSITION. A provider that returns 18 rows for 20
+    does not lose two lines — it shifts every remaining line in the film, pairing
+    dialogue with the wrong speaker and the wrong timing, with nothing downstream
+    able to notice. Treating a length mismatch as a provider failure lets the
+    normal retry/fallback chain handle it instead.
+    """
+    if result is None:
+        return None
+    if len(result) != len(chunk):
+        logger.error(
+            f"[TRANSLATE] {provider} returned {len(result)} segment(s) for the "
+            f"{len(chunk)} sent in chunk {start}-{start + len(chunk)} — discarding "
+            f"this result rather than misaligning every segment after it."
+        )
+        return None
+    return result
 
 
 class TranslationService:
@@ -251,33 +291,109 @@ class TranslationService:
         settings = get_settings()
         self.deepl_api_key = settings.DEEPL_API_KEY
         self.google_api_key = os.getenv("GOOGLE_TRANSLATE_API_KEY")
-        # Sort glossary by length descending so longer matches take priority
-        self._glossary_sorted = sorted(GLOSSARY.items(), key=lambda kv: len(kv[0]), reverse=True)
+        # Glossary is loaded dynamically per source language in translate_segments.
+        # Initialise with the Cantonese glossary as a safe default.
+        _yue_glossary = get_glossary("yue")
+        self._glossary_sorted = sorted(_yue_glossary.items(), key=lambda kv: len(kv[0]), reverse=True)
+        # Phonetic index: pinyin_key → (src, tgt, char_len) for fuzzy CJK matching
+        self._phonetic_index = build_phonetic_index(_yue_glossary)
 
-    def _apply_glossary_pre(self, text: str) -> Tuple[str, List[Tuple[str, str]]]:
-        """Replace glossary source terms with placeholder tokens before translation."""
-        # Collapse spaces between CJK characters — Whisper sometimes inserts
-        # spurious whitespace (e.g. "金 師傅" instead of "金師傅"), breaking
-        # glossary matching.
-        _cjk_space_re = re.compile(r'(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])')
+    def _reload_glossary(self, source_language: str) -> None:
+        """Reload glossary and phonetic index when source language changes."""
+        glossary = get_glossary(source_language)
+        self._glossary_sorted = sorted(glossary.items(), key=lambda kv: len(kv[0]), reverse=True)
+        self._phonetic_index = build_phonetic_index(glossary)
+
+    def _apply_glossary_pre(self, text: str):
+        """
+        Replace glossary source terms with placeholder tokens before translation.
+
+        Returns (protected_text, replacements, fuzzy_match_log).
+        fuzzy_match_log lists phonetic substitutions made for director review.
+        """
+        import re as _re2
+        _cjk_space_re = _re2.compile(r'(?<=[一-鿿])\s+(?=[一-鿿])')
+        _cjk_punct_re = _re2.compile(r'(?<=[一-鿿])[,，、;；]\s*(?=[一-鿿])')
         text = _cjk_space_re.sub('', text)
-        # Also strip commas/punctuation sandwiched between CJK characters —
-        # Whisper vocal recovery inserts "金師父, 沒事吧" with a comma that
-        # prevents glossary matching against "金師父沒事吧".
-        _cjk_punct_re = re.compile(r'(?<=[\u4e00-\u9fff])[,，、;；]\s*(?=[\u4e00-\u9fff])')
         text = _cjk_punct_re.sub('', text)
-        replacements: List[Tuple[str, str]] = []
+
+        replacements = []
+        fuzzy_log = []
+        phon_idx = len(self._glossary_sorted)
+
+        # Pass 1: exact match (existing behaviour)
         for i, (src_term, tgt_term) in enumerate(self._glossary_sorted):
-            # Also collapse CJK spaces in glossary keys so we don't need
-            # separate with-space/without-space duplicate entries.
             src_collapsed = _cjk_space_re.sub('', src_term)
             if src_collapsed in text:
-                # Use CAPITALIZED token that translation engines won't mangle.
-                # Double-underscores get stripped by DeepL.
                 placeholder = f"XGLO{i:03d}X"
                 text = text.replace(src_collapsed, placeholder)
                 replacements.append((placeholder, tgt_term))
-        return text, replacements
+
+        # Pass 2: phonetic (fuzzy) match for remaining CJK spans.
+        # Walks character-by-character; for each CJK run not already replaced,
+        # compares pinyin against every glossary term of matching length.
+        # e.g. 金山沼 / 金山找 / 金山照 all yield "jin shan zhao" and hit the same entry.
+        if self._phonetic_index:
+            term_lengths = sorted(set(v[2] for v in self._phonetic_index.values()), reverse=True)
+            chars = list(text)
+            replaced_spans = []
+
+            def _in_span(s, e, spans=replaced_spans):
+                return any(rs <= s < re_ or rs < e <= re_ for rs, re_ in spans)
+
+            rebuilt = []
+            pos = 0
+            while pos < len(chars):
+                ch = chars[pos]
+                if not _is_cjk(ch) or _in_span(pos, pos + 1):
+                    rebuilt.append(ch)
+                    pos += 1
+                    continue
+                matched = False
+                for tlen in term_lengths:
+                    if pos + tlen > len(chars):
+                        continue
+                    span = ''.join(chars[pos:pos + tlen])
+                    if not all(_is_cjk(c) for c in span):
+                        continue
+                    if _in_span(pos, pos + tlen):
+                        continue
+                    key = _cjk_pinyin(span)
+                    if key and key in self._phonetic_index:
+                        canonical_src, tgt_term, _ = self._phonetic_index[key]
+                        if span != canonical_src:
+                            placeholder = f"XFUZ{phon_idx:03d}X"
+                            phon_idx += 1
+                            rebuilt.append(placeholder)
+                            replacements.append((placeholder, tgt_term))
+                            replaced_spans.append((pos, pos + tlen))
+                            fuzzy_log.append(
+                                f"fuzzy: {span!r} -> {canonical_src!r} -> {tgt_term!r} (pinyin: {key})"
+                            )
+                            pos += tlen
+                            matched = True
+                            break
+                if not matched:
+                    rebuilt.append(ch)
+                    pos += 1
+
+            text = ''.join(rebuilt)
+
+        text = _re2.sub(r'(X(?:GLO|FUZ)\d{3}X)(?=X(?:GLO|FUZ)\d{3}X)', r' ', text)
+        return text, replacements, fuzzy_log
+
+    def _verify_translation(self, translated_text: str, replacements: list):
+        """
+        Post-translation verification: confirm every substituted glossary target
+        appears in the translated output. If missing, inject it at sentence start.
+        Returns (corrected_text, warnings).
+        """
+        warnings = []
+        for _ph, tgt_term in replacements:
+            if tgt_term.lower() not in translated_text.lower():
+                warnings.append(f"verify: {tgt_term!r} missing from output — injecting")
+                translated_text = f"{tgt_term}, {translated_text}"
+        return translated_text, warnings
 
     def _apply_glossary_post(self, text: str, replacements: List[Tuple[str, str]]) -> str:
         """Replace placeholder tokens with correct target-language terms after translation."""
@@ -303,6 +419,15 @@ class TranslationService:
         if re.search(r'XGLO\d{3}X', text, re.IGNORECASE):
             logger.warning(f"[GLOSSARY] Unresolved placeholder(s) in post-pass: '{text}' — stripping")
             text = re.sub(r'XGLO\d{3}X', '', text, flags=re.IGNORECASE).strip()
+        # Strip bare comma left when a glossary placeholder was stripped mid-sentence
+        text = re.sub(r'([!?.])\s*,\s*', r'\1 ', text).strip()
+        # Recapitalize first letter of any word that now directly follows terminal
+        # punctuation — the comma-strip above can leave lowercase sentence starts.
+        text = re.sub(r'([.!?])\s+([a-z])', lambda m: m.group(1) + ' ' + m.group(2).upper(), text)
+        # Clean up punctuation artifacts from post-fix values colliding with
+        # Claude's surrounding sentence context.
+        text = re.sub(r',\s*\.', '.', text)                          # ,. → .
+        text = re.sub(r'(?<!\.)\.\s*\.(?!\.)', '.', text)            # .. → . (ellipsis-aware)
         # Fix concatenated English words from adjacent glossary replacements
         # e.g. "Wing ChunIp Man" → "Wing Chun Ip Man"
         text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
@@ -338,10 +463,88 @@ class TranslationService:
             # GPT inconsistencies on final section
             "It is not a matter of Northern or Southern Fist": "It's not about Northern or Southern Fist",
             "It's not a matter of Northern or Southern Fist": "It's not about Northern or Southern Fist",
+            "Brother Quan":  "Master Chin",   # observed LLM hallucination for 陳師父
+            "Master Quan":   "Master Chin",   # LLM romanization of 陳 (Chan → Quan)
+            # 武痴林 romanization variants — catch slipthrough after glossary
+            "Wu Cilin":      "Lam",
+            "Wu Zilin":      "Lam",
+            "Wu Ci Lin":     "Lam",
+            "Wu Zi Lin":     "Lam",
+            # Plural agreement: these keys are intentionally REMOVED from plain-string
+            # replacement — using regex below instead (word-boundary prevents double-s
+            # when the translation already returns "masters").
+            # DO NOT add "so many master" / "plenty of master" / "many master" here.
+            # Ah Jun capitalization/spelling variants
+            "ah June":       "Ah Jun",
+            "Ah June":       "Ah Jun",
+            "ah jun":        "Ah Jun",
+            "Uncle Man":     "Uncle Ip",
+            "uncle man":     "Uncle Ip",
+            "Uncle IP":      "Uncle Ip",   # LLM/adaptation caps both letters
+            "uncle ip":      "Uncle Ip",
+            # Mrs. Ip — Claude romanizes 葉 as "Ye" (Mandarin) instead of "Yip" (Cantonese)
+            "Mrs. Ye":       "Mrs. Yip",
+            "Mrs Ye":        "Mrs. Yip",
+            "mrs. ye":       "Mrs. Yip",
+            # Line 1 — 久闻佛山武术之地: 之地 ("land of") implies fame; Claude drops "famous for"
+            # and produces various phrasings — catch all observed variants.
+            "that Foshan is martial arts":    "that Foshan is famous for martial arts",
+            "Foshan is martial arts":         "Foshan is famous for martial arts",
+            "that martial arts is in Foshan": "that Foshan is famous for martial arts",
+            "martial arts is in Foshan":      "Foshan is famous for martial arts",
+            # Line 12 — challenger boasting to Mrs. Yip (self-handicap threat, not
+            # an offer to Ip Man). Specific/longer patterns MUST come before bare
+            # patterns — Python applies these sequentially and "let him use one hand"
+            # firing inside "I'll let him use one hand" produces "I'll I'll use…".
+            "won't beat her to death":      "won't beat him to death",
+            "she'll lose":                  "he'll lose",
+            # Specific (with leading "I'll") — must precede bare variants.
+            # No trailing comma/prefix in values: Claude's surrounding sentence already
+            # provides context ("If you're afraid he'll lose, ..."), so embedding those
+            # in the replacement produces doubled phrases and ,. artifacts.
+            "I'll let her use one hand":    "I'll use only one hand",
+            "I'll let him use one hand":    "I'll use only one hand",
+            "I'll let her use both hands":  "I'll beat him with no hands.",
+            "I'll let him use both hands":  "I'll beat him with no hands.",
+            # Bare fallback (translation omits leading "I'll")
+            "let her use one hand":         "use only one hand",
+            "let him use one hand":         "use only one hand",
+            "let her use both hands":       "I'll beat him with no hands.",
+            "let him use both hands":       "I'll beat him with no hands.",
+            # Line 15 — Mrs. Yip: 你闭嘴。没打冷气的东西。 Velma transcribes inconsistently;
+            # Claude mis-translates 冷气 (air-con/cold) in several ways. Catch all observed variants.
+            "Shut your mouth! , remember your things.":        "Shut your mouth! Don't break my things.",
+            "shut your mouth! , remember your things.":        "Shut your mouth! Don't break my things.",
+            "A thing that hasn't been beaten cold.":           "Don't break my things.",
+            "a thing that hasn't been beaten cold.":           "Don't break my things.",
+            "thing that hasn't been beaten cold":              "Don't break my things.",
+            "Shut your mouth. A thing that hasn't been beaten cold.": "Shut your mouth! Don't break my things.",
+            # ASR safety net — Velma mishearing of 没打冷气的东西 produces English "remember
+            # your things" via Claude when the Cantonese source doesn't match any glossary key.
+            # Log fires tracked so we can identify additional source variants slipping through.
+            "Remember your things.":  "__LOG_POSTFIX__Don't break my things.",
+            "remember your things.":  "__LOG_POSTFIX__Don't break my things.",
+            "Remember your things!":  "__LOG_POSTFIX__Don't break my things.",
+            # Challenger boast — Claude appends a colloquial flourish not in source.
+            " — how about that?":     "",
+            " — How about that?":     "",
         }
         for wrong, correct in _POST_FIXES.items():
             if wrong in text:
+                if correct.startswith("__LOG_POSTFIX__"):
+                    correct = correct[len("__LOG_POSTFIX__"):]
+                    logger.warning(f"[POSTFIX_NET] Caught ASR mishearing safety-net: '{wrong}' → '{correct}' in: {text!r}")
                 text = text.replace(wrong, correct)
+        # Second pass: catch ,. and .. artifacts introduced by post-fix replacements
+        # (a replacement value ending in "." collides with the source text's existing period).
+        text = re.sub(r',\s*\.', '.', text)
+        text = re.sub(r'(?<!\.)\.\s*\.(?!\.)', '.', text)
+        # Plural fix — word-boundary regex prevents "masters" → "masterss" double-s
+        # when the translation engine already pluralised correctly.
+        text = re.sub(r'\b(so many|plenty of|many) master\b', r'\1 masters', text)
+        # Strip timing budget values echoed from the prompt (e.g. "1.2s, " or "1.2S, " at start).
+        # Claude sometimes repeats the (Xs) hint despite being told not to.
+        text = re.sub(r'^\d+\.?\d*[sS][,.]?\s*', '', text).strip()
         # Strip leading discourse-particle prefixes that LLMs sometimes emit
         # when Cantonese 講/gong opens a line (e.g. "Kong, I really want to see"
         # or "Gong, today Northern Fist lost...").  These are NOT character names.
@@ -353,16 +556,39 @@ class TranslationService:
         # Drop YouTube outro / promotional content hallucinated by Whisper
         if re.search(r'like.*subscribe|subscribe.*bell|hit the bell|tip tip', text, re.IGNORECASE):
             return ""
+        # Drop LLM meta-commentary that sometimes appears as a final "segment"
+        if re.search(r'^(summariz|in summary|summary|to summarize|closing|in conclusion)', text, re.IGNORECASE):
+            return ""
+        # Strip [[word]] bracket artifacts left by Claude over-applying the [[ENTITY:n]] pattern.
+        # By this point all real [[ENTITY:n]] tokens are already restored, so any remaining
+        # [[...]] brackets are LLM noise and should be unwrapped.
+        # Also strip empty [[]] brackets (Claude hallucinated a name placeholder with no content).
+        text = re.sub(r'\[\[\s*\]\]', '', text).strip()
+        text = re.sub(r'\[\[([^\]]+)\]\]', r'\1', text).strip()
         return text
     
     async def translate_segments(
         self,
         segments: List[Dict],
         source_language: str,
-        target_language: str
+        target_language: str,
+        character_profiles: Optional[List[Dict]] = None,
+        velma_context: Optional[Dict] = None,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> List[Dict]:
+        # Load the glossary for the incoming source language so every downstream
+        # call to _apply_glossary_pre/_post uses the correct language-specific terms.
+        self._glossary_sorted = sorted(
+            get_glossary(source_language).items(), key=lambda kv: len(kv[0]), reverse=True
+        )
+        logger.info(
+            f"[TRANSLATE] Loaded glossary for source_language='{source_language}' "
+            f"({len(self._glossary_sorted)} entries)"
+        )
+
         source_norm = normalize_language_code(source_language, allow_auto=True)
-        target_norm = normalize_language_code(target_language)
+        target_norm = normalize_language_code(target_language, strict=True)
 
         if source_norm != source_language or target_norm != target_language:
             logger.info(
@@ -411,8 +637,10 @@ class TranslationService:
         azure_key = os.getenv("AZURE_OPENAI_KEY", "")
         has_llm = bool(anthropic_key) or bool(openai_key) or (bool(azure_endpoint) and bool(azure_key))
 
-        # Exact-match overrides for single-word utterances — bypass LLM entirely.
-        # These are short Cantonese words that LLMs hallucinate into garbage.
+        # --- FIX 3: Universal short-segment bypass ---
+        # Segments ≤3 words that are pure punctuation/particles get direct lookup
+        # or are left as-is. Applies to ALL languages, not just Cantonese.
+        # Prevents LLMs from padding out "Okay." into three sentences.
         _EXACT_OVERRIDES = {
             "好": "Okay.", "好呀": "Sure.", "好了": "Alright.",
             "請": "Please.", "请": "Please.",
@@ -420,25 +648,51 @@ class TranslationService:
             "包賠": "I'll pay.", "照賠": "I'll pay.",
             "賠": "I'll pay.", "赔": "I'll pay.",
         }
-        for seg in segments:
+        _SHORT_BYPASS_INDICES: set = set()
+        for i, seg in enumerate(segments):
             stripped = (seg.get("text") or "").strip()
             if stripped in _EXACT_OVERRIDES:
                 seg["text"] = _EXACT_OVERRIDES[stripped]
+                _SHORT_BYPASS_INDICES.add(i)
+                continue
+            # Universal: skip LLM for segments with ≤2 non-CJK words that are
+            # already in English (target language). These are usually sound effects
+            # or titles that got through transcription as English.
+            _cjk_re_quick = re.compile(r'[一-鿿぀-ゟ゠-ヿ]')
+            words = stripped.split()
+            if (
+                len(words) <= 2
+                and not _cjk_re_quick.search(stripped)
+                and target_norm.startswith("en")
+                and re.match(r'^[A-Za-z0-9 .,!?\'"-]+$', stripped)
+            ):
+                # Already looks like English — keep as-is
+                _SHORT_BYPASS_INDICES.add(i)
 
         if is_cantonese and has_llm:
             # Try Claude first (most reliable for Cantonese)
             if anthropic_key:
                 result = await self._translate_segments_claude(
-                    segments, target_norm, source_norm
+                    segments, target_norm, source_norm,
+                    character_profiles=character_profiles,
+                    velma_context=velma_context,
+                    dubbing_style=dubbing_style,
+                    localized_aliases=localized_aliases,
                 )
                 if result is not None:
-                    return result
+                    translated = result
+                    # Adaptation pass disabled — rewrites cause synonym substitution and
+                    # paraphrasing that breaks word-for-word fidelity to the source script.
+                    return translated
                 logger.warning("[TRANSLATE] Claude Cantonese translation failed — trying GPT")
 
             # Fall back to GPT-4 (Azure or OpenAI)
             if bool(openai_key) or (bool(azure_endpoint) and bool(azure_key)):
                 result = await self._translate_segments_gpt(
-                    segments, target_norm, source_norm
+                    segments, target_norm, source_norm,
+                    character_profiles=character_profiles,
+                    dubbing_style=dubbing_style,
+                    localized_aliases=localized_aliases,
                 )
                 if result is not None:
                     return result
@@ -446,9 +700,13 @@ class TranslationService:
 
         # DeepL: does not support Cantonese as source, so skip for yue content.
         if self.deepl_api_key and not is_cantonese:
-            result = await self._translate_segments_deepl_batch(segments, source_norm, target_norm)
+            result = await self._translate_segments_deepl_batch(
+                segments, source_norm, target_norm,
+                dubbing_style=dubbing_style,
+                localized_aliases=localized_aliases,
+            )
             glossary_baselines = [
-                self._apply_glossary_post(*self._apply_glossary_pre(seg.get("text", "")))
+                self._apply_glossary_post(*self._apply_glossary_pre(seg.get("text", ""))[:2])
                 for seg in segments
             ]
             change_ratio = sum(
@@ -466,19 +724,72 @@ class TranslationService:
         # Google Cloud: supports yue-HK source explicitly.
         if self.google_api_key:
             result = await self._translate_segments_google_cloud(
-                segments, effective_source, target_norm
+                segments, effective_source, target_norm,
+                dubbing_style=dubbing_style,
+                localized_aliases=localized_aliases,
             )
             if result is not None:
                 return result
 
         # Last resort: free Google Translate via deep_translator (scraping)
-        return await self._translate_segments_batch(segments, source_norm, target_norm)
+        return await self._translate_segments_batch(
+            segments, source_norm, target_norm,
+            dubbing_style=dubbing_style,
+            localized_aliases=localized_aliases,
+        )
+
+    # ── Batch-translation line markers ────────────────────────────────────────
+    # Shared by _translate_segments_claude and _translate_segments_gpt. Both send
+    # every segment in one prompt as a numbered-line list and parse the reply
+    # back — plain "1. 2. 3." numbering let the model "helpfully" merge two
+    # short adjacent lines under one number, silently desyncing every segment's
+    # text from its own timing from that point on, with no error raised. A
+    # random per-line marker can't be merged or continued, and the mapping is
+    # now validated before being trusted at all.
+
+    def _generate_line_markers(self, n: int) -> List[str]:
+        """Fresh random markers for one batch — regenerated each call (including
+        retries) so a retry can't anchor on the same failure pattern."""
+        return [secrets.token_hex(3) for _ in range(n)]
+
+    def _parse_marked_reply(self, reply: str) -> List[Tuple[str, str]]:
+        """(marker, text) pairs in reply order. Deliberately preserves duplicates
+        and doesn't dedupe — _validate_marked_mapping decides what's fatal."""
+        pairs: List[Tuple[str, str]] = []
+        for line in reply.splitlines():
+            m = _MARKER_LINE_RE.match(line)
+            if m:
+                pairs.append((m.group(1), m.group(2).strip()))
+        return pairs
+
+    def _validate_marked_mapping(
+        self, markers: List[str], pairs: List[Tuple[str, str]]
+    ) -> Optional[Dict[str, str]]:
+        """Returns marker -> text ONLY if every sent marker comes back exactly
+        once. Returns None on ANY mismatch (missing, duplicated, extra, or
+        unrecognized marker) — the caller must treat None as a hard failure,
+        not a signal to fall back to a partial/best-effort zip."""
+        if len(pairs) != len(markers):
+            return None
+        seen: Dict[str, str] = {}
+        marker_set = set(markers)
+        for mk, text in pairs:
+            if mk not in marker_set or mk in seen:
+                return None
+            seen[mk] = text
+        if set(seen.keys()) != marker_set:
+            return None
+        return seen
 
     async def _translate_segments_claude(
         self,
         segments: List[Dict],
         target_language: str,
         source_language: str = "yue",
+        character_profiles: Optional[List[Dict]] = None,
+        velma_context: Optional[Dict] = None,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> Optional[List[Dict]]:
         """
         Translate segments using Claude via the Anthropic API.
@@ -492,52 +803,284 @@ class TranslationService:
         if not api_key:
             return None
 
+        # Process in chunks of 20 to avoid token overflow and dropped tail segments.
+        _CHUNK_SIZE = 20
+        if len(segments) > _CHUNK_SIZE:
+            results: List[Dict] = []
+            for start in range(0, len(segments), _CHUNK_SIZE):
+                chunk = segments[start:start + _CHUNK_SIZE]
+                chunk_result = _aligned(
+                    await self._translate_segments_claude(
+                        chunk, target_language, source_language, character_profiles,
+                        dubbing_style=dubbing_style, localized_aliases=localized_aliases,
+                    ),
+                    chunk, "Claude", start,
+                )
+                # A failed chunk must never discard the chunks that already
+                # succeeded. This used to `return None` on the first failure: a
+                # single read timeout on the LAST chunk of a feature threw away
+                # ~360 correctly translated segments, fell through to GPT-4, hit an
+                # exhausted quota, and left the film untranslated — which TTS then
+                # skipped as "untranslated", silencing 222 lines of dialogue.
+                # Degrade per chunk instead: retry, then GPT for this chunk only,
+                # then keep the original text. Worst case loses one chunk, not all.
+                if chunk_result is None:
+                    logger.warning(
+                        f"[TRANSLATE] Claude chunk {start}-{start + len(chunk)} failed "
+                        f"— retrying once before falling back"
+                    )
+                    chunk_result = _aligned(
+                        await self._translate_segments_claude(
+                            chunk, target_language, source_language, character_profiles,
+                            dubbing_style=dubbing_style, localized_aliases=localized_aliases,
+                        ),
+                        chunk, "Claude (retry)", start,
+                    )
+                if chunk_result is None:
+                    logger.warning(
+                        f"[TRANSLATE] Claude chunk {start}-{start + len(chunk)} failed "
+                        f"twice — falling back to GPT-4 for THIS CHUNK ONLY"
+                    )
+                    chunk_result = _aligned(
+                        await self._translate_segments_gpt(
+                            chunk, target_language, source_language, character_profiles,
+                            dubbing_style=dubbing_style, localized_aliases=localized_aliases,
+                        ),
+                        chunk, "GPT-4", start,
+                    )
+                if chunk_result is None:
+                    logger.error(
+                        f"[TRANSLATE] Chunk {start}-{start + len(chunk)} could not be "
+                        f"translated by any provider — keeping original text. These "
+                        f"{len(chunk)} segment(s) will be skipped by TTS as untranslated."
+                    )
+                    chunk_result = chunk
+                # Final guard. Reassembly is POSITIONAL, so a chunk of the wrong
+                # length does not lose one line — it shifts every line after it
+                # for the rest of the film, silently pairing dialogue with the
+                # wrong speaker and timing. Nothing downstream can detect that.
+                if len(chunk_result) != len(chunk):
+                    logger.error(
+                        f"[TRANSLATE] Chunk {start}-{start + len(chunk)} returned "
+                        f"{len(chunk_result)} segment(s) for {len(chunk)} sent — "
+                        f"refusing to misalign the timeline; keeping original text."
+                    )
+                    chunk_result = chunk
+                results.extend(chunk_result)
+            return results
+
         lang_name = LANGUAGE_NAMES.get(source_language, "Cantonese")
         target_name = LANGUAGE_NAMES.get(target_language, "English")
 
         texts = [seg.get("text", "") for seg in segments]
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
+        entity_replacements_per_seg: List[List[Tuple[str, str]]] = []
         for t in texts:
-            p, r = self._apply_glossary_pre(t)
-            protected.append(p)
+            p, r, _fuzz = self._apply_glossary_pre(t)
+            if _fuzz:
+                logger.info("[GLOSSARY-FUZZY] %s", " | ".join(_fuzz))
+            p2, r2 = protect_entities(p)
+            protected.append(p2)
             replacements_per_seg.append(r)
+            entity_replacements_per_seg.append(r2)
 
         def _slot(seg: Dict) -> str:
             start = float(seg.get("start", 0))
             end = float(seg.get("end", start))
             return f"{round(max(0.3, end - start), 1)}s"
 
-        numbered_lines = "\n".join(
-            f"{i+1}. [{_slot(segments[i])}] {p}"
-            for i, p in enumerate(protected)
-        )
+        def _build_marked_lines(markers: List[str]) -> str:
+            return "\n".join(
+                f"[[SEG-{markers[i]}]] ({_slot(segments[i])}) {p}"
+                for i, p in enumerate(protected)
+            )
 
-        system_prompt = (
-            f"You are a professional dubbing translator specializing in {lang_name} "
-            f"martial arts film dialogue. Translate the following {lang_name} dialogue "
-            f"lines into natural spoken {target_name} suitable for voice dubbing.\n\n"
-            f"IMPORTANT RULES:\n"
-            f"- These are SPOKEN {lang_name} lines, not Standard Written Chinese\n"
-            f"- Preserve the emotional tone (anger, calm authority, concern, urgency, humor)\n"
-            f"- Each line has a timing slot in [Xs] — your translation MUST fit that duration.\n"
-            f"  A 0.8s slot fits ~3 syllables. A 2s slot fits ~7 syllables. Match this strictly.\n"
-            f"- Short exclamations (好啊, 沒事) must stay short: 'Sure.' / 'I'm fine.' — not sentences\n"
-            f"- CRITICAL: each input line is a SEPARATE utterance by a DIFFERENT speaker or moment — "
-            f"NEVER combine two numbered lines into one answer, even if they seem related\n"
-            f"- Character names are PROPER NOUNS — output them EXACTLY as they appear in the input. "
-            f"NEVER romanize or translate them differently. "
-            f"'Ip Man' stays 'Ip Man', 'Master Shin' stays 'Master Shin', 'Wing Chun' stays 'Wing Chun'.\n"
-            f"- Terms like XGLO###X are protected placeholders — keep them unchanged\n"
-            f"- Return EXACTLY one numbered translation per input line — same count, same order\n"
-            f"- Do NOT include the timing slot in your output. Do NOT add explanations or notes\n"
-            f"- Do NOT prefix any translation with a character name, speaker label, or address "
-            f"term (e.g. NEVER start a line with 'Kong, ...' or 'Ip Man: ...' or 'Master Shin, ...')\n"
-            f"- Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) that open a line are fillers — "
-            f"drop them entirely, do NOT render them as 'Come', 'Kong', 'Kami', 'Wai', 'Hai', or any English word\n"
-        )
+        # Select the translation prompt based on the requested dubbing style.
+        # "literal" (default env fallback) preserves romanization and forbids natural rewrites.
+        # "natural" allows localized role/address terms and spoken-English smoothing.
+        _is_literal = resolve_dubbing_style(dubbing_style) == "literal"
+        _translation_system_prompt = get_translation_system_prompt(dubbing_style)
+        system_prompt_parts = [_translation_system_prompt]
 
-        user_prompt = f"Translate these {lang_name} dialogue lines to {target_name}:\n\n{numbered_lines}"
+        # Optional per-job localization mappings (e.g., Brother Gen -> Broker).
+        # Only apply in natural mode; literal mode must preserve source names exactly.
+        if not _is_literal:
+            _localized_mapping = build_localized_name_mapping_prompt(texts, extra=localized_aliases)
+            if _localized_mapping:
+                system_prompt_parts.append("")
+                system_prompt_parts.append(_localized_mapping)
+
+        # CHARACTER_REGISTRY injection suppressed — pre-baked character profiles caused
+        # name hallucination (e.g. "Master Ip" -> "Brother Man"). Per-job character_profiles
+        # (below) are still applied if explicitly provided by the caller.
+        # detected_profile = detect_character_from_text("\n".join(texts))
+        # name_mapping = build_name_mapping_prompt(texts)
+
+        # Per-job character profiles (Fix 2)
+        if character_profiles:
+            system_prompt_parts.append("")
+            system_prompt_parts.append("CHARACTER PROFILES FOR THIS PROJECT:")
+            for cp in character_profiles:
+                name = cp.get("name", "Unknown")
+                traits = ", ".join(cp.get("traits", []))
+                style = cp.get("speech_style", "")
+                system_prompt_parts.append(f"- {name}: traits=[{traits}]. Speech style: {style}")
+            system_prompt_parts.append("Apply these character voices consistently across all lines.")
+
+        # Velma scene context — summary, topics, speaker roles, sentiment
+        if velma_context:
+            _vc_summary = velma_context.get("summary")
+            _vc_topics = velma_context.get("topics", [])
+            _vc_roles = velma_context.get("role_picks", [])
+            _vc_sentiments = velma_context.get("topic_sentiments", [])
+
+            if _vc_summary or _vc_topics or _vc_roles:
+                system_prompt_parts.append("")
+                system_prompt_parts.append("SCENE CONTEXT (from audio analysis):")
+                if _vc_summary:
+                    system_prompt_parts.append(f"Scene summary: {_vc_summary}")
+                if _vc_topics:
+                    system_prompt_parts.append(f"Topics discussed: {', '.join(_vc_topics)}")
+                if _vc_roles:
+                    for _rp in _vc_roles:
+                        _spk = _rp.get("speaker_label", "?")
+                        _role = _rp.get("name", "Unknown")
+                        _conf = _rp.get("confidence", 0)
+                        _reason = _rp.get("reasoning", "")
+                        system_prompt_parts.append(
+                            f"- Speaker {_spk}: role={_role} (confidence={_conf:.0%}). {_reason}"
+                        )
+                if _vc_sentiments:
+                    _sent_parts = []
+                    for _ts in _vc_sentiments:
+                        _sent_parts.append(
+                            f"Speaker {_ts.get('speaker_label', '?')} on '{_ts.get('topic', '?')}': "
+                            f"{_ts.get('sentiment_label', '?')} ({_ts.get('sentiment_score', 0):+.1f})"
+                        )
+                    system_prompt_parts.append(f"Speaker sentiments: {'; '.join(_sent_parts)}")
+                system_prompt_parts.append(
+                    "Use this context to inform word choice and tone — "
+                    "but do NOT add information not present in the source text."
+                )
+
+        # Speaker gender map — prevents him/her pronoun errors in translation
+        _gender_map: dict = {}
+        for _seg in segments:
+            _spk = _seg.get("speaker") or _seg.get("speaker_label", "")
+            _gender = (_seg.get("speaker_gender") or _seg.get("gender") or "").lower().strip()
+            if _spk and _gender and _spk not in _gender_map:
+                _gender_map[_spk] = _gender
+        if _gender_map:
+            _has_female = any(_g in ("female", "f", "woman") for _g in _gender_map.values())
+            _src_is_cjk = (source_language or "").lower().startswith(("yue", "zh"))
+
+            system_prompt_parts.append("")
+            system_prompt_parts.append("CAST AND PRONOUNS:")
+            for _spk, _g in _gender_map.items():
+                _pronoun = "he/him" if _g in ("male", "m", "man", "child") else "she/her" if _g in ("female", "f", "woman") else "he/him"
+                system_prompt_parts.append(f"- {_spk}: {_pronoun}")
+            system_prompt_parts.append("NEVER use 'her' or 'she' for a male speaker, or 'him'/'he' for a female speaker.")
+
+            # Referent resolution, not just speaker gender. Observed failure:
+            # "葉太，唔使擔心，我唔會殺佢" → "Mrs. Yip, don't worry, I won't kill her".
+            # The model resolved the pronoun to the woman being ADDRESSED when the
+            # referent was the man being threatened. Stamping speaker genders cannot
+            # fix that alone — the model has to be told there is something to resolve.
+            if _src_is_cjk:
+                system_prompt_parts.append(
+                    "THIRD-PERSON PRONOUNS: the source pronoun (佢 / keoi5, 他, 她) is "
+                    "GENDER-NEUTRAL in speech. Work out WHO it refers to from the scene "
+                    "context above, then use that person's pronoun from the cast list."
+                )
+                system_prompt_parts.append(
+                    "Do NOT assume the pronoun refers to the person being ADDRESSED — "
+                    "a line often addresses one character while referring to another."
+                )
+                if not _has_female:
+                    system_prompt_parts.append(
+                        "Every identified character in this scene is male: do NOT write "
+                        "'she' or 'her' unless the source text explicitly names a female character."
+                    )
+
+        system_prompt_parts.append("")
+        system_prompt_parts.append("DOMAIN-SPECIFIC RULES:")
+        system_prompt_parts.append("- These are SPOKEN Cantonese martial arts film dialogue lines.")
+        system_prompt_parts.append("- Each line has a timing budget (Xs) — choose words that fit naturally in that time.")
+        system_prompt_parts.append("- Short exclamations must stay short (1-3 syllables).")
+        system_prompt_parts.append("- NEVER combine two [[SEG-...]] marked lines into one answer — answer each marker separately, even short ones.")
+        system_prompt_parts.append("- Do NOT echo or repeat the timing value (Xs) in your answer.")
+        system_prompt_parts.append("- Do NOT prefix with speaker names (e.g. NEVER 'Ip Man: ...').")
+        system_prompt_parts.append("- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.")
+        system_prompt_parts.append("- [[ENTITY:n]] tokens are PROTECTED placeholders — keep them EXACTLY.")
+        system_prompt_parts.append("")
+        system_prompt_parts.append("TONE AND EMOTIONAL STANCE:")
+        system_prompt_parts.append("- This is a classic period martial arts film. Characters speak with dignity, restraint, and warmth.")
+        system_prompt_parts.append("- PRESERVE the speaker's emotional stance. If a character is being self-deprecating or humble, the translation MUST reflect that.")
+        system_prompt_parts.append("- NEVER make a humble, self-deprecating line sound like a criticism of another character.")
+        system_prompt_parts.append("- Do NOT optimise for a 'clever' English line at the cost of faithfulness. A plain faithful translation beats a witty unfaithful one.")
+        system_prompt_parts.append("- Calm, friendly exchanges between friends must stay calm and friendly.")
+        system_prompt_parts.append("- NEVER add condescension, sarcasm, or aggressive subtext not present in the source.")
+        system_prompt_parts.append("")
+        system_prompt_parts.append(NO_HALLUCINATION_GUARDS)
+
+        system_prompt = "\n".join(system_prompt_parts)
+
+        _is_literal = resolve_dubbing_style(dubbing_style) == "literal"
+        def _build_user_prompt(marked_lines: str) -> str:
+            if _is_literal:
+                return (
+                    f"Translate these spoken {lang_name} dialogue lines to {target_name} word-for-word.\n\n"
+                    f"Rules:\n"
+                    f"- Translate LITERALLY. Do NOT substitute synonyms, paraphrase, or rewrite for 'naturalness'.\n"
+                    f"- Keep the exact meaning of each word. 'Secretive' must stay 'secretive', not 'mysterious'.\n"
+                    f"- Preserve every line. Do NOT drop, merge, or skip any [[SEG-...]] marked line.\n"
+                    f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
+                    f"{marked_lines}"
+                )
+            return (
+                f"Translate these spoken {lang_name} dialogue lines to natural {target_name} for a cinematic dubbed track.\n\n"
+                f"Rules:\n"
+                f"- You MAY rephrase for natural spoken English and use the localized name/role mappings below.\n"
+                f"- Do NOT add, remove, or combine utterances beyond what is needed for a grammatical, speakable line.\n"
+                f"- Preserve every line. Do NOT drop, merge, or skip any [[SEG-...]] marked line.\n"
+                f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
+                f"{marked_lines}"
+            )
+
+        async def _send_and_validate(markers: List[str]) -> Optional[Dict[str, str]]:
+            payload = {
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 8192,
+                "temperature": 0.3,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": _build_user_prompt(_build_marked_lines(markers))}],
+            }
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            }
+            response = await asyncio.to_thread(
+                lambda: httpx.post(
+                    "https://api.anthropic.com/v1/messages",
+                    # 60s was too tight: a 20-segment Cantonese batch regularly ran
+                    # close to it, and ONE read timeout used to discard the entire
+                    # film's translation (see the chunk loop below).
+                    json=payload, headers=headers,
+                    timeout=float(os.getenv("CLAUDE_TRANSLATE_TIMEOUT_SEC", "180")),
+                )
+            )
+            if response.status_code != 200:
+                logger.warning(
+                    f"[TRANSLATE] Claude failed: {response.status_code} "
+                    f"{response.text[:200]}"
+                )
+                return None
+            data = response.json()
+            reply = data["content"][0]["text"].strip()
+            pairs = self._parse_marked_reply(reply)
+            return self._validate_marked_mapping(markers, pairs)
 
         try:
             logger.info(
@@ -545,64 +1088,68 @@ class TranslationService:
                 f"{lang_name} -> {target_name} via Anthropic API"
             )
 
-            payload = {
-                "model": "claude-sonnet-4-6",
-                "max_tokens": 4096,
-                "temperature": 0.3,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": user_prompt}],
-            }
+            markers = self._generate_line_markers(len(protected))
+            marker_map = await _send_and_validate(markers)
 
-            headers = {
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            }
-
-            response = await asyncio.to_thread(
-                lambda: httpx.post(
-                    "https://api.anthropic.com/v1/messages",
-                    json=payload, headers=headers, timeout=60.0,
-                )
-            )
-
-            if response.status_code != 200:
+            if marker_map is None:
                 logger.warning(
-                    f"[TRANSLATE] Claude failed: {response.status_code} "
-                    f"{response.text[:200]}"
+                    f"[TRANSLATE-ZIP-MISMATCH] Claude's reply markers didn't validate "
+                    f"1:1 against the {len(markers)} segments sent (missing, duplicated, "
+                    f"or merged line) — rejecting this mapping rather than risk a silently "
+                    f"desynced text/timing zip. Retrying once with fresh markers."
                 )
-                return None
+                markers = self._generate_line_markers(len(protected))
+                marker_map = await _send_and_validate(markers)
 
-            data = response.json()
-            reply = data["content"][0]["text"].strip()
-
-            gpt_lines = re.findall(r"^\d+\.\s*(.+)$", reply, re.MULTILINE)
-
-            if len(gpt_lines) < len(segments):
+            if marker_map is None:
                 logger.warning(
-                    f"[TRANSLATE] Claude returned {len(gpt_lines)} lines "
-                    f"for {len(segments)} segments — padding with originals"
+                    f"[TRANSLATE-ZIP-FALLBACK] Retry also failed validation for this "
+                    f"{len(segments)}-segment batch — falling back to one Claude call "
+                    f"per segment (slower, but a single-segment batch has zero merge "
+                    f"risk by construction, so it's guaranteed aligned)."
                 )
+                result: List[Dict] = []
+                for i, seg in enumerate(segments):
+                    single = await self._translate_segments_claude(
+                        [seg], target_language, source_language, character_profiles, velma_context,
+                        dubbing_style=dubbing_style, localized_aliases=localized_aliases,
+                    )
+                    if single is None:
+                        logger.error(
+                            f"[TRANSLATE-ZIP-FALLBACK] seg {i} individual Claude call "
+                            f"also failed — keeping original text untranslated"
+                        )
+                        result.append({**seg, "original_text": seg.get("text", ""), "text": seg.get("text", "")})
+                    else:
+                        result.extend(single)
+                return result
 
             result: List[Dict] = []
             changed = 0
-            retry_indices: List[int] = []
             for i, seg in enumerate(segments):
-                if i < len(gpt_lines):
-                    raw = gpt_lines[i]
-                    final = self._apply_glossary_post(raw, replacements_per_seg[i])
-                    if raw.strip() != protected[i].strip():
-                        changed += 1
-                else:
-                    # Claude returned fewer lines than segments — mark for retry
-                    # rather than padding with raw CJK (which would go to TTS verbatim)
-                    final = self._apply_glossary_post(
-                        protected[i], replacements_per_seg[i]
-                    )
-                    retry_indices.append(i)
+                raw = marker_map[markers[i]]
+                # Restore protected entities first, then fix hallucinations, then glossary
+                raw = restore_entities(raw, entity_replacements_per_seg[i])
+                raw = fix_translation_names(raw)
+                final = self._apply_glossary_post(raw, replacements_per_seg[i])
+                final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
+                for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
+                if raw.strip() != protected[i].strip():
+                    changed += 1
                 result.append({
                     **seg, "original_text": seg.get("text", ""), "text": final,
                 })
+
+            # CJK leak guard — flag any segment that still contains CJK after translation.
+            # This catches cases where Claude echoed the source instead of translating it.
+            _cjk_leak_re = re.compile(r'[一-鿿぀-ゟ゠-ヿ]')
+            retry_indices: List[int] = []
+            for i, seg_result in enumerate(result):
+                if _cjk_leak_re.search(seg_result.get("text", "")):
+                    logger.warning(
+                        f"[TRANSLATE] CJK leak in seg {i}: '{seg_result['text'][:60]}' — queuing retry"
+                    )
+                    retry_indices.append(i)
 
             # Retry segments that didn't get a Claude translation by translating
             # them individually via _translate_text (uses DeepL/Google/Claude single).
@@ -621,6 +1168,8 @@ class TranslationService:
                             original_text,
                             source_language,
                             target_language,
+                            dubbing_style=dubbing_style,
+                            localized_aliases=localized_aliases,
                         )
                         if retranslated and not _cjk_re.search(retranslated):
                             result[i] = {
@@ -651,6 +1200,10 @@ class TranslationService:
         segments: List[Dict],
         target_language: str,
         source_language: str = "yue",
+        character_profiles: Optional[List[Dict]] = None,
+        allow_recursive: bool = True,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> Optional[List[Dict]]:
         """
         Translate segments using GPT-4 via Azure OpenAI or OpenAI API.
@@ -682,10 +1235,15 @@ class TranslationService:
         texts = [seg.get("text", "") for seg in segments]
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
+        entity_replacements_per_seg: List[List[Tuple[str, str]]] = []
         for t in texts:
-            p, r = self._apply_glossary_pre(t)
-            protected.append(p)
+            p, r, _fuzz = self._apply_glossary_pre(t)
+            if _fuzz:
+                logger.info("[GLOSSARY-FUZZY] %s", " | ".join(_fuzz))
+            p2, r2 = protect_entities(p)
+            protected.append(p2)
             replacements_per_seg.append(r)
+            entity_replacements_per_seg.append(r2)
 
         # Build a single prompt with all segments + their timing slot.
         # GPT uses the duration to choose words that fit the on-screen moment —
@@ -696,107 +1254,200 @@ class TranslationService:
             dur = round(max(0.3, end - start), 1)
             return f"{dur}s"
 
-        numbered_lines = "\n".join(
-            f"{i+1}. [{_slot(segments[i])}] {p}"
-            for i, p in enumerate(protected)
-        )
+        def _build_marked_lines(markers: List[str]) -> str:
+            return "\n".join(
+                f"[[SEG-{markers[i]}]] ({_slot(segments[i])}) {p}"
+                for i, p in enumerate(protected)
+            )
 
-        system_prompt = (
-            f"You are a professional dubbing translator specializing in {lang_name} "
-            f"martial arts film dialogue. Translate the following {lang_name} dialogue "
-            f"lines into natural spoken {target_name} suitable for voice dubbing.\n\n"
-            f"IMPORTANT RULES:\n"
-            f"- These are SPOKEN {lang_name} lines, not Standard Written Chinese\n"
-            f"- Preserve the emotional tone (anger, calm authority, concern, urgency, humor)\n"
-            f"- Each line has a timing slot in [Xs] — your translation MUST fit that duration.\n"
-            f"  A 0.8s slot fits ~3 syllables. A 2s slot fits ~7 syllables. Match this strictly.\n"
-            f"- Short exclamations (好啊, 沒事) must stay short: 'Sure.' / 'I'm fine.' — not sentences\n"
-            f"- CRITICAL: each input line is a SEPARATE utterance by a DIFFERENT speaker or moment — "
-            f"NEVER combine two numbered lines into one answer, even if they seem related\n"
-            f"- Character names are PROPER NOUNS — output them EXACTLY as they appear in the input. "
-            f"NEVER romanize or translate them differently. "
-            f"'Ip Man' stays 'Ip Man', 'Master Shin' stays 'Master Shin', 'Wing Chun' stays 'Wing Chun'.\n"
-            f"- Terms like XGLO###X are protected placeholders — keep them unchanged\n"
-            f"- Return EXACTLY one numbered translation per input line — same count, same order\n"
-            f"- Do NOT include the timing slot in your output. Do NOT add explanations or notes\n"
-            f"- Do NOT prefix any translation with a character name, speaker label, or address "
-            f"term (e.g. NEVER start a line with 'Kong, ...' or 'Ip Man: ...' or 'Master Shin, ...')\n"
-            f"- Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) that open a line are fillers — "
-            f"drop them entirely, do NOT render them as 'Come', 'Kong', 'Kami', 'Wai', 'Hai', or any English word\n"
-        )
+        # Build centralized system prompt from policy layer
+        _gpt_is_literal = resolve_dubbing_style(dubbing_style) == "literal"
+        system_prompt_parts = [get_translation_system_prompt(dubbing_style)]
 
-        user_prompt = f"Translate these {lang_name} dialogue lines to {target_name}:\n\n{numbered_lines}"
+        detected_profile = detect_character_from_text("\n".join(texts))
+        if detected_profile:
+            system_prompt_parts.append("")
+            system_prompt_parts.append(detected_profile.to_prompt())
 
-        try:
-            if use_azure:
-                api_version = "2024-06-01"
-                url = (
-                    f"{azure_endpoint}/openai/deployments/{azure_deployment}"
-                    f"/chat/completions?api-version={api_version}"
+        name_mapping = build_name_mapping_prompt(texts)
+        if name_mapping:
+            system_prompt_parts.append("")
+            system_prompt_parts.append(name_mapping)
+
+        # Localized role/address mappings are only appropriate for natural dubbing.
+        if not _gpt_is_literal:
+            localized_mapping = build_localized_name_mapping_prompt(texts, extra=localized_aliases)
+            if localized_mapping:
+                system_prompt_parts.append("")
+                system_prompt_parts.append(localized_mapping)
+
+        # Per-job character profiles (Fix 2)
+        if character_profiles:
+            system_prompt_parts.append("")
+            system_prompt_parts.append("CHARACTER PROFILES FOR THIS PROJECT:")
+            for cp in character_profiles:
+                name = cp.get("name", "Unknown")
+                traits = ", ".join(cp.get("traits", []))
+                style = cp.get("speech_style", "")
+                system_prompt_parts.append(f"- {name}: traits=[{traits}]. Speech style: {style}")
+            system_prompt_parts.append("Apply these character voices consistently across all lines.")
+
+        # Speaker gender map — prevents him/her pronoun errors in translation
+        _gender_map_gpt: dict = {}
+        for _seg in segments:
+            _spk = _seg.get("speaker") or _seg.get("speaker_label", "")
+            _gender = (_seg.get("speaker_gender") or _seg.get("gender") or "").lower().strip()
+            if _spk and _gender and _spk not in _gender_map_gpt:
+                _gender_map_gpt[_spk] = _gender
+        if _gender_map_gpt:
+            system_prompt_parts.append("")
+            system_prompt_parts.append("SPEAKER GENDERS — use correct pronouns when referring to each speaker:")
+            for _spk, _g in _gender_map_gpt.items():
+                _pronoun = "he/him" if _g in ("male", "m", "man", "child") else "she/her" if _g in ("female", "f", "woman") else "he/him"
+                system_prompt_parts.append(f"- {_spk}: {_pronoun}")
+            system_prompt_parts.append("NEVER use 'her' or 'she' for a male speaker, or 'him'/'he' for a female speaker.")
+
+        system_prompt_parts.append("")
+        system_prompt_parts.append("DOMAIN-SPECIFIC RULES:")
+        system_prompt_parts.append("- These are SPOKEN Cantonese martial arts film dialogue lines.")
+        system_prompt_parts.append("- Each line has a timing budget (Xs) — choose words that fit naturally in that time.")
+        system_prompt_parts.append("- Short exclamations must stay short (1-3 syllables).")
+        system_prompt_parts.append("- NEVER combine two [[SEG-...]] marked lines into one answer — answer each marker separately, even short ones.")
+        system_prompt_parts.append("- Do NOT echo or repeat the timing value (Xs) in your answer.")
+        system_prompt_parts.append("- Do NOT prefix with speaker names (e.g. NEVER 'Ip Man: ...').")
+        system_prompt_parts.append("- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.")
+        system_prompt_parts.append("- [[ENTITY:n]] tokens are PROTECTED placeholders — keep them EXACTLY.")
+        system_prompt_parts.append("")
+        system_prompt_parts.append("TONE AND EMOTIONAL STANCE:")
+        system_prompt_parts.append("- This is a classic period martial arts film. Characters speak with dignity, restraint, and warmth.")
+        system_prompt_parts.append("- PRESERVE the speaker's emotional stance. If a character is being self-deprecating or humble, the translation MUST reflect that.")
+        system_prompt_parts.append("- NEVER make a humble, self-deprecating line sound like a criticism of another character.")
+        system_prompt_parts.append("- Do NOT optimise for a 'clever' English line at the cost of faithfulness. A plain faithful translation beats a witty unfaithful one.")
+        system_prompt_parts.append("- Calm, friendly exchanges between friends must stay calm and friendly.")
+        system_prompt_parts.append("- NEVER add condescension, sarcasm, or aggressive subtext not present in the source.")
+        system_prompt_parts.append("")
+        system_prompt_parts.append(NO_HALLUCINATION_GUARDS)
+
+        system_prompt = "\n".join(system_prompt_parts)
+
+        def _build_user_prompt(marked_lines: str) -> str:
+            if _gpt_is_literal:
+                return (
+                    f"Translate these spoken {lang_name} dialogue lines to {target_name} word-for-word.\n\n"
+                    f"Rules:\n"
+                    f"- Translate LITERALLY. Do NOT substitute synonyms, paraphrase, or rewrite for 'naturalness'.\n"
+                    f"- Keep the exact meaning of each word.\n"
+                    f"- Preserve every line. Do NOT drop, merge, or skip any [[SEG-...]] marked line.\n"
+                    f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
+                    f"{marked_lines}"
                 )
-                headers = {"api-key": azure_key, "Content-Type": "application/json"}
-            else:
-                url = "https://api.openai.com/v1/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {openai_key}",
-                    "Content-Type": "application/json",
-                }
+            return (
+                f"Translate these spoken {lang_name} dialogue lines to natural {target_name} for voice actors.\n\n"
+                f"Preserve meaning, emotion, and character voice. "
+                f"Use colloquial spoken English — not formal or written style.\n\n"
+                f"{marked_lines}"
+            )
 
+        if use_azure:
+            api_version = "2024-06-01"
+            url = (
+                f"{azure_endpoint}/openai/deployments/{azure_deployment}"
+                f"/chat/completions?api-version={api_version}"
+            )
+            headers = {"api-key": azure_key, "Content-Type": "application/json"}
+        else:
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {openai_key}",
+                "Content-Type": "application/json",
+            }
+
+        async def _send_and_validate(markers: List[str]) -> Optional[Dict[str, str]]:
             payload = {
                 "messages": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": _build_user_prompt(_build_marked_lines(markers))},
                 ],
                 "temperature": 0.3,
-                "max_tokens": 4096,
+                "max_tokens": 8192,
             }
             if use_openai:
                 payload["model"] = "gpt-4o"
-
-            logger.info(
-                f"[TRANSLATE] GPT-4 batch: {len(segments)} segments, "
-                f"{lang_name} -> {target_name} via {'Azure OpenAI' if use_azure else 'OpenAI'}"
-            )
-
             response = await asyncio.to_thread(
                 lambda: httpx.post(url, json=payload, headers=headers, timeout=60.0)
             )
-
             if response.status_code != 200:
                 logger.warning(
                     f"[TRANSLATE] GPT-4 failed: {response.status_code} "
                     f"{response.text[:200]}"
                 )
                 return None
-
             data = response.json()
             reply = data["choices"][0]["message"]["content"].strip()
+            pairs = self._parse_marked_reply(reply)
+            return self._validate_marked_mapping(markers, pairs)
 
-            # Parse numbered lines from GPT response
-            import re
-            gpt_lines = re.findall(r"^\d+\.\s*(.+)$", reply, re.MULTILINE)
+        try:
+            logger.info(
+                f"[TRANSLATE] GPT-4 batch: {len(segments)} segments, "
+                f"{lang_name} -> {target_name} via {'Azure OpenAI' if use_azure else 'OpenAI'}"
+            )
 
-            if len(gpt_lines) < len(segments):
+            markers = self._generate_line_markers(len(protected))
+            marker_map = await _send_and_validate(markers)
+
+            if marker_map is None:
                 logger.warning(
-                    f"[TRANSLATE] GPT-4 returned {len(gpt_lines)} lines "
-                    f"for {len(segments)} segments — retrying with stricter prompt"
+                    f"[TRANSLATE-ZIP-MISMATCH] GPT-4's reply markers didn't validate "
+                    f"1:1 against the {len(markers)} segments sent — rejecting this "
+                    f"mapping rather than risk a silently desynced text/timing zip. "
+                    f"Retrying once with fresh markers."
                 )
-                # If the count is badly off (>20% missing), fail and let fallback handle it
-                if len(gpt_lines) < len(segments) * 0.8:
-                    return None
+                markers = self._generate_line_markers(len(protected))
+                marker_map = await _send_and_validate(markers)
+
+            if marker_map is None:
+                logger.warning(
+                    f"[TRANSLATE-ZIP-FALLBACK] Retry also failed validation for this "
+                    f"{len(segments)}-segment batch — falling back to one GPT-4 call "
+                    f"per segment (slower, but a single-segment batch has zero merge "
+                    f"risk by construction, so it's guaranteed aligned)."
+                )
+                result: List[Dict] = []
+                for i, seg in enumerate(segments):
+                    if allow_recursive:
+                        single = await self._translate_segments_gpt(
+                            [seg], target_language, source_language, character_profiles,
+                            allow_recursive=False,
+                            dubbing_style=dubbing_style,
+                            localized_aliases=localized_aliases,
+                        )
+                    else:
+                        # Base case: the single-segment GPT call already failed;
+                        # do not recurse again, just keep the original text.
+                        single = None
+                    if single is None:
+                        logger.error(
+                            f"[TRANSLATE-ZIP-FALLBACK] seg {i} individual GPT-4 call "
+                            f"also failed — keeping original text untranslated"
+                        )
+                        result.append({**seg, "original_text": seg.get("text", ""), "text": seg.get("text", "")})
+                    else:
+                        result.extend(single)
+                return result
 
             result: List[Dict] = []
             changed = 0
             for i, seg in enumerate(segments):
-                if i < len(gpt_lines):
-                    raw = gpt_lines[i]
-                    final = self._apply_glossary_post(raw, replacements_per_seg[i])
-                    if raw.strip() != protected[i].strip():
-                        changed += 1
-                else:
-                    final = self._apply_glossary_post(
-                        protected[i], replacements_per_seg[i]
-                    )
+                raw = marker_map[markers[i]]
+                # Restore protected entities first, then fix hallucinations, then glossary
+                raw = restore_entities(raw, entity_replacements_per_seg[i])
+                raw = fix_translation_names(raw)
+                final = self._apply_glossary_post(raw, replacements_per_seg[i])
+                final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
+                for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
+                if raw.strip() != protected[i].strip():
+                    changed += 1
                 result.append({
                     **seg,
                     "original_text": seg.get("text", ""),
@@ -829,21 +1480,35 @@ class TranslationService:
         deepl_target = target_language.upper()
         if deepl_target == "EN":
             deepl_target = "EN-US"
-        elif deepl_target == "PT":
+        elif deepl_target in ("PT", "PT-BR", "PT-PT"):
             deepl_target = "PT-BR"
+        elif deepl_target in ("ES", "ES-MX", "ES-ES", "ES-US"):
+            deepl_target = "ES"
+        elif deepl_target in ("YUE", "ZH-YUE", "YUE-HK", "ZH-HK"):
+            # DeepL does not support Cantonese as a target language.
+            return None
+
+        deepl_source = source_language.upper()
+        if deepl_source in ("PT-BR", "PT-PT"):
+            deepl_source = "PT"
+        elif deepl_source in ("ES-MX", "ES-ES", "ES-US"):
+            deepl_source = "ES"
+        elif deepl_source in ("YUE", "ZH-YUE", "YUE-HK", "ZH-HK"):
+            deepl_source = "ZH"
 
         form_pairs: List[Tuple[str, str]] = [("text", t) for t in protected]
         form_pairs.append(("target_lang", deepl_target))
         # Omit source_lang for auto-detection; DeepL rejects "AUTO"
-        if source_language.lower() not in ("auto", ""):
-            form_pairs.append(("source_lang", source_language.upper()))
+        if deepl_source.lower() not in ("auto", ""):
+            form_pairs.append(("source_lang", deepl_source))
 
         headers = {
             "Authorization": f"DeepL-Auth-Key {self.deepl_api_key}",
             "Content-Type": "application/x-www-form-urlencoded",
         }
 
-        src_display = source_language.upper() if source_language.lower() != "auto" else "AUTO-DETECT"
+        _src_for_display = deepl_source if deepl_source else source_language.upper()
+        src_display = _src_for_display if _src_for_display.lower() != "auto" else "AUTO-DETECT"
         logger.info(
             f"[TRANSLATE] DeepL batch: {len(protected)} segments, "
             f"{src_display} -> {deepl_target}"
@@ -876,17 +1541,24 @@ class TranslationService:
         segments: List[Dict],
         source_language: str,
         target_language: str,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> List[Dict]:
         """
         Send all segment texts in a single DeepL API request (multi-text batch).
         Uses the current header-based auth required since Nov 2025.
         """
-        texts = [seg.get("text", "") for seg in segments]
+        texts = [
+            _apply_source_aliases(seg.get("text", ""), dubbing_style, localized_aliases)
+            for seg in segments
+        ]
 
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
         for t in texts:
-            p, r = self._apply_glossary_pre(t)
+            p, r, _fuzz = self._apply_glossary_pre(t)
+            if _fuzz:
+                logger.info("[GLOSSARY-FUZZY] %s", " | ".join(_fuzz))
             protected.append(p)
             replacements_per_seg.append(r)
 
@@ -915,6 +1587,9 @@ class TranslationService:
         for i, seg in enumerate(segments):
             raw = (translations[i]["text"] if i < len(translations) else None) or protected[i]
             final = self._apply_glossary_post(raw, replacements_per_seg[i])
+            final = fix_translation_names(final)
+            final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
+            for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
             result.append({**seg, "original_text": seg.get("text", ""), "text": final})
 
         return result
@@ -924,18 +1599,25 @@ class TranslationService:
         segments: List[Dict],
         source_language: str,
         target_language: str,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> Optional[List[Dict]]:
         """
         Translate via the official Google Cloud Translation API v2 (paid).
         Supports multiple 'q' values in one request for batch translation.
         Returns None on failure so the caller can fall through to the next engine.
         """
-        texts = [seg.get("text", "") for seg in segments]
+        texts = [
+            _apply_source_aliases(seg.get("text", ""), dubbing_style, localized_aliases)
+            for seg in segments
+        ]
 
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
         for t in texts:
-            p, r = self._apply_glossary_pre(t)
+            p, r, _fuzz = self._apply_glossary_pre(t)
+            if _fuzz:
+                logger.info("[GLOSSARY-FUZZY] %s", " | ".join(_fuzz))
             protected.append(p)
             replacements_per_seg.append(r)
 
@@ -947,10 +1629,22 @@ class TranslationService:
                 src = "auto"
             elif src == "zh":
                 src = "zh-TW"
+            elif src in ("pt-br", "pt-pt"):
+                src = "pt"
+            elif src in ("es-mx", "es-es", "es-us"):
+                src = "es"
+
+            tgt = target_language
+            if tgt in ("pt-br", "pt-pt"):
+                tgt = "pt"
+            elif tgt in ("es-mx", "es-es", "es-us"):
+                tgt = "es"
+            elif tgt in ("yue", "yue-HK", "zh-yue", "zh-HK"):
+                tgt = "zh-TW"
 
             payload = {
                 "q": protected,
-                "target": target_language,
+                "target": tgt,
                 "format": "text",
             }
             # Only set source if not auto-detect
@@ -959,7 +1653,7 @@ class TranslationService:
 
             logger.info(
                 f"[TRANSLATE] Google Cloud API batch: {len(protected)} segments, "
-                f"{src if src.lower() != 'auto' else 'AUTO-DETECT'} -> {target_language}"
+                f"{src if src.lower() != 'auto' else 'AUTO-DETECT'} -> {tgt}"
             )
 
             response = await asyncio.to_thread(
@@ -991,6 +1685,9 @@ class TranslationService:
                     else protected[i]
                 )
                 final = self._apply_glossary_post(raw, replacements_per_seg[i])
+                final = fix_translation_names(final)
+                final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
+                for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
                 if raw.strip() != protected[i].strip():
                     changed += 1
                 result.append({**seg, "original_text": seg.get("text", ""), "text": final})
@@ -1008,18 +1705,25 @@ class TranslationService:
         segments: List[Dict],
         source_language: str,
         target_language: str,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> List[Dict]:
         """
         Translate all segment texts in a single batch call via deep_translator.
         One HTTP request instead of N, so Google's rate limit is not triggered.
         """
-        texts = [seg.get("text", "") for seg in segments]
+        texts = [
+            _apply_source_aliases(seg.get("text", ""), dubbing_style, localized_aliases)
+            for seg in segments
+        ]
 
         # Apply glossary pre-pass on every text
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
         for t in texts:
-            p, r = self._apply_glossary_pre(t)
+            p, r, _fuzz = self._apply_glossary_pre(t)
+            if _fuzz:
+                logger.info("[GLOSSARY-FUZZY] %s", " | ".join(_fuzz))
             protected.append(p)
             replacements_per_seg.append(r)
 
@@ -1046,8 +1750,18 @@ class TranslationService:
             # deep_translator uses zh-CN / zh-TW codes, not bare "zh" or "yue"
             if src in ("zh", "yue"):
                 src = "zh-TW"   # Traditional Chinese (closest to Cantonese)
+            if src in ("pt-br", "pt-pt"):
+                src = "pt"
+            if src in ("es-mx", "es-es", "es-us"):
+                src = "es"
             if tgt == "zh":
                 tgt = "zh-CN"
+            if tgt in ("pt-br", "pt-pt"):
+                tgt = "pt"
+            if tgt in ("es-mx", "es-es", "es-us"):
+                tgt = "es"
+            if tgt in ("yue", "yue-hk", "zh-yue", "zh-hk"):
+                tgt = "zh-TW"
 
             logger.info(
                 f"[TRANSLATE] Batch translating {len(translate_texts)} segments "
@@ -1079,6 +1793,9 @@ class TranslationService:
             else:
                 raw_translated = translated_map.get(i) or protected[i]
                 final = self._apply_glossary_post(raw_translated, replacements_per_seg[i])
+                final = fix_translation_names(final)
+                final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
+                for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
                 if raw_translated.strip() != protected[i].strip():
                     changed_count += 1
                 result.append({**seg, "original_text": seg.get("text", ""), "text": final})
@@ -1093,18 +1810,138 @@ class TranslationService:
             logger.info(f"[TRANSLATE] {changed_count}/{len(segments)} segments changed ({change_ratio:.0%})")
 
         return result
-    
+
+    # -----------------------------------------------------------------------
+    # FIX 1 — Two-pass dubbing adaptation
+    # -----------------------------------------------------------------------
+    async def _dubbing_adaptation_pass(
+        self,
+        segments: List[Dict],
+        source_language: str = "yue",
+        character_profiles: Optional[List[Dict]] = None,
+        skip_indices: Optional[set] = None,
+    ) -> List[Dict]:
+        """
+        Second pass: takes raw translated English and rewrites each line for
+        natural spoken performance — colloquial rhythm, character voice, no stiffness.
+        Short/bypassed segments are returned unchanged.
+        """
+        import httpx
+
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return segments
+
+        skip = skip_indices or set()
+
+        # Only adapt segments that actually have English text worth rewriting
+        adapt_indices = [
+            i for i, seg in enumerate(segments)
+            if i not in skip and len((seg.get("text") or "").split()) >= 3
+        ]
+        if not adapt_indices:
+            return segments
+
+        numbered_lines = "\n".join(
+            f"{i+1}. ({round(max(0.3, (seg.get('end', 0) or 0) - (seg.get('start', 0) or 0)), 1)}s) {seg.get('text', '')}"
+            for i, seg in [(i, segments[i]) for i in adapt_indices]
+        )
+
+        system_parts = [
+            "You are a professional dubbing dialogue coach.",
+            "",
+            "Your job: take a literal translated line and rewrite it so a voice actor can deliver it naturally.",
+            "",
+            "RULES:",
+            "- Keep the exact meaning — do NOT add, remove, or change information.",
+            "- Make it sound like something a person would actually SAY, not write.",
+            "- Use contractions, natural rhythm, and conversational phrasing.",
+            "- Preserve the character's emotional tone and personality.",
+            "- Keep it within the timing budget (Xs) shown before each line.",
+            "- Do NOT add filler words, reactions, or extra content.",
+            "- Do NOT change character names or proper nouns.",
+            "- Return ONLY numbered lines in the same format as input.",
+        ]
+
+        if character_profiles:
+            system_parts.append("")
+            system_parts.append("CHARACTER VOICES:")
+            for cp in character_profiles:
+                name = cp.get("name", "Unknown")
+                traits = ", ".join(cp.get("traits", []))
+                style = cp.get("speech_style", "")
+                system_parts.append(f"- {name}: [{traits}]. {style}")
+
+        system_prompt = "\n".join(system_parts)
+        user_prompt = (
+            "Rewrite these translated dialogue lines for natural spoken dubbing performance.\n\n"
+            f"{numbered_lines}"
+        )
+
+        try:
+            logger.info(f"[ADAPT] Dubbing adaptation pass: {len(adapt_indices)} segments")
+            payload = {
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 4096,
+                "temperature": 0.4,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+            }
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            }
+            response = await asyncio.to_thread(
+                lambda: httpx.post(
+                    "https://api.anthropic.com/v1/messages",
+                    json=payload, headers=headers, timeout=60.0,
+                )
+            )
+            if response.status_code != 200:
+                logger.warning(f"[ADAPT] Adaptation pass failed: {response.status_code} — returning raw translation")
+                return segments
+
+            reply = response.json()["content"][0]["text"].strip()
+            adapted_lines = re.findall(r"^\d+\.\s*(.+)$", reply, re.MULTILINE)
+
+            result = list(segments)
+            for local_i, seg_i in enumerate(adapt_indices):
+                if local_i < len(adapted_lines):
+                    adapted = adapted_lines[local_i].strip()
+                    # Sanity: reject if obviously longer than 2x original (hallucination guard)
+                    original_words = len((result[seg_i].get("text") or "").split())
+                    adapted_words = len(adapted.split())
+                    if adapted_words <= max(original_words * 2, original_words + 6):
+                        result[seg_i] = {**result[seg_i], "text": adapted}
+                    else:
+                        logger.warning(f"[ADAPT] Seg {seg_i} adaptation too long ({adapted_words} vs {original_words} words) — keeping raw")
+            logger.info(f"[ADAPT] Adaptation pass complete: {len(adapted_lines)} lines rewritten")
+            return result
+
+        except Exception as exc:
+            logger.warning(f"[ADAPT] Adaptation pass exception: {exc} — returning raw translation")
+            return segments
+
     async def _translate_text(
         self,
         text: str,
         source_language: str,
-        target_language: str
+        target_language: str,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
     ) -> str:
         if not text.strip():
             return text
 
+        # Natural style: pre-localize role/address terms so generic MT engines
+        # do not leave them as literal romanizations.
+        text = _apply_source_aliases(text, dubbing_style, localized_aliases)
+
         # Protect glossary terms with placeholders before translation
-        protected_text, replacements = self._apply_glossary_pre(text)
+        protected_text, replacements, _fuzz_single = self._apply_glossary_pre(text)
+        if _fuzz_single:
+            logger.info("[GLOSSARY-FUZZY] %s", " | ".join(_fuzz_single))
         if replacements:
             logger.debug(f"Glossary: protected {len(replacements)} terms in '{text[:60]}'")
 
@@ -1118,9 +1955,11 @@ class TranslationService:
         # Restore glossary terms in translated output
         if replacements:
             translated = self._apply_glossary_post(translated, replacements)
+            translated, _v_warns = self._verify_translation(translated, replacements)
+            for _w in _v_warns: logger.warning("[VERIFY] single: %s", "; ".join(_v_warns))
             logger.debug(f"Glossary: restored terms -> '{translated[:80]}'")
 
-        return translated
+        return fix_translation_names(translated)
     
     async def _translate_with_deepl(
         self,

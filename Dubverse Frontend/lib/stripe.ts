@@ -27,7 +27,6 @@ export const PLANS = {
     name: "Basic",
     monthlyPrice: 20,
     yearlyPrice: 192,
-    minutesPerMonth: 45,
     features: [
       "45 minutes video/month",
       "Voice cloning from video",
@@ -43,7 +42,6 @@ export const PLANS = {
     name: "Premium",
     monthlyPrice: 49,
     yearlyPrice: 470,
-    minutesPerMonth: 90,
     features: [
       "90 minutes video/month",
       "Professional timeline editor",
@@ -57,9 +55,8 @@ export const PLANS = {
   },
   professional: {
     name: "Professional",
-    monthlyPrice: 1400,
-    yearlyPrice: 13440,
-    minutesPerMonth: -1, // unlimited
+    monthlyPrice: 149,
+    yearlyPrice: 1430,
     features: [
       "Unlimited 2hr+ feature films/month",
       "All Premium features included",

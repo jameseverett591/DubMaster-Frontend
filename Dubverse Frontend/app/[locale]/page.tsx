@@ -37,26 +37,48 @@ import {
 } from "lucide-react"
 import Link from "next/link"
 import { LanguageSwitcher } from "@/components/language-switcher"
+import { useT } from '@/lib/use-t'
 
 /* ─── Floating particles component ─── */
+
+/** Deterministic pseudo-random in [0,1) from a particle index and a salt.
+ *
+ *  These used Math.random() during render, which returns different values on
+ *  the server and the client — a guaranteed hydration mismatch on every page
+ *  load, which React reports and which makes it discard the server HTML for
+ *  this subtree. Seeding from the index keeps the scatter looking random while
+ *  producing identical markup on both sides. */
+function particleRand(i: number, salt: number): number {
+  const x = Math.sin(i * 127.1 + salt * 311.7) * 43758.5453
+  return x - Math.floor(x)
+}
+
 function Particles() {
   return (
     <div className="absolute inset-0 overflow-hidden pointer-events-none">
-      {Array.from({ length: 30 }).map((_, i) => (
-        <div
-          key={i}
-          className="absolute rounded-full opacity-0"
-          style={{
-            width: `${Math.random() * 4 + 2}px`,
-            height: `${Math.random() * 4 + 2}px`,
-            left: `${Math.random() * 100}%`,
-            top: `${Math.random() * 100}%`,
-            background: i % 3 === 0 ? "#A855F7" : i % 3 === 1 ? "#22D3EE" : "#C084FC",
-            boxShadow: `0 0 ${Math.random() * 10 + 5}px ${i % 2 === 0 ? "#A855F7" : "#22D3EE"}`,
-            animation: `floatParticle ${Math.random() * 8 + 6}s ease-in-out ${Math.random() * 5}s infinite`,
-          }}
-        />
-      ))}
+      {Array.from({ length: 30 }).map((_, i) => {
+        const size  = particleRand(i, 1) * 4 + 2
+        const left  = particleRand(i, 2) * 100
+        const top   = particleRand(i, 3) * 100
+        const glow  = particleRand(i, 4) * 10 + 5
+        const dur   = particleRand(i, 5) * 8 + 6
+        const delay = particleRand(i, 6) * 5
+        return (
+          <div
+            key={i}
+            className="absolute rounded-full opacity-0"
+            style={{
+              width: `${size}px`,
+              height: `${size}px`,
+              left: `${left}%`,
+              top: `${top}%`,
+              background: i % 3 === 0 ? "#A855F7" : i % 3 === 1 ? "#22D3EE" : "#C084FC",
+              boxShadow: `0 0 ${glow}px ${i % 2 === 0 ? "#A855F7" : "#22D3EE"}`,
+              animation: `floatParticle ${dur}s ease-in-out ${delay}s infinite`,
+            }}
+          />
+        )
+      })}
     </div>
   )
 }
@@ -71,6 +93,7 @@ function GlowSeparator() {
 /* Pricing section removed - users see plans on signup page */
 
 export default function LandingPage() {
+  const tUi = useT()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [videoMode, setVideoMode] = useState<"original" | "dubbed" | "split">("split")
   const [scrollY, setScrollY] = useState(0)
@@ -214,7 +237,7 @@ export default function LandingPage() {
               <Link href="/signup" className="text-sm text-[#94A3B8] hover:text-[#C084FC]">{t('navPricing')}</Link>
               <a href="#faq" className="text-sm text-[#94A3B8] hover:text-[#C084FC]">{t('navFaq')}</a>
               <div className="flex items-center gap-2 pt-1">
-                <span className="text-sm text-[#64748B]">Language:</span>
+                <span className="text-sm text-[#64748B]">{tUi('Language:')}</span>
                 <LanguageSwitcher />
               </div>
               <Button asChild variant="outline" className="w-full border-[#A855F7]/30 text-[#C084FC] hover:bg-[#A855F7]/10 cursor-pointer">
@@ -303,7 +326,7 @@ export default function LandingPage() {
                 <div className="text-2xl md:text-3xl font-bold text-[#FDB022] drop-shadow-[0_0_15px_rgba(253,176,34,0.4)]">
                   {stat.value}
                 </div>
-                <div className="text-sm text-[#94A3B8]">{stat.label}</div>
+                <div className="text-sm text-[#94A3B8]">{tUi(stat.label)}</div>
               </div>
             ))}
           </div>
@@ -533,10 +556,10 @@ export default function LandingPage() {
                 {t('techDetails')}
               </AccordionTrigger>
               <AccordionContent className="text-[#94A3B8] space-y-2">
-                <p><strong className="text-[#C084FC]">Voice Cloning:</strong> Fish Audio S1 (zero-shot, 30-60s samples)</p>
-                <p><strong className="text-[#C084FC]">Emotion Analysis:</strong> Hume AI + emotion2vec</p>
-                <p><strong className="text-[#C084FC]">Quality Control:</strong> Azure Speech, SyncNet, Claude synthesis</p>
-                <p><strong className="text-[#C084FC]">Lip-Sync:</strong> Industry-standard LSE-D scoring</p>
+                <p><strong className="text-[#C084FC]">{tUi('Voice Cloning:')}</strong> Fish Audio S1 (zero-shot, 30-60s samples)</p>
+                <p><strong className="text-[#C084FC]">{tUi('Emotion Analysis:')}</strong> Hume AI + emotion2vec</p>
+                <p><strong className="text-[#C084FC]">{tUi('Quality Control:')}</strong> {tUi('Azure Speech, SyncNet, Claude synthesis')}</p>
+                <p><strong className="text-[#C084FC]">{tUi('Lip-Sync:')}</strong> {tUi('Industry-standard LSE-D scoring')}</p>
               </AccordionContent>
             </AccordionItem>
           </Accordion>
@@ -571,8 +594,8 @@ export default function LandingPage() {
                   <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-[#A855F7]/20 to-[#22D3EE]/10 flex items-center justify-center mb-4">
                     <feature.icon className="h-5 w-5 text-[#C084FC]" />
                   </div>
-                  <h3 className="font-semibold mb-2 text-white">{feature.title}</h3>
-                  <p className="text-sm text-[#94A3B8]">{feature.desc}</p>
+                  <h3 className="font-semibold mb-2 text-white">{tUi(feature.title)}</h3>
+                  <p className="text-sm text-[#94A3B8]">{tUi(feature.desc)}</p>
                 </CardContent>
               </Card>
             ))}
@@ -593,11 +616,11 @@ export default function LandingPage() {
             <table className="w-full border-collapse">
               <thead>
                 <tr className="border-b border-[#A855F7]/20">
-                  <th className="text-left py-5 px-6 text-[#94A3B8]">Feature</th>
+                  <th className="text-left py-5 px-6 text-[#94A3B8]">{tUi('Feature')}</th>
                   <th className="py-5 px-6 text-[#C084FC] font-bold text-lg">DubMaster</th>
-                  <th className="py-5 px-6 text-[#64748B]">Dubverse.ai</th>
-                  <th className="py-5 px-6 text-[#64748B]">HeyGen</th>
-                  <th className="py-5 px-6 text-[#64748B]">Traditional</th>
+                  <th className="py-5 px-6 text-[#64748B]">{tUi('Dubverse.ai')}</th>
+                  <th className="py-5 px-6 text-[#64748B]">{tUi('HeyGen')}</th>
+                  <th className="py-5 px-6 text-[#64748B]">{tUi('Traditional')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -778,7 +801,7 @@ export default function LandingPage() {
                   {col.links.map((link, j) => (
                     <li key={j}>
                       <Link href={link.href} className="text-sm text-[#64748B] hover:text-[#C084FC] transition-colors duration-300 cursor-pointer">
-                        {link.label}
+                        {tUi(link.label)}
                       </Link>
                     </li>
                   ))}

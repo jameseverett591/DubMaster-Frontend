@@ -162,7 +162,11 @@ class RunPodService:
         timeout: int = 600,
         interval: int = 5,
         progress_callback=None,
+        timing_callback=None,
     ) -> Dict[str, Any]:
+        """`timing_callback(execution_seconds, queue_seconds)` fires once on
+        completion. Kept as a callback rather than folded into the return value
+        so the GPU worker's output contract stays untouched."""
         start = time.time()
         last_status = None
         queue_timeout = max(0, self._queue_timeout_sec())
@@ -184,6 +188,27 @@ class RunPodService:
                     )
 
             if status == "COMPLETED":
+                # RunPod reports both in ms. Captured because they are the only
+                # real source of GPU cost per job — billing is per millisecond
+                # of execution, so without this any cost-per-source-minute
+                # figure is a guess. delayTime is queue wait and is NOT billed.
+                exec_ms = result.get("executionTime")
+                delay_ms = result.get("delayTime") or 0
+                if exec_ms is not None:
+                    logger.info(
+                        f"[RUNPOD-COST] job {runpod_job_id} execution={exec_ms / 1000:.1f}s "
+                        f"queue={delay_ms / 1000:.1f}s"
+                    )
+                    if timing_callback:
+                        try:
+                            import asyncio as _asyncio
+                            if _asyncio.iscoroutinefunction(timing_callback):
+                                await timing_callback(exec_ms / 1000.0, delay_ms / 1000.0)
+                            else:
+                                timing_callback(exec_ms / 1000.0, delay_ms / 1000.0)
+                        except Exception as e:
+                            # Cost accounting must never fail a completed dub.
+                            logger.warning(f"[RUNPOD-COST] timing_callback failed: {e}")
                 return result.get("output", {})
 
             if status == "FAILED":

@@ -8,7 +8,7 @@ const _geist = Geist({ subsets: ["latin"] })
 const _geistMono = Geist_Mono({ subsets: ["latin"] })
 
 export const metadata: Metadata = {
-  title: "DubVerse - AI Video Dubbing Studio",
+  title: "DubMaster - AI Video Dubbing Studio",
   description:
     "AI-powered video dubbing with intelligent voice detection, multi-language support, and creator collaboration",
   generator: "v0.app",

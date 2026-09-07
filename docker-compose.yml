@@ -27,13 +27,14 @@ services:
       # Persist HuggingFace/torch model cache across recreates
       - hf-cache:/root/.cache
     env_file:
-      - .env
+      - Dubverse Backend/.env
     environment:
       # Only set vars NOT in .env here. All API keys and app settings
       # come from .env via env_file above. Do NOT duplicate them here
       # with ${VAR} syntax — that pulls from the host system env and
       # silently overrides the .env values.
       - PYTHONUNBUFFERED=1
+      - REHYDRATE_JOBS=1
       - PROCESSING_MODE=gpu
       - RUNPOD_SUBMIT_TIMEOUT_SEC=120
       - RUNPOD_STATUS_TIMEOUT_SEC=30
@@ -42,6 +43,9 @@ services:
       - RUNPOD_HTTP_MAX_RETRIES=3
       - RUNPOD_HTTP_RETRY_BACKOFF_SEC=2
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 60s
@@ -74,6 +78,7 @@ services:
       - "./Dubverse Frontend/public:/app/public"
       - "./Dubverse Frontend/messages:/app/messages"
       - "./Dubverse Frontend/postcss.config.mjs:/app/postcss.config.mjs"
+      - "./Dubverse Frontend/next.config.mjs:/app/next.config.mjs:ro"
       - "./Dubverse Frontend/.env.local:/app/.env.local:ro"
       - "./Dubverse Frontend/middleware.ts:/app/middleware.ts"
       - "./Dubverse Frontend/i18n.ts:/app/i18n.ts"

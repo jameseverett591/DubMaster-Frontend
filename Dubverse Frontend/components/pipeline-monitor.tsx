@@ -1,17 +1,20 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from "react"
+import Link from "next/link"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { apiClient } from "@/lib/api-client"
 import {
   Activity, Upload, AudioLines, Scissors, FileText, Users, Sparkles,
   Languages, Mic2, Clock, Gauge, CheckCircle2, XCircle,
   Loader2, SkipForward, ChevronDown, ChevronUp, Cpu, Timer, Zap,
-  AlertTriangle, RefreshCw
+  AlertTriangle, RefreshCw, BarChart3
 } from "lucide-react"
+import { useT } from '@/lib/use-t'
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
@@ -67,6 +70,7 @@ function formatMs(ms: number | null): string {
 function StageNode({ stage, isLast, isExpanded, onToggle }: {
   stage: PipelineStage; isLast: boolean; isExpanded: boolean; onToggle: () => void
 }) {
+  const t = useT()
   const config = STATUS_CONFIG[stage.status] || STATUS_CONFIG.pending
   const Icon = STAGE_ICONS[stage.id] || Activity
 
@@ -101,7 +105,7 @@ function StageNode({ stage, isLast, isExpanded, onToggle }: {
                 {stage.name}
               </h4>
               <Badge variant="outline" className={`text-[10px] py-0 px-1.5 ${config.color} border-current/20`}>
-                {config.label}
+                {t(config.label)}
               </Badge>
             </div>
             <div className="flex items-center gap-2">
@@ -144,6 +148,7 @@ function StageNode({ stage, isLast, isExpanded, onToggle }: {
 }
 
 export default function PipelineMonitor({ jobId }: { jobId: string }) {
+  const t = useT()
   const [pipelineData, setPipelineData] = useState<PipelineData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -154,7 +159,9 @@ export default function PipelineMonitor({ jobId }: { jobId: string }) {
   const fetchPipeline = useCallback(async () => {
     if (!jobId) return
     try {
-      const res = await fetch(`${BACKEND_URL}/api/pipeline/${jobId}`)
+      const res = await fetch(`${BACKEND_URL}/api/pipeline/${jobId}`, {
+        headers: await apiClient.ensureAuthHeaders(),
+      })
       if (!res.ok) { if (res.status === 404) return; throw new Error(res.statusText) }
       const data: PipelineData = await res.json()
       setPipelineData(data)
@@ -184,7 +191,7 @@ export default function PipelineMonitor({ jobId }: { jobId: string }) {
         <CardContent className="flex items-center justify-center py-12">
           <div className="text-center">
             <Loader2 className="h-8 w-8 text-primary animate-spin mx-auto mb-3" />
-            <p className="text-sm text-muted-foreground">Connecting to pipeline...</p>
+            <p className="text-sm text-muted-foreground">{t('Connecting to pipeline...')}</p>
           </div>
         </CardContent>
       </Card>
@@ -199,7 +206,7 @@ export default function PipelineMonitor({ jobId }: { jobId: string }) {
             <XCircle className="h-8 w-8 text-red-500 mx-auto mb-3" />
             <p className="text-sm text-red-400">{error}</p>
             <Button variant="outline" size="sm" className="mt-3" onClick={fetchPipeline}>
-              <RefreshCw className="h-4 w-4 mr-2" />Retry
+              <RefreshCw className="h-4 w-4 mr-2" />{t('Retry')}
             </Button>
           </div>
         </CardContent>
@@ -254,6 +261,14 @@ export default function PipelineMonitor({ jobId }: { jobId: string }) {
             }>
               {completedCount}/{totalCount} stages
             </Badge>
+            {isComplete && (
+              <Link href={`/editor/${jobId}?showQC=true`}>
+                <Button variant="outline" size="sm" className="gap-2">
+                  <BarChart3 className="h-4 w-4" />
+                  {t('View QC')}
+                </Button>
+              </Link>
+            )}
           </div>
         </div>
         <div className="mt-3">

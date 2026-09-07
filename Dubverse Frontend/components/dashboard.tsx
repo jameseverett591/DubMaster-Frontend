@@ -1,19 +1,24 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { VideoUpload } from "@/components/video-upload"
 import { YouTubeIntegration } from "@/components/youtube-integration"
 import { PublicDomainLibrary } from "@/components/public-domain-library"
 import { CreatorCollaboration } from "@/components/creator-collaboration"
-import { StudioModeSelector } from "@/components/studio-mode-selector"
+import { UpgradePanel } from "@/components/upgrade-panel"
 import { DubbingWorkspace } from "@/components/dubbing-workspace"
 import { AdvancedDubbingEditor } from "@/components/advanced-dubbing-editor"
 import { Header } from "@/components/header"
-import { Upload, Youtube, Film, Clapperboard, Mic2, AlertTriangle } from "lucide-react"
+import { Upload, Youtube, Film, Sparkles, Mic2, AlertTriangle } from "lucide-react"
 import { RecentProjects } from "@/components/recent-projects"
 import { BonusMinutesDialog } from "@/components/bonus-minutes-dialog"
 import { createClient } from "@/lib/supabase/client"
+import { apiClient } from "@/lib/api-client"
+import { usePlan } from "@/lib/use-plan"
+import { PLAN_MINUTES, PLAN_MINUTES_DEFAULT, type PlanType } from "@/lib/plan-features"
+import { useT } from '@/lib/use-t'
 
 export type VideoSource = {
   id: string
@@ -46,18 +51,27 @@ const tabBackgrounds: Record<string, string> = {
 }
 
 export function Dashboard() {
-  const [activeTab, setActiveTab] = useState("upload")
+  const t = useT()
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') ?? "upload")
+
+  useEffect(() => {
+    const tab = searchParams.get('tab') ?? 'upload'
+    setActiveTab(tab)
+  }, [searchParams])
   const [selectedVideo, setSelectedVideo] = useState<VideoSource | null>(null)
   const [isWorkspaceOpen, setIsWorkspaceOpen] = useState(false)
   const [editorMode, setEditorMode] = useState<EditorMode>("automatic")
 
   // Usage tracking state
-  const [planType, setPlanType] = useState<string>("premium")
-  const [planLimit, setPlanLimit] = useState<number>(90)
+  const { plan } = usePlan()
   const [minutesUsed, setMinutesUsed] = useState<number>(0)
   const [bonusBalance, setBonusBalance] = useState<number>(0)
   const [bonusDialogOpen, setBonusDialogOpen] = useState(false)
   const [loadingUsage, setLoadingUsage] = useState(true)
+
+  const planLimit = PLAN_MINUTES[(plan ?? 'basic') as PlanType] ?? PLAN_MINUTES_DEFAULT
 
   const supabase = createClient()
 
@@ -66,17 +80,10 @@ export function Dashboard() {
     async function fetchUsageData() {
       setLoadingUsage(true)
       try {
-        const { data: { user } } = await supabase.auth.getUser()
-        if (!user) return
-
-        // Fetch subscription info
-        const { data: subData } = await supabase
-          .from("subscriptions")
-          .select("plan_type")
-          .eq("user_id", user.id)
-          .in("status", ["active", "trialing"])
-          .limit(1)
-          .single()
+        const { data: { session } } = await supabase.auth.getSession()
+        if (!session) return
+        const user = session.user
+        apiClient.setToken(session.access_token)
 
         // Fetch current month usage
         const { data: usageData } = await supabase
@@ -94,27 +101,14 @@ export function Dashboard() {
           .eq("user_id", user.id)
           .maybeSingle()
 
-        // Set plan limits
-        const PLAN_LIMITS: Record<string, number> = {
-          basic: 45,
-          premium: 90,
-          professional: -1, // unlimited
-        }
-
-        const plan = subData?.plan_type || "basic"
-        const limit = PLAN_LIMITS[plan] || 45
         const used = usageData?.minutes_used || 0
         const bonus = bonusData?.balance || 0
 
-        setPlanType(plan)
-        setPlanLimit(limit)
         setMinutesUsed(used)
         setBonusBalance(bonus)
       } catch (error) {
         console.error("Failed to fetch usage data:", error)
         // Set defaults on error to prevent blank UI
-        setPlanType("basic")
-        setPlanLimit(45)
         setMinutesUsed(0)
         setBonusBalance(0)
       } finally {
@@ -123,6 +117,23 @@ export function Dashboard() {
     }
 
     fetchUsageData()
+  }, [])
+
+  // Keep API client token in sync with Supabase auth state
+  useEffect(() => {
+    // Only clear on an explicit sign-out: Supabase emits events carrying a null
+    // session while the user is still signed in, and clearing on those left the
+    // API client tokenless while the UI still showed a signed-in user.
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (event, session) => {
+        if (session?.access_token) {
+          apiClient.setToken(session.access_token)
+        } else if (event === 'SIGNED_OUT') {
+          apiClient.setToken(null)
+        }
+      }
+    )
+    return () => subscription.unsubscribe()
   }, [])
 
   const handleVideoSelect = (video: VideoSource) => {
@@ -140,16 +151,7 @@ export function Dashboard() {
   }
 
   const handleOpenEditor = () => {
-    const demoVideo: VideoSource = {
-      id: "demo-video",
-      title: "Ip Man (2010) - Demo Scene",
-      url: "/demo-video.mp4",
-      thumbnail: "/backgrounds/ipman-kungfu.jpg",
-      duration: "4:22",
-      source: "public-domain"
-    }
-    setSelectedVideo(demoVideo)
-    setIsWorkspaceOpen(true)
+    router.push('/editor')
   }
 
   const currentBackground = tabBackgrounds[activeTab] || tabBackgrounds.upload
@@ -163,89 +165,6 @@ export function Dashboard() {
       <div className="fixed inset-0 z-0 bg-[radial-gradient(ellipse_at_top,_rgba(168,85,247,0.08)_0%,_transparent_50%)]" />
       <div className="fixed inset-0 z-0 bg-[radial-gradient(ellipse_at_bottom,_rgba(34,211,238,0.05)_0%,_transparent_50%)]" />
 
-      {/* TOP FILM STRIP - Scrolls RIGHT */}
-      <div className="fixed top-16 left-0 right-0 h-32 z-40 overflow-hidden border-b-2 border-[#FDB022]/40">
-        <div className="absolute inset-0 bg-gradient-to-b from-black/80 to-transparent" />
-        {/* Film sprocket holes - top */}
-        <div className="absolute top-0 left-0 right-0 h-3 bg-black flex">
-          {Array.from({ length: 100 }).map((_, i) => (
-            <div key={i} className="w-6 h-3 border-r-2 border-[#FDB022]/30" />
-          ))}
-        </div>
-        {/* Scrolling film frames */}
-        <div className="absolute top-3 bottom-3 left-0 flex animate-scroll-right">
-          {[...Array(3)].map((_, set) => (
-            <div key={set} className="flex">
-              {["Ip Man", "Bollywood", "Anime", "Drama", "Action", "Cinema"].map((title, i) => (
-                <div key={i} className="relative w-40 h-24 mx-2 flex-shrink-0 border-2 border-[#A855F7]/40 bg-gradient-to-br from-[#A855F7]/20 to-[#22D3EE]/20 backdrop-blur-sm rounded overflow-hidden">
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
-                  <div className="absolute bottom-2 left-2 right-2">
-                    <p className="text-white text-xs font-bold truncate">{title}</p>
-                    <p className="text-[#FDB022] text-[10px]">Classic Film</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-        {/* Film sprocket holes - bottom */}
-        <div className="absolute bottom-0 left-0 right-0 h-3 bg-black flex">
-          {Array.from({ length: 100 }).map((_, i) => (
-            <div key={i} className="w-6 h-3 border-r-2 border-[#FDB022]/30" />
-          ))}
-        </div>
-      </div>
-
-      {/* BOTTOM FILM STRIP - Scrolls LEFT */}
-      <div className="fixed bottom-0 left-0 right-0 h-32 z-40 overflow-hidden border-t-2 border-[#FDB022]/40">
-        <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent" />
-        {/* Film sprocket holes - top */}
-        <div className="absolute top-0 left-0 right-0 h-3 bg-black flex">
-          {Array.from({ length: 100 }).map((_, i) => (
-            <div key={i} className="w-6 h-3 border-r-2 border-[#FDB022]/30" />
-          ))}
-        </div>
-        {/* Scrolling film frames */}
-        <div className="absolute top-3 bottom-3 left-0 flex animate-scroll-left">
-          {[...Array(3)].map((_, set) => (
-            <div key={set} className="flex">
-              {["Martial Arts", "Romance", "Thriller", "Comedy", "Sci-Fi", "Adventure"].map((title, i) => (
-                <div key={i} className="relative w-40 h-24 mx-2 flex-shrink-0 border-2 border-[#22D3EE]/40 bg-gradient-to-br from-[#22D3EE]/20 to-[#A855F7]/20 backdrop-blur-sm rounded overflow-hidden">
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
-                  <div className="absolute bottom-2 left-2 right-2">
-                    <p className="text-white text-xs font-bold truncate">{title}</p>
-                    <p className="text-[#FDB022] text-[10px]">World Cinema</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-        {/* Film sprocket holes - bottom */}
-        <div className="absolute bottom-0 left-0 right-0 h-3 bg-black flex">
-          {Array.from({ length: 100 }).map((_, i) => (
-            <div key={i} className="w-6 h-3 border-r-2 border-[#FDB022]/30" />
-          ))}
-        </div>
-      </div>
-
-      {/* Add animation keyframes to globals.css */}
-      <style jsx global>{`
-        @keyframes scroll-right {
-          0% { transform: translateX(0); }
-          100% { transform: translateX(-50%); }
-        }
-        @keyframes scroll-left {
-          0% { transform: translateX(-50%); }
-          100% { transform: translateX(0); }
-        }
-        .animate-scroll-right {
-          animation: scroll-right 60s linear infinite;
-        }
-        .animate-scroll-left {
-          animation: scroll-left 60s linear infinite;
-        }
-      `}</style>
 
       <div className="relative z-10">
         <Header
@@ -277,9 +196,9 @@ export function Dashboard() {
                   <div className="relative grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
                     {/* Plan Info */}
                     <div>
-                      <p className="text-[#94A3B8] text-xs mb-1">Your Plan</p>
+                      <p className="text-[#94A3B8] text-xs mb-1">{t('Your Plan')}</p>
                       <p className="text-white text-xl font-bold bg-gradient-to-r from-[#A855F7] to-[#FDB022] bg-clip-text text-transparent capitalize">
-                        {loadingUsage ? "..." : planType}
+                        {loadingUsage ? "..." : (plan ?? 'basic')}
                       </p>
                     </div>
 
@@ -295,7 +214,7 @@ export function Dashboard() {
                         return (
                           <>
                             <div className="flex justify-between items-center mb-1.5">
-                              <p className="text-[#94A3B8] text-xs">Monthly Usage</p>
+                              <p className="text-[#94A3B8] text-xs">{t('Monthly Usage')}</p>
                               <p className="text-white text-sm font-bold">
                                 <span className={isExhausted ? "text-red-400" : isLowUsage ? "text-[#FDB022]" : "text-[#22D3EE]"}>
                                   {planLimit > 0 ? minutesUsed : "Unlimited"}
@@ -330,7 +249,7 @@ export function Dashboard() {
                                     {isExhausted ? (
                                       <span className="text-red-400 font-semibold flex items-center gap-1">
                                         <AlertTriangle className="h-3 w-3" />
-                                        Quota exceeded
+                                        {t('Quota exceeded')}
                                       </span>
                                     ) : isLowUsage ? (
                                       <span className="text-[#FDB022] font-semibold flex items-center gap-1">
@@ -364,10 +283,15 @@ export function Dashboard() {
               {/* CINEMATIC TITLE - Compact */}
               <div className="text-center mb-6">
                 <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-[#A855F7] via-[#FDB022] to-[#22D3EE] bg-clip-text text-transparent drop-shadow-[0_0_30px_rgba(168,85,247,0.8)] mb-2">
-                  DubMaster Studio
+                  {t('DubMaster Studio')}
                 </h1>
+                {plan === 'basic' && (
+                  <span className="inline-block text-xs font-semibold uppercase tracking-wide text-[#22D3EE] border border-[#22D3EE]/40 rounded-full px-2 py-0.5 mb-2">
+                    {t('Basic')}
+                  </span>
+                )}
                 <p className="text-[#94A3B8] text-base md:text-lg italic">
-                  Transform Your Content. Reach The World.
+                  {t('Transform Your Content. Reach The World.')}
                 </p>
               </div>
 
@@ -379,35 +303,35 @@ export function Dashboard() {
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
                   >
                     <Upload className="h-4 w-4" />
-                    <span className="hidden sm:inline">Upload</span>
+                    <span className="hidden sm:inline">{t('Upload')}</span>
                   </TabsTrigger>
                   <TabsTrigger
                     value="youtube"
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
                   >
                     <Youtube className="h-4 w-4" />
-                    <span className="hidden sm:inline">YouTube</span>
+                    <span className="hidden sm:inline">{t('YouTube')}</span>
                   </TabsTrigger>
                   <TabsTrigger
                     value="library"
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
                   >
                     <Film className="h-4 w-4" />
-                    <span className="hidden sm:inline">Library</span>
+                    <span className="hidden sm:inline">{t('Library')}</span>
                   </TabsTrigger>
                   <TabsTrigger
                     value="studio"
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
                   >
-                    <Clapperboard className="h-4 w-4" />
-                    <span className="hidden sm:inline">Studio</span>
+                    <Sparkles className="h-4 w-4" />
+                    <span className="hidden sm:inline">{t('Upgrade')}</span>
                   </TabsTrigger>
                   <TabsTrigger
                     value="projects"
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
                   >
                     <Mic2 className="h-4 w-4" />
-                    <span className="hidden sm:inline">Projects</span>
+                    <span className="hidden sm:inline">{t('Projects')}</span>
                   </TabsTrigger>
                 </TabsList>
 
@@ -436,12 +360,7 @@ export function Dashboard() {
                   <PublicDomainLibrary onVideoSelect={handleVideoSelect} />
                 </TabsContent>
                 <TabsContent value="studio">
-                  <StudioModeSelector
-                    editorMode={editorMode}
-                    onEditorModeChange={handleEditorModeChange}
-                    onStartProject={() => setActiveTab("upload")}
-                    onOpenEditor={handleOpenEditor}
-                  />
+                  <UpgradePanel />
                 </TabsContent>
                 <TabsContent value="projects">
                   <RecentProjects onVideoSelect={handleVideoSelect} />
@@ -459,7 +378,7 @@ export function Dashboard() {
         planMinutesUsed={minutesUsed}
         planMinutesLimit={planLimit}
         bonusBalance={bonusBalance}
-        planType={planType}
+        planType={plan ?? 'basic'}
       />
     </div>
   )

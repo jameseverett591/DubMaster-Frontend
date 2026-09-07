@@ -6,6 +6,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 import { Edit2, Check, X, Copy, RefreshCw } from "lucide-react"
 import type { TranscriptSegment } from "@/lib/api-client"
+import { useT } from '@/lib/use-t'
 
 interface TranscriptEditorProps {
   currentTime: number
@@ -97,6 +98,7 @@ function segmentsToLines(
 }
 
 export function TranscriptEditor({ currentTime, targetLanguage, segments, speakerGenders }: TranscriptEditorProps) {
+  const t = useT()
   const [transcript, setTranscript] = useState<TranscriptLine[]>(
     segments ? segmentsToLines(segments, speakerGenders) : SAMPLE_TRANSCRIPT
   )
@@ -151,12 +153,12 @@ export function TranscriptEditor({ currentTime, targetLanguage, segments, speake
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="font-semibold text-foreground">Translation Script</h3>
-          <p className="text-sm text-muted-foreground">Edit translations for perfect alignment</p>
+          <h3 className="font-semibold text-foreground">{t('Translation Script')}</h3>
+          <p className="text-sm text-muted-foreground">{t('Edit translations for perfect alignment')}</p>
         </div>
         <Button variant="outline" size="sm" className="gap-1.5 bg-transparent">
           <RefreshCw className="h-3.5 w-3.5" />
-          Re-translate
+          {t('Re-translate')}
         </Button>
       </div>
 
@@ -206,11 +208,11 @@ export function TranscriptEditor({ currentTime, targetLanguage, segments, speake
                 <div className="flex justify-end gap-2">
                   <Button variant="ghost" size="sm" onClick={handleCancel}>
                     <X className="mr-1 h-3.5 w-3.5" />
-                    Cancel
+                    {t('Cancel')}
                   </Button>
                   <Button size="sm" onClick={() => handleSave(line.id)}>
                     <Check className="mr-1 h-3.5 w-3.5" />
-                    Save
+                    {t('Save')}
                   </Button>
                 </div>
               </div>

@@ -4,6 +4,7 @@ import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { useTranslations } from "next-intl"
 import { createClient } from "@/lib/supabase/client"
+import { usePlan } from "@/lib/use-plan"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -13,19 +14,13 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { Bell, Settings, User, Menu, X, Mic2, Check, Users, LogOut, Clapperboard } from "lucide-react"
 import Link from "next/link"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { LanguageSwitcher } from "@/components/language-switcher"
+import { VoiceLibraryModal } from "@/components/voice-library-modal"
 
 import type { EditorMode } from "@/components/dashboard"
+import { useT } from '@/lib/use-t'
 
 interface HeaderProps {
   activeTab?: string
@@ -35,31 +30,24 @@ interface HeaderProps {
 }
 
 export function Header({ activeTab = "upload", onNavigate, editorMode = "automatic", onEditorModeChange }: HeaderProps) {
+  const tUi = useT()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [voiceLibraryOpen, setVoiceLibraryOpen] = useState(false)
   const [userEmail, setUserEmail] = useState<string | null>(null)
-  const [planType, setPlanType] = useState<string | null>(null)
   const router = useRouter()
   const supabase = createClient()
   const t = useTranslations('nav')
   const tc = useTranslations('common')
+  const { hasFeature } = usePlan()
 
   useEffect(() => {
-    supabase.auth.getUser().then(async ({ data }) => {
+    supabase.auth.getUser().then(({ data }) => {
       if (!data.user) return
       setUserEmail(data.user.email ?? null)
-      const { data: sub } = await supabase
-        .from("subscriptions")
-        .select("plan_type")
-        .eq("user_id", data.user.id)
-        .in("status", ["active", "trialing"])
-        .limit(1)
-        .single()
-      setPlanType(sub?.plan_type ?? null)
     })
   }, [])
 
-  const canAccessEditor = planType === "premium" || planType === "professional"
+  const canAccessEditor = hasFeature('editor')
 
   const userInitials = userEmail ? userEmail.slice(0, 2).toUpperCase() : "?"
 
@@ -70,28 +58,18 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
   }
 
   const handleNavClick = (tab: string) => {
-    if (onNavigate) {
-      onNavigate(tab)
-    } else {
-      router.push("/studio")
+    const routes: Record<string, string> = {
+      dashboard: "/dashboard",
+      projects: "/studio?tab=projects",
+      collaborate: "/collaborate",
+      studio: "/studio",
     }
+    router.push(routes[tab] ?? "/")
     setMobileMenuOpen(false)
   }
 
-  const voiceLibrary = [
-    { name: "James", type: "Male Adult", language: "English (US)", accent: "American" },
-    { name: "Sophia", type: "Female Adult", language: "English (UK)", accent: "British" },
-    { name: "Carlos", type: "Male Adult", language: "Spanish", accent: "Castilian" },
-    { name: "Maria", type: "Female Adult", language: "Spanish", accent: "Mexican" },
-    { name: "Yuki", type: "Female Adult", language: "Japanese", accent: "Tokyo" },
-    { name: "Hans", type: "Male Adult", language: "German", accent: "Standard" },
-    { name: "Pierre", type: "Male Adult", language: "French", accent: "Parisian" },
-    { name: "Mei", type: "Female Adult", language: "Chinese", accent: "Mandarin" },
-    { name: "Timmy", type: "Male Child", language: "English (US)", accent: "American" },
-    { name: "Emma", type: "Female Child", language: "English (UK)", accent: "British" },
-    { name: "Raj", type: "Male Adult", language: "Hindi", accent: "Standard" },
-    { name: "Fatima", type: "Female Adult", language: "Arabic", accent: "Modern Standard" },
-  ]
+  // Voice catalog now lives in <VoiceLibraryModal/> — it fetches Fish Audio's
+  // real library via /api/voices with pagination + filters + favorites.
 
   return (
     <>
@@ -106,10 +84,16 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
 
           <nav className="hidden items-center gap-6 md:flex">
             <button
-              onClick={() => handleNavClick("upload")}
-              className={`text-sm font-medium transition-colors ${activeTab === "upload" ? "text-[#C084FC]" : "text-[#94A3B8] hover:text-[#C084FC]"}`}
+              onClick={() => handleNavClick("dashboard")}
+              className={`text-sm font-medium transition-colors ${activeTab === "dashboard" ? "text-[#C084FC]" : "text-[#94A3B8] hover:text-[#C084FC]"}`}
             >
               {t('dashboard')}
+            </button>
+            <button
+              onClick={() => handleNavClick("studio")}
+              className={`text-sm font-medium transition-colors ${activeTab === "studio" || activeTab === "upload" ? "text-[#C084FC]" : "text-[#94A3B8] hover:text-[#C084FC]"}`}
+            >
+              {tUi('Studio')}
             </button>
             <button
               onClick={() => handleNavClick("projects")}
@@ -126,12 +110,14 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
               {t('collaborate')}
             </button>
 
-            <button
-              onClick={() => setVoiceLibraryOpen(true)}
-              className="text-sm font-medium text-[#94A3B8] transition-colors hover:text-[#C084FC]"
-            >
-              {t('voiceLibrary')}
-            </button>
+            {hasFeature('voiceLibrary') && (
+              <button
+                onClick={() => setVoiceLibraryOpen(true)}
+                className="text-sm font-medium text-[#94A3B8] transition-colors hover:text-[#C084FC]"
+              >
+                {t('voiceLibrary')}
+              </button>
+            )}
             {canAccessEditor && (
               <Link
                 href="/editor"
@@ -164,7 +150,7 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
                   </div>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator className="bg-[#A855F7]/20" />
-                <DropdownMenuItem onClick={() => router.push("/account")} className="cursor-pointer text-[#94A3B8] hover:text-[#C084FC] hover:bg-[#A855F7]/10">
+                <DropdownMenuItem onClick={() => router.push("/profile")} className="cursor-pointer text-[#94A3B8] hover:text-[#C084FC] hover:bg-[#A855F7]/10">
                   <User className="mr-2 h-4 w-4" />
                   {t('profile')}
                 </DropdownMenuItem>
@@ -190,10 +176,16 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
           <div className="border-t border-[#A855F7]/30 bg-[#020817]/95 backdrop-blur-xl p-4 md:hidden">
             <nav className="flex flex-col gap-4">
               <button
-                onClick={() => handleNavClick("upload")}
-                className={`text-sm font-medium text-left ${activeTab === "upload" ? "text-[#C084FC]" : "text-[#94A3B8]"}`}
+                onClick={() => handleNavClick("dashboard")}
+                className={`text-sm font-medium text-left ${activeTab === "dashboard" ? "text-[#C084FC]" : "text-[#94A3B8]"}`}
               >
                 {t('dashboard')}
+              </button>
+              <button
+                onClick={() => handleNavClick("studio")}
+                className={`text-sm font-medium text-left ${activeTab === "studio" || activeTab === "upload" ? "text-[#C084FC]" : "text-[#94A3B8]"}`}
+              >
+                {tUi('Studio')}
               </button>
               <button
                 onClick={() => handleNavClick("projects")}
@@ -210,14 +202,16 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
                 {t('collaborate')}
               </button>
 
-              <div className="border-t border-[#A855F7]/20 pt-4 mt-2">
-                <button
-                  onClick={() => { setVoiceLibraryOpen(true); setMobileMenuOpen(false); }}
-                  className="text-sm font-medium text-[#94A3B8] text-left"
-                >
-                  {t('voiceLibrary')}
-                </button>
-              </div>
+              {hasFeature('voiceLibrary') && (
+                <div className="border-t border-[#A855F7]/20 pt-4 mt-2">
+                  <button
+                    onClick={() => { setVoiceLibraryOpen(true); setMobileMenuOpen(false); }}
+                    className="text-sm font-medium text-[#94A3B8] text-left"
+                  >
+                    {t('voiceLibrary')}
+                  </button>
+                </div>
+              )}
               {canAccessEditor && (
                 <Link
                   href="/editor"
@@ -243,41 +237,8 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
         )}
       </header>
 
-      {/* Voice Library Modal */}
-      <Dialog open={voiceLibraryOpen} onOpenChange={setVoiceLibraryOpen}>
-        <DialogContent className="max-w-4xl max-h-[80vh] overflow-y-auto bg-[#020817]/95 backdrop-blur-md border-[#A855F7]/30">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-white">
-              <Mic2 className="h-5 w-5 text-[#A855F7]" />
-              Voice Library
-            </DialogTitle>
-            <DialogDescription className="text-[#94A3B8]">
-              Browse our collection of AI voices for dubbing. All voices support multiple emotions and speaking styles.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 mt-4">
-            {voiceLibrary.map((voice) => (
-              <Card key={voice.name} className="bg-[#0F172A]/50 border-[#A855F7]/30 hover:border-[#A855F7] hover:shadow-[0_0_20px_rgba(168,85,247,0.3)] transition-all cursor-pointer">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-base text-white">{voice.name}</CardTitle>
-                  <CardDescription className="text-[#94A3B8]">{voice.type}</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-sm text-[#94A3B8]">
-                    <p>{voice.language}</p>
-                    <p className="text-xs">{voice.accent} accent</p>
-                  </div>
-                  <Button variant="outline" size="sm" className="mt-3 w-full bg-transparent border-[#A855F7]/30 text-[#C084FC] hover:bg-[#A855F7]/10 hover:border-[#A855F7]">
-                    Preview Voice
-                  </Button>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* Pricing Modal removed */}
+      {/* Voice Library Modal — fetches Fish Audio's real catalog with paginated browse */}
+      <VoiceLibraryModal open={voiceLibraryOpen} onOpenChange={setVoiceLibraryOpen} />
     </>
   )
 }

@@ -76,6 +76,7 @@ def merge_asr_results(
     Output:
         Merged list of segments, sorted by start time.
         Each segment has: start, end, text, confidence, source
+        plus optional speaker_id (from Tencent) and words (word timestamps).
     """
     is_cjk_lang = source_language in {"zh", "yue", "ja", "ko", "cmn"}
 
@@ -126,13 +127,16 @@ def merge_asr_results(
             p_conf = best_match.get("confidence", 0.0)
 
             if p_conf >= _PARAFORMER_CONFIDENCE_THRESHOLD:
-                # Rule B + high confidence: use Paraformer text, Tencent timestamps
+                # Rule B + high confidence: use Paraformer text, Tencent timestamps.
+                # Only keep word timestamps if they came from the same source as the text.
                 merged.append({
                     "start": t_seg["start"],       # Rule C: Tencent timestamps
                     "end": t_seg["end"],
                     "text": best_match["text"],    # Rule B: Paraformer text
                     "confidence": p_conf,
                     "source": "paraformer+tencent_ts",
+                    "speaker_id": t_seg.get("speaker_id"),
+                    "words": best_match.get("words"),
                 })
                 logger.debug(
                     f"[ASR-MERGE] Merged (paraformer text): "
@@ -147,6 +151,8 @@ def merge_asr_results(
                     "text": t_seg["text"],
                     "confidence": t_seg.get("confidence", 0.0),
                     "source": "tencent_fallback",
+                    "speaker_id": t_seg.get("speaker_id"),
+                    "words": t_seg.get("words"),
                 })
                 logger.debug(
                     f"[ASR-MERGE] Fallback to Tencent (low paraformer conf={p_conf:.2f}): "
@@ -160,6 +166,8 @@ def merge_asr_results(
                 "text": t_seg["text"],
                 "confidence": t_seg.get("confidence", 0.0),
                 "source": "tencent_only",
+                "speaker_id": t_seg.get("speaker_id"),
+                "words": t_seg.get("words"),
             })
             logger.debug(
                 f"[ASR-MERGE] Tencent only: "
@@ -175,6 +183,7 @@ def merge_asr_results(
                 "text": p_seg["text"],
                 "confidence": p_seg.get("confidence", 0.0),
                 "source": "paraformer_only",
+                "words": p_seg.get("words"),
             })
             logger.debug(
                 f"[ASR-MERGE] Paraformer only: "

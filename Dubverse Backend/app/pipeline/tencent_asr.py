@@ -294,13 +294,23 @@ def _parse_tencent_result(
             start_ms = sentence.get("StartMs", 0)
             end_ms = sentence.get("EndMs", 0)
             speaker = sentence.get("SpeakerId", 0)
-            confidence = sentence.get("WordsResultDetail", [])
+            word_details = sentence.get("WordsResultDetail", []) or []
 
             # Calculate average confidence from word details
-            avg_conf = 0.0
-            if confidence:
-                confs = [w.get("Confidence", 0) for w in confidence]
-                avg_conf = sum(confs) / len(confs) if confs else 0.0
+            confs = [w.get("Confidence", 0) for w in word_details]
+            avg_conf = sum(confs) / len(confs) if confs else 0.0
+
+            # Normalize word timestamps to seconds for downstream splitting.
+            words = [
+                {
+                    "word": w.get("Word", "").strip(),
+                    "start": round(w.get("StartMs", 0) / 1000.0, 3),
+                    "end": round(w.get("EndMs", 0) / 1000.0, 3),
+                    "confidence": round(w.get("Confidence", 0.0), 4),
+                }
+                for w in word_details
+                if w.get("Word", "").strip()
+            ]
 
             segments.append({
                 "start": round(start_ms / 1000.0, 3),
@@ -308,6 +318,7 @@ def _parse_tencent_result(
                 "text": text,
                 "confidence": round(avg_conf, 4),
                 "speaker_id": speaker,
+                "words": words,
                 "source": "tencent",
             })
     elif result_text:

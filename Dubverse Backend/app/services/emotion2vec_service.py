@@ -25,6 +25,16 @@ _MODEL = None
 _MODEL_AVAILABLE = None
 
 
+def _norm_label(lbl: str) -> str:
+    """Normalize emotion2vec label strings.
+    Handles: '<neutral>' → 'neutral', '其他/other' → 'other', 'NEUTRAL' → 'neutral'
+    """
+    s = str(lbl).strip("<>")
+    if "/" in s:
+        s = s.split("/")[-1]  # bilingual "中立/neutral" → "neutral"
+    return s.strip().lower()
+
+
 def is_enabled() -> bool:
     """Check if emotion analysis is available (needs numpy + torchaudio)."""
     try:
@@ -33,6 +43,213 @@ def is_enabled() -> bool:
         return True
     except ImportError:
         return False
+
+
+# emotion2vec_plus_base label set
+_E2V_LABELS = ["angry", "disgusted", "fearful", "happy", "neutral", "other", "sad", "surprised", "unknown"]
+
+# Map emotion2vec labels → chord emotion names (must match _NEXT_CHORD / _EMOTION_INTENSITY in routes.py)
+_E2V_TO_CHORD = {
+    "angry":     "Anger",
+    "disgusted": "Contempt",
+    "fearful":   "Fear",
+    "happy":     "Excitement",
+    "neutral":   "Serenity",
+    "other":     "Serenity",
+    "sad":       "Grief",
+    "surprised": "Awe",
+    "unknown":   "Serenity",
+}
+
+# Acoustic feature → pseudo-emotion scores (fallback when FunASR not available)
+# Features: [rms, energy_var, zcr, spectral_centroid, spectral_rolloff, speech_rate]
+def _features_to_emotion_scores(features) -> Dict[str, float]:
+    """Convert 6-element audio feature vector to rough emotion probability scores."""
+    import numpy as np
+    rms, e_var, zcr, centroid, rolloff, speech_rate = features
+
+    scores: Dict[str, float] = {}
+    # High energy + high centroid = angry/happy
+    arousal = float(np.clip(rms * 10 + centroid * 5, 0, 1))
+    # Low energy + low centroid = sad/neutral
+    valence_neg = float(np.clip(1.0 - rms * 8, 0, 1))
+    # High variance = surprised/fearful
+    variability = float(np.clip(e_var * 20, 0, 1))
+
+    scores["angry"]     = float(np.clip(arousal * 0.8 - valence_neg * 0.3, 0, 1))
+    scores["happy"]     = float(np.clip(arousal * 0.6 + (1 - valence_neg) * 0.4, 0, 1))
+    scores["sad"]       = float(np.clip(valence_neg * 0.9, 0, 1))
+    scores["fearful"]   = float(np.clip(variability * 0.7 + valence_neg * 0.3, 0, 1))
+    scores["surprised"] = float(np.clip(variability * 0.8 + arousal * 0.2, 0, 1))
+    scores["neutral"]   = float(np.clip(1.0 - arousal * 0.5 - variability * 0.3, 0, 1))
+    scores["disgusted"] = float(np.clip(valence_neg * 0.5 + arousal * 0.2, 0, 1))
+    scores["other"]     = 0.05
+    scores["unknown"]   = 0.02
+
+    # Normalise to sum=1
+    total = sum(scores.values()) or 1.0
+    return {k: round(v / total, 4) for k, v in scores.items()}
+
+
+def analyze_single_segment(audio_path: str) -> Optional[Dict[str, Any]]:
+    """
+    Analyse a single audio file and return emotion scores.
+
+    Returns:
+        {
+          "method": "emotion2vec" | "audio-features",
+          "emotions": [{"label": str, "score": float, "chord": str}, ...],  # sorted desc
+        }
+        or None on failure.
+    """
+    if not os.path.exists(audio_path):
+        logger.warning(f"[EMOTION2VEC] File not found: {audio_path}")
+        return None
+
+    try:
+        import numpy as np
+        import soundfile as sf
+
+        audio, sr = sf.read(audio_path)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        audio = audio.astype(np.float32)
+
+        # --- Try full emotion2vec model first ---
+        if _check_emotion2vec():
+            try:
+                from funasr import AutoModel
+                global _MODEL
+                if _MODEL is None:
+                    logger.info("[EMOTION2VEC] Loading emotion2vec model...")
+                    _MODEL = AutoModel(model="iic/emotion2vec_plus_base")
+                    logger.info("[EMOTION2VEC] Model loaded")
+
+                result = _MODEL.generate(audio, output_dir=None, granularity="utterance", extract_embedding=False)
+                if result and result[0].get("scores"):
+                    labels = result[0].get("labels", _E2V_LABELS)
+                    raw_scores = result[0]["scores"]
+                    emotion_scores = {
+                        _norm_label(lbl): float(sc)
+                        for lbl, sc in zip(labels, raw_scores)
+                    }
+                    total = sum(emotion_scores.values()) or 1.0
+                    emotion_scores = {k: round(v / total, 4) for k, v in emotion_scores.items()}
+                    sorted_emotions = [
+                        {"label": k, "score": v, "chord": _E2V_TO_CHORD.get(k, "Calm")}
+                        for k, v in sorted(emotion_scores.items(), key=lambda x: x[1], reverse=True)
+                    ]
+                    return {"method": "emotion2vec", "emotions": sorted_emotions}
+            except Exception as exc:
+                logger.warning(f"[EMOTION2VEC] Model inference failed, using features: {exc}")
+
+        # --- Fallback: acoustic feature heuristics ---
+        audio_data = {"audio": audio, "sr": sr}
+        duration = len(audio) / sr
+        features = _extract_emotion_features(audio_data, 0.0, duration)
+        if features is None:
+            return None
+
+        emotion_scores = _features_to_emotion_scores(features)
+        sorted_emotions = [
+            {"label": k, "score": v, "chord": _E2V_TO_CHORD.get(k, "Calm")}
+            for k, v in sorted(emotion_scores.items(), key=lambda x: x[1], reverse=True)
+        ]
+        return {"method": "audio-features", "emotions": sorted_emotions}
+
+    except Exception as e:
+        logger.error(f"[EMOTION2VEC] analyze_single_segment failed: {e}", exc_info=True)
+        return None
+
+
+def analyze_sliding_window(
+    audio_path: str,
+    window_ms: int = 200,
+    hop_ms: int = 200,
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Run emotion analysis on successive windows of an audio clip to produce
+    a real frame-level emotion time series (instead of one label for the
+    whole clip).
+
+    Returns a list of {"t": float (0-1 fraction through clip), "scores": {label: score}}
+    or None on failure. Falls back to acoustic-feature heuristics per window
+    when the full emotion2vec model isn't available — still genuinely
+    per-window, just less precise than the trained model.
+    """
+    if not os.path.exists(audio_path):
+        logger.warning(f"[EMOTION2VEC] File not found: {audio_path}")
+        return None
+
+    try:
+        import numpy as np
+        import soundfile as sf
+
+        audio, sr = sf.read(audio_path)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        audio = audio.astype(np.float32)
+
+        total_samples = len(audio)
+        duration = total_samples / sr
+        if duration < 0.15:
+            return None
+
+        win_samples = max(1, int(window_ms / 1000 * sr))
+        hop_samples = max(1, int(hop_ms / 1000 * sr))
+
+        use_model = _check_emotion2vec()
+        model = None
+        if use_model:
+            try:
+                from funasr import AutoModel
+                global _MODEL
+                if _MODEL is None:
+                    logger.info("[EMOTION2VEC] Loading emotion2vec model...")
+                    _MODEL = AutoModel(model="iic/emotion2vec_plus_base")
+                    logger.info("[EMOTION2VEC] Model loaded")
+                model = _MODEL
+            except Exception as exc:
+                logger.warning(f"[EMOTION2VEC] Model load failed, using features: {exc}")
+                use_model = False
+
+        results: List[Dict[str, Any]] = []
+        pos = 0
+        while pos < total_samples:
+            window = audio[pos:min(total_samples, pos + win_samples)]
+            if len(window) < sr * 0.05:  # skip trailing scrap < 50ms
+                break
+            t_center = (pos + len(window) / 2) / total_samples
+
+            scores: Optional[Dict[str, float]] = None
+            if use_model and model is not None:
+                try:
+                    result = model.generate(window, output_dir=None, granularity="utterance", extract_embedding=False)
+                    if result and result[0].get("scores"):
+                        labels = result[0].get("labels", _E2V_LABELS)
+                        raw = result[0]["scores"]
+                        total = sum(raw) or 1.0
+                        scores = {_norm_label(lbl): float(sc) / total for lbl, sc in zip(labels, raw)}
+                        logger.info(f"[EMOTION2VEC] window t={t_center:.2f} scores: {sorted(scores.items(), key=lambda x: x[1], reverse=True)[:4]}")
+                except Exception as exc:
+                    logger.debug(f"[EMOTION2VEC] Window inference failed at t={t_center:.2f}: {exc}")
+
+            if scores is None:
+                audio_data = {"audio": window, "sr": sr}
+                features = _extract_emotion_features(audio_data, 0.0, len(window) / sr)
+                if features is not None:
+                    scores = _features_to_emotion_scores(features)
+
+            if scores:
+                results.append({"t": round(t_center, 4), "scores": scores})
+
+            pos += hop_samples
+
+        return results if results else None
+
+    except Exception as e:
+        logger.error(f"[EMOTION2VEC] analyze_sliding_window failed: {e}", exc_info=True)
+        return None
 
 
 def _check_emotion2vec() -> bool:

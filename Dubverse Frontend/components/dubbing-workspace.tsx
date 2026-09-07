@@ -56,6 +56,9 @@ import {
   type Voice,
   type JobStatus,
 } from "@/lib/api-client"
+import { useEditorStore } from "@/lib/editor-store"
+import { usePlan } from "@/lib/use-plan"
+import { useT } from '@/lib/use-t'
 
 interface DubbingWorkspaceProps {
   video: VideoSource
@@ -63,22 +66,74 @@ interface DubbingWorkspaceProps {
 }
 
 const LANGUAGES = [
-  { code: "en", name: "English", flag: "🇺🇸" },
+  // East / Southeast Asia
+  { code: "zh", name: "Mandarin Chinese", flag: "🇨🇳" },
+  { code: "yue", name: "Cantonese", flag: "🇭🇰" },
+  { code: "ja", name: "Japanese", flag: "🇯🇵" },
+  { code: "ko", name: "Korean", flag: "🇰🇷" },
+  { code: "vi", name: "Vietnamese", flag: "🇻🇳" },
+  { code: "th", name: "Thai", flag: "🇹🇭" },
+  { code: "id", name: "Indonesian", flag: "🇮🇩" },
+  { code: "ms", name: "Malay", flag: "🇲🇾" },
+  { code: "tl", name: "Filipino", flag: "🇵🇭" },
+  { code: "km", name: "Khmer", flag: "🇰🇭" },
+  { code: "my", name: "Burmese", flag: "🇲🇲" },
+  // South Asia
+  { code: "hi", name: "Hindi", flag: "🇮🇳" },
+  { code: "bn", name: "Bengali", flag: "🇧🇩" },
+  { code: "ur", name: "Urdu", flag: "🇵🇰" },
+  { code: "ta", name: "Tamil", flag: "🇱🇰" },
+  { code: "te", name: "Telugu", flag: "🇮🇳" },
+  { code: "gu", name: "Gujarati", flag: "🇮🇳" },
+  { code: "mr", name: "Marathi", flag: "🇮🇳" },
+  { code: "si", name: "Sinhala", flag: "🇱🇰" },
+  // Middle East / Central Asia
+  { code: "ar", name: "Arabic", flag: "🇸🇦" },
+  { code: "fa", name: "Persian", flag: "🇮🇷" },
+  { code: "he", name: "Hebrew", flag: "🇮🇱" },
+  { code: "tr", name: "Turkish", flag: "🇹🇷" },
+  // Western Europe
+  { code: "en", name: "English", flag: "🇬🇧" },
   { code: "es", name: "Spanish", flag: "🇪🇸" },
   { code: "fr", name: "French", flag: "🇫🇷" },
   { code: "de", name: "German", flag: "🇩🇪" },
   { code: "it", name: "Italian", flag: "🇮🇹" },
   { code: "pt", name: "Portuguese", flag: "🇵🇹" },
-  { code: "ja", name: "Japanese", flag: "🇯🇵" },
-  { code: "ko", name: "Korean", flag: "🇰🇷" },
-  { code: "zh", name: "Chinese", flag: "🇨🇳" },
-  { code: "ar", name: "Arabic", flag: "🇸🇦" },
-  { code: "hi", name: "Hindi", flag: "🇮🇳" },
-  { code: "ru", name: "Russian", flag: "🇷🇺" },
   { code: "nl", name: "Dutch", flag: "🇳🇱" },
+  { code: "sv", name: "Swedish", flag: "🇸🇪" },
+  { code: "no", name: "Norwegian", flag: "🇳🇴" },
+  { code: "da", name: "Danish", flag: "🇩🇰" },
+  { code: "fi", name: "Finnish", flag: "🇫🇮" },
+  { code: "el", name: "Greek", flag: "🇬🇷" },
+  // Eastern Europe
+  { code: "ru", name: "Russian", flag: "🇷🇺" },
+  { code: "uk", name: "Ukrainian", flag: "🇺🇦" },
+  { code: "pl", name: "Polish", flag: "🇵🇱" },
+  { code: "cs", name: "Czech", flag: "🇨🇿" },
+  { code: "sk", name: "Slovak", flag: "🇸🇰" },
+  { code: "hu", name: "Hungarian", flag: "🇭🇺" },
+  { code: "ro", name: "Romanian", flag: "🇷🇴" },
+  { code: "bg", name: "Bulgarian", flag: "🇧🇬" },
+  { code: "hr", name: "Croatian", flag: "🇭🇷" },
+  { code: "sr", name: "Serbian", flag: "🇷🇸" },
+  // Africa
+  { code: "sw", name: "Swahili", flag: "🇰🇪" },
+  { code: "am", name: "Amharic", flag: "🇪🇹" },
+  { code: "yo", name: "Yoruba", flag: "🇳🇬" },
+  { code: "ig", name: "Igbo", flag: "🇳🇬" },
+  { code: "zu", name: "Zulu", flag: "🇿🇦" },
+  // Americas
+  { code: "pt-BR", name: "Portuguese (Brazil)", flag: "🇧🇷" },
+  { code: "es-MX", name: "Spanish (Mexico)", flag: "🇲🇽" },
 ]
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+const VOICES_BY_GENDER: Record<string, string[]> = {
+  male:   ['male-1', 'male-2', 'male-3', 'male-4'],
+  female: ['female-1', 'female-2', 'female-3', 'female-4'],
+  child:  ['child-1', 'child-2', 'child-3'],
+}
 
 function buildDetectedVoices(
   transcript: Transcript,
@@ -90,6 +145,8 @@ function buildDetectedVoices(
     map[seg.speaker].push({ start: seg.start, end: seg.end })
   }
 
+  const genderUsage: Record<string, number> = {}
+
   return Object.entries(map).map(([speakerId, timeRanges]) => {
     const gender = speakerGenders?.[speakerId]
     const type: DetectedVoice["type"] =
@@ -97,7 +154,10 @@ function buildDetectedVoices(
     const label =
       speakerId.charAt(0).toUpperCase() +
       speakerId.slice(1).replace(/-/g, " ").replace(/_/g, " ")
-    const defaultVoice = type === "female" ? "female-1" : type === "child" ? "child-1" : "male-1"
+    const pool = VOICES_BY_GENDER[type] ?? VOICES_BY_GENDER.male
+    const idx = genderUsage[type] ?? 0
+    const defaultVoice = pool[idx % pool.length]
+    genderUsage[type] = idx + 1
     return {
       id: speakerId,
       type,
@@ -111,6 +171,8 @@ function buildDetectedVoices(
 // ── Component ──────────────────────────────────────────────────────────────
 
 export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
+  const t = useT()
+  const { hasFeature } = usePlan()
   const [targetLanguage, setTargetLanguage] = useState("en")
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
@@ -300,6 +362,32 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
     }
   }, [video.jobId])
 
+  // ── Check if the job is already completed on mount ──────────────────────
+  // Without this, returning to a completed job shows "No Dubbed Video Yet"
+  // instead of the result with the real "Open in Editor" link, because
+  // dubbingComplete starts false and nothing sets it until a NEW dub is run.
+  useEffect(() => {
+    if (!video.jobId) return
+    let cancelled = false
+    apiClient.getJobStatus(video.jobId).then(async status => {
+      if (cancelled) return
+      if (status.status === "completed") {
+        setDubbingComplete(true)
+        setDubbingProgress(100)
+        if (status.dubbed_video_url) {
+          // Through mediaUrl, not string concatenation: media routes require
+          // auth and a <video> element cannot send a header, so a plain URL
+          // returns 401 and the player shows nothing.
+          const fullUrl = status.dubbed_video_url.startsWith("http")
+            ? status.dubbed_video_url
+            : await apiClient.mediaUrl(status.dubbed_video_url)
+          if (!cancelled) setDubbedVideoUrl(fullUrl)
+        }
+      }
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [video.jobId])
+
   // ── Video player handlers ─────────────────────────────────────────────────
   const handlePlayPause = () => {
     if (videoRef.current) {
@@ -419,10 +507,12 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
           setIsDubbing(false)
           setDubbingComplete(true)
           if (status.dubbed_video_url) {
+            // Same reason as the mount-time check above: media routes are
+            // authenticated, so the URL must carry the token.
             const fullUrl = status.dubbed_video_url.startsWith("http")
               ? status.dubbed_video_url
-              : `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}${status.dubbed_video_url}`
-            setDubbedVideoUrl(fullUrl)
+              : await apiClient.mediaUrl(status.dubbed_video_url)
+            if (!cancelled) setDubbedVideoUrl(fullUrl)
           }
           return
         }
@@ -467,9 +557,15 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
     }
 
     try {
+      // Merge workspace detectedVoices with editor store speakerVoiceMap
+      // Editor store takes priority because the Speaker Voice Panel is the
+      // canonical voice assignment UI.
+      const { speakerVoiceMap, speakerPitchMap } = useEditorStore.getState()
+
       const voiceMapping: Record<string, string> = {}
       for (const v of detectedVoices) {
-        voiceMapping[v.id] = v.selectedVoice
+        // Prefer editor store assignment; fall back to workspace default
+        voiceMapping[v.id] = speakerVoiceMap[v.id] || v.selectedVoice
       }
 
       const transcriptSegments = transcript
@@ -483,14 +579,28 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
             }))
           )
 
-      // Convert UI pitch/speed settings to backend voice_settings format.
-      // pitch -> style (0=flat, 100=expressive), speed is handled by TTS provider.
+      // Build voice_settings from editor store speakerPitchMap.
+      // Keys in voice_settings must match speaker IDs so the backend
+      // can look up per-speaker overrides.
       const voiceSettings: Record<string, Record<string, number>> = {}
+      for (const [speakerId, pitch] of Object.entries(speakerPitchMap)) {
+        if (pitch !== 0) {
+          voiceSettings[speakerId] = {
+            pitch,
+            stability: 0.3,
+            similarity_boost: 0.9,
+            style: 0.5,
+          }
+        }
+      }
+      // Also merge workspace voiceSettingsMap (legacy path) for backward compat
       for (const [voiceId, settings] of Object.entries(voiceSettingsMap)) {
-        voiceSettings[voiceId] = {
-          style: settings.pitch / 100,
-          stability: 1 - (settings.pitch / 100) * 0.5,  // higher pitch variance = lower stability
-          similarity_boost: 0.9,
+        if (!voiceSettings[voiceId]) {
+          voiceSettings[voiceId] = {
+            style: settings.pitch / 100,
+            stability: 1 - (settings.pitch / 100) * 0.5,
+            similarity_boost: 0.9,
+          }
         }
       }
 
@@ -568,7 +678,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
           <Select value={targetLanguage} onValueChange={setTargetLanguage}>
             <SelectTrigger className="w-[160px] h-8 text-sm">
               <Languages className="mr-2 h-3.5 w-3.5" />
-              <SelectValue placeholder="Target Language" />
+              <SelectValue placeholder={t('Target Language')} />
             </SelectTrigger>
             <SelectContent>
               {LANGUAGES.map((lang) => (
@@ -586,7 +696,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
-              <DropdownMenuLabel>Dubbing Engine</DropdownMenuLabel>
+              <DropdownMenuLabel>{t('Dubbing Engine')}</DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuRadioGroup value={dubbingEngine} onValueChange={(v) => setDubbingEngine(v as 'dubmaster' | 'vozo')}>
                 <DropdownMenuRadioItem value="dubmaster">
@@ -599,11 +709,11 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
               {dubbingEngine === "dubmaster" && (
                 <>
                   <DropdownMenuSeparator />
-                  <DropdownMenuLabel>TTS Engine</DropdownMenuLabel>
+                  <DropdownMenuLabel>{t('TTS Engine')}</DropdownMenuLabel>
                   <DropdownMenuSeparator />
                   <DropdownMenuRadioGroup value={ttsProvider} onValueChange={handleSwitchProvider}>
                     <DropdownMenuRadioItem value="elevenlabs" disabled={!providerInfo.elevenlabs?.available}>
-                      ElevenLabs
+                      {t('ElevenLabs')}
                     </DropdownMenuRadioItem>
                     <DropdownMenuRadioItem value="fish-audio" disabled={!providerInfo["fish-audio"]?.available}>
                       Fish Audio S1 {providerInfo["fish-audio"]?.voice_cloning && "(Voice Clone)"}
@@ -616,7 +726,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
           <Badge variant="outline" className={`text-xs h-6 font-normal ${switchingProvider ? "animate-pulse" : ""}`}>
             {dubbingEngine === "vozo"
               ? "Vozo AI"
-              : ttsProvider === "fish-audio" ? "Fish Audio S1" : "ElevenLabs"}
+              : ttsProvider === "fish-audio" ? t('Fish Audio S1') : t('ElevenLabs')}
           </Badge>
           <Button
             onClick={handleStartDubbing}
@@ -624,26 +734,33 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
             className="gap-2 h-8 text-sm"
             variant={dubbingComplete ? "outline" : "default"}
           >
+            {/* Always reads "Generate Dub" when idle, including after a
+                completed run. The button stays clickable either way, so
+                labelling it "Dub Complete" only hid the action behind a status
+                the Pipeline Monitor already reports. The green tick and the
+                outline variant carry the "this job has been dubbed" signal. */}
             {isDubbing ? (
               <>
                 <RefreshCw className="h-3.5 w-3.5 animate-spin" />
                 Dubbing... {Math.round(dubbingProgress)}%
               </>
-            ) : dubbingComplete ? (
-              <>
-                <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
-                Dub Complete
-              </>
             ) : (
               <>
-                <Sparkles className="h-3.5 w-3.5" />
+                {dubbingComplete
+                  ? <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+                  : <Sparkles className="h-3.5 w-3.5" />}
                 Generate Dub
               </>
             )}
           </Button>
-          <Button variant="secondary" className="gap-2 h-8 text-sm" disabled={!dubbingComplete || !dubbedVideoUrl}>
+          <Button
+            variant="secondary"
+            className="gap-2 h-8 text-sm"
+            disabled={!dubbingComplete || !dubbedVideoUrl}
+            onClick={() => { if (dubbedVideoUrl) window.open(dubbedVideoUrl, '_blank') }}
+          >
             <Download className="h-3.5 w-3.5" />
-            Export
+            {t('Export')}
           </Button>
         </div>
       </div>
@@ -655,7 +772,9 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
           <div ref={videoContainerRef} className="relative flex-1 bg-black min-h-0">
             <video
               ref={videoRef}
-              src={mainVideoSrc}
+              // undefined, not "": an empty src makes the browser resolve it
+              // against the current page and re-download the whole document.
+              src={mainVideoSrc || undefined}
               className="absolute inset-0 h-full w-full object-contain"
               onTimeUpdate={handleTimeUpdate}
               onLoadedMetadata={handleLoadedMetadata}
@@ -680,25 +799,24 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                 <div className="flex flex-col items-center gap-4 text-white">
                   <Waveform className="h-16 w-16 animate-pulse text-primary" />
                   <div className="text-center">
-                    <p className="text-lg font-medium">Analyzing Audio</p>
+                    <p className="text-lg font-medium">{t('Analyzing Audio')}</p>
                     <p className="text-sm text-gray-400">
                       {video.jobId
-                        ? "Waiting for transcription to complete..."
-                        : "Detecting voices and identifying speakers..."}
+                        ? t('Waiting for transcription to complete...') : t('Detecting voices and identifying speakers...')}
                     </p>
                   </div>
                   <div className="flex items-center gap-6 text-sm">
                     <div className="flex items-center gap-2">
                       <User className="h-4 w-4 text-blue-400" />
-                      <span>Male voices</span>
+                      <span>{t('Male voices')}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <User className="h-4 w-4 text-pink-400" />
-                      <span>Female voices</span>
+                      <span>{t('Female voices')}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <Baby className="h-4 w-4 text-green-400" />
-                      <span>Children</span>
+                      <span>{t('Children')}</span>
                     </div>
                   </div>
                 </div>
@@ -722,7 +840,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                   onClick={() => setShowOriginal(false)}
                   className="text-xs h-7"
                 >
-                  Dubbed
+                  {t('Dubbed')}
                 </Button>
                 <Button
                   size="sm"
@@ -730,7 +848,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                   onClick={() => setShowOriginal(true)}
                   className="text-xs h-7"
                 >
-                  Original
+                  {t('Original')}
                 </Button>
               </div>
             )}
@@ -777,26 +895,26 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
           </div>
         </div>
 
-        {/* Sidebar Panel — fixed width, fits in viewport */}
-        <div className="w-80 shrink-0 border-l border-border/50 bg-card/50 backdrop-blur-md flex flex-col min-h-0">
+        {/* Sidebar Panel — editor feature (Premium+) */}
+        {hasFeature('editor') && <div className="w-80 shrink-0 border-l border-border/50 bg-card/50 backdrop-blur-md flex flex-col min-h-0">
           <Tabs value={activeTab} onValueChange={setActiveTab} className="flex h-full flex-col min-h-0">
             <div className="mx-3 mt-3 shrink-0 space-y-1">
               <TabsList className="grid w-full grid-cols-4">
                 <TabsTrigger value="pipeline" className="gap-1 text-xs px-1">
                   <Activity className="h-3.5 w-3.5" />
-                  Pipeline
+                  {t('Pipeline')}
                 </TabsTrigger>
                 <TabsTrigger value="voices" className="gap-1 text-xs px-1">
                   <Mic2 className="h-3.5 w-3.5" />
-                  Voices
+                  {t('Voices')}
                 </TabsTrigger>
                 <TabsTrigger value="transcript" className="gap-1 text-xs px-1">
                   <Waveform className="h-3.5 w-3.5" />
-                  Script
+                  {t('Script')}
                 </TabsTrigger>
                 <TabsTrigger value="timeline" className="gap-1 text-xs px-1">
                   <Settings2 className="h-3.5 w-3.5" />
-                  Timeline
+                  {t('Timeline')}
                 </TabsTrigger>
               </TabsList>
               <TabsList className="grid w-full grid-cols-3">
@@ -807,11 +925,11 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                 </TabsTrigger>
                 <TabsTrigger value="quality" className="gap-1 text-xs px-1">
                   <BarChart3 className="h-3.5 w-3.5" />
-                  Quality
+                  {t('Quality')}
                 </TabsTrigger>
                 <TabsTrigger value="studio" className="gap-1 text-xs px-1 relative">
                   <Film className="h-3.5 w-3.5" />
-                  Studio
+                  {t('Studio')}
                   <Crown className="absolute -right-1 -top-1 h-2.5 w-2.5 text-amber-400" />
                 </TabsTrigger>
               </TabsList>
@@ -873,14 +991,14 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                     <div className="rounded-full bg-muted p-4 mb-4">
                       <Sparkles className="h-8 w-8 text-muted-foreground" />
                     </div>
-                    <h3 className="font-semibold text-foreground text-sm">No Dubbed Video Yet</h3>
+                    <h3 className="font-semibold text-foreground text-sm">{t('No Dubbed Video Yet')}</h3>
                     <p className="mt-2 text-xs text-muted-foreground max-w-xs">
                       Select your target language, configure voice settings, then click &quot;Generate Dub&quot; to create your
                       dubbed video.
                     </p>
                     <Button className="mt-4 gap-2 text-sm h-8" onClick={handleStartDubbing} disabled={isAnalyzing}>
                       <Sparkles className="h-3.5 w-3.5" />
-                      Generate Dub Now
+                      {t('Generate Dub')}
                     </Button>
                   </div>
                 )}
@@ -902,17 +1020,17 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                   <div className="rounded-lg border border-amber-500/30 bg-gradient-to-br from-amber-500/10 to-orange-500/5 p-4">
                     <div className="flex items-center gap-2 mb-2">
                       <Crown className="h-5 w-5 text-amber-400" />
-                      <h3 className="font-semibold text-sm text-foreground">Studio Editor</h3>
+                      <h3 className="font-semibold text-sm text-foreground">{t('Studio Editor')}</h3>
                       <Badge className="bg-amber-500/15 text-amber-400 border-amber-500/30 text-[10px]">PRO</Badge>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      Professional video editor with timeline, lip-sync adjustment, and frame-by-frame control.
+                      {t('Professional video editor with timeline, lip-sync adjustment, and frame-by-frame control.')}
                     </p>
                   </div>
 
                   {/* Features List */}
                   <div className="rounded-lg border border-border bg-card p-3 space-y-3">
-                    <h4 className="text-xs font-medium text-foreground">Studio Features</h4>
+                    <h4 className="text-xs font-medium text-foreground">{t('Studio Features')}</h4>
                     {[
                       { icon: Film, label: "Multi-track timeline editor", desc: "Edit audio & video tracks independently" },
                       { icon: Mic2, label: "Per-segment voice tuning", desc: "Adjust pitch, speed & emotion per line" },
@@ -924,8 +1042,8 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                           <Icon className="h-3.5 w-3.5 text-muted-foreground" />
                         </div>
                         <div>
-                          <p className="text-xs font-medium text-foreground">{label}</p>
-                          <p className="text-[10px] text-muted-foreground">{desc}</p>
+                          <p className="text-xs font-medium text-foreground">{t(label)}</p>
+                          <p className="text-[10px] text-muted-foreground">{t(desc)}</p>
                         </div>
                       </div>
                     ))}
@@ -936,12 +1054,15 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                     <Button
                       className="w-full gap-2 h-9 text-xs bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white border-0"
                       onClick={() => {
-                        // Open studio editor with current job context
-                        window.open(`/studio?job=${video.jobId}&lang=${targetLanguage}`, "_blank")
+                        // Open the real DubVerse editor
+                        if (video.jobId) {
+                          window.open(`/editor/${video.jobId}`, "_blank")
+                        }
                       }}
+                      disabled={!video.jobId}
                     >
                       <Film className="h-3.5 w-3.5" />
-                      Open in Studio Editor
+                      {t('Open in Editor')}
                     </Button>
                   ) : (
                     <div className="space-y-2">
@@ -951,10 +1072,10 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                         disabled
                       >
                         <Lock className="h-3.5 w-3.5" />
-                        Complete Dubbing to Unlock
+                        {t('Complete Dubbing to Unlock')}
                       </Button>
                       <p className="text-[10px] text-center text-muted-foreground">
-                        Generate a dub first, then open it in the Studio Editor for fine-tuning.
+                        {t('Generate a dub first, then open it in the Studio Editor for fine-tuning.')}
                       </p>
                     </div>
                   )}
@@ -962,14 +1083,14 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                   {/* Subscription CTA */}
                   <div className="rounded-lg bg-muted/50 p-3 text-center">
                     <p className="text-[10px] text-muted-foreground">
-                      Studio Editor is available on <span className="text-amber-400 font-medium">Professional</span> and <span className="text-amber-400 font-medium">Enterprise</span> plans.
+                      {t('Studio Editor is available on')} <span className="text-amber-400 font-medium">{t('Professional')}</span> and <span className="text-amber-400 font-medium">{t('Enterprise')}</span> plans.
                     </p>
                   </div>
                 </div>
               </ScrollArea>
             </TabsContent>
           </Tabs>
-        </div>
+        </div>}
       </div>
     </div>
   )

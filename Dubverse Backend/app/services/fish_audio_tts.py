@@ -1,11 +1,13 @@
 """
-Fish Audio S1 TTS service.
+Fish Audio S2.1 TTS service.
 
 Drop-in alternative to ElevenLabs TTS for the Dubverse dubbing pipeline.
 Uses the Fish Audio async Python SDK for voice-cloned, emotion-tagged speech.
 
-Emotion control is handled via inline text tags (e.g. ``(angry)``, ``(calm)``)
-prepended to the text before synthesis.
+Emotion control is handled via one composed inline directive in square
+brackets (e.g. ``[gruff, hopeful, soft trailing tail]``) prepended to the text
+before synthesis — see ``compose_fish_directive`` in dubbing_service. The
+``(parens)`` form is S1 legacy syntax and does nothing on S2.x.
 
 Voice identity can come from:
 1. **Inline references** — raw audio bytes + transcript extracted from the
@@ -19,9 +21,44 @@ import os
 import logging
 import importlib.util
 import random
+import base64
+import httpx
 from typing import Optional, Dict, List
 
 from app.config import get_settings
+
+# Fish's REST endpoint. We POST here directly (JSON + `model` header) instead of
+# using the SDK's tts.convert, because only this path triggers S2's inline
+# [bracket] tag parsing — the SDK's msgpack request silently ignores the tags
+# (verified: two different tags produced byte-identical audio via the SDK, but
+# distinct audio via this endpoint). See _convert_via_http.
+_FISH_TTS_URL = "https://api.fish.audio/v1/tts"
+# s2.1-pro is the only model that measurably acts on the composed [bracket]
+# directive. Measured 2026-07-29 over 2 models x 4 directives x 2 reps against a
+# real voice: a "[whispering, barely audible, hushed]" directive dropped mean
+# volume ~3-9 dB below an undirected read on s2.1-pro in 4/4 reps, and 0/4 on
+# s2-pro (indistinguishable from neutral, with or without loudness
+# normalization). Emotion pills were effectively inert before this.
+_FISH_MODEL = os.getenv("FISH_AUDIO_MODEL", "s2.1-pro")
+# The SDK's tts.convert types `model` as Literal['speech-1.5','speech-1.6','s1',
+# 's2-pro'] — it cannot express s2.1-pro. The msgpack path it serves drops the
+# inline directive anyway (see below), so it stays on s2-pro rather than passing
+# a value the SDK would reject.
+_FISH_SDK_MODEL = "s2-pro"
+
+# Fish's own documented defaults. `temperature` is described upstream as
+# "controls expressiveness" and `top_p` as nucleus-sampling diversity; both
+# default to 0.7. Defaulted here rather than at the call sites so every caller
+# inherits one value, and overridable by env for probing.
+#
+# The previous 0.25/0.55 was a leftover from a measurement probe (chosen to
+# suppress run-to-run variance so a directive's effect could be measured), not a
+# tuned value. A/B on s2.1-pro showed no intensity difference between the two
+# settings — both sat inside the 3.3 dB within-condition spread. Note the
+# trade-off: 0.7 restores ~1.5-2 dB of run-to-run variance, so future A/B probes
+# should pin these via env rather than assume the default is quiet.
+_FISH_TEMPERATURE = float(os.getenv("FISH_AUDIO_TEMPERATURE", "0.7"))
+_FISH_TOP_P = float(os.getenv("FISH_AUDIO_TOP_P", "0.7"))
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +183,84 @@ class FishAudioTTS:
             logger.error(f"Failed to fetch Fish Audio voices: {e}")
             return self._fallback_voice_list()
 
+    async def list_voices_filtered(
+        self,
+        page: int = 1,
+        page_size: int = 50,
+        tag: Optional[str] = None,
+        gender: Optional[str] = None,
+        language: Optional[str] = None,
+        search: Optional[str] = None,
+        sort_by: str = "task_count",
+    ) -> Dict:
+        """Filter/paginate the Fish Audio voice library via the SDK.
+
+        Returns {"voices": [...], "total": int|None, "page": int, "page_size": int}.
+        ``gender`` is mapped to a tag filter ("male"/"female"/"child").
+        When both ``tag`` and ``gender`` are given they're AND-combined.
+        """
+        if not self.enabled:
+            return {"voices": [], "total": 0, "page": page, "page_size": page_size}
+
+        tags: List[str] = []
+        if tag:
+            tags.append(tag)
+        if gender:
+            tags.append(gender)
+
+        list_kwargs: Dict = {
+            "page_size": page_size,
+            "page_number": page,
+            "sort_by": sort_by,
+        }
+        if tags:
+            list_kwargs["tags"] = tags
+        if language:
+            list_kwargs["language"] = language
+        if search:
+            list_kwargs["title"] = search
+
+        try:
+            client = self._get_client()
+            resp = await client.voices.list(**list_kwargs)
+            items = list(resp.items) if hasattr(resp, "items") else []
+            formatted: List[Dict] = []
+            for v in items:
+                v_tags = list(getattr(v, "tags", None) or [])
+                v_tags_lower = {t.lower() for t in v_tags}
+                v_gender = (
+                    "male" if "male" in v_tags_lower else
+                    "female" if "female" in v_tags_lower else
+                    "child" if "child" in v_tags_lower else
+                    "unknown"
+                )
+                formatted.append({
+                    "voice_id": v.id,
+                    "name": getattr(v, "title", None) or "Fish Audio Voice",
+                    "category": "cloned",
+                    "labels": {
+                        "gender": v_gender,
+                        "accent": "cloned",
+                        "age": "child" if "child" in v_tags_lower else "adult",
+                    },
+                    "preview_url": f"/api/voice-preview/{v.id}",
+                    "description": (getattr(v, "description", "") or "").strip(),
+                    "tags": v_tags,
+                    "task_count": getattr(v, "task_count", 0),
+                    "like_count": getattr(v, "like_count", 0),
+                    "visibility": getattr(v, "visibility", "public"),
+                })
+            total = getattr(resp, "total", None)
+            return {
+                "voices": formatted,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
+        except Exception as e:
+            logger.error(f"Fish voice list (filtered) failed: {e}")
+            return {"voices": [], "total": 0, "page": page, "page_size": page_size}
+
     def _fallback_voice_list(self) -> List[Dict]:
         """Return placeholder entries from the env-based voice map."""
         result = []
@@ -182,8 +297,72 @@ class FishAudioTTS:
 
     # ----- TTS ------------------------------------------------------------ #
 
+    async def _convert_via_http(self, tts_kwargs: Dict) -> bytes:
+        """POST to Fish's /v1/tts REST endpoint with the `model` HEADER.
+
+        This is the ONLY request shape that triggers S2's inline [bracket] tag
+        parsing — the fish-audio-sdk's msgpack request ignores the tags. Mirrors
+        the Playground's cURL: JSON body + `model: s2-pro` header. Handles both
+        voice modes: a pre-uploaded ``reference_id`` and inline ``references``
+        (zero-shot cloning), the latter base64-encoded for JSON transport.
+        """
+        cfg = tts_kwargs.get("config")
+        body: Dict = {
+            "text": tts_kwargs["text"],
+            "format": tts_kwargs.get("format", "mp3"),
+            "mp3_bitrate": getattr(cfg, "mp3_bitrate", 128),
+            "normalize": getattr(cfg, "normalize", True),
+        }
+        # Expressiveness knobs. Previously accepted by text_to_speech but never
+        # sent, so both sat at Fish's 0.7 default. Run-to-run variance at 0.7 is
+        # ~1.5-2 dB — the same magnitude as a weak directive's effect — so a
+        # caller that wants a directive to read clearly needs to lower these.
+        for _k in ("temperature", "top_p"):
+            _v = getattr(cfg, _k, None)
+            if _v is not None:
+                body[_k] = _v
+        # Fish defaults prosody.normalize_loudness to true. We had never sent the
+        # field at all, so every request was loudness-normalised by omission rather
+        # than by intent. Send it explicitly.
+        # NOTE: this is a CORRECTNESS fix, not an intensity fix. A/B on s2.1-pro
+        # (4 conditions x 3 reps, ~2.9s clips, one voice) showed NO measurable
+        # effect: the normalize_loudness=false delta was ~0.3 dB LUFS, well inside
+        # the 3.3 dB within-condition spread. Do not expect an audible change.
+        prosody: Dict = {"normalize_loudness": False}
+        speed = tts_kwargs.get("speed")
+        if speed and float(speed) != 1.0:
+            prosody["speed"] = float(speed)
+        body["prosody"] = prosody
+
+        refs = tts_kwargs.get("references")
+        if refs:
+            body["references"] = [
+                {
+                    "audio": base64.b64encode(
+                        r.audio if hasattr(r, "audio") else r["audio"]
+                    ).decode("ascii"),
+                    "text": r.text if hasattr(r, "text") else r["text"],
+                }
+                for r in refs
+            ]
+        elif tts_kwargs.get("reference_id"):
+            body["reference_id"] = tts_kwargs["reference_id"]
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "model": tts_kwargs.get("model") or _FISH_MODEL,
+        }
+        async with httpx.AsyncClient(timeout=90) as client:
+            resp = await client.post(_FISH_TTS_URL, headers=headers, json=body)
+        if resp.status_code == 429:
+            raise RuntimeError("HTTP 429: Too Many Requests")
+        if resp.status_code != 200:
+            raise RuntimeError(f"Fish TTS HTTP {resp.status_code}: {resp.text[:200]}")
+        return resp.content
+
     async def _convert_with_backoff(self, tts_kwargs: Dict) -> bytes:
-        """Call Fish Audio's tts.convert with concurrency cap and 429 backoff.
+        """Synthesize via /v1/tts with concurrency cap and 429 backoff.
 
         Concurrency is bounded by FISH_AUDIO_MAX_CONCURRENT so we never burst
         past the tier's rate limit. On 429 we sleep with exponential backoff
@@ -193,15 +372,23 @@ class FishAudioTTS:
 
         Returns the audio bytes on success.
         """
-        client = self._get_client()
         sem = _get_fish_semaphore()
         last_exc: Optional[BaseException] = None
+
+        # Route by voice mode:
+        #  - reference_id (editor regen, custom/library voices) -> JSON /v1/tts so
+        #    S2's inline [bracket] emotion tags actually parse.
+        #  - inline references (pipeline zero-shot cloning) -> SDK msgpack, the only
+        #    shape Fish accepts binary reference audio in (JSON rejects base64 refs
+        #    with HTTP 400). These requests don't carry editor emotion tags anyway.
+        use_http = not tts_kwargs.get("references")
 
         for attempt in range(_FISH_429_MAX_RETRIES + 1):
             async with sem:
                 try:
-                    audio = await client.tts.convert(**tts_kwargs)
-                    # SDK may return bytes directly or an async iterator.
+                    if use_http:
+                        return await self._convert_via_http(tts_kwargs)
+                    audio = await self._get_client().tts.convert(**tts_kwargs)
                     if isinstance(audio, (bytes, bytearray)):
                         return bytes(audio)
                     buf = bytearray()
@@ -238,10 +425,11 @@ class FishAudioTTS:
         voice_id: str,
         output_path: str,
         emotion_tags: str = "",
+        traits_tag: str = "",
         speaker_references: Optional[List[Dict]] = None,
         speed: float = 1.0,
-        temperature: float = 0.7,
-        top_p: float = 0.7,
+        temperature: float = _FISH_TEMPERATURE,
+        top_p: float = _FISH_TOP_P,
         language: str = "en",
         # Accept ElevenLabs params for interface compat (unused)
         model_id: str = "",
@@ -263,7 +451,9 @@ class FishAudioTTS:
         output_path : str
             Where to write the audio file.
         emotion_tags : str
-            Fish Audio inline tags, e.g. ``"(angry)(shouting)"``.
+            One composed Fish S2 bracket directive, e.g.
+            ``"[angry, clipped and hard-edged]"``. Only reaches the model on the
+            ``reference_id`` path; the inline-references path drops it.
         speaker_references : list of dict, optional
             Inline voice cloning references.  Each dict has keys
             ``"audio"`` (bytes) and ``"text"`` (str transcript of that audio).
@@ -279,8 +469,10 @@ class FishAudioTTS:
             logger.warning("Fish Audio unavailable; falling back to Edge TTS.")
             return await self._edge_fallback(text, output_path, language, voice_id)
 
-        # Prepend emotion tags to text
-        tagged_text = f"{emotion_tags} {text}".strip() if emotion_tags else text
+        # Wire format: [trait1] [trait2] [trait3] [emotion] segment_text
+        # Traits = character (speaker-level); emotion = line (segment-level).
+        prefix = " ".join(p for p in (traits_tag, emotion_tags) if p)
+        tagged_text = f"{prefix} {text}".strip() if prefix else text
 
         # Decide cloning mode: inline references vs pre-uploaded model
         use_inline = bool(speaker_references)
@@ -288,17 +480,25 @@ class FishAudioTTS:
         logger.info(
             f"[FISH-TTS] mode={'inline-clone' if use_inline else 'reference-id'}, "
             f"voice={voice_id if not use_inline else f'{len(speaker_references)} refs'}, "
-            f"tags={emotion_tags!r}, text={tagged_text[:60]!r}..."
+            f"traits={traits_tag!r}, emotion={emotion_tags!r}, "
+            f"temp={temperature} top_p={top_p}, text={tagged_text[:60]!r}..."
         )
 
         try:
-            from fishaudio import ReferenceAudio
+            from fishaudio import ReferenceAudio, TTSConfig
 
-            # Build call kwargs
+            tts_config = TTSConfig(
+                normalize=True,
+                mp3_bitrate=128,
+                temperature=temperature,
+                top_p=top_p,
+            )
             tts_kwargs = dict(
                 text=tagged_text,
                 speed=speed,
                 format="mp3",
+                config=tts_config,
+                model=_FISH_SDK_MODEL if use_inline else _FISH_MODEL,
             )
 
             if use_inline:
@@ -332,7 +532,20 @@ class FishAudioTTS:
         # to Edge TTS which produces a completely different voice mid-job.
         if use_inline:
             try:
-                retry_kwargs = dict(text=tagged_text, speed=speed, format="mp3")
+                # Dropping the inline refs moves this to the JSON/HTTP path, so
+                # it takes the directive-aware model.
+                retry_kwargs = dict(
+                    text=tagged_text,
+                    speed=speed,
+                    format="mp3",
+                    config=TTSConfig(
+                        normalize=True,
+                        mp3_bitrate=128,
+                        temperature=temperature,
+                        top_p=top_p,
+                    ),
+                    model=_FISH_MODEL,
+                )
                 if voice_id:
                     retry_kwargs["reference_id"] = voice_id
                 audio_bytes = await self._convert_with_backoff(retry_kwargs)

@@ -1,6 +1,6 @@
 # ============================================
 # DUBVERSE BACKEND DOCKERFILE — GPU SERVERLESS
-# CUDA 11.8 + cuDNN 8 + Python 3.11
+# CUDA 12.1 + cuDNN 8 + Python 3.11
 # For RunPod Serverless Endpoints
 #
 # LEAN IMAGE — models download at runtime via
@@ -8,11 +8,25 @@
 # Target size: ~4-6GB (down from 16GB+)
 # ============================================
 
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV DEBIAN_FRONTEND=noninteractive
+ENV TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;12.0"
+
+# Cap CPU thread pools. Unset, each of torch/OpenBLAS/MKL/numexpr independently
+# defaults to one thread per core — on a 50+ core worker, several uncoordinated
+# full-core-count thread pools (plus our own ThreadPoolExecutor(max_workers=8) in
+# dubbing_service.py's mixdown path) means far more threads than cores, so the
+# CPU reads 100% busy from context-switch thrashing while actual throughput is a
+# fraction of that. Verified live: worker showed 100% CPU / 0% GPU / 178
+# processes during download+extract (CPU-only stages), which should take
+# seconds, not the ~950-1150s and ~1800s observed across three real runs.
+ENV OMP_NUM_THREADS=8
+ENV MKL_NUM_THREADS=8
+ENV OPENBLAS_NUM_THREADS=8
+ENV NUMEXPR_NUM_THREADS=8
 
 WORKDIR /app
 
@@ -24,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11-dev \
     python3-pip \
     ffmpeg \
+    librubberband2 \
     libsndfile1 \
     curl \
     git \
@@ -39,7 +54,7 @@ RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
 COPY requirements.gpu.txt .
 
 RUN pip install --no-cache-dir -r requirements.gpu.txt && \
-    pip install --no-cache-dir runpod>=1.6.0
+    pip install --no-cache-dir "runpod>=1.6.0,<2.0.0"
 
 # ============================================
 # APPLICATION

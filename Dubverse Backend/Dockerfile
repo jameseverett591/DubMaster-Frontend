@@ -18,6 +18,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     # FFmpeg for audio/video processing
     ffmpeg \
+    librubberband2 \
+    rubberband-cli \
     # Build tools for Python packages
     build-essential \
     # Audio processing libraries

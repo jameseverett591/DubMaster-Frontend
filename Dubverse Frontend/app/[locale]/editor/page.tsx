@@ -1,11 +1,19 @@
-import { Suspense } from "react"
-import { AdvancedDubbingEditor } from "@/components/advanced-dubbing-editor"
-import { LoadingSpinner } from "@/components/loading-spinner"
+'use client'
+
+import { useEffect } from 'react'
+import { useRouter } from 'next/navigation'
 
 export default function EditorPage() {
-  return (
-    <Suspense fallback={<LoadingSpinner />}>
-      <AdvancedDubbingEditor />
-    </Suspense>
-  )
+  const router = useRouter()
+
+  useEffect(() => {
+    const lastJobId = localStorage.getItem('dubverse.lastEditorJobId')
+    if (lastJobId && lastJobId !== 'demo') {
+      router.replace(`/editor/${lastJobId}`)
+    } else {
+      router.replace('/dashboard')
+    }
+  }, [router])
+
+  return null
 }

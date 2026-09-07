@@ -11,9 +11,11 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Mic2, Mail, Lock, User, Github, Check, Loader2, Eye, EyeOff } from "lucide-react"
 import Link from "next/link"
+import { useT } from '@/lib/use-t'
 
 export default function SignUpPage() {
-  const [selectedPlan, setSelectedPlan] = useState<"basic" | "premium" | "professional">("premium")
+  const tUi = useT()
+  const [selectedPlan, setSelectedPlan] = useState<"basic" | "premium" | "professional">("basic")
   const [isYearly, setIsYearly] = useState(false)
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
@@ -73,9 +75,9 @@ export default function SignUpPage() {
       key: "professional" as const,
       name: tp('professional.name'),
       tagline: tp('professional.taglineShort'),
-      monthlyPrice: 1400,
-      yearlyPrice: 13440,
-      yearlySavings: 3360,
+      monthlyPrice: 149,
+      yearlyPrice: 1430,
+      yearlySavings: 358,
       color: "#FDB022",
       features: [
         tp('professional.features.unlimited'),
@@ -113,15 +115,14 @@ export default function SignUpPage() {
       setError(signUpError.message)
       setLoading(false)
     } else if (data.user) {
-      // Store selected plan for post-confirmation checkout
-      sessionStorage.setItem('selectedPlan', JSON.stringify({
-        planKey: selectedPlan,
-        isYearly,
-        userId: data.user.id,
-        email: data.user.email
-      }))
-      setSuccess(true)
-      setLoading(false)
+      if (data.session) {
+        // Email confirmation not required — go straight to checkout
+        router.push(`/checkout?plan=${selectedPlan}&interval=${isYearly ? 'year' : 'month'}`)
+      } else {
+        // Email confirmation required — the email link includes plan/interval
+        setSuccess(true)
+        setLoading(false)
+      }
     }
   }
 
@@ -340,7 +341,7 @@ export default function SignUpPage() {
                   <Input
                     id="name"
                     type="text"
-                    placeholder="Ip Man"
+                    placeholder={tUi('Ip Man')}
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
                     className="pl-10 bg-[#0F172A] border-[#334155] text-white placeholder:text-[#475569] focus:border-[#A855F7] focus:ring-[#A855F7]/20"
@@ -371,7 +372,7 @@ export default function SignUpPage() {
                   <Input
                     id="password"
                     type={showPassword ? "text" : "password"}
-                    placeholder="Min. 6 characters"
+                    placeholder={tUi('Min. 6 characters')}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
@@ -395,7 +396,7 @@ export default function SignUpPage() {
                   <Input
                     id="confirmPassword"
                     type={showConfirmPassword ? "text" : "password"}
-                    placeholder="Re-enter password"
+                    placeholder={tUi('Re-enter password')}
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     required
