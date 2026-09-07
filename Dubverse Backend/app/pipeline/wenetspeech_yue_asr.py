@@ -161,7 +161,6 @@ def _get_vad_chunks(waveform: np.ndarray) -> List[Dict[str, int]]:
         min_silence_duration_ms=int(os.getenv("WENET_VAD_MIN_SILENCE_MS", "150")),
         speech_pad_ms=int(os.getenv("WENET_VAD_SPEECH_PAD_MS", "400")),
         max_speech_duration_s=max_speech_s,
-        use_max_poss_sil_at_max_speech=True,
     )
 
     return get_speech_timestamps(waveform, vad_options, sampling_rate=_SAMPLE_RATE)
