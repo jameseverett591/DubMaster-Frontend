@@ -442,18 +442,20 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
     unique_speakers = len(speaker_map)
 
     def _scope_words(words, window_start, window_end):
-        """Return only word alignments that overlap the child time window."""
+        """Return word alignments whose start time falls inside the child window.
+
+        Using start-time containment instead of overlap ensures a word that
+        straddles a diarization boundary is assigned to exactly one child.
+        """
         if not words:
             return None
         scoped = []
         for w in words:
             if isinstance(w, dict):
                 ws = w.get("start", 0.0)
-                we = w.get("end", 0.0)
             else:
                 ws = getattr(w, "start", 0.0)
-                we = getattr(w, "end", 0.0)
-            if min(we, window_end) - max(ws, window_start) > 0.0:
+            if window_start <= ws < window_end:
                 scoped.append(w)
         return scoped or None
 
