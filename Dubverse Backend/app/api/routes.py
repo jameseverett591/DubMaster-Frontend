@@ -427,7 +427,7 @@ async def _dep_internal(request: Request) -> None:
 
 
 
-def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, **__):
+def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, preserve_unsplit=False, **__):
     if not diarization_segments:
         return None
 
@@ -624,6 +624,12 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, **
                 if s.speaker:
                     last_speaker = s.speaker
                 assigned.append(s)
+            continue
+        if preserve_unsplit and seg.get("speaker"):
+            s = _seg_dict_to_model(seg)
+            if s.speaker:
+                last_speaker = s.speaker
+            assigned.append(s)
             continue
         speaker = _best_speaker(seg) or last_speaker
         last_speaker = speaker
@@ -1881,6 +1887,46 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
             reassigned = _normalize_speaker_labels(reassigned)
             if reassigned:
                 segments = reassigned
+
+        # Per-segment rescue: Velma may return an overall healthy speaker count
+        # but still merge a specific multi-speaker passage into one long segment.
+        # Re-split any segment that contains multiple pyannote diarization turns,
+        # preserving speakers on segments that are already correctly split.
+        raw_segments = []
+        for s in segments:
+            words_raw = None
+            if s.words:
+                words_raw = [w.model_dump() for w in s.words]
+            raw_segments.append(
+                {
+                    "text": s.text,
+                    "start": s.start,
+                    "end": s.end,
+                    "speaker": s.speaker,
+                    "confidence": s.confidence,
+                    "confidence_tier": s.confidence_tier,
+                    "words": words_raw,
+                    "velma_emotion": s.velma_emotion,
+                    "velma_accent": s.velma_accent,
+                    "velma_deepfake_score": s.velma_deepfake_score,
+                    "is_credit": s.is_credit,
+                    "source": s.source,
+                }
+            )
+        rescued = _assign_speakers_from_diarization(
+            raw_segments, diarization_segments, preserve_unsplit=True
+        )
+        if rescued and len(rescued) > len(segments):
+            # Re-normalize so the new diarization-derived speakers keep the
+            # same 1-indexed convention as the rest of the transcript, but do
+            # not re-run global smoothing here — it can overwrite short or
+            # rare-speaker assignments on segments that were already correct.
+            rescued = _normalize_speaker_labels(rescued)
+            logger.info(
+                f"Job {job_id}: per-segment diarization rescue split "
+                f"{len(segments)} segments into {len(rescued)} segments"
+            )
+            segments = rescued
 
     # F0 fallback: if diarization collapsed everything to 1 speaker but the user
     # told us there are N > 1 speakers, split using pitch-based k-means.
