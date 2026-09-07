@@ -192,6 +192,25 @@ def diarize_audio(
                 ),
             }
 
+        # This stage runs on CPU only, and only after separation/transcription
+        # have already finished (they're sequential, not concurrent) — so the
+        # container-wide OMP/MKL/OPENBLAS/NUMEXPR thread caps (set to 8 in
+        # Dockerfile.gpu specifically to stop *concurrent* GPU-stage libraries
+        # from oversubscribing the worker's cores) are needlessly limiting
+        # diarization to a fraction of the worker's real CPU count. Bump
+        # PyTorch's own thread pool for just this stage; nothing else is
+        # running to contend with it. Verified on the full 105-minute film:
+        # CPU diarization alone took 1405s (57% of total pipeline time) capped
+        # at 8 threads.
+        try:
+            import torch as _torch_threads
+            _cpu_count = os.cpu_count() or 8
+            _diar_threads = int(os.getenv("DIARIZATION_CPU_THREADS", str(_cpu_count)))
+            _torch_threads.set_num_threads(_diar_threads)
+            logger.info(f"[DIARIZE] Using {_diar_threads} CPU threads for this stage (of {_cpu_count} available)")
+        except Exception as _thread_err:
+            logger.warning(f"[DIARIZE] Could not raise thread count: {_thread_err}")
+
         logger.info("[DIARIZE] Running pipeline inference...")
         # Constrain speaker count.  For known-N-speaker content set both
         # min_speakers and max_speakers to N so pyannote is forced to find
