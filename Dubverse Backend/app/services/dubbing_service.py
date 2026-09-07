@@ -1086,17 +1086,26 @@ class DubbingService:
                     "the", "a", "an",
                 }
 
-                def _is_droppable(_raw: str) -> bool:
+                def _is_droppable(_raw: str, _flagged: bool) -> bool:
                     _t = _raw.strip()
                     # No letter / digit / CJK char → nothing TTS can voice
-                    # (covers ASCII and full-width punctuation, whitespace, "_").
+                    # (covers ASCII and full-width punctuation, whitespace, "_") —
+                    # true regardless of confidence, there is nothing to review.
                     if not re.search(r"[^\W_]", _t, re.UNICODE):
                         return True
+                    # A flagged segment is held for human review, not silently
+                    # dropped — the noise-word list exists to strip Whisper
+                    # hallucination residue, but a low-confidence/garbled
+                    # segment that happens to translate into a noise word is
+                    # exactly the case a reviewer needs to see, not lose.
+                    if _flagged:
+                        return False
                     return _t.lower().rstrip(".,!?") in _NOISE_WORDS
 
                 before_drop = len(transcript)
                 transcript = [
-                    s for s in transcript if not _is_droppable(s.get("text", ""))
+                    s for s in transcript
+                    if not _is_droppable(s.get("text", ""), bool(s.get("translation_flagged")))
                 ]
                 if len(transcript) != before_drop:
                     logger.info(
@@ -1206,6 +1215,18 @@ class DubbingService:
                 if segment.get("is_credit"):
                     logger.info(f"[TTS] seg {i}: skipping subtitle/credit segment")
                     return {"index": i, "skipped": True, "reason": "credit"}
+
+                # Withhold TTS for segments flagged by the pre-translation
+                # confidence gate (missing/low ASR confidence) until a human
+                # clears the flag via an explicit editor review action. The
+                # translated draft is kept in transcript/segments.json either
+                # way — only audio synthesis is blocked.
+                if segment.get("translation_flagged"):
+                    logger.info(
+                        f"[TTS] seg {i}: skipping — translation_flagged "
+                        f"({segment.get('flag_reason')}), needs human review"
+                    )
+                    return {"index": i, "skipped": True, "reason": "translation_flagged"}
 
                 text = self._sanitize_text(text)
 
