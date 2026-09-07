@@ -25,6 +25,21 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+_CANTONESE_LANGS = {"yue", "zh-yue", "yue-hk", "zh-hk"}
+
+
+def _is_cantonese(source_language: Optional[str]) -> bool:
+    """Return True when source_language is a Cantonese variant."""
+    return (source_language or "").lower().strip().replace("_", "-") in _CANTONESE_LANGS
+
+
+def _normalize_language(source_language: Optional[str]) -> str:
+    """Map Cantonese locale variants to the base `yue` code used by engines."""
+    lang = (source_language or "").lower().strip().replace("_", "-")
+    if lang in _CANTONESE_LANGS:
+        return "yue"
+    return source_language or "yue"
+
 
 def _prepare_audio_file(extract_result: Dict[str, Any]) -> Optional[str]:
     """
@@ -86,11 +101,17 @@ def transcribe_cantonese(
         }
 
     # Determine which engines to use
-    engines_str = os.getenv("CANTONESE_ASR_ENGINES", "tencent,paraformer,whisper")
+    env_engines = os.getenv("CANTONESE_ASR_ENGINES", "").strip()
+    if env_engines:
+        engines_str = env_engines
+    elif _is_cantonese(source_language):
+        engines_str = "wenetspeech,tencent,paraformer,whisper"
+    else:
+        engines_str = "tencent,paraformer,whisper"
     engines = [e.strip().lower() for e in engines_str.split(",") if e.strip()]
     whisper_gap_fill = os.getenv("CANTONESE_ASR_WHISPER_GAP_FILL", "1") == "1"
 
-    language = os.getenv("WHISPER_LANGUAGE", "yue")
+    language = _normalize_language(os.getenv("WHISPER_LANGUAGE") or source_language)
 
     logger.info(
         f"[CANTONESE-ASR] Starting multi-engine pipeline: {engines}, "
@@ -118,9 +139,35 @@ def transcribe_cantonese(
     tencent_segments: List[Dict] = []
     paraformer_segments: List[Dict] = []
     whisper_segments: List[Dict] = []
+    wenet_segments: List[Dict] = []
     engines_used: List[str] = []
 
     try:
+        # ── Engine 0: WenetSpeech-Yue CTC (primary for Cantonese) ──
+        if "wenetspeech" in engines:
+            try:
+                from app.pipeline.wenetspeech_yue_asr import transcribe_with_wenetspeech_yue
+
+                wenet_result = transcribe_with_wenetspeech_yue(
+                    extract_result,
+                    audio_path=audio_file,
+                    source_language=source_language,
+                    job_id=job_id,
+                )
+                if wenet_result.get("status") == "ok":
+                    wenet_segments = wenet_result.get("segments", [])
+                    engines_used.append("wenetspeech")
+                    logger.info(
+                        f"[CANTONESE-ASR] WenetSpeech-Yue: {len(wenet_segments)} segments"
+                    )
+                else:
+                    logger.info(
+                        f"[CANTONESE-ASR] WenetSpeech-Yue skipped: "
+                        f"{wenet_result.get('reason', 'unknown')}"
+                    )
+            except Exception as e:
+                logger.warning(f"[CANTONESE-ASR] WenetSpeech-Yue failed: {e}")
+
         # ── Engine 1: Tencent ASR ──
         if "tencent" in engines:
             try:
@@ -172,20 +219,21 @@ def transcribe_cantonese(
         # ── Engine 3: Whisper (fallback / gap fill) ──
         run_whisper_full = (
             "whisper" in engines
+            and not wenet_segments
             and not tencent_segments
             and not paraformer_segments
         )
         run_whisper_gaps = (
             whisper_gap_fill
             and "whisper" in engines
-            and (tencent_segments or paraformer_segments)
+            and (wenet_segments or tencent_segments or paraformer_segments)
         )
 
         if run_whisper_full or run_whisper_gaps:
             try:
                 from app.pipeline.transcribe_audio import transcribe_audio
 
-                whisper_result = transcribe_audio(extract_result, job_id, source_language=source_language)
+                whisper_result = transcribe_audio(extract_result, job_id, source_language=language)
                 if whisper_result.get("status") == "ok":
                     import json
                     transcript_path = whisper_result.get("transcript_path")
@@ -207,7 +255,18 @@ def transcribe_cantonese(
         # ── Merge results ──
         from app.pipeline.asr_merge import merge_asr_results, merge_with_whisper_fallback
 
-        if tencent_segments or paraformer_segments:
+        if wenet_segments:
+            # WenetSpeech-Yue is the primary Cantonese transcript.
+            merged = wenet_segments
+
+            # Optional: fill gaps with Whisper
+            if whisper_segments and run_whisper_gaps:
+                merged = merge_with_whisper_fallback(
+                    merged_segments=merged,
+                    whisper_segments=whisper_segments,
+                    job_id=job_id,
+                )
+        elif tencent_segments or paraformer_segments:
             # Primary merge: Tencent + Paraformer
             merged = merge_asr_results(
                 tencent_segments=tencent_segments,

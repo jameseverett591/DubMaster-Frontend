@@ -36,7 +36,7 @@ torchaudio==2.6.0+cu126
 # Speaker Diarization
 pyannote.audio>=3.1.0
 
-huggingface_hub<1.0.0
+huggingface_hub>=0.20.0,<1.0.0
 
 # Audio Source Separation
 demucs>=4.0.0
@@ -49,6 +49,9 @@ openai-whisper>=20231117
 # Cantonese ASR — Paraformer (Alibaba FunASR)
 funasr>=1.0.0
 modelscope>=1.9.0
+
+# WenetSpeech-Yue INT8 CTC — runs on CPU, no GPU needed
+sherpa-onnx>=1.11.1
 
 # ============================================
 # TEXT-TO-SPEECH

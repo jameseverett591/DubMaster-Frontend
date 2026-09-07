@@ -2,7 +2,7 @@ from pathlib import Path
 import json
 import logging
 import os
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ _HALLUCINATION_PHRASES = {
     "la ilaha illallah",
 }
 
-_WHISPER_MODEL = None
+_WHISPER_MODELS: Dict[Tuple[str, str, str], Any] = {}
 
 
 def _get_compute_device() -> tuple:
@@ -86,26 +86,30 @@ def _get_compute_device() -> tuple:
     return "cpu", "int8"
 
 
-def _get_whisper_model():
-    global _WHISPER_MODEL
-    if _WHISPER_MODEL is not None:
-        return _WHISPER_MODEL
+def _get_whisper_model(source_language: Optional[str] = None):
     from faster_whisper import WhisperModel
-    wl = (os.getenv("WHISPER_LANGUAGE", "") or "").strip().lower()
+    wl = (source_language or os.getenv("WHISPER_LANGUAGE", "") or "").strip().lower()
     _is_cantonese_lang = wl in ("yue", "zh-yue", "yue-hk", "zh-hk")
     model_size = os.getenv("WHISPER_MODEL", "medium")
     # Cantonese requires at least large-v3 for acceptable accuracy.
-    # If WHISPER_MODEL is set to a smaller model but WHISPER_LANGUAGE=yue,
+    # If WHISPER_MODEL is set to a smaller model but language=yue,
     # upgrade silently — medium produces too many Standard Chinese artefacts.
     _MODEL_RANK = {"tiny": 0, "base": 1, "small": 2, "medium": 3, "large": 4, "large-v2": 5, "large-v3": 6}
     if _is_cantonese_lang and _MODEL_RANK.get(model_size, 3) < _MODEL_RANK["large-v3"]:
         logger.info(f"[WHISPER] Cantonese detected — upgrading model from '{model_size}' to 'large-v3'")
         model_size = "large-v3"
     device, compute_type = _get_compute_device()
+    key = (model_size, device, compute_type)
+    model = _WHISPER_MODELS.get(key)
+    if model is not None:
+        return model
     logger.info(f"[WHISPER] Loading model '{model_size}' on {device} (will be cached for subsequent jobs)...")
-    _WHISPER_MODEL = WhisperModel(model_size, device=device, compute_type=compute_type)
+    _WHISPER_MODELS[key] = WhisperModel(model_size, device=device, compute_type=compute_type)
     logger.info(f"[WHISPER] Model '{model_size}' loaded and cached.")
-    return _WHISPER_MODEL
+    return _WHISPER_MODELS[key]
+
+
+get_whisper_model = _get_whisper_model
 
 
 def _find_gaps(segments: List[Dict], duration: float, min_gap: float) -> List[tuple]:
