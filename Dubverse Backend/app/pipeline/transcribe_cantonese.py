@@ -18,6 +18,7 @@ Environment variables:
   CANTONESE_ASR_WHISPER_GAP_FILL — "1" to fill gaps with Whisper (default: "1")
 """
 
+import concurrent.futures
 import logging
 import os
 import tempfile
@@ -121,8 +122,13 @@ def transcribe_cantonese(
     engines_used: List[str] = []
 
     try:
-        # ── Engine 1: Tencent ASR ──
-        if "tencent" in engines:
+        # ── Engine 1 + 2: Tencent ASR and Paraformer in parallel ──
+        # Tencent is a cloud API call; Paraformer is a local model. They are
+        # independent, so run them concurrently to avoid waiting for the slower
+        # one before starting the next.
+        def _run_tencent():
+            if "tencent" not in engines:
+                return []
             try:
                 from app.pipeline.tencent_asr import transcribe_with_tencent
 
@@ -132,11 +138,9 @@ def transcribe_cantonese(
                     job_id=job_id,
                 )
                 if tencent_result.get("status") == "ok":
-                    tencent_segments = tencent_result.get("segments", [])
-                    engines_used.append("tencent")
-                    logger.info(
-                        f"[CANTONESE-ASR] Tencent: {len(tencent_segments)} segments"
-                    )
+                    segs = tencent_result.get("segments", [])
+                    logger.info(f"[CANTONESE-ASR] Tencent: {len(segs)} segments")
+                    return segs
                 else:
                     logger.info(
                         f"[CANTONESE-ASR] Tencent skipped: "
@@ -144,9 +148,11 @@ def transcribe_cantonese(
                     )
             except Exception as e:
                 logger.warning(f"[CANTONESE-ASR] Tencent failed: {e}")
+            return []
 
-        # ── Engine 2: Paraformer ──
-        if "paraformer" in engines:
+        def _run_paraformer():
+            if "paraformer" not in engines:
+                return []
             try:
                 from app.pipeline.paraformer_asr import transcribe_with_paraformer
 
@@ -156,11 +162,9 @@ def transcribe_cantonese(
                     job_id=job_id,
                 )
                 if paraformer_result.get("status") == "ok":
-                    paraformer_segments = paraformer_result.get("segments", [])
-                    engines_used.append("paraformer")
-                    logger.info(
-                        f"[CANTONESE-ASR] Paraformer: {len(paraformer_segments)} segments"
-                    )
+                    segs = paraformer_result.get("segments", [])
+                    logger.info(f"[CANTONESE-ASR] Paraformer: {len(segs)} segments")
+                    return segs
                 else:
                     logger.info(
                         f"[CANTONESE-ASR] Paraformer skipped: "
@@ -168,6 +172,20 @@ def transcribe_cantonese(
                     )
             except Exception as e:
                 logger.warning(f"[CANTONESE-ASR] Paraformer failed: {e}")
+            return []
+
+        if "tencent" in engines or "paraformer" in engines:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                t_future = pool.submit(_run_tencent) if "tencent" in engines else None
+                p_future = pool.submit(_run_paraformer) if "paraformer" in engines else None
+                tencent_segments = t_future.result() if t_future else []
+                paraformer_segments = p_future.result() if p_future else []
+            if tencent_segments:
+                engines_used.append("tencent")
+            if paraformer_segments:
+                engines_used.append("paraformer")
+        else:
+            logger.info("[CANTONESE-ASR] Skipping Tencent and Paraformer (not in engine list)")
 
         # ── Engine 3: Whisper (fallback / gap fill) ──
         run_whisper_full = (
