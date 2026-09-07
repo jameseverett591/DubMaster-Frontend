@@ -38,6 +38,10 @@ _SENTENCE_SPLIT_RE = re.compile(
     r'|\s+—\s+(?=[A-Z])'
 )
 
+# Segments with missing or below-threshold ASR confidence are still translated
+# but are flagged for human review and TTS is blocked until the editor commits.
+LOW_CONFIDENCE_THRESHOLD = float(os.getenv("LOW_CONFIDENCE_THRESHOLD", "0.55"))
+
 # ── Natural speech rate constants ─────────────────────────────────────────────
 # All tunable via environment variables so RunPod instances can be dialled in
 # without a code deploy — just update the env var and restart the container.
@@ -870,6 +874,17 @@ class TranslationService:
         target_name = LANGUAGE_NAMES.get(target_language, "English")
 
         texts = [seg.get("text", "") for seg in segments]
+
+        # Flag segments with low ASR confidence for human review. Translation
+        # still runs so the editor has a draft, but TTS is blocked until the
+        # user commits the segment. Missing confidence values are not treated as
+        # low confidence so legacy or source-only transcripts remain renderable.
+        for seg in segments:
+            _conf = seg.get("confidence")
+            if _conf is not None and _conf < LOW_CONFIDENCE_THRESHOLD:
+                seg["translation_flagged"] = True
+                seg["flag_reason"] = "low_asr_confidence"
+
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
         entity_replacements_per_seg: List[List[Tuple[str, str]]] = []
