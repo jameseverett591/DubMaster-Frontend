@@ -266,11 +266,23 @@ class JobManager:
                             "duration": getattr(transcript, "duration", None),
                             "text": getattr(transcript, "text", None),
                             "segments": [
-                                {
-                                    "text": getattr(seg, "text", ""),
-                                    "start": getattr(seg, "start", 0),
-                                    "end": getattr(seg, "end", 0),
-                                    "speaker": getattr(seg, "speaker", None),
+                                seg.model_dump()
+                                if hasattr(seg, "model_dump")
+                                else {
+                                    "text": seg.get("text", ""),
+                                    "start": seg.get("start", 0),
+                                    "end": seg.get("end", 0),
+                                    "speaker": seg.get("speaker"),
+                                    "confidence": seg.get("confidence"),
+                                    "confidence_tier": seg.get("confidence_tier"),
+                                    "words": seg.get("words"),
+                                    "source": seg.get("source"),
+                                    "translation_flagged": seg.get("translation_flagged"),
+                                    "flag_reason": seg.get("flag_reason"),
+                                    "is_credit": seg.get("is_credit"),
+                                    "velma_emotion": seg.get("velma_emotion"),
+                                    "velma_accent": seg.get("velma_accent"),
+                                    "velma_deepfake_score": seg.get("velma_deepfake_score"),
                                 }
                                 for seg in (getattr(transcript, "segments", None) or [])
                             ],
