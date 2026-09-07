@@ -442,13 +442,13 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
     unique_speakers = len(speaker_map)
 
     def _assign_words_to_windows(words, windows):
-        """Assign every parent word to exactly one child window.
+        """Assign each overlapping parent word to exactly one child window.
 
-        Each word is allocated to the child with the largest temporal overlap
-        (ties go to the first matching child). If a word does not overlap any
-        child, it is assigned to the nearest child and its timestamps are clamped
-        to that child's window. This guarantees no word is duplicated and no word
-        is returned with timestamps outside its owning segment.
+        Words are allocated to the child whose time window has the largest
+        overlap (ties go to the first matching child) and their timestamps are
+        clamped to that window. Words that do not overlap any child window are
+        not assigned, preserving alignment integrity without creating out-of-range
+        or zero-duration entries.
         """
         if not words or not windows:
             return [None] * len(windows)
@@ -466,33 +466,25 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
                 word_conf = getattr(w, "confidence", 0.5)
 
             best_idx, best_overlap = 0, -1.0
-            best_dist = float("inf")
-            best_idx_gap = 0
             for idx, win in enumerate(windows):
                 win_s = win.get("start", 0.0) if isinstance(win, dict) else getattr(win, "start", 0.0)
                 win_e = win.get("end", 0.0) if isinstance(win, dict) else getattr(win, "end", 0.0)
                 overlap = max(0.0, min(we, win_e) - max(ws, win_s))
                 if overlap > best_overlap:
                     best_overlap, best_idx = overlap, idx
-                dist = max(0.0, win_s - we, ws - win_e)
-                if dist < best_dist:
-                    best_dist, best_idx_gap = dist, idx
 
-            chosen = best_idx if best_overlap > 0.0 else best_idx_gap
-            win = windows[chosen]
+            if best_overlap <= 0.0:
+                continue
+
+            win = windows[best_idx]
             win_s = win.get("start", 0.0) if isinstance(win, dict) else getattr(win, "start", 0.0)
             win_e = win.get("end", 0.0) if isinstance(win, dict) else getattr(win, "end", 0.0)
+            new_s = max(ws, win_s)
+            new_e = max(new_s, min(we, win_e))
+            if new_e <= new_s:
+                continue
 
-            # Clamp word timestamps to the chosen child window.
-            if ws >= win_e:
-                new_s = new_e = win_e
-            elif we <= win_s:
-                new_s = new_e = win_s
-            else:
-                new_s = max(ws, win_s)
-                new_e = max(new_s, min(we, win_e))
-
-            assigned[chosen].append({
+            assigned[best_idx].append({
                 "word": word_text,
                 "start": new_s,
                 "end": new_e,
@@ -7389,9 +7381,17 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     if paired_with_next is not None:
         seg["paired_with_next"] = paired_with_next
     # Only clear the low-confidence translation flag when the editor has actually
-    # reviewed the text (translated or adapted). Timing, pairing, and other
-    # metadata commits should not unilaterally unblock TTS for a flagged draft.
-    if text is not None or committed_adapted_text is not None:
+    # reviewed the segment. Editing text or adapted text is an obvious review,
+    # but an approval-without-edit is also allowed via the explicit approval
+    # fields the editor sends (text_locked / approved / translation_flagged:false).
+    reviewed = (
+        text is not None
+        or committed_adapted_text is not None
+        or text_locked is True
+        or body.get("approved") is True
+        or body.get("translation_flagged") is False
+    )
+    if reviewed:
         seg["translation_flagged"] = False
         seg["flag_reason"] = None
     data["segments"] = segs
