@@ -441,57 +441,6 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
 
     unique_speakers = len(speaker_map)
 
-    def _assign_words_to_windows(words, windows):
-        """Assign each overlapping parent word to exactly one child window.
-
-        Words are allocated to the child whose time window has the largest
-        overlap (ties go to the first matching child) and their timestamps are
-        clamped to that window. Words that do not overlap any child window are
-        not assigned, preserving alignment integrity without creating out-of-range
-        or zero-duration entries.
-        """
-        if not words or not windows:
-            return [None] * len(windows)
-        assigned: List[List] = [[] for _ in windows]
-        for w in words:
-            if isinstance(w, dict):
-                ws = w.get("start", 0.0)
-                we = w.get("end", 0.0)
-                word_text = w.get("word", "")
-                word_conf = w.get("confidence", 0.5)
-            else:
-                ws = getattr(w, "start", 0.0)
-                we = getattr(w, "end", 0.0)
-                word_text = getattr(w, "word", "")
-                word_conf = getattr(w, "confidence", 0.5)
-
-            best_idx, best_overlap = 0, -1.0
-            for idx, win in enumerate(windows):
-                win_s = win.get("start", 0.0) if isinstance(win, dict) else getattr(win, "start", 0.0)
-                win_e = win.get("end", 0.0) if isinstance(win, dict) else getattr(win, "end", 0.0)
-                overlap = max(0.0, min(we, win_e) - max(ws, win_s))
-                if overlap > best_overlap:
-                    best_overlap, best_idx = overlap, idx
-
-            if best_overlap <= 0.0:
-                continue
-
-            win = windows[best_idx]
-            win_s = win.get("start", 0.0) if isinstance(win, dict) else getattr(win, "start", 0.0)
-            win_e = win.get("end", 0.0) if isinstance(win, dict) else getattr(win, "end", 0.0)
-            new_s = max(ws, win_s)
-            new_e = max(new_s, min(we, win_e))
-            if new_e <= new_s:
-                continue
-
-            assigned[best_idx].append({
-                "word": word_text,
-                "start": new_s,
-                "end": new_e,
-                "confidence": word_conf,
-            })
-        return [a or None for a in assigned]
-
     # ── Split single-blob transcripts using diarization timestamps ──
     # ONLY split when ASR returns exactly 1 segment (a true blob).
     # When Whisper produces multiple segments with timestamps, use
@@ -518,7 +467,6 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
             total_dur += max(0.0, float(duration))
 
         if dia_kept:
-            blob_word_lists = _assign_words_to_windows(raw_segments[0].get("words"), dia_kept)
             idx = 0
             n_tokens = len(blob_tokens)
             for j, dk in enumerate(dia_kept):
@@ -538,21 +486,13 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
                         seg_text = " ".join(blob_tokens[idx: idx + take]).strip()
                         idx += take
 
-                _parent = raw_segments[0]
                 split_segments.append(
                     TranscriptSegment(
                         text=seg_text,
                         start=dk["start"],
                         end=dk["end"],
                         speaker=dk["speaker"],
-                        confidence=_parent.get("confidence"),
-                        confidence_tier=_parent.get("confidence_tier"),
-                        words=blob_word_lists[j],
-                        velma_emotion=_parent.get("velma_emotion"),
-                        velma_accent=_parent.get("velma_accent"),
-                        velma_deepfake_score=_parent.get("velma_deepfake_score"),
-                        is_credit=_parent.get("is_credit", False),
-                        source=_parent.get("source"),
+                        source=raw_segments[0].get("source"),
                     )
                 )
 
@@ -646,22 +586,14 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
             sl["text"] = seg_text[prev:end].strip()
             prev = end
 
-        per_seg_word_lists = _assign_words_to_windows(seg.get("words"), slices)
         out = []
-        for idx, sl in enumerate(slices):
+        for sl in slices:
             out.append(
                 TranscriptSegment(
                     text=sl.get("text", ""),
                     start=sl["start"],
                     end=sl["end"],
                     speaker=sl.get("speaker") or "speaker-1",
-                    confidence=seg.get("confidence"),
-                    confidence_tier=seg.get("confidence_tier"),
-                    words=per_seg_word_lists[idx],
-                    velma_emotion=seg.get("velma_emotion"),
-                    velma_accent=seg.get("velma_accent"),
-                    velma_deepfake_score=seg.get("velma_deepfake_score"),
-                    is_credit=seg.get("is_credit", False),
                     source=seg.get("source"),
                 )
             )
@@ -3488,8 +3420,6 @@ async def get_transcript(job_id: str):
                     "velma_emotion": seg.velma_emotion,
                     "velma_accent": seg.velma_accent,
                     "velma_deepfake_score": seg.velma_deepfake_score,
-                    "translation_flagged": seg.translation_flagged,
-                    "flag_reason": seg.flag_reason,
                 }
                 for seg in job.transcript.segments
             ]
@@ -3540,16 +3470,7 @@ async def get_transcript_editor_format(job_id: str):
         if not (job and job.transcript):
             raise HTTPException(status_code=404, detail="Transcript not available yet")
         segments_raw = [
-            {
-                "text": s.text,
-                "start": s.start,
-                "end": s.end,
-                "speaker": s.speaker,
-                "confidence": s.confidence,
-                "confidence_tier": s.confidence_tier,
-                "translation_flagged": s.translation_flagged,
-                "flag_reason": s.flag_reason,
-            }
+            {"text": s.text, "start": s.start, "end": s.end, "speaker": s.speaker}
             for s in job.transcript.segments
         ]
         duration = job.transcript.duration or 0
@@ -3611,12 +3532,10 @@ async def get_transcript_editor_format(job_id: str):
             "end": seg.get("end", 0),
             "speaker_id": spk_id_map.get(spk_label, "spk_0"),
             "language": language,
-            "confidence": seg.get("confidence") if seg.get("confidence") is not None else 1.0,
-            "words": seg.get("words") or [],
+            "confidence": 1.0,
+            "words": [],
             "is_edited": False,
             "status": "pending",
-            "translation_flagged": seg.get("translation_flagged", False),
-            "flag_reason": seg.get("flag_reason"),
         })
 
     return {
@@ -4741,8 +4660,6 @@ async def dub_video(request: DubRequest, http_request: Request, background_tasks
             "velma_deepfake_score": seg.velma_deepfake_score,
             "confidence": seg.confidence if getattr(seg, "confidence", None) is not None else _conf,
             "confidence_tier": seg.confidence_tier if getattr(seg, "confidence_tier", None) is not None else _tier,
-            "translation_flagged": seg.translation_flagged,
-            "flag_reason": seg.flag_reason,
         })
 
     detected_lang = job.transcript.language if job and job.transcript else None
@@ -4895,8 +4812,6 @@ async def translate_only(request: DubRequest, http_request: Request):
             "source": seg.source,
             "velma_emotion": seg.velma_emotion,
             "velma_accent": seg.velma_accent,
-            "translation_flagged": seg.translation_flagged,
-            "flag_reason": seg.flag_reason,
         }
         _key = f"{seg.start:.3f}_{seg.end:.3f}"
         if _key in _job_seg_lookup:
@@ -4968,11 +4883,8 @@ async def translate_only(request: DubRequest, http_request: Request):
         }
         transcript_dicts = [
             s for s in transcript_dicts
-            if s.get("translation_flagged")
-            or (
-                s.get("text", "").strip()
-                and s.get("text", "").strip().lower().rstrip(".,!?") not in _NOISE_WORDS
-            )
+            if s.get("text", "").strip()
+            and s.get("text", "").strip().lower().rstrip(".,!?") not in _NOISE_WORDS
         ]
 
         # Clear source-language word alignments — they don't match the
@@ -5054,8 +4966,6 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
             "source_text": getattr(seg, "source_text", None) or seg.text,
             "confidence": seg.confidence if getattr(seg, "confidence", None) is not None else _conf,
             "confidence_tier": seg.confidence_tier if getattr(seg, "confidence_tier", None) is not None else _tier,
-            "translation_flagged": seg.translation_flagged,
-            "flag_reason": seg.flag_reason,
         })
 
     try:
@@ -7380,20 +7290,6 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         seg["text_locked"] = text_locked
     if paired_with_next is not None:
         seg["paired_with_next"] = paired_with_next
-    # Only clear the low-confidence translation flag when the editor has actually
-    # reviewed the segment. Editing text or adapted text is an obvious review,
-    # but an approval-without-edit is also allowed via the explicit approval
-    # fields the editor sends (text_locked / approved / translation_flagged:false).
-    reviewed = (
-        text is not None
-        or committed_adapted_text is not None
-        or text_locked is True
-        or body.get("approved") is True
-        or body.get("translation_flagged") is False
-    )
-    if reviewed:
-        seg["translation_flagged"] = False
-        seg["flag_reason"] = None
     data["segments"] = segs
     atomic_write_json(segments_path, data)
     return {"status": "ok", "job_id": job_id, "index": index}

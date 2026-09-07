@@ -1096,8 +1096,7 @@ class DubbingService:
 
                 before_drop = len(transcript)
                 transcript = [
-                    s for s in transcript
-                    if s.get("translation_flagged") or not _is_droppable(s.get("text", ""))
+                    s for s in transcript if not _is_droppable(s.get("text", ""))
                 ]
                 if len(transcript) != before_drop:
                     logger.info(
@@ -1161,12 +1160,6 @@ class DubbingService:
                 # Resolve adapted variant text, falling back to raw translated text.
                 seg_id = segment.get("segment_id", str(i))
                 speaker = segment.get("speaker", "speaker-1")
-
-                # Block TTS for segments the translator flagged as low-confidence.
-                # The editor can review the draft translation and commit to generate audio.
-                if segment.get("translation_flagged"):
-                    logger.info(f"[TTS] seg {i}: skipped — translation_flagged ({segment.get('flag_reason')})")
-                    return {"index": i, "skipped": True, "reason": "translation_flagged"}
                 # Resolve voice_key early so ADAPT-FIT can use a voice-calibrated
                 # natural_duration() — without this, slow voices under-trigger the
                 # shortener because the global 14 cps rate underestimates their time.
