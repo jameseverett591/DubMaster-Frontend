@@ -12,6 +12,17 @@ from typing import Optional, List, Dict, Any, Tuple
 import asyncio
 import json
 import httpx
+import errno
+import threading
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore
 
 from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
@@ -186,10 +197,172 @@ def atomic_write_json(path: str, data, indent: int = 2) -> None:
         raise
 
 
+_SEGMENTS_FILE_LOCK_TIMEOUT = 30.0
+_SEGMENTS_MUX_TIMEOUT_SECONDS = 300.0
+
+
+def _lock_fd(
+    fd: int,
+    timeout: float = _SEGMENTS_FILE_LOCK_TIMEOUT,
+    cancel_event: Optional[threading.Event] = None,
+) -> None:
+    """Acquire an advisory exclusive lock on a file descriptor."""
+    deadline = time.monotonic() + timeout
+    if msvcrt is not None:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise asyncio.CancelledError("Lock acquisition cancelled")
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as exc:
+                if exc.errno != errno.EACCES:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"Could not acquire segments file lock within {timeout}s"
+                    ) from exc
+                time.sleep(0.01)
+    elif fcntl is not None:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise asyncio.CancelledError("Lock acquisition cancelled")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EACCES):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"Could not acquire segments file lock within {timeout}s"
+                    ) from exc
+                time.sleep(0.01)
+
+
+def _unlock_fd(fd: int) -> None:
+    """Release an advisory lock on a file descriptor."""
+    if msvcrt is not None:
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    elif fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+class _SegmentFileLock:
+    """Per-job lock that serializes segments.json access across Uvicorn workers.
+
+    Uses an asyncio.Lock for process-level concurrency and an OS advisory file
+    lock so separate worker processes sharing the same filesystem cannot perform
+    overlapping read-modify-write cycles on the same job's segments.json.
+    """
+
+    __slots__ = (
+        "_lock_path",
+        "_local_lock",
+        "_cancel_event",
+        "_acquired_event",
+        "_release_event",
+        "_error",
+        "_fd",
+        "_thread",
+    )
+
+    def __init__(self, lock_path: str):
+        self._lock_path = lock_path
+        self._local_lock = asyncio.Lock()
+        self._cancel_event = threading.Event()
+        self._acquired_event = threading.Event()
+        self._release_event = threading.Event()
+        self._error: Optional[BaseException] = None
+        self._fd: Optional[int] = None
+        self._thread: Optional[threading.Thread] = None
+
+    async def __aenter__(self):
+        await self._local_lock.acquire()
+        self._cancel_event.clear()
+        self._acquired_event.clear()
+        self._release_event.clear()
+        self._error = None
+        self._fd = None
+        self._thread = threading.Thread(target=self._lock_holder, daemon=True)
+        self._thread.start()
+        try:
+            while not self._acquired_event.is_set() and self._error is None:
+                if self._cancel_event.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            if self._error is not None:
+                raise self._error
+            if not self._acquired_event.is_set():
+                raise asyncio.CancelledError("Lock acquisition cancelled")
+            return self
+        except BaseException:
+            self._cancel_event.set()
+            self._release_event.set()
+            if self._thread is not None:
+                self._thread.join(timeout=1.0)
+            self._thread = None
+            self._local_lock.release()
+            raise
+
+    async def __aexit__(self, exc_type, exc, tb):
+        try:
+            self._release_event.set()
+            if self._thread is not None:
+                await asyncio.to_thread(self._thread.join, timeout=2.0)
+                self._thread = None
+        finally:
+            self._local_lock.release()
+        return False
+
+    def _lock_holder(self) -> None:
+        lock_dir = os.path.dirname(self._lock_path) or "."
+        fd: Optional[int] = None
+        try:
+            os.makedirs(lock_dir, exist_ok=True)
+            fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT)
+            try:
+                _lock_fd(fd, cancel_event=self._cancel_event)
+                if self._cancel_event.is_set():
+                    _unlock_fd(fd)
+                    os.close(fd)
+                    return
+                self._fd = fd
+                self._acquired_event.set()
+                self._release_event.wait()
+            finally:
+                fd_to_close = self._fd if self._fd is not None else fd
+                self._fd = None
+                if fd_to_close is not None:
+                    try:
+                        _unlock_fd(fd_to_close)
+                    except OSError:
+                        pass
+                    try:
+                        os.close(fd_to_close)
+                    except OSError:
+                        pass
+        except BaseException as exc:
+            self._error = exc
+            self._acquired_event.set()
+
+
 class DubbingService:
     def __init__(self):
         self.dubbed_dir = settings.DUBBED_DIR
         os.makedirs(self.dubbed_dir, exist_ok=True)
+        # One lock per job for segments.json read-modify-write cycles. The lock
+        # is backed by an OS advisory file lock so separate Uvicorn workers
+        # sharing the same filesystem also serialize on the same job.
+        self._segment_file_locks: Dict[str, _SegmentFileLock] = {}
+
+    async def _get_segments_file_lock(self, job_id: str) -> _SegmentFileLock:
+        lock = self._segment_file_locks.get(job_id)
+        if lock is None:
+            lock_path = os.path.join(self.dubbed_dir, job_id, ".segments.lock")
+            lock = _SegmentFileLock(lock_path)
+            self._segment_file_locks[job_id] = lock
+        return lock
 
     def _get_tts_provider(self, target_language: str = "en"):
         """Return the active TTS service based on TTS_PROVIDER env/config.
@@ -1920,33 +2093,79 @@ class DubbingService:
 
             # accompaniment_path was set earlier from the Demucs run at the top
             output_video = os.path.join(output_dir, f"dubbed_{target_norm}.mp4")
-            # `data` was not in scope here; load persisted scenes from segments.json
-            # if a previous run/editor state exists, otherwise start with an empty list.
-            _scenes_data_path = os.path.join(output_dir, "segments.json")
-            _scenes_data: Dict = {}
-            if os.path.exists(_scenes_data_path):
-                try:
-                    with open(_scenes_data_path, "r", encoding="utf-8") as _sdf:
-                        _scenes_data = json.load(_sdf)
-                except Exception:
-                    pass
-            scenes = _scenes_data.get("scenes") or []
-            scenes_moved = any(
-                float(s.get("source_start", s.get("start", 0))) != float(s.get("start", 0)) or
-                float(s.get("source_end", s.get("end", 0))) != float(s.get("end", 0))
-                for s in scenes
-            )
-            if scenes_moved:
-                if accompaniment_path:
-                    logger.warning("[DUB] Scenes have been moved; separated accompaniment is not yet supported in scene-based mux. Using dubbed audio only.")
-                success = await asyncio.to_thread(
-                    self._replace_audio_in_video_with_scenes, video_path, merged_audio, output_video, scenes,
+            # Read the current scene layout, release the lock for the long
+            # FFmpeg mux, then re-acquire and re-read before writing. A
+            # concurrent PUT /scenes therefore never has to wait on the full
+            # render. If scenes change while muxing, re-render with the latest
+            # layout until the output and segments.json agree. If the layout
+            # keeps changing and the overall mux budget runs out, preserve the
+            # editor's latest acknowledged scene layout rather than overwriting
+            # it with an older rendered snapshot.
+            lock = await self._get_segments_file_lock(job_id)
+            scenes: List[Dict] = []
+            mux_start = time.monotonic()
+            iteration = 0
+            # translation_flagged segments get no audio but their text must still
+            # reach segments.json (editor review). Keep them out of audio_segments
+            # (mixdown reads seg["path"]) and merge them into the payload here.
+            _segments_for_json = audio_segments
+            if flagged_placeholders:
+                _segments_for_json = sorted(
+                    audio_segments + flagged_placeholders,
+                    key=lambda s: s.get("transcript_index", 0),
                 )
-            else:
-                success = await asyncio.to_thread(
-                    self._replace_audio_in_video, video_path, merged_audio, output_video,
-                    accompaniment_path, scenes,
+                logger.info(
+                    f"Job {job_id}: {len(flagged_placeholders)} translation_flagged "
+                    f"segment(s) kept as no-audio drafts in segments.json"
                 )
+            while True:
+                iteration += 1
+                async with lock:
+                    _latest_scenes = self._read_existing_scenes(output_dir)
+                    if _latest_scenes is not None:
+                        scenes = _latest_scenes
+                    elif not scenes:
+                        scenes = []
+                scenes_moved = any(
+                    float(s.get("source_start", s.get("start", 0))) != float(s.get("start", 0)) or
+                    float(s.get("source_end", s.get("end", 0))) != float(s.get("end", 0))
+                    for s in scenes
+                )
+                if scenes_moved:
+                    if accompaniment_path:
+                        logger.warning("[DUB] Scenes have been moved; separated accompaniment is not yet supported in scene-based mux. Using dubbed audio only.")
+                    success = await asyncio.to_thread(
+                        self._replace_audio_in_video_with_scenes, video_path, merged_audio, output_video, scenes,
+                    )
+                else:
+                    success = await asyncio.to_thread(
+                        self._replace_audio_in_video, video_path, merged_audio, output_video,
+                        accompaniment_path, scenes,
+                    )
+                if not success:
+                    raise RuntimeError("Failed to mux dubbed audio into the video (ffmpeg error).")
+
+                async with lock:
+                    _latest_scenes = self._read_existing_scenes(output_dir)
+                    if _latest_scenes is not None and _latest_scenes != scenes:
+                        elapsed = time.monotonic() - mux_start
+                        if elapsed < _SEGMENTS_MUX_TIMEOUT_SECONDS:
+                            logger.info(f"[DUB] Scene layout changed during mux; retrying with latest scenes (iteration {iteration})")
+                            scenes = _latest_scenes
+                            continue
+                        logger.warning(f"[DUB] Scene layout still changing after {iteration} mux iterations ({elapsed:.1f}s); preserving latest scene edit")
+                        scenes = _latest_scenes
+                    payload = await asyncio.to_thread(
+                        self._write_segments_json_locked,
+                        job_id, target_norm, _segments_for_json, output_dir, scenes,
+                        video_path=video_path,
+                        accompaniment_path=accompaniment_path,
+                        video_duration=video_duration,
+                        dubbing_style=dubbing_style,
+                        localized_aliases=localized_aliases,
+                    )
+                break
+
             _stage_t["mux"] = time.monotonic()
             logger.info(
                 f"[STAGE] mux: {_stage_t['mux'] - _stage_t['merge']:.1f}s"
@@ -1960,40 +2179,24 @@ class DubbingService:
                 f"segments={len(transcript)}"
             )
 
-            if success:
-                logger.info(f"Dubbed video created: {output_video}")
-                engine_summary = "unknown"
-                if tts_engines:
-                    unique_engines = set(tts_engines)
-                    if len(unique_engines) == 1:
-                        engine_summary = next(iter(unique_engines))
-                    else:
-                        engine_summary = "mixed"
-                _segments_for_json = audio_segments
-                if flagged_placeholders:
-                    _segments_for_json = sorted(
-                        audio_segments + flagged_placeholders,
-                        key=lambda s: s.get("transcript_index", 0),
-                    )
-                    logger.info(
-                        f"Job {job_id}: {len(flagged_placeholders)} translation_flagged "
-                        f"segment(s) kept as no-audio drafts in segments.json"
-                    )
-                self._write_segments_json(
-                    job_id, target_norm, _segments_for_json, output_dir,
-                    video_path=video_path,
-                    accompaniment_path=accompaniment_path,
-                    video_duration=video_duration,
-                    dubbing_style=dubbing_style,
-                    localized_aliases=localized_aliases,
-                )
-                return {
-                    "output_path": output_video,
-                    "tts_engine": engine_summary,
-                    "segment_engines": segment_engines,
-                }
-
-            raise RuntimeError("Failed to mux dubbed audio into the video (ffmpeg error).")
+            logger.info(f"Dubbed video created: {output_video}")
+            engine_summary = "unknown"
+            if tts_engines:
+                unique_engines = set(tts_engines)
+                if len(unique_engines) == 1:
+                    engine_summary = next(iter(unique_engines))
+                else:
+                    engine_summary = "mixed"
+            try:
+                from app.services.supabase_client import upsert_segments
+                asyncio.create_task(upsert_segments(job_id, payload["segments"]))
+            except Exception:
+                pass
+            return {
+                "output_path": output_video,
+                "tts_engine": engine_summary,
+                "segment_engines": segment_engines,
+            }
                 
         except Exception as e:
             logger.exception(f"Dubbing error: {e}")
@@ -3511,31 +3714,31 @@ class DubbingService:
     # Segment editor support
     # ------------------------------------------------------------------
 
-    def _write_segments_json(
+    def _read_existing_scenes(self, output_dir: str) -> Optional[List[Dict]]:
+        """Read the current `scenes` list from segments.json, if any."""
+        path = os.path.join(output_dir, "segments.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f).get("scenes")
+        except Exception:
+            return None
+
+    def _write_segments_json_locked(
         self,
         job_id: str,
         language: str,
         audio_segments: List[Dict],
         output_dir: str,
+        scenes: Optional[List[Dict]],
         video_path: str = "",
         accompaniment_path: Optional[str] = None,
         video_duration: float = 0.0,
         dubbing_style: Optional[str] = None,
         localized_aliases: Optional[Dict[str, str]] = None,
-    ) -> None:
+    ) -> Dict:
+        """Write segments.json. Caller must hold the per-job lock; returns the payload."""
         path = os.path.join(output_dir, "segments.json")
         snapshot_path = os.path.join(output_dir, "segments_snapshot.json")
-
-        # Preserve user/editor state that should survive regeneration, e.g. scene
-        # boundaries persisted via PUT /scenes/{job_id}. Without this, a rerun
-        # overwrites segments.json and the next mux/load cycle loses the layout.
-        existing_scenes = None
-        try:
-            with open(path, "r", encoding="utf-8") as _f:
-                _existing = json.load(_f)
-                existing_scenes = _existing.get("scenes")
-        except Exception:
-            pass
 
         payload = {
             "job_id": job_id,
@@ -3557,19 +3760,44 @@ class DubbingService:
                 for seg in audio_segments
             ],
         }
-        if existing_scenes is not None:
-            payload["scenes"] = existing_scenes
+        if scenes is not None:
+            payload["scenes"] = scenes
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
         shutil.copy2(path, snapshot_path)
         logger.info(f"[SEGMENTS] Wrote {len(audio_segments)} segments to {path}")
         from app.services.segment_validation import validate_segments
         validate_segments(job_id, payload["segments"])
+        return payload
+
+    async def _write_segments_json(
+        self,
+        job_id: str,
+        language: str,
+        audio_segments: List[Dict],
+        output_dir: str,
+        video_path: str = "",
+        accompaniment_path: Optional[str] = None,
+        video_duration: float = 0.0,
+    ) -> None:
+        """Write segments.json while holding the per-job lock.
+
+        The lock protects the read-modify-write of existing scenes so that a
+        concurrent PUT /scenes cannot be overwritten by a rerun that read the
+        file before the editor's scenes were persisted.
+        """
+        lock = await self._get_segments_file_lock(job_id)
+        async with lock:
+            scenes = self._read_existing_scenes(output_dir)
+            payload = await asyncio.to_thread(
+                self._write_segments_json_locked,
+                job_id, language, audio_segments, output_dir, scenes,
+                video_path, accompaniment_path, video_duration,
+            )
         try:
             from app.services.supabase_client import upsert_segments
-            loop = asyncio.get_running_loop()
-            loop.create_task(upsert_segments(job_id, payload["segments"]))
-        except RuntimeError:
+            asyncio.create_task(upsert_segments(job_id, payload["segments"]))
+        except Exception:
             pass  # No running event loop — skip Supabase upsert
 
     class NuanceTranslator:
@@ -4688,28 +4916,60 @@ class DubbingService:
             raise RuntimeError(f"Remix failed: could not merge {len(merge_segments)} segments for job {job_id}")
 
         output_video = os.path.join(output_dir, f"dubbed_{language}.mp4")
-        scenes = data.get("scenes") or []
-        scenes_moved = any(
-            float(s.get("source_start", s.get("start", 0))) != float(s.get("start", 0)) or
-            float(s.get("source_end", s.get("end", 0))) != float(s.get("end", 0))
-            for s in scenes
-        )
-        if scenes_moved:
-            if accompaniment_path:
-                logger.warning("[REMIX] Scenes have been moved; separated accompaniment is not yet supported in scene-based mux. Using dubbed audio only.")
-            ok = await asyncio.to_thread(
-                self._replace_audio_in_video_with_scenes, video_path, merged_audio, output_video, scenes
+        # Read the current scene layout, release the lock for the long FFmpeg
+        # mux, then re-acquire and re-read before writing. This keeps scene
+        # edits from blocking on the render. If scenes change while muxing,
+        # re-render with the latest layout until the output and segments.json
+        # agree. If the layout keeps changing and the overall mux budget runs
+        # out, preserve the editor's latest acknowledged scene layout rather
+        # than overwriting it with an older rendered snapshot.
+        lock = await self._get_segments_file_lock(job_id)
+        scenes: List[Dict] = []
+        mux_start = time.monotonic()
+        iteration = 0
+        while True:
+            iteration += 1
+            async with lock:
+                _latest_scenes = self._read_existing_scenes(output_dir)
+                if _latest_scenes is not None:
+                    scenes = _latest_scenes
+                elif not scenes:
+                    scenes = data.get("scenes") or []
+            scenes_moved = any(
+                float(s.get("source_start", s.get("start", 0))) != float(s.get("start", 0)) or
+                float(s.get("source_end", s.get("end", 0))) != float(s.get("end", 0))
+                for s in scenes
             )
-        else:
-            ok = await asyncio.to_thread(
-                self._replace_audio_in_video, video_path, merged_audio, output_video, accompaniment_path, scenes
-            )
-        if not ok:
-            raise RuntimeError(f"Remix failed: could not mux audio into video for job {job_id}")
+            if scenes_moved:
+                if accompaniment_path:
+                    logger.warning("[REMIX] Scenes have been moved; separated accompaniment is not yet supported in scene-based mux. Using dubbed audio only.")
+                ok = await asyncio.to_thread(
+                    self._replace_audio_in_video_with_scenes, video_path, merged_audio, output_video, scenes
+                )
+            else:
+                ok = await asyncio.to_thread(
+                    self._replace_audio_in_video, video_path, merged_audio, output_video, accompaniment_path, scenes
+                )
+            if not ok:
+                raise RuntimeError(f"Remix failed: could not mux audio into video for job {job_id}")
 
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        data["last_remixed_at"] = datetime.utcnow().isoformat() + "Z"
-        atomic_write_json(segments_path, data)
+            async with lock:
+                with open(segments_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                _latest_scenes = data.get("scenes")
+                if _latest_scenes is not None and _latest_scenes != scenes:
+                    elapsed = time.monotonic() - mux_start
+                    if elapsed < _SEGMENTS_MUX_TIMEOUT_SECONDS:
+                        logger.info(f"[REMIX] Scene layout changed during mux; retrying with latest scenes (iteration {iteration})")
+                        scenes = _latest_scenes
+                        continue
+                    logger.warning(f"[REMIX] Scene layout still changing after {iteration} mux iterations ({elapsed:.1f}s); preserving latest scene edit")
+                    scenes = _latest_scenes
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                data["last_remixed_at"] = datetime.utcnow().isoformat() + "Z"
+                data["scenes"] = scenes
+                await asyncio.to_thread(atomic_write_json, segments_path, data)
+            break
 
         logger.info(f"[REMIX] job={job_id} segments={len(merge_segments)} elapsed={elapsed_ms}ms")
         return {
