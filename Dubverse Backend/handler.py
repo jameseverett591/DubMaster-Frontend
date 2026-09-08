@@ -10,6 +10,14 @@ import os
 import re
 import time
 
+# Image version stamp — confirms which Docker image the worker is running.
+# Updated on every build.  If the log doesn't show this version, the worker
+# is running a cached/old image.
+_WORKER_IMAGE_VERSION = "v69-deepgram"
+print(f"handler.py: IMAGE_VERSION={_WORKER_IMAGE_VERSION}", flush=True)
+print(f"handler.py: CANTONESE_ASR_ENGINES={os.getenv('CANTONESE_ASR_ENGINES', '(not set)')}", flush=True)
+print(f"handler.py: DEEPGRAM_API_KEY={'set' if os.getenv('DEEPGRAM_API_KEY') else 'NOT SET'}", flush=True)
+
 try:
     import runpod
     print(f"handler.py: runpod {getattr(runpod, '__version__', 'unknown')} OK", flush=True)
@@ -276,15 +284,20 @@ def _split_segment_by_diarization(
     if len(intervals) == 1:
         return _split_long_segment(seg, intervals[0][2], max_duration, max_chars)
 
-    # Turns averaging under 0.8s are more likely diarization noise than real
-    # speaker changes — fall back to the dominant speaker rather than splitting
-    # on jitter. Time-based, not character-count-based: a character-count
-    # guard here (len(intervals) > chars_total) was language-biased — CJK text
-    # conveys a full exchange in far fewer characters than the English
-    # equivalent, so it tripped constantly on Cantonese/Chinese segments and
-    # almost never on English ones for the identical number of real speaker
-    # turns, silently collapsing real multi-speaker Cantonese dialogue into
-    # one dominant voice.
+    # Turns averaging under this floor are more likely diarization noise than
+    # real speaker changes — fall back to the dominant speaker rather than
+    # splitting on jitter. Time-based, not character-count-based: a
+    # character-count guard here (len(intervals) > chars_total) was
+    # language-biased — CJK text conveys a full exchange in far fewer
+    # characters than the English equivalent, so it tripped constantly on
+    # Cantonese/Chinese segments and almost never on English ones for the
+    # identical number of real speaker turns, silently collapsing real
+    # multi-speaker Cantonese dialogue into one dominant voice.
+    # Floor lowered from 0.8 to 0.3 (env-configurable): confirmed directly
+    # against a real transcript that rapid Cantonese back-and-forth (turn
+    # gaps under 0.8s) was landing below the old floor and collapsing to one
+    # speaker even after Deepgram itself produced separate diarization turns.
+    min_turn_duration = float(os.getenv("DIARIZATION_MIN_TURN_DURATION", "0.3"))
     avg_turn_duration = (t_end - t_start) / len(intervals)
     chars_total = max(len(text), 1)
     # Second guard, independent of the duration check above: the proportional
@@ -300,7 +313,7 @@ def _split_segment_by_diarization(
     # character per turn, which is rare for genuine multi-turn dialogue in any
     # script, unlike the old bug which fired on any Cantonese segment with
     # more turns than its (naturally low) character count.
-    if avg_turn_duration < 0.8 or len(intervals) > chars_total:
+    if avg_turn_duration < min_turn_duration or len(intervals) > chars_total:
         speakers = {}
         for s, e, sp in intervals:
             speakers[sp] = speakers.get(sp, 0.0) + (e - s)

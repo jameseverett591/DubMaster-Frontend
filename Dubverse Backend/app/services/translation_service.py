@@ -153,6 +153,33 @@ def split_translated_sentences(segments: list) -> list:
     # Mask title/honorific abbreviations before splitting so their periods
     # are never treated as sentence boundaries.  Restored after split.
     _TITLE_ABBREV_RE = re.compile(r'\b(Mr|Mrs|Ms|Dr|Prof|Jr|Sr|St|Lt|Sgt|Gen|Col|Maj|Capt)\.')
+
+    # Same technique as routes.py's diarization-split boundary snapping:
+    # divide the CJK source text proportionally by the same time fractions
+    # used for the English timing split, snapping each cut to the nearest
+    # sentence-ending punctuation (CJK or ASCII) instead of a raw character
+    # count. Previously every child repeated the WHOLE parent source_text
+    # verbatim (deliberately, to avoid ever showing a blank source row) --
+    # correct for avoiding blanks, but confusing in the editor, where a
+    # 5-way split all showed the identical full source line. If the source
+    # has no sentence punctuation at all (common for raw Cantonese ASR
+    # blobs), this degrades gracefully to a plain proportional character
+    # split, which is still a real improvement over full duplication.
+    _SENT_ENDS = frozenset('.!?。！？')
+
+    def _snap_to_boundary(text: str, target_char: int) -> int:
+        """Index just after the nearest sentence-ending char to target_char."""
+        best_idx = target_char
+        best_dist = len(text) + 1
+        for ci, ch in enumerate(text):
+            if ch in _SENT_ENDS:
+                idx = ci + 1
+                dist = abs(idx - target_char)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+        return best_idx
+
     out: list = []
     for seg in segments:
         text = (seg.get("translated_text") or seg.get("text") or "").strip()
@@ -248,9 +275,60 @@ def split_translated_sentences(segments: list) -> list:
         n         = len(sentences)
         fracs     = [d / total_nat for d in group_nats]
 
+        source_text = (seg.get("source_text") or "").strip()
+        n_src_chars = len(source_text)
+        src_cursor = 0
+        cum_frac = 0.0
+
+        # Prefer real timing over guessing. Deepgram (and Whisper) return a
+        # timestamp per source word/character, which is exact -- unlike the
+        # punctuation-snap/proportional fallback below, it can never cut a
+        # word in half, because it never looks at character counts at all.
+        # Sorted once; word_idx advances monotonically through the per-child
+        # loop so each source word is assigned to exactly one child.
+        source_words = seg.get("words") or []
+        source_words = sorted(
+            (w for w in source_words if (w.get("word") or "").strip()),
+            key=lambda w: float(w.get("start", 0.0)),
+        )
+        word_idx = 0
+
         cursor = start
         for i, (sentence, frac) in enumerate(zip(sentences, fracs)):
             seg_end = (cursor + duration * frac) if i < n - 1 else end
+            cum_frac += frac
+
+            if source_words:
+                # Word timing exists for this segment -- trust it for every
+                # child, even one that lands empty (e.g. a very short child
+                # window with no word midpoint inside it). Falling back to
+                # character slicing only for that one child would restart
+                # from src_cursor=0 while earlier children already consumed
+                # words from the front of source_text, duplicating text
+                # instead of showing a blank -- worse than the blank.
+                picked = []
+                # Last child takes every remaining word, so trailing words
+                # whose timestamp lands past a rounded `end` aren't dropped.
+                while word_idx < len(source_words):
+                    w = source_words[word_idx]
+                    w_mid = (float(w.get("start", 0.0)) + float(w.get("end", 0.0))) / 2.0
+                    if i < n - 1 and w_mid >= seg_end:
+                        break
+                    picked.append(w["word"])
+                    word_idx += 1
+                child_source = "".join(picked).strip()
+            else:
+                # No word timing at all on this segment -- fall back to the
+                # punctuation-snap/proportional character split.
+                if source_text:
+                    if i < n - 1:
+                        src_end = _snap_to_boundary(source_text, int(cum_frac * n_src_chars))
+                    else:
+                        src_end = n_src_chars
+                    child_source = source_text[src_cursor:src_end].strip()
+                    src_cursor = src_end
+                else:
+                    child_source = source_text
             out.append({
                 **seg,
                 "text":                sentence,
@@ -260,10 +338,10 @@ def split_translated_sentences(segments: list) -> list:
                 "auto_split":          True,
                 "original_segment_id": orig_id,
                 "split_index":         i,
-                # The parent segment's source text is the source line for the
-                # whole split group; repeat it on every child so the Script view
-                # never shows blank source rows.
-
+                # Divided proportionally above rather than repeating the whole
+                # parent source line -- see the boundary-snapping helper and
+                # comment near the top of this function for why.
+                "source_text":         child_source,
             })
             cursor = seg_end
     return out

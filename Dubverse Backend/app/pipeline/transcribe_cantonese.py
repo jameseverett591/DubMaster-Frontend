@@ -302,6 +302,20 @@ def transcribe_cantonese(
             # non-overlapping gaps, so they never overwrite the primary text.
             merged = deepgram_segments
 
+            # Rescore Deepgram's own low-confidence segments (likely
+            # homophone/garbled-character errors) BEFORE gap-fill, so the two
+            # correction mechanisms stay orthogonal: rescoring fixes WRONG
+            # text on segments Deepgram produced, gap-fill covers MISSING
+            # text where Deepgram produced nothing at all.
+            try:
+                import asyncio as _asyncio_rescore
+                from app.pipeline.asr_rescore import rescore_low_confidence_segments
+                merged = _asyncio_rescore.run(
+                    rescore_low_confidence_segments(merged, source_language=source_language, job_id=job_id)
+                )
+            except Exception as e:
+                logger.warning(f"[CANTONESE-ASR] ASR rescoring failed: {e} — using unrescored Deepgram text")
+
             fallback_segments = []
             if tencent_segments:
                 fallback_segments.extend(tencent_segments)

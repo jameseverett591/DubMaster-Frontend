@@ -92,16 +92,30 @@ def transcribe_with_deepgram(
     model = os.getenv("DEEPGRAM_MODEL", "nova-3").strip() or "nova-3"
 
     # Deepgram batch API parameters.
-    # - diarize=true: speaker diarization (speaker 0, 1, 2...)
+    # - diarize_model=latest: speaker diarization, pinned to Deepgram's
+    #   current best model version instead of an unpinned implicit default
     # - utterances=true: per-utterance segments with speaker + timing
+    # - utt_split: silence gap (seconds) that starts a new utterance.
+    #   Deepgram's own default is 0.8, which merges rapid back-and-forth
+    #   Cantonese dialogue (turn gaps under 0.8s) into one long utterance
+    #   with one speaker label -- confirmed directly against a real
+    #   transcript: a 14s exchange between two speakers came back as a
+    #   single speaker-2 utterance. Lowered default to 0.3s so genuinely
+    #   fast turn-taking still splits; env-configurable in case 0.3 proves
+    #   too aggressive on other content and over-fragments slower dialogue.
     # - punctuate=true: add punctuation (prevents mid-sentence fragments)
+    # - paragraphs=true: group utterances into paragraphs using punctuation
+    #   + speaker changes together
     # - smart_format=true: smart formatting for numbers, dates, etc.
+    utt_split = os.getenv("DEEPGRAM_UTT_SPLIT", "0.3").strip() or "0.3"
     params = {
         "model": model,
         "language": language,
-        "diarize": "true",
+        "diarize_model": "latest",
         "utterances": "true",
+        "utt_split": utt_split,
         "punctuate": "true",
+        "paragraphs": "true",
         "smart_format": "true",
     }
 
