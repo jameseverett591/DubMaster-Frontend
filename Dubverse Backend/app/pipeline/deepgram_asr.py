@@ -60,6 +60,107 @@ def _get_api_key() -> Optional[str]:
     return key
 
 
+_MIN_WORD_SPEAKER_CONFIDENCE = 0.5
+
+
+def _split_by_word_speakers(
+    text: str,
+    start: float,
+    end: float,
+    speaker_num: int,
+    confidence: float,
+    words: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Split a Deepgram utterance at word-level speaker-change boundaries.
+
+    utt_split only creates a new utterance across a silence gap; two people
+    trading lines with less than that gap between them stay one utterance
+    with one speaker label no matter how low utt_split goes -- confirmed
+    directly against the Ip Man 2 test clip, where a countryman's speech
+    with a brief "Thank you so much" interjection from Ip Man collapsed to
+    one speaker even after lowering utt_split and the diarization-split
+    floors. But Deepgram tags every WORD with its own speaker +
+    speaker_confidence, independent of that utterance grouping -- real
+    signal that was previously captured (further down, in the words list)
+    and then discarded rather than used to split.
+
+    A word with low speaker_confidence is treated as an unreliable tag and
+    folded into whichever run it falls inside rather than triggering a
+    split, so isolated diarization jitter on one word doesn't fragment an
+    otherwise-single-speaker utterance.
+    """
+    if not words:
+        return [{
+            "start": start,
+            "end": end,
+            "text": text,
+            "speaker": f"speaker-{speaker_num + 1}",
+            "confidence": confidence,
+            "source": "deepgram",
+            "words": None,
+        }]
+
+    runs: List[Dict[str, Any]] = []
+    for w in words:
+        w_speaker = w.get("speaker")
+        w_conf = w.get("speaker_confidence")
+        reliable = w_speaker is not None and w_conf is not None and w_conf >= _MIN_WORD_SPEAKER_CONFIDENCE
+        if runs and (not reliable or w_speaker == runs[-1]["speaker"]):
+            runs[-1]["words"].append(w)
+        else:
+            runs.append({"speaker": w_speaker if reliable else speaker_num, "words": [w]})
+
+    if len(runs) == 1:
+        return [{
+            "start": start,
+            "end": end,
+            "text": text,
+            "speaker": f"speaker-{speaker_num + 1}",
+            "confidence": confidence,
+            "source": "deepgram",
+            "words": words,
+        }]
+
+    logger.info(
+        f"[DEEPGRAM] split utterance at word speaker change: "
+        f"{start}-{end}s, utterance-level speaker={speaker_num}, "
+        f"{len(runs)} word-level run(s) -> speakers "
+        f"{[r['speaker'] for r in runs]}"
+    )
+
+    out: List[Dict[str, Any]] = []
+    for run in runs:
+        run_words = run["words"]
+        run_text = "".join(w.get("word", "") for w in run_words).strip()
+        if not run_text:
+            continue
+        confidences = [w["confidence"] for w in run_words if w.get("confidence") is not None]
+        run_confidence = sum(confidences) / len(confidences) if confidences else confidence
+        out.append({
+            "start": round(float(run_words[0]["start"]), 3),
+            "end": round(float(run_words[-1]["end"]), 3),
+            "text": run_text,
+            "speaker": f"speaker-{int(run['speaker']) + 1}",
+            "confidence": round(run_confidence, 4),
+            "source": "deepgram",
+            "words": run_words,
+        })
+
+    # All runs came out empty (shouldn't happen, but never emit nothing for
+    # a non-empty utterance) -- fall back to the single unsplit segment.
+    if not out:
+        return [{
+            "start": start,
+            "end": end,
+            "text": text,
+            "speaker": f"speaker-{speaker_num + 1}",
+            "confidence": confidence,
+            "source": "deepgram",
+            "words": words,
+        }]
+    return out
+
+
 def transcribe_with_deepgram(
     extract_result: Dict[str, Any],
     audio_path: Optional[str] = None,
@@ -205,7 +306,11 @@ def transcribe_with_deepgram(
         # Map Deepgram speaker numbers to our speaker-N convention.
         speaker = f"speaker-{speaker_num + 1}"
 
-        # Convert Deepgram word timings to our format.
+        # Convert Deepgram word timings to our format. Capture speaker +
+        # speaker_confidence per word too -- Deepgram tags these
+        # independently of the utterance-level speaker/utt_split grouping,
+        # and they're the only signal left once two people trade lines with
+        # too little pause for utt_split to ever create a new utterance.
         words = []
         for w in utt.get("words", []):
             words.append({
@@ -213,17 +318,11 @@ def transcribe_with_deepgram(
                 "start": round(float(w.get("start", 0.0)), 3),
                 "end": round(float(w.get("end", 0.0)), 3),
                 "confidence": float(w.get("confidence", 0.0)),
+                "speaker": w.get("speaker"),
+                "speaker_confidence": w.get("speaker_confidence"),
             })
 
-        segments.append({
-            "start": start,
-            "end": end,
-            "text": text,
-            "speaker": speaker,
-            "confidence": confidence,
-            "source": "deepgram",
-            "words": words if words else None,
-        })
+        segments.extend(_split_by_word_speakers(text, start, end, speaker_num, confidence, words))
 
     logger.info(
         f"[DEEPGRAM] job={job_id} produced {len(segments)} segments, "
