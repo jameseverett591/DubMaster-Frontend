@@ -2394,8 +2394,9 @@ async def _runpod_transcribe_fallback(
     env_vars = dict(gpu_env_vars)
     # Remove any VAD override so the worker uses its default (0.15 for yue).
     env_vars.pop("VAD_THRESHOLD", None)
-    # Use WenetSpeech-Yue where possible, Whisper as fallback.
-    env_vars["CANTONESE_ASR_ENGINES"] = "wenetspeech,whisper"
+    # Fallback is a rescue from Wenet/Paraformer/Tencent failures or
+    # over-filtered vocals — use Whisper-only so the retry is independent.
+    env_vars["CANTONESE_ASR_ENGINES"] = "whisper"
     env_vars.setdefault("WHISPER_MODEL", "large-v3")
 
     submit_result = await runpod_service.submit_job(
