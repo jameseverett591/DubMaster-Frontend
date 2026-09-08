@@ -1597,13 +1597,14 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "6"))
 
     # Cantonese quality defaults for GPU worker:
-    # - Prefer Whisper large-v3 for yue
+    # - Prefer WenetSpeech-Yue CTC as primary ASR (CPU, low latency, Cantonese-specific)
+    # - Keep Whisper large-v3 as fallback / gap-fill
     # - Disable Paraformer for yue (Mandarin-focused, often produces blob/junk)
     if whisper_language.lower() == "yue":
         if not os.getenv("WHISPER_MODEL", "").strip():
             os.environ["WHISPER_MODEL"] = "large-v3"
         if not os.getenv("CANTONESE_ASR_ENGINES", "").strip():
-            os.environ["CANTONESE_ASR_ENGINES"] = "whisper"
+            os.environ["CANTONESE_ASR_ENGINES"] = "wenetspeech,whisper"
 
     # Collect env vars the GPU worker needs for ASR engines and callbacks
     _env_keys = [
@@ -1630,7 +1631,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         gpu_env_vars["WHISPER_LANGUAGE"] = whisper_language
         if whisper_language.lower() == "yue":
             gpu_env_vars.setdefault("WHISPER_MODEL", os.environ.get("WHISPER_MODEL", "large-v3"))
-            gpu_env_vars.setdefault("CANTONESE_ASR_ENGINES", os.environ.get("CANTONESE_ASR_ENGINES", "whisper"))
+            gpu_env_vars.setdefault("CANTONESE_ASR_ENGINES", os.environ.get("CANTONESE_ASR_ENGINES", "wenetspeech,whisper"))
             # Let the worker pick its VAD threshold (default 0.15 for Cantonese).
             # Explicitly setting VAD_THRESHOLD=0 disabled VAD and caused the worker
             # to return empty transcripts on long-form mixed-content films.
@@ -1663,6 +1664,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         f"Job {job_id}: ASR settings pinned — "
         f"language={gpu_env_vars.get('WHISPER_LANGUAGE') or 'auto-detect'}, "
         f"model={gpu_env_vars.get('WHISPER_MODEL')}, "
+        f"engines={gpu_env_vars.get('CANTONESE_ASR_ENGINES', 'worker-inherited')}, "
         f"vad={gpu_env_vars.get('VAD_THRESHOLD', 'worker-inherited')}"
         + (f" | UNPINNED (worker decides): {', '.join(_unpinned)}" if _unpinned else "")
     )
@@ -2392,8 +2394,8 @@ async def _runpod_transcribe_fallback(
     env_vars = dict(gpu_env_vars)
     # Remove any VAD override so the worker uses its default (0.15 for yue).
     env_vars.pop("VAD_THRESHOLD", None)
-    # Pin Whisper-only to avoid Tencent 413 / Paraformer unsupported-language issues.
-    env_vars["CANTONESE_ASR_ENGINES"] = "whisper"
+    # Use WenetSpeech-Yue where possible, Whisper as fallback.
+    env_vars["CANTONESE_ASR_ENGINES"] = "wenetspeech,whisper"
     env_vars.setdefault("WHISPER_MODEL", "large-v3")
 
     submit_result = await runpod_service.submit_job(
