@@ -567,13 +567,20 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
         # the old sentence-count approach treated all CJK text as one sentence
         # because the regex only matched ASCII punctuation.
         _SENT_ENDS = frozenset('.!?。！？')
+        _WORD_BOUNDS = frozenset(' \t，,、')
+        # Minimum fragment size for word-boundary splits — prevents "a few /
+        # months" while still allowing splits in long multi-speaker segments.
+        _MIN_FRAG_CHARS = 8
+        _MIN_FRAG_WORDS = 2
 
-        def _snap_to_boundary(text, target_char):
-            """Index just after the nearest sentence-ending char to target_char.
+        def _snap_to_boundary(text, target_char, prev_point=0):
+            """Find the best split point near target_char.
 
-            Returns -1 if no sentence-ending punctuation exists in the text,
-            so the caller can avoid splitting mid-sentence.
+            Priority: sentence-ending punctuation, then word boundaries
+            (only if both sides meet minimum fragment size).  Returns -1
+            if no suitable boundary exists.
             """
+            # 1. Sentence-ending punctuation.
             best_idx = -1
             best_dist = len(text) + 1
             for ci, ch in enumerate(text):
@@ -583,23 +590,43 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
                     if dist < best_dist:
                         best_dist = dist
                         best_idx = idx
+            if best_idx != -1:
+                return best_idx
+
+            # 2. Word boundary — only if both sides are long enough.
+            best_idx = -1
+            best_dist = len(text) + 1
+            for ci, ch in enumerate(text):
+                if ch in _WORD_BOUNDS:
+                    idx = ci + 1
+                    dist = abs(idx - target_char)
+                    if dist < best_dist:
+                        left = text[prev_point:ci].strip()
+                        right = text[ci:].strip()
+                        if (len(left) >= _MIN_FRAG_CHARS
+                                and len(right) >= _MIN_FRAG_CHARS
+                                and len(left.split()) >= _MIN_FRAG_WORDS
+                                and len(right.split()) >= _MIN_FRAG_WORDS):
+                            best_dist = dist
+                            best_idx = idx
             return best_idx
 
         n_chars = len(seg_text)
         total_slice_dur = sum(sl["dur"] for sl in slices) or seg_dur
         cum_dur = 0.0
         split_points = []
+        prev = 0
         for sl in slices[:-1]:
             cum_dur += sl["dur"]
             rel = cum_dur / total_slice_dur if total_slice_dur > 0 else (slices.index(sl) + 1) / len(slices)
             target = int(rel * n_chars)
-            bp = _snap_to_boundary(seg_text, target)
+            bp = _snap_to_boundary(seg_text, target, prev_point=prev)
             if bp == -1:
-                # No sentence-ending punctuation in the text — don't split
-                # mid-sentence.  Return [] so the caller falls back to
-                # assigning the whole segment to the dominant speaker.
+                # No suitable boundary — don't split.  Return [] so the
+                # caller assigns the whole segment to the dominant speaker.
                 return []
             split_points.append(bp)
+            prev = bp
 
         prev = 0
         for j, sl in enumerate(slices):

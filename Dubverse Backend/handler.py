@@ -311,11 +311,17 @@ def _split_segment_by_diarization(
     # natural punctuation boundaries when possible.  This preserves the exact number
     # of speaker turns instead of collapsing ratios into fewer chunks.
     #
-    # CRITICAL: only split at sentence-ending punctuation.  If no sentence
-    # boundary is found near the diarization turn, do NOT split mid-sentence —
-    # "This place was free for a few / months" across two bubbles corrupts the
-    # text.  The whole line stays with the dominant speaker; the editor can
-    # fix speaker attribution, but a mid-word split is unrecoverable.
+    # Split priority:
+    #   1. Sentence-ending punctuation (。！？.?!；;) within 25% of target
+    #   2. Word boundary (space/comma) — BUT only if both sides have at least
+    #      _MIN_FRAGMENT_CHARS characters and _MIN_FRAGMENT_WORDS words.
+    #      This prevents "a few / months" (fragment too short) while still
+    #      allowing splits in long multi-speaker segments with no punctuation
+    #      (so 5 sentences don't collapse into one bubble/speaker).
+    #   3. If neither found, don't split — dominant speaker gets the whole line.
+    _MIN_FRAGMENT_CHARS = 8
+    _MIN_FRAGMENT_WORDS = 2
+
     total_speech = sum(i[1] - i[0] for i in intervals)
     num_intervals = len(intervals)
     split_points: list[int] = []
@@ -330,8 +336,7 @@ def _split_segment_by_diarization(
         max_target = chars_total - (num_intervals - 1 - i)
         target = min(max(raw_target, prev_point + 1), max_target)
 
-        # Search for sentence-ending punctuation within 25% of the remaining
-        # text length.  Only split at a real sentence boundary — never mid-word.
+        # 1. Search for sentence-ending punctuation within 25% of remaining text.
         max_dist = max(3, int((search_end - prev_point) * 0.25))
         best = -1
         best_dist = float("inf")
@@ -341,17 +346,34 @@ def _split_segment_by_diarization(
                 if dist <= max_dist and dist < best_dist:
                     best = j + 1
                     best_dist = dist
+
+        # 2. If no sentence boundary, try word boundaries — but only if both
+        #    sides would be long enough to be meaningful speech fragments.
         if best == -1:
-            # No sentence-ending punctuation within range — skip this split.
-            # The text stays with the dominant speaker (handled below).
+            for j in range(prev_point, search_end):
+                if text[j] in _WORD_BOUNDARY_PUNCT:
+                    dist = abs((j + 1) - target)
+                    if dist < best_dist:
+                        left = text[prev_point:j].strip()
+                        right = text[j:].strip()
+                        left_words = len(left.split())
+                        right_words = len(right.split())
+                        if (len(left) >= _MIN_FRAGMENT_CHARS
+                                and len(right) >= _MIN_FRAGMENT_CHARS
+                                and left_words >= _MIN_FRAGMENT_WORDS
+                                and right_words >= _MIN_FRAGMENT_WORDS):
+                            best = j + 1
+                            best_dist = dist
+
+        if best == -1:
+            # No suitable boundary — skip this split.
             continue
         best = max(prev_point + 1, min(best, search_end))
         split_points.append(best)
         prev_point = best
 
-    # If we couldn't find sentence boundaries for every turn transition, don't
-    # force-split — assign the whole segment to the dominant speaker instead.
-    # This prevents mid-sentence splits like "a few / months".
+    # If we couldn't find boundaries for every turn transition, don't
+    # force-split — assign the whole segment to the dominant speaker.
     if len(split_points) < num_intervals - 1:
         speakers = {}
         for s, e, sp in intervals:
