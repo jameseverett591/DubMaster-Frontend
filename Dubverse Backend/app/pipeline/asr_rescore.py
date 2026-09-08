@@ -79,7 +79,7 @@ def _build_prompt(lang_name: str, marked_lines: str) -> str:
     )
 
 
-async def rescore_low_confidence_segments(
+def rescore_low_confidence_segments(
     segments: List[Dict[str, Any]],
     source_language: Optional[str] = None,
     job_id: Optional[str] = None,
@@ -137,8 +137,8 @@ async def rescore_low_confidence_segments(
     }
 
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
+        with httpx.Client() as client:
+            response = client.post(
                 _API_URL, json=payload, headers=headers, timeout=_timeout_sec(),
             )
     except Exception as e:
