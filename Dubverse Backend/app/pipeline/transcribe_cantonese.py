@@ -1,20 +1,23 @@
 """
-Unified Cantonese transcription pipeline.
+Unified Chinese (Cantonese + Mandarin) transcription pipeline.
 
-Orchestrates multiple ASR engines for maximum accuracy:
-  1. Tencent ASR  (cloud) — high recall, catches speech in noise
-  2. Paraformer   (local) — high precision, correct tones/characters
-  3. Whisper      (local) — fallback gap fill
-  4. Merge engine          — combines the best of each
+WenetSpeech is the primary ASR for Cantonese and Mandarin. It is supported
+by the other engines as fallbacks / gap-fillers:
+  1. WenetSpeech (local) — primary for Cantonese and Mandarin
+  2. Tencent ASR  (cloud) — high recall, catches speech in noise
+  3. Paraformer   (local) — high precision for Mandarin tones/characters
+  4. Whisper      (local) — fallback gap fill
+  5. Merge engine          — combines the best of each
 
 The pipeline gracefully degrades:
-  - If Tencent is not configured → Paraformer + Whisper
-  - If Paraformer is not installed → Tencent + Whisper
-  - If both unavailable → Whisper only (existing behavior)
+  - If WenetSpeech is not installed → Tencent + Paraformer + Whisper
+  - If Tencent is not configured → WenetSpeech + Paraformer + Whisper
+  - If Paraformer is not installed → WenetSpeech + Tencent + Whisper
+  - If all unavailable → Whisper only (existing behavior)
 
 Environment variables:
   CANTONESE_ASR_ENGINES  — Comma-separated engine priority
-                           (default: "tencent,paraformer,whisper")
+                           (default: "wenetspeech,tencent,paraformer,whisper")
   CANTONESE_ASR_WHISPER_GAP_FILL — "1" to fill gaps with Whisper (default: "1")
 """
 
@@ -27,6 +30,8 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 _CANTONESE_LANGS = {"yue", "zh-yue", "yue-hk", "zh-hk"}
+_MANDARIN_LANGS = {"zh", "cmn", "zho", "zh-cn", "zh-tw"}
+_CHINESE_LANGS = _CANTONESE_LANGS | _MANDARIN_LANGS
 
 
 def _is_cantonese(source_language: Optional[str]) -> bool:
@@ -34,11 +39,23 @@ def _is_cantonese(source_language: Optional[str]) -> bool:
     return (source_language or "").lower().strip().replace("_", "-") in _CANTONESE_LANGS
 
 
+def _is_mandarin(source_language: Optional[str]) -> bool:
+    """Return True when source_language is a Mandarin/Standard Chinese variant."""
+    return (source_language or "").lower().strip().replace("_", "-") in _MANDARIN_LANGS
+
+
+def _is_chinese(source_language: Optional[str]) -> bool:
+    """Return True for any Cantonese or Mandarin/Standard Chinese variant."""
+    return _is_cantonese(source_language) or _is_mandarin(source_language)
+
+
 def _normalize_language(source_language: Optional[str]) -> str:
     """Map Cantonese locale variants to the base `yue` code used by engines."""
     lang = (source_language or "").lower().strip().replace("_", "-")
     if lang in _CANTONESE_LANGS:
         return "yue"
+    if lang in _MANDARIN_LANGS:
+        return "zh"
     return source_language or "yue"
 
 
@@ -76,7 +93,7 @@ def transcribe_cantonese(
     source_language: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Run the multi-engine Cantonese transcription pipeline.
+    Run the multi-engine Chinese (Cantonese + Mandarin) transcription pipeline.
 
     Input:
         extract_result: From extract_audio() — contains audio tensor + sample_rate
@@ -105,7 +122,7 @@ def transcribe_cantonese(
     env_engines = os.getenv("CANTONESE_ASR_ENGINES", "").strip()
     if env_engines:
         engines_str = env_engines
-    elif _is_cantonese(source_language):
+    elif _is_chinese(source_language):
         engines_str = "wenetspeech,tencent,paraformer,whisper"
     else:
         engines_str = "tencent,paraformer,whisper"
@@ -273,17 +290,30 @@ def transcribe_cantonese(
                 logger.warning(f"[CANTONESE-ASR] Whisper failed: {e}")
 
         # ── Merge results ──
-        from app.pipeline.asr_merge import merge_asr_results, merge_with_whisper_fallback
+        from app.pipeline.asr_merge import (
+            fill_gaps_with_fallbacks,
+            merge_asr_results,
+            merge_with_whisper_fallback,
+        )
 
         if wenet_segments:
-            # WenetSpeech-Yue is the primary Cantonese transcript.
+            # WenetSpeech is the primary Chinese (Cantonese/Mandarin) transcript.
+            # Tencent/Paraformer/Whisper are only added where WenetSpeech left
+            # non-overlapping gaps, so they never overwrite the primary text.
             merged = wenet_segments
 
-            # Optional: fill gaps with Whisper
+            fallback_segments = []
+            if tencent_segments:
+                fallback_segments.extend(tencent_segments)
+            if paraformer_segments:
+                fallback_segments.extend(paraformer_segments)
             if whisper_segments and run_whisper_gaps:
-                merged = merge_with_whisper_fallback(
-                    merged_segments=merged,
-                    whisper_segments=whisper_segments,
+                fallback_segments.extend(whisper_segments)
+
+            if fallback_segments:
+                merged = fill_gaps_with_fallbacks(
+                    primary_segments=merged,
+                    fallback_segments=fallback_segments,
                     job_id=job_id,
                 )
         elif tencent_segments or paraformer_segments:

@@ -87,9 +87,11 @@ def _upload_stems(job_id: str, sep_result: dict) -> dict:
     return keys
 
 
-# Languages that use the multi-engine Cantonese ASR pipeline
-_CJK_LANGS = {"zh", "yue", "cmn", "zho", "ja", "ko",
-               "zh-cn", "zh-tw", "zh-hk", "yue-hk", "zh-yue"}
+# Languages that use the multi-engine Chinese ASR pipeline
+# WenetSpeech supports Cantonese and Mandarin/Standard Chinese; Japanese/Korean
+# fall back to the standard Whisper path.
+_CHINESE_LANGS = {"zh", "yue", "cmn", "zho",
+                   "zh-cn", "zh-tw", "zh-hk", "yue-hk", "zh-yue"}
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -384,12 +386,95 @@ def _assign_and_split_segments(
     return out
 
 
+# Simple CJK detector for merging over-fragmented Chinese/Cantonese text without
+# inserting spaces between characters.
+_CJK_RE = re.compile(r"[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]")
+
+
+def _merge_overfragmented_segments(
+    segments: list[dict],
+    max_gap: float = 0.5,
+    max_duration: float = _MAX_SEGMENT_DURATION,
+    max_chars: int = _MAX_SEGMENT_CHARS,
+) -> list[dict]:
+    """Merge adjacent same-speaker fragments that were split by diarization noise.
+
+    WenetSpeech's VAD produces short chunks; when those chunks cross a pyannote
+    speaker-boundary jitter, the diarization rescue split can chop a single
+    sentence into tiny pieces (e.g. "Master Ip" / "haven't you taken any
+    disciples in today?"). This step rejoins adjacent fragments when:
+      - they have the same speaker,
+      - the gap/overlap is small,
+      - the previous fragment does not end with sentence-ending punctuation,
+      - the combined segment still fits the duration/char limits.
+    """
+    if not segments:
+        return segments
+
+    _SENTENCE_ENDS = frozenset(".!?。！？")
+
+    def _join_texts(a: str, b: str) -> str:
+        a = (a or "").rstrip()
+        b = (b or "").lstrip()
+        # If both sides are primarily CJK, do not insert a space.
+        if _CJK_RE.search(a) and _CJK_RE.search(b):
+            return (a + b).strip()
+        return (a + " " + b).strip()
+
+    merged: list[dict] = []
+    for seg in sorted(segments, key=lambda s: float(s.get("start", 0))):
+        if not merged:
+            merged.append(seg)
+            continue
+
+        prev = merged[-1]
+        prev_speaker = prev.get("speaker", "SPEAKER_00")
+        cur_speaker = seg.get("speaker", "SPEAKER_00")
+        gap = float(seg.get("start", 0)) - float(prev.get("end", 0))
+        prev_text = (prev.get("text") or "").strip()
+        cur_text = (seg.get("text") or "").strip()
+        joined_text = _join_texts(prev_text, cur_text)
+        joined_dur = float(seg.get("end", 0)) - float(prev.get("start", 0))
+
+        can_merge = (
+            prev_speaker == cur_speaker
+            and prev_text
+            and cur_text
+            and gap >= -0.05
+            and gap <= max_gap
+            and prev_text[-1] not in _SENTENCE_ENDS
+            and joined_dur <= max_duration
+            and len(joined_text) <= max_chars
+        )
+
+        if can_merge:
+            merged[-1] = dict(prev)
+            merged[-1]["text"] = joined_text
+            merged[-1]["end"] = float(seg.get("end", 0))
+            # Combine word alignments if both sides carry them.
+            if prev.get("words") or seg.get("words"):
+                merged[-1]["words"] = (prev.get("words") or []) + (seg.get("words") or [])
+            # Keep the lower (worse) confidence of the two fragments.
+            prev_conf = prev.get("confidence")
+            cur_conf = seg.get("confidence")
+            if prev_conf is not None and cur_conf is not None:
+                merged[-1]["confidence"] = min(prev_conf, cur_conf)
+            # If either fragment was flagged low-confidence, keep the flag.
+            if prev.get("confidence_tier") == "low" or seg.get("confidence_tier") == "low":
+                merged[-1]["confidence_tier"] = "low"
+        else:
+            merged.append(seg)
+
+    return merged
+
+
 def handler(event):
     """
-    RunPod serverless handler — v28.
+    RunPod serverless handler — v29.
 
     Pipeline: Download → Extract Audio → Demucs Separation →
-              Whisper Transcription → pyannote Diarization → Speaker Assignment
+              Chinese Multi-Engine ASR / Whisper Transcription →
+              pyannote Diarization → Speaker Assignment → Anti-Fragmentation Merge
 
     Returns transcript + diarization data to the local backend.
     Translation and TTS happen locally (not in RunPod) so the local
@@ -543,10 +628,10 @@ def handler(event):
 
     def _run_transcribe():
         t0 = time.time()
-        if _lang_norm in _CJK_LANGS:
-            # Multi-engine pipeline: Tencent → Paraformer → Whisper (with merge)
-            # Passes separated vocals so Tencent/Paraformer get the cleanest signal
-            logger.info(f"[TRANSCRIBE] CJK language '{language}' — using multi-engine Cantonese pipeline")
+        if _lang_norm in _CHINESE_LANGS:
+            # Multi-engine pipeline: WenetSpeech → Tencent → Paraformer → Whisper
+            # Passes separated vocals so the engines get the cleanest signal.
+            logger.info(f"[TRANSCRIBE] Chinese language '{language}' — using multi-engine Chinese pipeline")
             result = transcribe_cantonese(
                 transcription_source,
                 vocals_path=vocals_audio_path,
@@ -633,6 +718,18 @@ def handler(event):
         logger.info(
             f"Speaker assignment (no diarization): {unique} default speaker(s) across "
             f"{len(segments)} segments (before split: {before})"
+        )
+
+    # ── Anti-fragmentation merge ───────────────────────────────────────────
+    # WenetSpeech's short VAD chunks can get chopped further by the diarization
+    # rescue split. Rejoin adjacent same-speaker fragments that do not end with
+    # sentence-ending punctuation so a single sentence isn't broken into pieces.
+    _before_merge = len(segments)
+    segments = _merge_overfragmented_segments(segments)
+    if len(segments) != _before_merge:
+        logger.info(
+            f"Merged {_before_merge - len(segments)} over-fragmented segment(s) "
+            f"back into sentence-level chunks"
         )
 
     # ── Confidence Tiering ────────────────────────────────────────────────

@@ -18,7 +18,10 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Model supports Cantonese, Mandarin/Standard Chinese, and English.
 _CANTONESE_LANGS = {"yue", "zh-yue", "yue-hk", "zh-hk"}
+_MANDARIN_LANGS = {"zh", "cmn", "zho", "zh-cn", "zh-tw"}
+_SUPPORTED_WENET_LANGS = _CANTONESE_LANGS | _MANDARIN_LANGS
 _DEFAULT_REPO = (
     "csukuangfj/sherpa-onnx-wenetspeech-yue-u2pp-conformer-ctc-zh-en-cantonese-int8-2025-09-10"
 )
@@ -31,6 +34,11 @@ _WENET_RECOGNIZER: Any = None
 def _is_cantonese(source_language: Optional[str]) -> bool:
     """Return True if source_language is a Cantonese variant."""
     return (source_language or "").lower().strip().replace("_", "-") in _CANTONESE_LANGS
+
+
+def _is_supported_chinese_language(source_language: Optional[str]) -> bool:
+    """Return True if source_language is a Cantonese or Mandarin variant supported by WenetSpeech."""
+    return (source_language or "").lower().strip().replace("_", "-") in _SUPPORTED_WENET_LANGS
 
 
 def _load_audio_file(audio_path: str) -> Tuple[np.ndarray, int]:
@@ -220,7 +228,12 @@ def _whisper_confidence_pass(
     from app.pipeline.transcribe_audio import INITIAL_PROMPT, get_whisper_model
 
     model = get_whisper_model(source_language=language)
-    whisper_lang = "yue" if _is_cantonese(language) else (language or "yue")
+    if _is_cantonese(language):
+        whisper_lang = "yue"
+    elif (language or "").lower().strip().replace("_", "-") in _MANDARIN_LANGS:
+        whisper_lang = "zh"
+    else:
+        whisper_lang = language or "yue"
     whisper_kwargs = dict(
         language=whisper_lang,
         beam_size=5,
@@ -396,9 +409,9 @@ def transcribe_with_wenetspeech_yue(
     """Public entry point for WenetSpeech-Yue CTC ASR.
 
     Returns a dict with ``status`` and ``segments`` compatible with the rest of
-    the Cantonese pipeline.  Only runs for Cantonese language variants.
+    the Cantonese pipeline.  Runs for Cantonese and Mandarin/Standard Chinese variants.
     """
-    if not _is_cantonese(source_language):
+    if not _is_supported_chinese_language(source_language):
         return {
             "status": "skipped",
             "reason": "unsupported_language",

@@ -1832,9 +1832,25 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
     # cached separation, which is what keeps the long-form mix guard from firing.
     await asyncio.to_thread(_fetch_gpu_stems, job_id, result.get("stems") or {})
 
-    # Try Velma diarization first (primary source)
+    # Try Velma diarization first (primary source) — but skip it for all Chinese
+    # jobs, because WenetSpeech is now the primary ASR for Cantonese and Mandarin.
+    # Velma is a generalist multilingual STT/diarization product; repeated direct
+    # A/B testing on Cantonese showed the same mistranscribed lines regardless of
+    # which worker engine ran, so its Cantonese transcription is unreliable.
+    # WenetSpeech-Yue was trained on 21,800 hours of Cantonese-specific speech
+    # and is not hobbled by this. For Mandarin, the same WenetSpeech model is
+    # best-in-class for Chinese. These jobs fall through to the existing
+    # "Velma unavailable" path below, which uses the worker's own transcript
+    # + pyannote diarization.
+    _chinese_langs = {
+        "yue", "zh-yue", "yue-hk", "zh-hk",
+        "zh", "cmn", "zho", "zh-cn", "zh-tw",
+    }
+    _is_chinese_job = (job_source_lang or "").lower().strip().replace("_", "-") in _chinese_langs
     velma_result = None
-    if os.getenv("MODULATE_API_KEY") and video_path:
+    if _is_chinese_job:
+        logger.info(f"Job {job_id}: Chinese job — skipping Velma, using WenetSpeech + pyannote instead")
+    elif os.getenv("MODULATE_API_KEY") and video_path:
         try:
             logger.info(f"Job {job_id}: RunPod path — attempting Velma diarization (primary)")
             # Vocals, not the video container — see _velma_source_audio. Off the
@@ -1868,7 +1884,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         )
 
         def _match_runpod_confidence(velma_start, velma_end, rp_segs):
-            """Find best-overlapping RunPod segment and return its confidence + words."""
+            """Find best-overlapping RunPod segment and return its confidence + words + text."""
             best_overlap, best_seg = 0, None
             for rp in rp_segs:
                 rp_s, rp_e = float(rp.get("start", 0)), float(rp.get("end", 0))
@@ -1876,17 +1892,29 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
                 if overlap > best_overlap:
                     best_overlap, best_seg = overlap, rp
             if best_seg and best_overlap > 0:
-                return best_seg.get("confidence"), best_seg.get("confidence_tier"), best_seg.get("words")
-            return None, None, None
+                return best_seg.get("confidence"), best_seg.get("confidence_tier"), best_seg.get("words"), best_seg.get("text")
+            return None, None, None, None
+
+        # TEMPORARY DIAGNOSTIC TOGGLE (2026-09-08): Velma's own transcription
+        # normally wins for `text` unconditionally -- the RunPod worker's ASR
+        # output (WenetSpeech-Yue/Tencent/Whisper) is only ever used to borrow
+        # a confidence score via time-overlap matching, never for the actual
+        # dialogue text. That means no worker-side ASR engine change, however
+        # good, can ever affect final transcript quality while Velma succeeds.
+        # Set VELMA_PRIMARY_TRANSCRIPT=0 to instead use the best-overlapping
+        # RunPod segment's text (falling back to Velma's if none overlaps),
+        # to isolate whether Velma or the worker ASR is producing bad text.
+        _velma_text_wins = os.getenv("VELMA_PRIMARY_TRANSCRIPT", "1") == "1"
 
         segments_data = []
         for s in _velma_segs:
             if not (s.get("text") or "").strip():
                 continue
             v_start, v_end = float(s.get("start", 0)), float(s.get("end", 0))
-            conf, tier, words = _match_runpod_confidence(v_start, v_end, _runpod_segments)
+            conf, tier, words, rp_text = _match_runpod_confidence(v_start, v_end, _runpod_segments)
+            _text = s.get("text", "") if _velma_text_wins or not rp_text else rp_text
             segments_data.append({
-                "text": s.get("text", ""),
+                "text": _text,
                 "start": v_start,
                 "end": v_end,
                 "speaker": s.get("speaker", "speaker-1"),
@@ -2126,9 +2154,9 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
                 "RunPod fallback also failed. Check RunPod worker configuration or Velma credits."
             ) from e
 
-    # Cantonese cleanup: GPU workers often return CJK characters spaced like tokens.
+    # Chinese cleanup: GPU workers often return CJK characters spaced like tokens.
     # Fix at ingestion time so downstream translation/TTS sees real sentences.
-    if whisper_language.lower() in ("yue", "zh-yue", "yue-hk", "zh-hk") and segments:
+    if whisper_language.lower() in ("yue", "zh-yue", "yue-hk", "zh-hk", "zh", "cmn", "zho", "zh-cn", "zh-tw") and segments:
         before = len(segments)
         segments = [
             TranscriptSegment(

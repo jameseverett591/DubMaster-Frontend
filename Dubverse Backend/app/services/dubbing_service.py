@@ -1545,12 +1545,44 @@ class DubbingService:
             # ------------------------------------------------------------------
             audio_segments = []
             _flagged_div_groups: set = set()
+            # translation_flagged segments never get audio (see _synthesise_one),
+            # but the translated text must still reach the editor for review --
+            # dropping them here would silently delete real dialogue instead of
+            # withholding only the audio. Kept out of audio_segments itself
+            # (which _merge_audio_segments reads seg["path"] from unconditionally
+            # and would crash/mis-mix on a placeholder with no audio file) and
+            # merged into the final segments.json below instead.
+            flagged_placeholders: List[Dict] = []
 
             for i, segment in enumerate(transcript):
                 raw = tts_results[i]
                 if raw is None or raw.get("skipped") or raw.get("failed"):
                     if raw and raw.get("skipped"):
                         segment_engines[i] = "skipped"
+                        if raw.get("reason") == "translation_flagged":
+                            flagged_placeholders.append({
+                                "transcript_index": i,
+                                "text": segment.get("text", ""),
+                                "source_text": segment.get("source_text", ""),
+                                "speaker": segment.get("speaker", "speaker-1"),
+                                "voice_id": "",
+                                "speed": 1.0,
+                                "path": "",
+                                "audio_url": None,
+                                "committed_audio_url": None,
+                                "start": segment.get("start", 0),
+                                "end": segment.get("end", 0),
+                                "duration": 0.0,
+                                "transcript_start": segment.get("start", 0),
+                                "transcript_end": segment.get("end", 0),
+                                "velma_emotion": segment.get("velma_emotion"),
+                                "velma_accent": segment.get("velma_accent"),
+                                "velma_deepfake_score": segment.get("velma_deepfake_score"),
+                                "confidence": segment.get("confidence"),
+                                "confidence_tier": segment.get("confidence_tier"),
+                                "translation_flagged": True,
+                                "flag_reason": segment.get("flag_reason"),
+                            })
                     else:
                         segment_engines[i] = "failed"
                     continue
@@ -1937,8 +1969,18 @@ class DubbingService:
                         engine_summary = next(iter(unique_engines))
                     else:
                         engine_summary = "mixed"
+                _segments_for_json = audio_segments
+                if flagged_placeholders:
+                    _segments_for_json = sorted(
+                        audio_segments + flagged_placeholders,
+                        key=lambda s: s.get("transcript_index", 0),
+                    )
+                    logger.info(
+                        f"Job {job_id}: {len(flagged_placeholders)} translation_flagged "
+                        f"segment(s) kept as no-audio drafts in segments.json"
+                    )
                 self._write_segments_json(
-                    job_id, target_norm, audio_segments, output_dir,
+                    job_id, target_norm, _segments_for_json, output_dir,
                     video_path=video_path,
                     accompaniment_path=accompaniment_path,
                     video_duration=video_duration,

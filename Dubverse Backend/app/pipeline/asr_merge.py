@@ -272,6 +272,37 @@ def _deduplicate_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return deduped
 
 
+def fill_gaps_with_fallbacks(
+    primary_segments: List[Dict[str, Any]],
+    fallback_segments: List[Dict[str, Any]],
+    job_id: str | None = None,
+) -> List[Dict[str, Any]]:
+    """Add fallback segments that do not overlap the primary segments.
+
+    Used when WenetSpeech is the primary Chinese ASR: Tencent/Paraformer/Whisper
+    segments are only added where WenetSpeech left a gap, so the primary
+    transcript is never overwritten by a weaker engine.
+    """
+    if not fallback_segments:
+        return primary_segments
+    if not primary_segments:
+        return fallback_segments
+
+    result = list(primary_segments)
+    for fb in fallback_segments:
+        if not (fb.get("text") or "").strip():
+            continue
+        has_overlap = any(
+            _segments_overlap(fb, p) > _OVERLAP_THRESHOLD
+            for p in result
+        )
+        if not has_overlap:
+            result.append(dict(fb))
+
+    result.sort(key=lambda s: s["start"])
+    return result
+
+
 def merge_with_whisper_fallback(
     merged_segments: List[Dict[str, Any]],
     whisper_segments: List[Dict[str, Any]],

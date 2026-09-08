@@ -1,0 +1,22 @@
+# Dockerfile.gpu only COPYs ./app, handler.py, and requirements.gpu.txt.
+# Everything else here bloats the build context for no reason — data/ in
+# particular accumulates job audio/video/transcripts and was large enough
+# that `du -sh` timed out measuring it, silently stalling every build at
+# the "sending build context to daemon" step with zero output.
+data/
+uploads/
+outputs/
+logs/
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+Dubverse Frontend/
+*.mp4
+*.mkv
+*.wav
+*.mp3
+*.mka
