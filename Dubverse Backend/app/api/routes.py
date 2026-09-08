@@ -569,8 +569,12 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
         _SENT_ENDS = frozenset('.!?。！？')
 
         def _snap_to_boundary(text, target_char):
-            """Index just after the nearest sentence-ending char to target_char."""
-            best_idx = target_char
+            """Index just after the nearest sentence-ending char to target_char.
+
+            Returns -1 if no sentence-ending punctuation exists in the text,
+            so the caller can avoid splitting mid-sentence.
+            """
+            best_idx = -1
             best_dist = len(text) + 1
             for ci, ch in enumerate(text):
                 if ch in _SENT_ENDS:
@@ -589,7 +593,13 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
             cum_dur += sl["dur"]
             rel = cum_dur / total_slice_dur if total_slice_dur > 0 else (slices.index(sl) + 1) / len(slices)
             target = int(rel * n_chars)
-            split_points.append(_snap_to_boundary(seg_text, target))
+            bp = _snap_to_boundary(seg_text, target)
+            if bp == -1:
+                # No sentence-ending punctuation in the text — don't split
+                # mid-sentence.  Return [] so the caller falls back to
+                # assigning the whole segment to the dominant speaker.
+                return []
+            split_points.append(bp)
 
         prev = 0
         for j, sl in enumerate(slices):
