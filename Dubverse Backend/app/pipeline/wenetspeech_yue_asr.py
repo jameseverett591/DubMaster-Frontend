@@ -159,19 +159,62 @@ def _get_wenet_model() -> Any:
 
 
 def _get_vad_chunks(waveform: np.ndarray) -> List[Dict[str, int]]:
-    """Return VAD speech chunks as {start, end} sample indices at 16 kHz."""
+    """Return VAD speech chunks as {start, end} sample indices at 16 kHz.
+
+    The thresholds here are deliberately more conservative than Whisper's
+    defaults: min_silence_duration_ms=500 keeps natural phrase pauses (150-
+    400ms) from splitting a single sentence into multiple chunks, and
+    min_speech_duration_ms=250 filters out brief noise bursts. CTC models
+    like WenetSpeech need several seconds of context to produce accurate
+    transcriptions — decoding 0.5s fragments in isolation produces
+    semantically wrong text (e.g. "Please" → "wear whatever you like").
+    """
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
-    max_speech_s = float(os.getenv("WENET_VAD_MAX_SPEECH_S", "20.0"))
+    max_speech_s = float(os.getenv("WENET_VAD_MAX_SPEECH_S", "30.0"))
     vad_options = VadOptions(
-        threshold=float(os.getenv("WENET_VAD_THRESHOLD", "0.15")),
-        min_speech_duration_ms=int(os.getenv("WENET_VAD_MIN_SPEECH_MS", "50")),
-        min_silence_duration_ms=int(os.getenv("WENET_VAD_MIN_SILENCE_MS", "150")),
+        threshold=float(os.getenv("WENET_VAD_THRESHOLD", "0.30")),
+        min_speech_duration_ms=int(os.getenv("WENET_VAD_MIN_SPEECH_MS", "250")),
+        min_silence_duration_ms=int(os.getenv("WENET_VAD_MIN_SILENCE_MS", "500")),
         speech_pad_ms=int(os.getenv("WENET_VAD_SPEECH_PAD_MS", "400")),
         max_speech_duration_s=max_speech_s,
     )
 
     return get_speech_timestamps(waveform, vad_options, sampling_rate=_SAMPLE_RATE)
+
+
+def _merge_adjacent_chunks(
+    chunks: List[Dict[str, int]],
+    max_gap_s: float = 0.8,
+) -> List[Dict[str, int]]:
+    """Merge adjacent VAD chunks with small gaps into longer chunks.
+
+    VAD detects speech vs silence, but natural speech has brief pauses
+    (150-800ms) that shouldn't create separate decode units. Merging
+    chunks with gaps under ``max_gap_s`` gives the CTC decoder several
+    seconds of continuous context, which dramatically improves
+    transcription accuracy and reduces over-fragmentation.
+
+    The original chunk boundaries are NOT preserved — the merged chunk
+    is decoded as one unit. Downstream diarization will re-split by
+    speaker turns if needed.
+    """
+    if not chunks or len(chunks) <= 1:
+        return chunks
+
+    max_gap_samples = int(max_gap_s * _SAMPLE_RATE)
+    merged: List[Dict[str, int]] = [dict(chunks[0])]
+
+    for chunk in chunks[1:]:
+        prev = merged[-1]
+        gap = chunk["start"] - prev["end"]
+        if gap <= max_gap_samples and gap >= -max_gap_samples:
+            # Merge: extend the previous chunk to cover this one.
+            prev["end"] = max(prev["end"], chunk["end"])
+        else:
+            merged.append(dict(chunk))
+
+    return merged
 
 
 def _split_long_chunks(
@@ -353,8 +396,22 @@ def _transcribe(
     logger.info(f"[WENET] job={job_id} language={source_language} waveform_samples={len(waveform)}")
 
     chunks = _get_vad_chunks(waveform)
-    max_speech_s = float(os.getenv("WENET_VAD_MAX_SPEECH_S", "20.0"))
+    max_speech_s = float(os.getenv("WENET_VAD_MAX_SPEECH_S", "30.0"))
     chunks = _split_long_chunks(chunks, max_speech_s)
+
+    # Merge adjacent VAD chunks with small gaps so the CTC decoder gets
+    # longer, more contextual audio. This is the single most impactful
+    # change for transcription accuracy: decoding 0.5s fragments in
+    # isolation produces semantically wrong text because the model has
+    # no surrounding context to disambiguate phones.
+    merge_gap_s = float(os.getenv("WENET_MERGE_GAP_S", "0.8"))
+    pre_merge_count = len(chunks)
+    chunks = _merge_adjacent_chunks(chunks, max_gap_s=merge_gap_s)
+    if len(chunks) != pre_merge_count:
+        logger.info(
+            f"[WENET] job={job_id} merged {pre_merge_count} VAD chunks "
+            f"→ {len(chunks)} contextual chunks (max_gap={merge_gap_s}s)"
+        )
 
     if not chunks:
         logger.info(f"[WENET] job={job_id} no speech detected")
