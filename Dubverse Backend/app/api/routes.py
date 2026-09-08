@@ -1641,11 +1641,12 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         if not os.getenv("WHISPER_MODEL", "").strip():
             os.environ["WHISPER_MODEL"] = "large-v3"
         if not os.getenv("CANTONESE_ASR_ENGINES", "").strip():
-            os.environ["CANTONESE_ASR_ENGINES"] = "wenetspeech,whisper"
+            os.environ["CANTONESE_ASR_ENGINES"] = "deepgram,whisper"
 
     # Collect env vars the GPU worker needs for ASR engines and callbacks
     _env_keys = [
         "TENCENT_SECRET_ID", "TENCENT_SECRET_KEY",
+        "DEEPGRAM_API_KEY",
         "CANTONESE_ASR_ENGINES", "CANTONESE_ASR_WHISPER_GAP_FILL",
         "WHISPER_LANGUAGE", "WHISPER_MODEL",
         "HF_TOKEN", "HUGGING_FACE_TOKEN", "HUGGINGFACE_TOKEN", "HUGGINGFACE_HUB_TOKEN",
@@ -1668,7 +1669,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         gpu_env_vars["WHISPER_LANGUAGE"] = whisper_language
         if whisper_language.lower() == "yue":
             gpu_env_vars.setdefault("WHISPER_MODEL", os.environ.get("WHISPER_MODEL", "large-v3"))
-            gpu_env_vars.setdefault("CANTONESE_ASR_ENGINES", os.environ.get("CANTONESE_ASR_ENGINES", "wenetspeech,whisper"))
+            gpu_env_vars.setdefault("CANTONESE_ASR_ENGINES", os.environ.get("CANTONESE_ASR_ENGINES", "deepgram,whisper"))
             # Let the worker pick its VAD threshold (default 0.15 for Cantonese).
             # Explicitly setting VAD_THRESHOLD=0 disabled VAD and caused the worker
             # to return empty transcripts on long-form mixed-content films.
@@ -2459,7 +2460,7 @@ async def _runpod_transcribe_fallback(
     env_vars = dict(gpu_env_vars)
     # Remove any VAD override so the worker uses its default (0.15 for yue).
     env_vars.pop("VAD_THRESHOLD", None)
-    # Fallback is a rescue from Wenet/Paraformer/Tencent failures or
+    # Fallback is a rescue from Deepgram/Tencent/Paraformer failures or
     # over-filtered vocals — use Whisper-only so the retry is independent.
     env_vars["CANTONESE_ASR_ENGINES"] = "whisper"
     env_vars.setdefault("WHISPER_MODEL", "large-v3")

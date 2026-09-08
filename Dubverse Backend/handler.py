@@ -88,7 +88,7 @@ def _upload_stems(job_id: str, sep_result: dict) -> dict:
 
 
 # Languages that use the multi-engine Chinese ASR pipeline
-# WenetSpeech supports Cantonese and Mandarin/Standard Chinese; Japanese/Korean
+# Deepgram Nova-3 supports Cantonese and Mandarin/Standard Chinese; Japanese/Korean
 # fall back to the standard Whisper path.
 _CHINESE_LANGS = {"zh", "yue", "cmn", "zho",
                    "zh-cn", "zh-tw", "zh-hk", "yue-hk", "zh-yue"}
@@ -666,7 +666,7 @@ def handler(event):
     def _run_transcribe():
         t0 = time.time()
         if _lang_norm in _CHINESE_LANGS:
-            # Multi-engine pipeline: WenetSpeech → Tencent → Paraformer → Whisper
+            # Multi-engine pipeline: Deepgram → Tencent → Paraformer → Whisper
             # Passes separated vocals so the engines get the cleanest signal.
             logger.info(f"[TRANSCRIBE] Chinese language '{language}' — using multi-engine Chinese pipeline")
             result = transcribe_cantonese(

@@ -1,23 +1,23 @@
 """
 Unified Chinese (Cantonese + Mandarin) transcription pipeline.
 
-WenetSpeech is the primary ASR for Cantonese and Mandarin. It is supported
-by the other engines as fallbacks / gap-fillers:
-  1. WenetSpeech (local) — primary for Cantonese and Mandarin
+Deepgram Nova-3 is the primary ASR for Cantonese and Mandarin. It is
+supported by the other engines as fallbacks / gap-fillers:
+  1. Deepgram    (cloud) — primary for Cantonese and Mandarin
   2. Tencent ASR  (cloud) — high recall, catches speech in noise
   3. Paraformer   (local) — high precision for Mandarin tones/characters
   4. Whisper      (local) — fallback gap fill
   5. Merge engine          — combines the best of each
 
 The pipeline gracefully degrades:
-  - If WenetSpeech is not installed → Tencent + Paraformer + Whisper
-  - If Tencent is not configured → WenetSpeech + Paraformer + Whisper
-  - If Paraformer is not installed → WenetSpeech + Tencent + Whisper
+  - If Deepgram is not configured → Tencent + Paraformer + Whisper
+  - If Tencent is not configured → Deepgram + Paraformer + Whisper
+  - If Paraformer is not installed → Deepgram + Tencent + Whisper
   - If all unavailable → Whisper only (existing behavior)
 
 Environment variables:
   CANTONESE_ASR_ENGINES  — Comma-separated engine priority
-                           (default: "wenetspeech,tencent,paraformer,whisper")
+                           (default: "deepgram,tencent,paraformer,whisper")
   CANTONESE_ASR_WHISPER_GAP_FILL — "1" to fill gaps with Whisper (default: "1")
 """
 
@@ -123,7 +123,7 @@ def transcribe_cantonese(
     if env_engines:
         engines_str = env_engines
     elif _is_chinese(source_language):
-        engines_str = "wenetspeech,tencent,paraformer,whisper"
+        engines_str = "deepgram,tencent,paraformer,whisper"
     else:
         engines_str = "tencent,paraformer,whisper"
     engines = [e.strip().lower() for e in engines_str.split(",") if e.strip()]
@@ -157,34 +157,34 @@ def transcribe_cantonese(
     tencent_segments: List[Dict] = []
     paraformer_segments: List[Dict] = []
     whisper_segments: List[Dict] = []
-    wenet_segments: List[Dict] = []
+    deepgram_segments: List[Dict] = []
     engines_used: List[str] = []
 
     try:
-        # ── Engine 0: WenetSpeech-Yue CTC (primary for Cantonese) ──
-        if "wenetspeech" in engines:
+        # ── Engine 0: Deepgram Nova-3 (primary for Cantonese/Mandarin) ──
+        if "deepgram" in engines:
             try:
-                from app.pipeline.wenetspeech_yue_asr import transcribe_with_wenetspeech_yue
+                from app.pipeline.deepgram_asr import transcribe_with_deepgram
 
-                wenet_result = transcribe_with_wenetspeech_yue(
+                deepgram_result = transcribe_with_deepgram(
                     extract_result,
                     audio_path=audio_file,
                     source_language=source_language,
                     job_id=job_id,
                 )
-                if wenet_result.get("status") == "ok":
-                    wenet_segments = wenet_result.get("segments", [])
-                    engines_used.append("wenetspeech")
+                if deepgram_result.get("status") == "ok":
+                    deepgram_segments = deepgram_result.get("segments", [])
+                    engines_used.append("deepgram")
                     logger.info(
-                        f"[CANTONESE-ASR] WenetSpeech-Yue: {len(wenet_segments)} segments"
+                        f"[CANTONESE-ASR] Deepgram: {len(deepgram_segments)} segments"
                     )
                 else:
                     logger.info(
-                        f"[CANTONESE-ASR] WenetSpeech-Yue skipped: "
-                        f"{wenet_result.get('reason', 'unknown')}"
+                        f"[CANTONESE-ASR] Deepgram skipped: "
+                        f"{deepgram_result.get('reason', 'unknown')}"
                     )
             except Exception as e:
-                logger.warning(f"[CANTONESE-ASR] WenetSpeech-Yue failed: {e}")
+                logger.warning(f"[CANTONESE-ASR] Deepgram failed: {e}")
 
         # ── Engine 1 + 2: Tencent ASR and Paraformer in parallel ──
         # Tencent is a cloud API call; Paraformer is a local model. They are
@@ -256,14 +256,14 @@ def transcribe_cantonese(
         # ── Engine 3: Whisper (fallback / gap fill) ──
         run_whisper_full = (
             "whisper" in engines
-            and not wenet_segments
+            and not deepgram_segments
             and not tencent_segments
             and not paraformer_segments
         )
         run_whisper_gaps = (
             whisper_gap_fill
             and "whisper" in engines
-            and (wenet_segments or tencent_segments or paraformer_segments)
+            and (deepgram_segments or tencent_segments or paraformer_segments)
         )
 
         if run_whisper_full or run_whisper_gaps:
@@ -296,11 +296,11 @@ def transcribe_cantonese(
             merge_with_whisper_fallback,
         )
 
-        if wenet_segments:
-            # WenetSpeech is the primary Chinese (Cantonese/Mandarin) transcript.
-            # Tencent/Paraformer/Whisper are only added where WenetSpeech left
+        if deepgram_segments:
+            # Deepgram is the primary Chinese (Cantonese/Mandarin) transcript.
+            # Tencent/Paraformer/Whisper are only added where Deepgram left
             # non-overlapping gaps, so they never overwrite the primary text.
-            merged = wenet_segments
+            merged = deepgram_segments
 
             fallback_segments = []
             if tencent_segments:
