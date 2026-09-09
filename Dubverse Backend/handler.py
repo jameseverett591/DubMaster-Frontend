@@ -746,7 +746,11 @@ def handler(event):
             transcript_data = json.load(f)
 
         segments = transcript_data.get("segments", [])
-        logger.info(f"Transcription complete in {timings.get('transcribe', 0)}s: {len(segments)} segments")
+        logger.info(
+            f"[STAGE] After transcription: {len(segments)} segments, "
+            f"sources={sorted(set(s.get('source','?') for s in segments))}, "
+            f"speakers={sorted(set(s.get('speaker','?') for s in segments))}"
+        )
     else:
         transcript_data = {}
         segments = []
@@ -773,7 +777,7 @@ def handler(event):
         segments = _assign_and_split_segments(segments, diarization_segments)
         unique = len(set(s.get("speaker") for s in segments))
         logger.info(
-            f"Speaker assignment complete: {unique} unique speaker(s) across "
+            f"[STAGE] After speaker assignment: {unique} unique speaker(s) across "
             f"{len(segments)} segments (before split: {before})"
         )
     else:
@@ -783,7 +787,7 @@ def handler(event):
         segments = _assign_and_split_segments(segments, [])
         unique = len(set(s.get("speaker") for s in segments))
         logger.info(
-            f"Speaker assignment (no diarization): {unique} default speaker(s) across "
+            f"[STAGE] After speaker assignment (no diarization): {unique} default speaker(s) across "
             f"{len(segments)} segments (before split: {before})"
         )
 
@@ -795,8 +799,8 @@ def handler(event):
     segments = _merge_overfragmented_segments(segments)
     if len(segments) != _before_merge:
         logger.info(
-            f"Merged {_before_merge - len(segments)} over-fragmented segment(s) "
-            f"back into sentence-level chunks"
+            f"[STAGE] After anti-fragmentation merge: {len(segments)} segments "
+            f"(merged {_before_merge - len(segments)} fragment(s))"
         )
 
     # ── Confidence Tiering ────────────────────────────────────────────────

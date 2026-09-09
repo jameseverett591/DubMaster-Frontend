@@ -1,185 +1,221 @@
 """
-LLM rescoring pass for low-confidence Cantonese/Mandarin ASR segments.
+Confidence-gated LLM rescoring for ASR text correction.
 
-Deepgram (or any other engine in the Cantonese pipeline) occasionally
-mis-hears a homophone or garbles a character run, and that error survives
-untouched into translation because nothing downstream understands the
-source language well enough to catch it. This module sends only the
-LOW-CONFIDENCE segments -- the ones the ASR engine itself was already
-unsure about -- to Claude for a conservative correction pass.
+After Deepgram produces its best guess, this pass corrects likely
+transcription errors (wrong homophones, garbled characters, name
+confusion) using Claude. It does NOT invent new content.
 
-Deliberately conservative: last night's investigation found Claude's
-translation step, when handed genuinely garbled Cantonese, doesn't fail --
-it invents plausible-but-wrong content. A "fix errors" prompt has the exact
-same failure mode if not constrained, so the prompt explicitly instructs
-Claude to leave ambiguous text untouched rather than guess. Original text is
-always preserved (never overwritten) so a bad correction is visible and
-reversible, not silently shipped.
+Safety design:
+  1. Gate on confidence — only rescore segments below a threshold
+     (default 0.7), not already-high-confidence text.
+  2. Conservative correction — the prompt explicitly instructs: "fix
+     likely transcription errors; if the audio content is genuinely
+     ambiguous, leave the text unchanged rather than inventing new
+     content."
+  3. Log both versions — keep the original ASR text in
+     ``original_text`` and the corrected text in ``text``, so we can
+     see what changed and catch a bad correction in review.
 
-Uses the same [[SEG-xxxxxx]] marker + validate-1:1 mechanism as
-translation_service.py (via the shared instance) so a merged, dropped, or
-reordered line is treated as a hard failure -- this batch is left
-unrescored -- rather than risking a silent text/segment desync.
+Environment variables:
+  ASR_RESCORE_ENABLED              — "1" to enable (default: "1")
+  ASR_RESCORE_CONFIDENCE_THRESHOLD — only rescore below this (default: "0.7")
+  ASR_RESCORE_MODEL                — Claude model (default: "claude-sonnet-4-6")
+  ASR_RESCORE_TIMEOUT_SEC          — per-batch timeout (default: "30")
 """
 
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
 
-import httpx
-
 logger = logging.getLogger(__name__)
 
-_API_URL = "https://api.anthropic.com/v1/messages"
 
-_LANG_NAMES = {
-    "yue": "Cantonese", "zh-yue": "Cantonese", "yue-hk": "Cantonese", "zh-hk": "Cantonese",
-    "zh": "Mandarin Chinese", "zh-cn": "Mandarin Chinese", "zh-tw": "Mandarin Chinese",
-}
+def _get_threshold() -> float:
+    return float(os.getenv("ASR_RESCORE_CONFIDENCE_THRESHOLD", "0.7"))
 
 
-def _is_enabled() -> bool:
-    return os.getenv("ASR_RESCORE_ENABLED", "1").strip() == "1"
-
-
-def _confidence_threshold() -> float:
-    try:
-        return float(os.getenv("ASR_RESCORE_CONFIDENCE_THRESHOLD", "0.7"))
-    except ValueError:
-        return 0.7
-
-
-def _model() -> str:
+def _get_model() -> str:
     return os.getenv("ASR_RESCORE_MODEL", "claude-sonnet-4-6").strip() or "claude-sonnet-4-6"
 
 
-def _timeout_sec() -> float:
-    try:
-        return float(os.getenv("ASR_RESCORE_TIMEOUT_SEC", "60"))
-    except ValueError:
-        return 60.0
+def _get_timeout() -> float:
+    return float(os.getenv("ASR_RESCORE_TIMEOUT_SEC", "30"))
 
 
-def _build_prompt(lang_name: str, marked_lines: str) -> str:
-    return (
-        f"These are spoken {lang_name} lines from an ASR system that flagged each one as "
-        f"LOW CONFIDENCE -- it was already unsure about the exact wording.\n\n"
-        f"Your job is ONLY to fix likely transcription errors: wrong homophones, "
-        f"garbled or dropped characters, an obviously mis-heard word given the "
-        f"surrounding context.\n\n"
-        f"Rules:\n"
-        f"- If a line's content is genuinely ambiguous, or you are not clearly confident "
-        f"about a specific correction, return that line EXACTLY UNCHANGED. Do not guess. "
-        f"Do not invent words to fill a gap.\n"
-        f"- Do NOT translate. Output stays in the original language.\n"
-        f"- Do NOT merge, split, drop, or reorder lines. Every [[SEG-...]] marker you "
-        f"receive must appear exactly once in your reply, in any order.\n"
-        f"- Do NOT add commentary. Reply with only the marked lines.\n\n"
-        f"{marked_lines}"
-    )
+_SYSTEM_PROMPT = """\
+You are a Cantonese and Mandarin transcription corrector. You receive
+ASR (automatic speech recognition) output that may contain errors from
+a speech-to-text system.
+
+Your job: fix likely transcription errors only:
+  - Wrong homophones (e.g., 龍城 vs 永成)
+  - Garbled or corrupted characters
+  - Name confusion (wrong character for a proper name)
+
+Critical rules:
+  - If the text is genuinely ambiguous, return it UNCHANGED.
+  - Do NOT invent new content that is not present in the original.
+  - Do NOT add information, commentary, or context.
+  - Do NOT translate — keep the same language (Cantonese/Mandarin).
+  - Only fix obvious character-level errors.
+
+Return JSON: a list of objects with "index" (0-based) and "corrected"
+(the corrected text, or the original if no correction needed).
+"""
 
 
-def rescore_low_confidence_segments(
-    segments: List[Dict[str, Any]],
-    source_language: Optional[str] = None,
-    job_id: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """Conservatively correct low-confidence segments' text in place.
+def _build_user_prompt(items: List[Dict[str, Any]]) -> str:
+    lines = []
+    for i, item in enumerate(items):
+        lines.append(f'{i}. "{item["text"]}"')
+    return "Fix transcription errors in these segments. Return JSON array:\n\n" + "\n".join(lines)
 
-    Returns the same list of segment dicts. Segments that get corrected gain
-    `original_text` (the pre-correction ASR text) and `rescored=True`.
-    Segments that were already high-confidence, empty, or where the batch
-    validation failed are returned completely unchanged.
+
+def _call_claude(items: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+    """Call Claude to rescore a batch of low-confidence segments.
+
+    Returns a list of {"index": N, "corrected": "..."} dicts, or None
+    on failure.
     """
-    if not _is_enabled():
-        return segments
+    import httpx
 
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
-        logger.warning(f"[ASR-RESCORE] job={job_id} no ANTHROPIC_API_KEY — skipping")
-        return segments
+        logger.warning("[RESCORE] No ANTHROPIC_API_KEY set — skipping rescoring")
+        return None
 
-    threshold = _confidence_threshold()
-    candidates = [
-        i for i, s in enumerate(segments)
-        if (s.get("text") or "").strip()
-        and s.get("confidence") is not None
-        and float(s["confidence"]) < threshold
-    ]
-    if not candidates:
-        return segments
-
-    lang_name = _LANG_NAMES.get((source_language or "").lower(), "Cantonese")
-
-    # Reuse translation_service's marker generation/parsing/validation --
-    # same [[SEG-xxxxxx]] mechanism, same "any mismatch is a hard failure"
-    # semantics, rather than reimplementing (and risking a subtly different)
-    # alignment safety net.
-    from app.services.translation_service import translation_service as _ts
-
-    markers = _ts._generate_line_markers(len(candidates))
-    marked_lines = "\n".join(
-        f"[[SEG-{markers[j]}]] {segments[i].get('text', '').strip()}"
-        for j, i in enumerate(candidates)
-    )
-    prompt = _build_prompt(lang_name, marked_lines)
-
+    payload = {
+        "model": _get_model(),
+        "max_tokens": 4096,
+        "temperature": 0.2,
+        "system": _SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": _build_user_prompt(items)}],
+    }
     headers = {
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": _model(),
-        "max_tokens": 4096,
-        "temperature": 0.0,
-        "messages": [{"role": "user", "content": prompt}],
-    }
 
     try:
-        with httpx.Client() as client:
-            response = client.post(
-                _API_URL, json=payload, headers=headers, timeout=_timeout_sec(),
+        resp = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            json=payload,
+            headers=headers,
+            timeout=_get_timeout(),
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                f"[RESCORE] Claude failed: {resp.status_code} {resp.text[:200]}"
             )
+            return None
+
+        data = resp.json()
+        content = data.get("content", [])
+        if not content:
+            return None
+
+        text = content[0].get("text", "")
+        # Parse JSON array from response
+        # Claude may wrap in markdown code blocks
+        text = text.strip()
+        if text.startswith("```"):
+            # Strip markdown code fences
+            lines = text.split("\n")
+            text = "\n".join(l for l in lines if not l.startswith("```"))
+
+        result = json.loads(text)
+        if isinstance(result, list):
+            return result
+        return None
+
+    except json.JSONDecodeError as e:
+        logger.warning(f"[RESCORE] Failed to parse Claude response: {e}")
+        return None
     except Exception as e:
-        logger.warning(f"[ASR-RESCORE] job={job_id} request failed: {e} — leaving segments unchanged")
+        logger.warning(f"[RESCORE] Claude call failed: {e}")
+        return None
+
+
+def rescore_segments(
+    segments: List[Dict[str, Any]],
+    job_id: Optional[str] = None,
+    source_language: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Rescore low-confidence ASR segments using Claude.
+
+    Only processes segments where:
+      - source == "deepgram"
+      - confidence < threshold (default 0.7)
+
+    For each rescored segment:
+      - text is replaced with the corrected text (if different)
+      - original_text preserves the original ASR text
+      - rescored flag is set to True
+
+    If Claude returns the same text or fails, the segment is unchanged.
+    """
+    if os.getenv("ASR_RESCORE_ENABLED", "1") != "1":
         return segments
 
-    if response.status_code != 200:
-        logger.warning(
-            f"[ASR-RESCORE] job={job_id} Claude failed: {response.status_code} "
-            f"{response.text[:200]} — leaving segments unchanged"
-        )
-        return segments
+    threshold = _get_threshold()
 
-    try:
-        reply = response.json()["content"][0]["text"].strip()
-    except Exception as e:
-        logger.warning(f"[ASR-RESCORE] job={job_id} malformed response: {e} — leaving segments unchanged")
-        return segments
+    # Find low-confidence Deepgram segments
+    low_conf: List[Dict[str, Any]] = []
+    low_conf_indices: List[int] = []
+    for i, seg in enumerate(segments):
+        if seg.get("source") != "deepgram":
+            continue
+        conf = seg.get("confidence")
+        if conf is None:
+            continue
+        if float(conf) < threshold:
+            low_conf.append(seg)
+            low_conf_indices.append(i)
 
-    pairs = _ts._parse_marked_reply(reply)
-    marker_map = _ts._validate_marked_mapping(markers, pairs)
-    if marker_map is None:
-        logger.warning(
-            f"[ASR-RESCORE] job={job_id} reply markers didn't validate 1:1 against "
-            f"{len(candidates)} sent segments — rejecting this batch rather than risk "
-            f"a silently desynced correction; leaving all segments unchanged"
-        )
+    if not low_conf:
+        logger.info(f"[RESCORE] job={job_id} no low-confidence segments to rescore")
         return segments
-
-    changed = 0
-    for j, i in enumerate(candidates):
-        corrected = (marker_map.get(markers[j]) or "").strip()
-        original = (segments[i].get("text") or "").strip()
-        if corrected and corrected != original:
-            segments[i]["original_text"] = original
-            segments[i]["text"] = corrected
-            segments[i]["rescored"] = True
-            changed += 1
 
     logger.info(
-        f"[ASR-RESCORE] job={job_id} {len(candidates)} low-confidence segment(s) "
-        f"reviewed (threshold={threshold}), {changed} corrected"
+        f"[RESCORE] job={job_id} rescore {len(low_conf)} low-confidence segments "
+        f"(threshold={threshold})"
     )
+
+    corrections = _call_claude(low_conf)
+    if not corrections:
+        logger.info(f"[RESCORE] job={job_id} no corrections returned")
+        return segments
+
+    # Build a map of index -> corrected text
+    correction_map: Dict[int, str] = {}
+    for c in corrections:
+        idx = c.get("index")
+        corrected = c.get("corrected", "")
+        if idx is not None and corrected:
+            correction_map[int(idx)] = corrected.strip()
+
+    # Apply corrections
+    rescored_count = 0
+    for map_idx, seg_idx in enumerate(low_conf_indices):
+        if map_idx not in correction_map:
+            continue
+        corrected = correction_map[map_idx]
+        original = segments[seg_idx].get("text", "")
+        if corrected and corrected != original:
+            segments[seg_idx]["original_text"] = original
+            segments[seg_idx]["text"] = corrected
+            segments[seg_idx]["rescored"] = True
+            rescored_count += 1
+            logger.info(
+                f"[RESCORE] job={job_id} segment {seg_idx}: "
+                f"'{original[:30]}...' -> '{corrected[:30]}...'"
+            )
+
+    logger.info(
+        f"[RESCORE] job={job_id} applied {rescored_count} correction(s) "
+        f"out of {len(low_conf)} candidates"
+    )
+
     return segments
