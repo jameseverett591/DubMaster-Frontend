@@ -66,9 +66,27 @@ _QUESTION_END = r"[？?！!]"
 # Sentence-ending punctuation for split points
 _SENTENCE_END = r"[。．.？?！!；;]"
 
+# CJK conversational markers that often end a clause/thought even without
+# punctuation. Deepgram's Cantonese output frequently lacks sentence-ending
+# punctuation, so we fall back to splitting at these markers.
+# Each marker is a natural pause point in conversation.
+_CJK_CLAUSE_END = [
+    # Cantonese sentence-final particles
+    "嘛", "啦", "囉", "嘅", "嘞", "囖",
+    # Mandarin sentence-final particles
+    "了", "的", "吧", "呢", "啊", "呀", "嗎",
+    # Common clause connectors
+    "然後", "不過", "但是", "而且",
+]
+
 
 def _split_at_punctuation(text: str) -> List[Tuple[str, int]]:
-    """Split text at sentence-ending punctuation, returning (sentence, char_offset) pairs."""
+    """Split text at sentence-ending punctuation, returning (sentence, char_offset) pairs.
+
+    If the text has no sentence-ending punctuation (common in Deepgram's
+    Cantonese output), fall back to splitting at CJK conversational
+    markers (嘛, 了, 啊, etc.) which are natural clause boundaries.
+    """
     sentences: List[Tuple[str, int]] = []
     current = ""
     base_offset = 0
@@ -82,6 +100,45 @@ def _split_at_punctuation(text: str) -> List[Tuple[str, int]]:
             current = ""
     if current.strip():
         sentences.append((current.strip(), base_offset))
+
+    # Fallback: if no punctuation was found, split at CJK clause markers
+    if len(sentences) <= 1 and len(text) > 15:
+        sentences = _split_at_cjk_markers(text)
+
+    return sentences
+
+
+def _split_at_cjk_markers(text: str) -> List[Tuple[str, int]]:
+    """Split text at CJK conversational markers when no punctuation exists.
+
+    Splits AFTER each marker (the marker stays with the preceding clause).
+    Only splits if the resulting clauses are at least 4 characters long
+    to avoid over-fragmentation.
+    """
+    sentences: List[Tuple[str, int]] = []
+    current = ""
+    base_offset = 0
+
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        current += ch
+        # Check if this position ends with a CJK clause marker
+        for marker in _CJK_CLAUSE_END:
+            if current.endswith(marker):
+                # Only split if the remaining text is long enough
+                remaining = text[i + 1:]
+                stripped = current.strip()
+                if stripped and len(remaining) >= 4 and len(stripped) >= 4:
+                    sentences.append((stripped, base_offset))
+                    base_offset = i + 1
+                    current = ""
+                break
+        i += 1
+
+    if current.strip():
+        sentences.append((current.strip(), base_offset))
+
     return sentences
 
 
@@ -291,7 +348,7 @@ def detect_turn_splits(
     if os.getenv("TURN_DETECTION_ENABLED", "1") != "1":
         return segments
 
-    min_segment_s = float(os.getenv("TURN_DETECTION_MIN_SEGMENT_S", "6.0"))
+    min_segment_s = float(os.getenv("TURN_DETECTION_MIN_SEGMENT_S", "3.5"))
 
     out: List[Dict[str, Any]] = []
     splits_applied = 0
@@ -327,7 +384,7 @@ def detect_turn_splits(
             rule = "address-response"
         if split_idx is None:
             # Long multi-sentence segment: split at midpoint for readability
-            if len(sentences) >= 3 and duration >= 6.0:
+            if len(sentences) >= 3 and duration >= 3.5:
                 split_idx = _detect_long_segment_split(sentences)
                 rule = "long-segment"
 
