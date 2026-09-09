@@ -31,6 +31,7 @@ try:
     from app.pipeline.transcribe_audio import transcribe_audio
     from app.pipeline.transcribe_cantonese import transcribe_cantonese
     from app.pipeline.diarize_audio import diarize_audio
+    from app.pipeline.speechmatics_diarize import diarize_with_speechmatics
     print("handler.py: pipeline imports OK", flush=True)
 except Exception as _e:
     print(f"handler.py FATAL (pipeline import): {_e}", file=sys.stderr, flush=True)
@@ -697,7 +698,23 @@ def handler(event):
         if vocal_extract is not None:
             logger.info("[DIARIZE] Using separated vocals as diarization source")
         t0 = time.time()
-        result = diarize_audio(diarize_source, job_id=job_id, min_speakers=min_speakers, max_speakers=max_speakers)
+        # Cantonese/Mandarin: prefer Speechmatics' diarization over pyannote.
+        # Confirmed directly against the Ip Man 2 test clip that pyannote
+        # (and Deepgram's own diarization) collapse brief interjections
+        # inside a longer speaker's turn; Speechmatics' tunable
+        # speaker_sensitivity showed real separation on the same audio.
+        # Requires the real vocals WAV file (not just a decoded tensor) and
+        # falls back to pyannote on any failure or if unconfigured.
+        if _lang_norm in _CHINESE_LANGS and os.getenv("SPEECHMATICS_API_KEY") and vocals_audio_path:
+            logger.info(f"[DIARIZE] Chinese language '{language}' — using Speechmatics diarization instead of pyannote")
+            result = diarize_with_speechmatics(vocals_audio_path, job_id=job_id, source_language=language)
+            if result.get("status") != "ok":
+                logger.warning(
+                    f"[DIARIZE] Speechmatics diarization unavailable ({result.get('reason')}) — falling back to pyannote"
+                )
+                result = diarize_audio(diarize_source, job_id=job_id, min_speakers=min_speakers, max_speakers=max_speakers)
+        else:
+            result = diarize_audio(diarize_source, job_id=job_id, min_speakers=min_speakers, max_speakers=max_speakers)
         timings["diarize"] = round(time.time() - t0, 2)
         return result
 

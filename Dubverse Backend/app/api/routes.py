@@ -1667,6 +1667,10 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         # routes.py itself (backend-side _split_segment_by_diarization), so
         # it already has local .env access and does NOT need forwarding here.
         "DIARIZATION_MIN_TURN_DURATION",
+        # Speechmatics diarization (speechmatics_diarize.py) runs on the
+        # worker for Cantonese/Mandarin jobs -- see handler.py's _run_diarize.
+        "SPEECHMATICS_API_KEY", "SPEECHMATICS_SPEAKER_SENSITIVITY",
+        "SPEECHMATICS_POLL_TIMEOUT_SEC",
     ]
     gpu_env_vars = {}
     for k in _env_keys:
