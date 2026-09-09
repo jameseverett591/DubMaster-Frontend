@@ -222,6 +222,31 @@ def _filter_hallucinations(
                     )
                     continue
 
+            # Reject repeated short phrases (e.g., "結婚了﹗結婚了﹗" = "got married!
+            # got married!"). Whisper sometimes loops a short phrase when it
+            # can't decode the actual audio. A real short phrase won't repeat
+            # itself verbatim in the same segment.
+            cleaned = re.sub(r'[﹗！!。.？?，,；;]', '', text).strip()
+            if len(cleaned) >= 3 and len(cleaned) <= 20:
+                half = len(cleaned) // 2
+                if half >= 2 and cleaned[:half] == cleaned[half:half*2]:
+                    logger.info(
+                        f"[HALLUCINATION] Rejected repeated-phrase segment: "
+                        f"'{text[:40]}' at {seg.get('start', '?')}-{seg.get('end', '?')}"
+                    )
+                    continue
+
+            # Reject extremely low-confidence Whisper segments (< 0.2).
+            # These are almost always hallucinations on noise/silence.
+            conf = seg.get("confidence")
+            if conf is not None and float(conf) < 0.2:
+                logger.info(
+                    f"[HALLUCINATION] Rejected very-low-confidence Whisper segment "
+                    f"(conf={conf:.2f}): '{text[:40]}' "
+                    f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
+                )
+                continue
+
             # Reject short single-word Latin-script hallucinations.
             # Whisper often produces nonsense English words during fight scenes
             # or silent moments (e.g. "pave", "the", "you").  This must not

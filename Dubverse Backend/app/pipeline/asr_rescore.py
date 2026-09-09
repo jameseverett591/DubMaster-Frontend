@@ -2,23 +2,25 @@
 Confidence-gated LLM rescoring for ASR text correction.
 
 After Deepgram produces its best guess, this pass corrects likely
-transcription errors (wrong homophones, garbled characters, name
-confusion) using Claude. It does NOT invent new content.
+transcription errors (wrong homophones, garbled characters) using Claude.
+It does NOT invent new content and does NOT change proper names.
 
 Safety design:
   1. Gate on confidence — only rescore segments below a threshold
-     (default 0.7), not already-high-confidence text.
-  2. Conservative correction — the prompt explicitly instructs: "fix
-     likely transcription errors; if the audio content is genuinely
-     ambiguous, leave the text unchanged rather than inventing new
-     content."
-  3. Log both versions — keep the original ASR text in
-     ``original_text`` and the corrected text in ``text``, so we can
-     see what changed and catch a bad correction in review.
+     (default 0.5), not already-high-confidence text.
+  2. Skip short segments — proper names (≤4 CJK chars) are NOT rescored
+     because the LLM has no context to know which name is correct and
+     frequently "corrects" the right name to a wrong one.
+  3. Conservative correction — the prompt explicitly instructs: "fix
+     likely transcription errors; if the text is genuinely ambiguous
+     or could be a proper name, leave it UNCHANGED."
+  4. Log both versions — keep the original ASR text in ``original_text``
+     and the corrected text in ``text``, so bad corrections are visible.
 
 Environment variables:
   ASR_RESCORE_ENABLED              — "1" to enable (default: "1")
-  ASR_RESCORE_CONFIDENCE_THRESHOLD — only rescore below this (default: "0.7")
+  ASR_RESCORE_CONFIDENCE_THRESHOLD — only rescore below this (default: "0.5")
+  ASR_RESCORE_MIN_LENGTH           — skip segments shorter than this (default: "5")
   ASR_RESCORE_MODEL                — Claude model (default: "claude-sonnet-4-6")
   ASR_RESCORE_TIMEOUT_SEC          — per-batch timeout (default: "30")
 """
@@ -32,7 +34,11 @@ logger = logging.getLogger(__name__)
 
 
 def _get_threshold() -> float:
-    return float(os.getenv("ASR_RESCORE_CONFIDENCE_THRESHOLD", "0.7"))
+    return float(os.getenv("ASR_RESCORE_CONFIDENCE_THRESHOLD", "0.5"))
+
+
+def _get_min_length() -> int:
+    return int(os.getenv("ASR_RESCORE_MIN_LENGTH", "5"))
 
 
 def _get_model() -> str:
@@ -48,17 +54,19 @@ You are a Cantonese and Mandarin transcription corrector. You receive
 ASR (automatic speech recognition) output that may contain errors from
 a speech-to-text system.
 
-Your job: fix likely transcription errors only:
-  - Wrong homophones (e.g., 龍城 vs 永成)
-  - Garbled or corrupted characters
-  - Name confusion (wrong character for a proper name)
+Your job: fix OBVIOUS transcription errors only:
+  - Wrong homophones where the context makes the correct word unambiguous
+  - Garbled or corrupted character runs that are clearly not real words
 
-Critical rules:
+CRITICAL RULES (violating these causes HARM):
+  - If the text could be a PROPER NAME, return it UNCHANGED. You do NOT
+    know which name the speaker intended — 永成 is just as valid as 龍城.
+    NEVER "correct" one name to another.
   - If the text is genuinely ambiguous, return it UNCHANGED.
   - Do NOT invent new content that is not present in the original.
   - Do NOT add information, commentary, or context.
   - Do NOT translate — keep the same language (Cantonese/Mandarin).
-  - Only fix obvious character-level errors.
+  - When in doubt, return the original text UNCHANGED.
 
 Return JSON: a list of objects with "index" (0-based) and "corrected"
 (the corrected text, or the original if no correction needed).
@@ -160,6 +168,7 @@ def rescore_segments(
         return segments
 
     threshold = _get_threshold()
+    min_length = _get_min_length()
 
     # Find low-confidence Deepgram segments
     low_conf: List[Dict[str, Any]] = []
@@ -169,6 +178,11 @@ def rescore_segments(
             continue
         conf = seg.get("confidence")
         if conf is None:
+            continue
+        text = (seg.get("text") or "").strip()
+        # Skip short segments — these are often proper names and the
+        # LLM frequently "corrects" the right name to a wrong one.
+        if len(text) < min_length:
             continue
         if float(conf) < threshold:
             low_conf.append(seg)

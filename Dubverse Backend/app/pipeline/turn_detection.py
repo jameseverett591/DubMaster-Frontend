@@ -177,6 +177,44 @@ def _detect_address_split(sentences: List[Tuple[str, int]]) -> Optional[int]:
     return None
 
 
+def _detect_address_response_split(sentences: List[Tuple[str, int]]) -> Optional[int]:
+    """Find a split where an address term marks a NEW speaker's turn.
+
+    Pattern: sentence i is a short question/statement containing an address
+    term (e.g., "什麼事3姑" = "What is it, Auntie?"), and sentence i+1 is
+    a longer response from the addressed person. The address term marks
+    the END of the first speaker's turn, not the beginning.
+    """
+    for i in range(len(sentences) - 1):
+        s1 = sentences[i][0]
+        s2 = sentences[i + 1][0]
+        # First sentence contains an address term AND is short (a question
+        # or inquiry to the addressed person)
+        if _contains_address_term(s1) and len(s1) <= 15:
+            # Second sentence is a longer response (the addressed person speaks)
+            if len(s2) > len(s1) and not _contains_address_term(s2):
+                return i + 1
+    return None
+
+
+def _detect_long_segment_split(
+    sentences: List[Tuple[str, int]],
+    min_sentences: int = 3,
+) -> Optional[int]:
+    """Find a split point in a long multi-sentence segment.
+
+    For segments with 3+ sentences from one speaker that should be
+    separate subtitle bubbles, split at the most natural boundary
+    (after a complete thought, typically 2-3 sentences in).
+    """
+    if len(sentences) < min_sentences:
+        return None
+    # Split at the midpoint sentence boundary to create roughly equal bubbles.
+    # This is conservative — only fires for long segments with many sentences.
+    mid = len(sentences) // 2
+    return mid
+
+
 def _split_segment(
     seg: Dict[str, Any],
     split_sentence_idx: int,
@@ -284,6 +322,14 @@ def detect_turn_splits(
         if split_idx is None:
             split_idx = _detect_address_split(sentences)
             rule = "address-term"
+        if split_idx is None:
+            split_idx = _detect_address_response_split(sentences)
+            rule = "address-response"
+        if split_idx is None:
+            # Long multi-sentence segment: split at midpoint for readability
+            if len(sentences) >= 3 and duration >= 6.0:
+                split_idx = _detect_long_segment_split(sentences)
+                rule = "long-segment"
 
         if split_idx is not None and 0 < split_idx < len(sentences):
             result = _split_segment(seg, split_idx, sentences)
