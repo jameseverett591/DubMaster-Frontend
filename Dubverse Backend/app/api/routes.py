@@ -1645,7 +1645,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         if not os.getenv("WHISPER_MODEL", "").strip():
             os.environ["WHISPER_MODEL"] = "large-v3"
         if not os.getenv("CANTONESE_ASR_ENGINES", "").strip():
-            os.environ["CANTONESE_ASR_ENGINES"] = "speechmatics,deepgram,whisper"
+            os.environ["CANTONESE_ASR_ENGINES"] = "deepgram,whisper"
 
     # Collect env vars the GPU worker needs for ASR engines and callbacks
     _env_keys = [
