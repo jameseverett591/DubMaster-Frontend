@@ -226,7 +226,7 @@ def _filter_hallucinations(
             # got married!"). Whisper sometimes loops a short phrase when it
             # can't decode the actual audio. A real short phrase won't repeat
             # itself verbatim in the same segment.
-            cleaned = re.sub(r'[﹗！!。.？?，,；;]', '', text).strip()
+            cleaned = _re.sub(r'[﹗！!。.？?，,；;]', '', text).strip()
             if len(cleaned) >= 3 and len(cleaned) <= 20:
                 half = len(cleaned) // 2
                 if half >= 2 and cleaned[:half] == cleaned[half:half*2]:
