@@ -315,7 +315,40 @@ def transcribe_cantonese(
             # non-overlapping gaps, so they never overwrite the primary text.
             merged = deepgram_segments
 
-            # Turn detection DISABLED for editor evaluation.
+            # Text-based turn detection: split long single-speaker segments
+            # at clear conversational markers (Q&A, gratitude, address
+            # terms) where acoustic diarization failed to separate two
+            # speakers trading lines with very short gaps. Runs BEFORE
+            # rescoring so the rescoring pass sees correctly-split segments.
+            try:
+                from app.pipeline.turn_detection import detect_turn_splits
+                merged = detect_turn_splits(merged, job_id=job_id, source_language=source_language)
+            except Exception as e:
+                logger.warning(f"[CANTONESE-ASR] Turn detection failed: {e}")
+
+            # Post-ASR correction for known Deepgram Cantonese mishearings.
+            # Deepgram's zh-HK model consistently misrecognizes certain
+            # words in martial-arts film dialogue. Keyterm boosting did
+            # not fix these, so apply text-level corrections after ASR.
+            _ASR_CORRECTIONS = {
+                "推搪祖師": "行開",
+                "推3祖師": "行開",
+                "別推搪": "別行開",
+                "別推3": "別行開",
+                "打打殺散": "打打殺殺",
+                "創我": "女人創的",
+                "打不了我": "打不死",
+                "收水": "收手",
+            }
+            for seg in merged:
+                txt = seg.get("text", "")
+                for wrong, right in _ASR_CORRECTIONS.items():
+                    if wrong in txt:
+                        seg["text"] = txt.replace(wrong, right)
+                        logger.info(
+                            f"[CANTONESE-ASR] Corrected ASR mishearing: "
+                            f"'{wrong}' -> '{right}'"
+                        )
 
             # Rescore low-confidence segments (likely homophone/garbled-
             # character errors) BEFORE gap-fill, so the two correction

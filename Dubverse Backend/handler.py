@@ -13,7 +13,7 @@ import time
 # Image version stamp — confirms which Docker image the worker is running.
 # Updated on every build.  If the log doesn't show this version, the worker
 # is running a cached/old image.
-_WORKER_IMAGE_VERSION = "v85-keyterm-boost"
+_WORKER_IMAGE_VERSION = "v86-asr-correction"
 print(f"handler.py: IMAGE_VERSION={_WORKER_IMAGE_VERSION}", flush=True)
 print(f"handler.py: CANTONESE_ASR_ENGINES={os.getenv('CANTONESE_ASR_ENGINES', '(not set)')}", flush=True)
 print(f"handler.py: DEEPGRAM_API_KEY={'set' if os.getenv('DEEPGRAM_API_KEY') else 'NOT SET'}", flush=True)
