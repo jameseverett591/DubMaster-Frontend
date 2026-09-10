@@ -1688,7 +1688,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         gpu_env_vars["WHISPER_LANGUAGE"] = whisper_language
         if whisper_language.lower() == "yue":
             gpu_env_vars.setdefault("WHISPER_MODEL", os.environ.get("WHISPER_MODEL", "large-v3"))
-            gpu_env_vars.setdefault("CANTONESE_ASR_ENGINES", os.environ.get("CANTONESE_ASR_ENGINES", "deepgram,whisper"))
+            gpu_env_vars.setdefault("CANTONESE_ASR_ENGINES", os.environ.get("CANTONESE_ASR_ENGINES", "deepgram,wenetspeech,whisper"))
             # Let the worker pick its VAD threshold (default 0.15 for Cantonese).
             # Explicitly setting VAD_THRESHOLD=0 disabled VAD and caused the worker
             # to return empty transcripts on long-form mixed-content films.

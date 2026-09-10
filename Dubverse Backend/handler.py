@@ -13,7 +13,7 @@ import time
 # Image version stamp — confirms which Docker image the worker is running.
 # Updated on every build.  If the log doesn't show this version, the worker
 # is running a cached/old image.
-_WORKER_IMAGE_VERSION = "v86-asr-correction"
+_WORKER_IMAGE_VERSION = "v87-thought-grouping-wenet"
 print(f"handler.py: IMAGE_VERSION={_WORKER_IMAGE_VERSION}", flush=True)
 print(f"handler.py: CANTONESE_ASR_ENGINES={os.getenv('CANTONESE_ASR_ENGINES', '(not set)')}", flush=True)
 print(f"handler.py: DEEPGRAM_API_KEY={'set' if os.getenv('DEEPGRAM_API_KEY') else 'NOT SET'}", flush=True)
@@ -473,85 +473,188 @@ def _assign_and_split_segments(
 _CJK_RE = re.compile(r"[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]")
 
 
-def _merge_overfragmented_segments(
-    segments: list[dict],
-    max_gap: float = 0.5,
-    max_duration: float = _MAX_SEGMENT_DURATION,
-    max_chars: int = _MAX_SEGMENT_CHARS,
-) -> list[dict]:
-    """Merge adjacent same-speaker fragments that were split by diarization noise.
+# Thought-grouping thresholds. Captions should contain complete thoughts, not
+# breath-length fragments. A bubble only closes at a sentence boundary or a
+# clear thought pause; short related sentences by one speaker share a bubble.
+_GROUP_MERGE_GAP = float(os.getenv("GROUP_MERGE_GAP_S", "1.2"))
+_GROUP_TARGET_S = float(os.getenv("GROUP_BUBBLE_TARGET_S", "5.0"))
+_GROUP_TARGET_CHARS = int(os.getenv("GROUP_BUBBLE_TARGET_CHARS", "60"))
+_PAUSE_SPLIT_S = float(os.getenv("GROUP_PAUSE_SPLIT_S", "0.45"))
 
-    WenetSpeech's VAD produces short chunks; when those chunks cross a pyannote
-    speaker-boundary jitter, the diarization rescue split can chop a single
-    sentence into tiny pieces (e.g. "Master Ip" / "haven't you taken any
-    disciples in today?"). This step rejoins adjacent fragments when:
-      - they have the same speaker,
-      - the gap/overlap is small,
-      - the previous fragment does not end with sentence-ending punctuation,
-      - the combined segment still fits the duration/char limits.
+_THOUGHT_ENDS = frozenset("。！？!?…")  # full sentence-ending punctuation
+
+
+def _join_texts(a: str, b: str) -> str:
+    a = (a or "").rstrip()
+    b = (b or "").lstrip()
+    if _CJK_RE.search(a) and _CJK_RE.search(b):
+        return (a + b).strip()
+    return (a + " " + b).strip()
+
+
+def _regroup_segments_by_thoughts(
+    segments: list[dict],
+    merge_gap: float = _GROUP_MERGE_GAP,
+    target_s: float = _GROUP_TARGET_S,
+    target_chars: int = _GROUP_TARGET_CHARS,
+) -> list[dict]:
+    """Group same-speaker segments into complete-thought bubbles.
+
+    Two phases:
+      1. MERGE adjacent same-speaker segments separated by small gaps (a
+         breath, not a turn) into one run, so sentences torn by VAD or
+         diarization jitter are made whole again. turn_split boundaries
+         (deliberate speaker-turn splits) are never crossed.
+      2. SPLIT a run only when it exceeds the bubble target, and only at
+         sentence-ending punctuation (。.!?) or — in unpunctuated runs —
+         at the largest intra-run pause. Mid-sentence splits are forbidden:
+         if no boundary exists, the oversized run stays whole rather than
+         truncating a sentence.
     """
     if not segments:
         return segments
 
-    _SENTENCE_ENDS = frozenset(".!?。！？")
+    ordered = sorted(segments, key=lambda s: float(s.get("start", 0)))
 
-    def _join_texts(a: str, b: str) -> str:
-        a = (a or "").rstrip()
-        b = (b or "").lstrip()
-        # If both sides are primarily CJK, do not insert a space.
-        if _CJK_RE.search(a) and _CJK_RE.search(b):
-            return (a + b).strip()
-        return (a + " " + b).strip()
-
-    merged: list[dict] = []
-    for seg in sorted(segments, key=lambda s: float(s.get("start", 0))):
-        if not merged:
-            merged.append(seg)
+    # Phase 1: merge same-speaker fragments into runs.
+    runs: list[list[dict]] = []
+    for seg in ordered:
+        text = (seg.get("text") or "").strip()
+        if not text:
             continue
+        if runs:
+            prev_seg = runs[-1][-1]
+            same_speaker = (
+                prev_seg.get("speaker", "SPEAKER_00") == seg.get("speaker", "SPEAKER_00")
+            )
+            gap = float(seg.get("start", 0)) - float(prev_seg.get("end", 0))
+            if (
+                same_speaker
+                and -0.05 <= gap <= merge_gap
+                and not prev_seg.get("turn_split")
+                and not seg.get("turn_split")
+            ):
+                runs[-1].append(seg)
+                continue
+        runs.append([seg])
 
-        prev = merged[-1]
-        prev_speaker = prev.get("speaker", "SPEAKER_00")
-        cur_speaker = seg.get("speaker", "SPEAKER_00")
-        gap = float(seg.get("start", 0)) - float(prev.get("end", 0))
-        prev_text = (prev.get("text") or "").strip()
-        cur_text = (seg.get("text") or "").strip()
-        joined_text = _join_texts(prev_text, cur_text)
-        joined_dur = float(seg.get("end", 0)) - float(prev.get("start", 0))
+    def _emit_run(run: list[dict]) -> list[dict]:
+        """Merge run into one dict, or split at sentence/pause boundaries
+        if oversized. Never splits mid-sentence."""
+        base = dict(run[0])
+        base["start"] = round(float(run[0].get("start", 0)), 3)
+        base["end"] = round(float(run[-1].get("end", 0)), 3)
+        text = base.get("text", "")
+        for seg in run[1:]:
+            text = _join_texts(text, seg.get("text", ""))
+        base["text"] = text
+        words: list = []
+        for seg in run:
+            words.extend(seg.get("words") or [])
+        base["words"] = words or None
+        confs = [float(s.get("confidence")) for s in run if s.get("confidence") is not None]
+        if confs:
+            base["confidence"] = min(confs)
+        if any(s.get("confidence_tier") == "low" for s in run):
+            base["confidence_tier"] = "low"
+        dur = base["end"] - base["start"]
+        if dur <= target_s and len(text) <= target_chars:
+            return [base]
 
-        can_merge = (
-            prev_speaker == cur_speaker
-            and prev_text
-            and cur_text
-            and gap >= -0.05
-            and gap <= max_gap
-            and prev_text[-1] not in _SENTENCE_ENDS
-            and joined_dur <= max_duration
-            and len(joined_text) <= max_chars
-            # Never merge segments that were explicitly split by turn
-            # detection — those splits represent real speaker changes.
-            and not prev.get("turn_split")
-            and not seg.get("turn_split")
-        )
+        # Oversized run — find candidate split character positions.
+        candidates = [i + 1 for i, ch in enumerate(text[:-1]) if ch in _THOUGHT_ENDS]
 
-        if can_merge:
-            merged[-1] = dict(prev)
-            merged[-1]["text"] = joined_text
-            merged[-1]["end"] = float(seg.get("end", 0))
-            # Combine word alignments if both sides carry them.
-            if prev.get("words") or seg.get("words"):
-                merged[-1]["words"] = (prev.get("words") or []) + (seg.get("words") or [])
-            # Keep the lower (worse) confidence of the two fragments.
-            prev_conf = prev.get("confidence")
-            cur_conf = seg.get("confidence")
-            if prev_conf is not None and cur_conf is not None:
-                merged[-1]["confidence"] = min(prev_conf, cur_conf)
-            # If either fragment was flagged low-confidence, keep the flag.
-            if prev.get("confidence_tier") == "low" or seg.get("confidence_tier") == "low":
-                merged[-1]["confidence_tier"] = "low"
-        else:
-            merged.append(seg)
+        if not candidates and len(run) > 1:
+            # No sentence punctuation (common for Cantonese ASR): split at
+            # the largest inter-fragment gap, which marks a thought pause.
+            gaps = []
+            for k in range(1, len(run)):
+                g = float(run[k].get("start", 0)) - float(run[k - 1].get("end", 0))
+                # Char offset where fragment k begins in the joined text.
+                prefix = run[0].get("text", "")
+                for s2 in run[1:k]:
+                    prefix = _join_texts(prefix, s2.get("text", ""))
+                gaps.append((g, len(prefix)))
+            splits = [c for g, c in gaps if g >= _PAUSE_SPLIT_S and c > 0]
+            if splits:
+                candidates = splits
+            elif gaps:
+                largest = max(gaps)[1]
+                if largest > 0:
+                    candidates = [largest]
 
-    return merged
+        if not candidates:
+            # Last resort for words-carrying runs: largest word gap.
+            if words:
+                wgaps = sorted(
+                    (float(words[i + 1].get("start", 0)) - float(words[i].get("end", 0)), i)
+                    for i in range(len(words) - 1)
+                )
+                if wgaps and wgaps[-1][0] >= _PAUSE_SPLIT_S:
+                    cut_word = wgaps[-1][1] + 1
+                    cut_text = "".join(w.get("word", "") for w in words[:cut_word]).strip()
+                    if 0 < len(cut_text) < len(text):
+                        candidates = [len(cut_text)]
+            if not candidates:
+                # No safe boundary — keep the complete utterance whole.
+                return [base]
+
+        # Bucket candidates into bubbles near the target size.
+        bubbles: list[tuple[int, int]] = []
+        start_idx = 0
+        while start_idx < len(text):
+            limit_time = target_s if len(text[start_idx:]) > target_chars else _MAX_SEGMENT_DURATION
+            window_chars = target_chars if len(text[start_idx:]) > target_chars else _MAX_SEGMENT_CHARS
+            best_cut = None
+            best_score = None
+            for c in candidates:
+                if c <= start_idx or c >= len(text):
+                    continue
+                piece = text[start_idx:c]
+                if len(piece) > _MAX_SEGMENT_CHARS:
+                    continue
+                over_target = len(piece) > window_chars
+                score = (1 if over_target else 0, abs(len(piece) - window_chars))
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_cut = c
+            if best_cut is None:
+                break
+            bubbles.append((start_idx, best_cut))
+            start_idx = best_cut
+        if bubbles and bubbles[-1][1] < len(text):
+            bubbles.append((bubbles[-1][1], len(text)))
+        if not bubbles:
+            return [base]
+
+        # Timing: proportional by character fraction across the run.
+        out = []
+        total_chars = max(1, len(text))
+        run_start = float(run[0].get("start", 0))
+        run_end = float(run[-1].get("end", 0))
+        prev_end = run_start
+        for b0, b1 in bubbles:
+            piece_text = text[b0:b1].strip()
+            if not piece_text:
+                continue
+            frac_start = b0 / total_chars
+            frac_end = b1 / total_chars
+            t0 = run_start + frac_start * (run_end - run_start)
+            t1 = run_start + frac_end * (run_end - run_start)
+            t0 = max(t0, prev_end)
+            prev_end = t1
+            sub = dict(base)
+            sub["text"] = piece_text
+            sub["start"] = round(t0, 3)
+            sub["end"] = round(t1, 3)
+            sub.pop("words", None)
+            out.append(sub)
+        return out or [base]
+
+    regrouped: list[dict] = []
+    for run in runs:
+        regrouped.extend(_emit_run(run))
+    return regrouped
 
 
 def handler(event):
@@ -826,16 +929,17 @@ def handler(event):
             f"{len(segments)} segments (before split: {before})"
         )
 
-    # ── Anti-fragmentation merge ───────────────────────────────────────────
-    # WenetSpeech's short VAD chunks can get chopped further by the diarization
-    # rescue split. Rejoin adjacent same-speaker fragments that do not end with
-    # sentence-ending punctuation so a single sentence isn't broken into pieces.
+    # ── Thought-grouping regroup ───────────────────────────────────────────
+    # Captions must contain complete thoughts, not breath-length fragments.
+    # Merge same-speaker fragments separated by pauses (healed torn sentences),
+    # then split oversized runs only at sentence boundaries or clear thought
+    # pauses — never mid-sentence.
     _before_merge = len(segments)
-    segments = _merge_overfragmented_segments(segments)
+    segments = _regroup_segments_by_thoughts(segments)
     if len(segments) != _before_merge:
         logger.info(
-            f"[STAGE] After anti-fragmentation merge: {len(segments)} segments "
-            f"(merged {_before_merge - len(segments)} fragment(s))"
+            f"[STAGE] After thought-grouping: {len(segments)} segments "
+            f"(was {_before_merge})"
         )
 
     # ── Confidence Tiering ────────────────────────────────────────────────
