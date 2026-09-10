@@ -13,7 +13,7 @@ import time
 # Image version stamp — confirms which Docker image the worker is running.
 # Updated on every build.  If the log doesn't show this version, the worker
 # is running a cached/old image.
-_WORKER_IMAGE_VERSION = "v81-turn-split-protect"
+_WORKER_IMAGE_VERSION = "v82-second-pass-turn-detect"
 print(f"handler.py: IMAGE_VERSION={_WORKER_IMAGE_VERSION}", flush=True)
 print(f"handler.py: CANTONESE_ASR_ENGINES={os.getenv('CANTONESE_ASR_ENGINES', '(not set)')}", flush=True)
 print(f"handler.py: DEEPGRAM_API_KEY={'set' if os.getenv('DEEPGRAM_API_KEY') else 'NOT SET'}", flush=True)
@@ -806,6 +806,22 @@ def handler(event):
             f"[STAGE] After anti-fragmentation merge: {len(segments)} segments "
             f"(merged {_before_merge - len(segments)} fragment(s))"
         )
+
+    # ── Second-pass turn detection ─────────────────────────────────────────
+    # Anti-fragmentation merge can recombine fragments into long segments that
+    # turn detection (which ran earlier in transcribe_cantonese.py) never saw.
+    # Run turn detection again here to catch any newly-merged long segments.
+    try:
+        from app.pipeline.turn_detection import detect_turn_splits
+        _before_td2 = len(segments)
+        segments = detect_turn_splits(segments, job_id=job_id, source_language=source_language)
+        if len(segments) != _before_td2:
+            logger.info(
+                f"[STAGE] After second-pass turn detection: {len(segments)} segments "
+                f"(split {_before_td2 - len(segments)} long segment(s))"
+            )
+    except Exception as e:
+        logger.warning(f"Second-pass turn detection failed: {e}")
 
     # ── Confidence Tiering ────────────────────────────────────────────────
     # Tag each segment so the editor can route low-confidence ones to review.
