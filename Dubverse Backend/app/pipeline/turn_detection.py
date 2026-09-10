@@ -319,11 +319,13 @@ def _split_segment(
     first_seg["text"] = first_text
     first_seg["end"] = round(split_time, 3)
     first_seg["speaker"] = original_speaker
+    first_seg["turn_split"] = True
 
     second_seg = dict(seg)
     second_seg["text"] = second_text
     second_seg["start"] = round(split_time, 3)
     second_seg["speaker"] = other_speaker
+    second_seg["turn_split"] = True
 
     logger.info(
         f"[TURN-DETECT] Split segment at {seg_start:.1f}s: "

@@ -13,7 +13,7 @@ import time
 # Image version stamp — confirms which Docker image the worker is running.
 # Updated on every build.  If the log doesn't show this version, the worker
 # is running a cached/old image.
-_WORKER_IMAGE_VERSION = "v80-blackwell-cu128"
+_WORKER_IMAGE_VERSION = "v81-turn-split-protect"
 print(f"handler.py: IMAGE_VERSION={_WORKER_IMAGE_VERSION}", flush=True)
 print(f"handler.py: CANTONESE_ASR_ENGINES={os.getenv('CANTONESE_ASR_ENGINES', '(not set)')}", flush=True)
 print(f"handler.py: DEEPGRAM_API_KEY={'set' if os.getenv('DEEPGRAM_API_KEY') else 'NOT SET'}", flush=True)
@@ -496,6 +496,10 @@ def _merge_overfragmented_segments(
             and prev_text[-1] not in _SENTENCE_ENDS
             and joined_dur <= max_duration
             and len(joined_text) <= max_chars
+            # Never merge segments that were explicitly split by turn
+            # detection — those splits represent real speaker changes.
+            and not prev.get("turn_split")
+            and not seg.get("turn_split")
         )
 
         if can_merge:
