@@ -71,6 +71,12 @@ _HALLUCINATION_PHRASES = {
     "assalamu alaikum",
     "alhamdulillah",
     "la ilaha illallah",
+    # Cantonese/Mandarin short phrases Whisper hallucinates from silence
+    # at the end of clips (often after the dialogue has ended).
+    "走呀",
+    "走呀 走呀",
+    "走開",
+    "打不死",
 }
 
 _WHISPER_MODELS: Dict[Tuple[str, str, str], Any] = {}
@@ -221,6 +227,31 @@ def _filter_hallucinations(
                         f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
                     )
                     continue
+
+            # Reject repeated short phrases (e.g., "結婚了﹗結婚了﹗" = "got married!
+            # got married!"). Whisper sometimes loops a short phrase when it
+            # can't decode the actual audio. A real short phrase won't repeat
+            # itself verbatim in the same segment.
+            cleaned = _re.sub(r'[﹗！!。.？?，,；;]', '', text).strip()
+            if len(cleaned) >= 3 and len(cleaned) <= 20:
+                half = len(cleaned) // 2
+                if half >= 2 and cleaned[:half] == cleaned[half:half*2]:
+                    logger.info(
+                        f"[HALLUCINATION] Rejected repeated-phrase segment: "
+                        f"'{text[:40]}' at {seg.get('start', '?')}-{seg.get('end', '?')}"
+                    )
+                    continue
+
+            # Reject extremely low-confidence Whisper segments (< 0.2).
+            # These are almost always hallucinations on noise/silence.
+            conf = seg.get("confidence")
+            if conf is not None and float(conf) < 0.2:
+                logger.info(
+                    f"[HALLUCINATION] Rejected very-low-confidence Whisper segment "
+                    f"(conf={conf:.2f}): '{text[:40]}' "
+                    f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
+                )
+                continue
 
             # Reject short single-word Latin-script hallucinations.
             # Whisper often produces nonsense English words during fight scenes

@@ -60,6 +60,107 @@ def _get_api_key() -> Optional[str]:
     return key
 
 
+_MIN_WORD_SPEAKER_CONFIDENCE = 0.5
+
+
+def _split_by_word_speakers(
+    text: str,
+    start: float,
+    end: float,
+    speaker_num: int,
+    confidence: float,
+    words: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Split a Deepgram utterance at word-level speaker-change boundaries.
+
+    utt_split only creates a new utterance across a silence gap; two people
+    trading lines with less than that gap between them stay one utterance
+    with one speaker label no matter how low utt_split goes -- confirmed
+    directly against the Ip Man 2 test clip, where a countryman's speech
+    with a brief "Thank you so much" interjection from Ip Man collapsed to
+    one speaker even after lowering utt_split and the diarization-split
+    floors. But Deepgram tags every WORD with its own speaker +
+    speaker_confidence, independent of that utterance grouping -- real
+    signal that was previously captured (further down, in the words list)
+    and then discarded rather than used to split.
+
+    A word with low speaker_confidence is treated as an unreliable tag and
+    folded into whichever run it falls inside rather than triggering a
+    split, so isolated diarization jitter on one word doesn't fragment an
+    otherwise-single-speaker utterance.
+    """
+    if not words:
+        return [{
+            "start": start,
+            "end": end,
+            "text": text,
+            "speaker": f"speaker-{speaker_num + 1}",
+            "confidence": confidence,
+            "source": "deepgram",
+            "words": None,
+        }]
+
+    runs: List[Dict[str, Any]] = []
+    for w in words:
+        w_speaker = w.get("speaker")
+        w_conf = w.get("speaker_confidence")
+        reliable = w_speaker is not None and w_conf is not None and w_conf >= _MIN_WORD_SPEAKER_CONFIDENCE
+        if runs and (not reliable or w_speaker == runs[-1]["speaker"]):
+            runs[-1]["words"].append(w)
+        else:
+            runs.append({"speaker": w_speaker if reliable else speaker_num, "words": [w]})
+
+    if len(runs) == 1:
+        return [{
+            "start": start,
+            "end": end,
+            "text": text,
+            "speaker": f"speaker-{speaker_num + 1}",
+            "confidence": confidence,
+            "source": "deepgram",
+            "words": words,
+        }]
+
+    logger.info(
+        f"[DEEPGRAM] split utterance at word speaker change: "
+        f"{start}-{end}s, utterance-level speaker={speaker_num}, "
+        f"{len(runs)} word-level run(s) -> speakers "
+        f"{[r['speaker'] for r in runs]}"
+    )
+
+    out: List[Dict[str, Any]] = []
+    for run in runs:
+        run_words = run["words"]
+        run_text = "".join(w.get("word", "") for w in run_words).strip()
+        if not run_text:
+            continue
+        confidences = [w["confidence"] for w in run_words if w.get("confidence") is not None]
+        run_confidence = sum(confidences) / len(confidences) if confidences else confidence
+        out.append({
+            "start": round(float(run_words[0]["start"]), 3),
+            "end": round(float(run_words[-1]["end"]), 3),
+            "text": run_text,
+            "speaker": f"speaker-{int(run['speaker']) + 1}",
+            "confidence": round(run_confidence, 4),
+            "source": "deepgram",
+            "words": run_words,
+        })
+
+    # All runs came out empty (shouldn't happen, but never emit nothing for
+    # a non-empty utterance) -- fall back to the single unsplit segment.
+    if not out:
+        return [{
+            "start": start,
+            "end": end,
+            "text": text,
+            "speaker": f"speaker-{speaker_num + 1}",
+            "confidence": confidence,
+            "source": "deepgram",
+            "words": words,
+        }]
+    return out
+
+
 def transcribe_with_deepgram(
     extract_result: Dict[str, Any],
     audio_path: Optional[str] = None,
@@ -92,18 +193,81 @@ def transcribe_with_deepgram(
     model = os.getenv("DEEPGRAM_MODEL", "nova-3").strip() or "nova-3"
 
     # Deepgram batch API parameters.
-    # - diarize=true: speaker diarization (speaker 0, 1, 2...)
+    # - diarize_model=latest: speaker diarization, pinned to Deepgram's
+    #   current best model version instead of an unpinned implicit default
     # - utterances=true: per-utterance segments with speaker + timing
+    # - utt_split: silence gap (seconds) that starts a new utterance.
+    #   Deepgram's own default is 0.8, which merges rapid back-and-forth
+    #   Cantonese dialogue (turn gaps under 0.8s) into one long utterance
+    #   with one speaker label -- confirmed directly against a real
+    #   transcript: a 14s exchange between two speakers came back as a
+    #   single speaker-2 utterance. Lowered default to 0.3s so genuinely
+    #   fast turn-taking still splits; env-configurable in case 0.3 proves
+    #   too aggressive on other content and over-fragments slower dialogue.
     # - punctuate=true: add punctuation (prevents mid-sentence fragments)
+    # - paragraphs=true: group utterances into paragraphs using punctuation
+    #   + speaker changes together
     # - smart_format=true: smart formatting for numbers, dates, etc.
+    utt_split = os.getenv("DEEPGRAM_UTT_SPLIT", "0.3").strip() or "0.3"
     params = {
         "model": model,
         "language": language,
-        "diarize": "true",
+        "diarize_model": "latest",
         "utterances": "true",
+        "utt_split": utt_split,
         "punctuate": "true",
+        "paragraphs": "true",
         "smart_format": "true",
     }
+
+    # Keyterm boosting (Nova-3 only). Boosts recognition of Cantonese
+    # words that Deepgram's acoustic model consistently mishears in
+    # martial-arts film dialogue. Without boosting, 行開 ("walk away")
+    # gets misheard as 推搪祖師, 收聲 ("shut up") as 走開, and 女人
+    # ("woman") gets truncated out of 創我 ("created by...").
+    # Repeat the keyterm param once per term — Deepgram's API requires
+    # this rather than a comma-separated list.
+    _DEFAULT_KEYTERMS_YUE = [
+        # Address terms / names
+        "葉問", "葉太太", "金山爪", "金師父", "文哥", "全哥", "王叔",
+        # Martial arts terms
+        "武館", "武術", "永春拳", "詠春", "切磋", "打", "功夫",
+        # Common misheard verbs/particles
+        "行開", "收聲", "閉嘴", "出去", "離開", "走開",
+        "別推搪", "別行開",
+        # Common nouns that get truncated
+        "女人", "男人", "師父", "徒弟", "師傅",
+        # Common phrases
+        "不怕", "怕了", "怕老婆", "尊重",
+        "失望", "弱", "厲害",
+    ]
+    _DEFAULT_KEYTERMS_ZH = [
+        "叶问", "叶太太", "金山爪", "金师父", "文哥", "全哥", "王叔",
+        "武馆", "武术", "咏春", "切磋", "功夫",
+        "走开", "收声", "闭嘴", "出去", "离开",
+        "女人", "男人", "师父", "徒弟",
+        "不怕", "怕老婆", "尊重", "失望", "厉害",
+    ]
+    _is_yue = language == "zh-HK"
+    _keyterm_env = os.getenv(
+        "DEEPGRAM_KEYTERMS_YUE" if _is_yue else "DEEPGRAM_KEYTERMS_ZH", ""
+    ).strip()
+    if _keyterm_env:
+        # Allow override via env (comma-separated)
+        _keyterms = [t.strip() for t in _keyterm_env.split(",") if t.strip()]
+    else:
+        _keyterms = _DEFAULT_KEYTERMS_YUE if _is_yue else _DEFAULT_KEYTERMS_ZH
+
+    if _keyterms:
+        # Convert dict params to list of tuples so keyterm can repeat.
+        # requests accepts params as either dict or list of (key, value) tuples.
+        params = [(k, v) for k, v in params.items()]
+        for t in _keyterms:
+            params.append(("keyterm", t))
+        logger.info(
+            f"[DEEPGRAM] job={job_id} boosting {len(_keyterms)} keyterms "
+            f"(lang={language}): {_keyterms[:8]}..."
+        )
 
     # Determine content type from file extension.
     ext = os.path.splitext(str(audio_path))[1].lower()
@@ -191,7 +355,11 @@ def transcribe_with_deepgram(
         # Map Deepgram speaker numbers to our speaker-N convention.
         speaker = f"speaker-{speaker_num + 1}"
 
-        # Convert Deepgram word timings to our format.
+        # Convert Deepgram word timings to our format. Capture speaker +
+        # speaker_confidence per word too -- Deepgram tags these
+        # independently of the utterance-level speaker/utt_split grouping,
+        # and they're the only signal left once two people trade lines with
+        # too little pause for utt_split to ever create a new utterance.
         words = []
         for w in utt.get("words", []):
             words.append({
@@ -199,17 +367,11 @@ def transcribe_with_deepgram(
                 "start": round(float(w.get("start", 0.0)), 3),
                 "end": round(float(w.get("end", 0.0)), 3),
                 "confidence": float(w.get("confidence", 0.0)),
+                "speaker": w.get("speaker"),
+                "speaker_confidence": w.get("speaker_confidence"),
             })
 
-        segments.append({
-            "start": start,
-            "end": end,
-            "text": text,
-            "speaker": speaker,
-            "confidence": confidence,
-            "source": "deepgram",
-            "words": words if words else None,
-        })
+        segments.extend(_split_by_word_speakers(text, start, end, speaker_num, confidence, words))
 
     logger.info(
         f"[DEEPGRAM] job={job_id} produced {len(segments)} segments, "

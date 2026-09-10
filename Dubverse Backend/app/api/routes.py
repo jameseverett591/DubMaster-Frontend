@@ -544,8 +544,12 @@ def _assign_speakers_from_diarization(raw_segments, diarization_segments, *_, pr
         unique = list(dict.fromkeys(speakers_in_seg))
 
         # Only split when there are multiple speakers AND the segment is long enough.
-        # Keep short segments intact to avoid over-fragmenting.
-        if len(unique) < 2 or seg_dur < 1.2:
+        # Keep short segments intact to avoid over-fragmenting. Floor lowered
+        # from 1.2 to 0.5 (env-configurable): rapid Cantonese back-and-forth
+        # produces genuinely short multi-speaker segments that the old floor
+        # refused to split, leaving them collapsed under one speaker.
+        _min_split_dur = float(os.environ.get("DIARIZATION_MIN_SPLIT_DURATION", "0.5"))
+        if len(unique) < 2 or seg_dur < _min_split_dur:
             return []
 
         # Build diarization slices clipped to the ASR segment.
@@ -1646,12 +1650,27 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
     # Collect env vars the GPU worker needs for ASR engines and callbacks
     _env_keys = [
         "TENCENT_SECRET_ID", "TENCENT_SECRET_KEY",
-        "DEEPGRAM_API_KEY",
+        "DEEPGRAM_API_KEY", "DEEPGRAM_UTT_SPLIT",
         "CANTONESE_ASR_ENGINES", "CANTONESE_ASR_WHISPER_GAP_FILL",
         "WHISPER_LANGUAGE", "WHISPER_MODEL",
         "HF_TOKEN", "HUGGING_FACE_TOKEN", "HUGGINGFACE_TOKEN", "HUGGINGFACE_HUB_TOKEN",
         "PARAFORMER_DEVICE",
         "PUBLIC_BASE_URL",  # Worker uses this to POST stage callbacks back to us
+        # ASR rescoring (asr_rescore.py) runs on the worker and needs its
+        # own env forwarded -- ANTHROPIC_API_KEY is required for the
+        # rescoring Claude call itself.
+        "ANTHROPIC_API_KEY",
+        "ASR_RESCORE_ENABLED", "ASR_RESCORE_CONFIDENCE_THRESHOLD",
+        "ASR_RESCORE_MODEL", "ASR_RESCORE_TIMEOUT_SEC",
+        # handler.py's diarization-split floor runs on the worker and needs
+        # this forwarded. DIARIZATION_MIN_SPLIT_DURATION is read directly by
+        # routes.py itself (backend-side _split_segment_by_diarization), so
+        # it already has local .env access and does NOT need forwarding here.
+        "DIARIZATION_MIN_TURN_DURATION",
+        # Speechmatics diarization (speechmatics_diarize.py) runs on the
+        # worker for Cantonese/Mandarin jobs -- see handler.py's _run_diarize.
+        "SPEECHMATICS_API_KEY", "SPEECHMATICS_SPEAKER_SENSITIVITY",
+        "SPEECHMATICS_POLL_TIMEOUT_SEC",
     ]
     gpu_env_vars = {}
     for k in _env_keys:
@@ -1669,7 +1688,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         gpu_env_vars["WHISPER_LANGUAGE"] = whisper_language
         if whisper_language.lower() == "yue":
             gpu_env_vars.setdefault("WHISPER_MODEL", os.environ.get("WHISPER_MODEL", "large-v3"))
-            gpu_env_vars.setdefault("CANTONESE_ASR_ENGINES", os.environ.get("CANTONESE_ASR_ENGINES", "deepgram,whisper"))
+            gpu_env_vars.setdefault("CANTONESE_ASR_ENGINES", os.environ.get("CANTONESE_ASR_ENGINES", "deepgram,wenetspeech,whisper"))
             # Let the worker pick its VAD threshold (default 0.15 for Cantonese).
             # Explicitly setting VAD_THRESHOLD=0 disabled VAD and caused the worker
             # to return empty transcripts on long-form mixed-content films.

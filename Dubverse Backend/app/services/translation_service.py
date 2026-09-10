@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 import asyncio
 import re
 import secrets
@@ -39,11 +39,48 @@ from app.services.adaptation_engine.policy import (
 )
 
 # Split after .!? followed by whitespace + uppercase letter.
-# Em-dash variant catches ". — Next sentence" patterns from some LLM outputs.
+#
+# The em-dash branch splits on any spaced em-dash and deliberately does NOT
+# require an uppercase letter after the dash. The LLM welds two spoken beats
+# into one line with a lowercase continuation ("...afraid of their wives —
+# only men who respect them"), and the old (?=[A-Z]) lookahead let every one
+# of those through untouched. An actor cannot perform a single subtitle
+# carrying two beats, so splitting here is what keeps our pacing close to a
+# human dub. Whitespace is still required on both sides, which leaves a
+# trailing dash ("...he'll lose —") alone rather than producing an empty tail.
 _SENTENCE_SPLIT_RE = re.compile(
     r'(?<=[.!?])\s+(?=[A-Z])'
-    r'|\s+—\s+(?=[A-Z])'
+    r'|\s+—\s+'
 )
+
+_TERMINAL_PUNCT = '.!?。！？…'
+
+
+def _tidy_split_fragments(parts: list) -> list:
+    """Make split fragments able to stand alone as subtitles.
+
+    Splitting on an em-dash leaves a tail that starts lowercase and a head
+    with no terminal punctuation ("...their wives" / "only men who respect
+    them."). Each fragment becomes its own subtitle *and* its own TTS unit,
+    so both halves are wrong as-is: the reader sees a lowercase line, and
+    the voice gets no sentence-final prosody to land the beat on.
+
+    Capitalise every fragment, and close each non-final one with a full stop
+    unless it already ends in terminal punctuation. Fragments produced by the
+    .!? branch are untouched, since its lookarounds already guarantee both.
+    """
+    tidied = []
+    last = len(parts) - 1
+    for i, part in enumerate(parts):
+        if part and part[0].islower():
+            part = part[0].upper() + part[1:]
+        if i < last:
+            part = part.rstrip(',;:')
+            if part and part[-1] not in _TERMINAL_PUNCT:
+                part += '.'
+        tidied.append(part)
+    return tidied
+
 
 # ── Natural speech rate constants ─────────────────────────────────────────────
 # All tunable via environment variables so RunPod instances can be dialled in
@@ -153,11 +190,39 @@ def split_translated_sentences(segments: list) -> list:
     # Mask title/honorific abbreviations before splitting so their periods
     # are never treated as sentence boundaries.  Restored after split.
     _TITLE_ABBREV_RE = re.compile(r'\b(Mr|Mrs|Ms|Dr|Prof|Jr|Sr|St|Lt|Sgt|Gen|Col|Maj|Capt)\.')
+
+    # Same technique as routes.py's diarization-split boundary snapping:
+    # divide the CJK source text proportionally by the same time fractions
+    # used for the English timing split, snapping each cut to the nearest
+    # sentence-ending punctuation (CJK or ASCII) instead of a raw character
+    # count. Previously every child repeated the WHOLE parent source_text
+    # verbatim (deliberately, to avoid ever showing a blank source row) --
+    # correct for avoiding blanks, but confusing in the editor, where a
+    # 5-way split all showed the identical full source line. If the source
+    # has no sentence punctuation at all (common for raw Cantonese ASR
+    # blobs), this degrades gracefully to a plain proportional character
+    # split, which is still a real improvement over full duplication.
+    _SENT_ENDS = frozenset('.!?。！？')
+
+    def _snap_to_boundary(text: str, target_char: int) -> int:
+        """Index just after the nearest sentence-ending char to target_char."""
+        best_idx = target_char
+        best_dist = len(text) + 1
+        for ci, ch in enumerate(text):
+            if ch in _SENT_ENDS:
+                idx = ci + 1
+                dist = abs(idx - target_char)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+        return best_idx
+
     out: list = []
     for seg in segments:
         text = (seg.get("translated_text") or seg.get("text") or "").strip()
         text = _TITLE_ABBREV_RE.sub(lambda m: m.group(1) + '\x00', text)
         sentences = [s.replace('\x00', '.').strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
+        sentences = _tidy_split_fragments(sentences)
         if len(sentences) <= 1:
             out.append(seg)
             continue
@@ -248,9 +313,60 @@ def split_translated_sentences(segments: list) -> list:
         n         = len(sentences)
         fracs     = [d / total_nat for d in group_nats]
 
+        source_text = (seg.get("source_text") or "").strip()
+        n_src_chars = len(source_text)
+        src_cursor = 0
+        cum_frac = 0.0
+
+        # Prefer real timing over guessing. Deepgram (and Whisper) return a
+        # timestamp per source word/character, which is exact -- unlike the
+        # punctuation-snap/proportional fallback below, it can never cut a
+        # word in half, because it never looks at character counts at all.
+        # Sorted once; word_idx advances monotonically through the per-child
+        # loop so each source word is assigned to exactly one child.
+        source_words = seg.get("words") or []
+        source_words = sorted(
+            (w for w in source_words if (w.get("word") or "").strip()),
+            key=lambda w: float(w.get("start", 0.0)),
+        )
+        word_idx = 0
+
         cursor = start
         for i, (sentence, frac) in enumerate(zip(sentences, fracs)):
             seg_end = (cursor + duration * frac) if i < n - 1 else end
+            cum_frac += frac
+
+            if source_words:
+                # Word timing exists for this segment -- trust it for every
+                # child, even one that lands empty (e.g. a very short child
+                # window with no word midpoint inside it). Falling back to
+                # character slicing only for that one child would restart
+                # from src_cursor=0 while earlier children already consumed
+                # words from the front of source_text, duplicating text
+                # instead of showing a blank -- worse than the blank.
+                picked = []
+                # Last child takes every remaining word, so trailing words
+                # whose timestamp lands past a rounded `end` aren't dropped.
+                while word_idx < len(source_words):
+                    w = source_words[word_idx]
+                    w_mid = (float(w.get("start", 0.0)) + float(w.get("end", 0.0))) / 2.0
+                    if i < n - 1 and w_mid >= seg_end:
+                        break
+                    picked.append(w["word"])
+                    word_idx += 1
+                child_source = "".join(picked).strip()
+            else:
+                # No word timing at all on this segment -- fall back to the
+                # punctuation-snap/proportional character split.
+                if source_text:
+                    if i < n - 1:
+                        src_end = _snap_to_boundary(source_text, int(cum_frac * n_src_chars))
+                    else:
+                        src_end = n_src_chars
+                    child_source = source_text[src_cursor:src_end].strip()
+                    src_cursor = src_end
+                else:
+                    child_source = source_text
             out.append({
                 **seg,
                 "text":                sentence,
@@ -260,10 +376,10 @@ def split_translated_sentences(segments: list) -> list:
                 "auto_split":          True,
                 "original_segment_id": orig_id,
                 "split_index":         i,
-                # The parent segment's source text is the source line for the
-                # whole split group; repeat it on every child so the Script view
-                # never shows blank source rows.
-
+                # Divided proportionally above rather than repeating the whole
+                # parent source line -- see the boundary-snapping helper and
+                # comment near the top of this function for why.
+                "source_text":         child_source,
             })
             cursor = seg_end
     return out
@@ -447,11 +563,11 @@ class TranslationService:
             "Southern Boxing": "Southern Fist",
             "Northern Fist Boxing": "Northern Fist",
             "Southern Fist Boxing": "Southern Fist",
-            "Master Xing": "Master Shin",
-            "Master Xin": "Master Shin",
-            "Master Jin": "Master Shin",
-            "Master Kin": "Master Shin",
-            "Master Gam": "Master Shin",
+            "Master Xing": "Master Jin",
+            "Master Xin": "Master Jin",
+            "Master Shin": "Master Jin",
+            "Master Kin": "Master Jin",
+            "Master Gam": "Master Jin",
             # LLM hallucinations observed on short Cantonese utterances
             "Fire Mindup": "Please",
             "fire mindup": "Please",
@@ -1037,6 +1153,34 @@ class TranslationService:
         system_prompt_parts.append("- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.")
         system_prompt_parts.append("- [[ENTITY:n]] tokens are PROTECTED placeholders — keep them EXACTLY.")
         system_prompt_parts.append("")
+        system_prompt_parts.append("CANTONESE TRANSLATION PITFALLS (critical for accuracy):")
+        system_prompt_parts.append("- 開武館 means 'OPENING a martial arts school' — use present continuous or 'going to open', NOT 'we run a school'.")
+        system_prompt_parts.append("- 切磋 means 'spar' or 'challenge to a duel' — choose based on context. A challenger at the door is 'challenge', not 'spar'.")
+        system_prompt_parts.append("- 打 means 'fight' or 'hit' — NOT 'spar'. Use 'spar' ONLY when the source explicitly says 切磋.")
+        system_prompt_parts.append("- 離開/出去 means 'leave' or 'get out' — do NOT translate as 'go away' when the speaker is being polite.")
+        system_prompt_parts.append("- 收聲/閉嘴 means 'shut up' — do NOT translate as 'get out' or 'leave'.")
+        system_prompt_parts.append("- 威 means 'might' or 'power' — 'show our might' NOT 'show what we can do'.")
+        system_prompt_parts.append("- 不敢 means 'afraid' or 'scared' — 'Don't you dare' or 'Are you scared?' NOT 'Don't push me'.")
+        system_prompt_parts.append("- 行開 means 'walk away' — 'Don't walk away!' NOT 'Don't push me!'.")
+        system_prompt_parts.append("- 武館 means 'martial arts school/club' — NOT 'ring' or 'gym'.")
+        system_prompt_parts.append("- 女人 means 'woman' — if the source says 'created by a woman', translate 'woman' — do NOT truncate or omit it.")
+        system_prompt_parts.append("- 不用雙手/不用手 means 'without hands' or 'no hands' — NOT 'give him more advantage'.")
+        system_prompt_parts.append("- 失望 means 'disappointed' — 'Foshan has disappointed me' or 'Foshan's let me down' NOT 'Foshan's truly weak'.")
+        system_prompt_parts.append("- 打不死 means 'can't be beaten' is an EXCLAMATION — translate as 'Unbeatable!' or 'Can't beat me!' NOT as a statement about someone else.")
+        system_prompt_parts.append("- 好厲害 means 'amazing' or 'impressive' — NOT 'I can't believe it'.")
+        system_prompt_parts.append("- If a line is CUT OFF mid-sentence by another speaker interrupting, translate only what was said — do NOT complete the unfinished thought.")
+        system_prompt_parts.append("")
+        system_prompt_parts.append("SIMPLICITY RULE (critical — stop overcompensating):")
+        system_prompt_parts.append("- Translate EXACTLY what is there. Do NOT add words the source doesn't have.")
+        system_prompt_parts.append("- Do NOT add 'you're set', 'you're good', 'how's that', 'right this way', 'be my guest' — these are NOT in the source.")
+        system_prompt_parts.append("- Do NOT add conversational fillers ('well', 'so', 'now then') that aren't in the source.")
+        system_prompt_parts.append("- 請你離開 means simply 'Please leave.' — do NOT add 'and you're set' or 'and go'.")
+        system_prompt_parts.append("- 請便 means 'go ahead' or 'suit yourself' — do NOT add 'right this way' or 'be my guest'.")
+        system_prompt_parts.append("- 帶我進去 means 'take me inside' or 'go back inside' — do NOT add extra words.")
+        system_prompt_parts.append("- Keep translations SHORT and LITERAL when the source is short. A 3-word source = a 3-5 word translation, NOT a 10-word translation.")
+        system_prompt_parts.append("- Do NOT add stage directions, emotional coloring, or dramatic phrasing not present in the source.")
+        system_prompt_parts.append("- When in doubt, translate word-for-word. A plain literal translation is ALWAYS better than a clever embellished one.")
+        system_prompt_parts.append("")
         system_prompt_parts.append("TONE AND EMOTIONAL STANCE:")
         system_prompt_parts.append("- This is a classic period martial arts film. Characters speak with dignity, restraint, and warmth.")
         system_prompt_parts.append("- PRESERVE the speaker's emotional stance. If a character is being self-deprecating or humble, the translation MUST reflect that.")
@@ -1340,6 +1484,34 @@ class TranslationService:
         system_prompt_parts.append("- Do NOT prefix with speaker names (e.g. NEVER 'Ip Man: ...').")
         system_prompt_parts.append("- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.")
         system_prompt_parts.append("- [[ENTITY:n]] tokens are PROTECTED placeholders — keep them EXACTLY.")
+        system_prompt_parts.append("")
+        system_prompt_parts.append("CANTONESE TRANSLATION PITFALLS (critical for accuracy):")
+        system_prompt_parts.append("- 開武館 means 'OPENING a martial arts school' — use present continuous or 'going to open', NOT 'we run a school'.")
+        system_prompt_parts.append("- 切磋 means 'spar' or 'challenge to a duel' — choose based on context. A challenger at the door is 'challenge', not 'spar'.")
+        system_prompt_parts.append("- 打 means 'fight' or 'hit' — NOT 'spar'. Use 'spar' ONLY when the source explicitly says 切磋.")
+        system_prompt_parts.append("- 離開/出去 means 'leave' or 'get out' — do NOT translate as 'go away' when the speaker is being polite.")
+        system_prompt_parts.append("- 收聲/閉嘴 means 'shut up' — do NOT translate as 'get out' or 'leave'.")
+        system_prompt_parts.append("- 威 means 'might' or 'power' — 'show our might' NOT 'show what we can do'.")
+        system_prompt_parts.append("- 不敢 means 'afraid' or 'scared' — 'Don't you dare' or 'Are you scared?' NOT 'Don't push me'.")
+        system_prompt_parts.append("- 行開 means 'walk away' — 'Don't walk away!' NOT 'Don't push me!'.")
+        system_prompt_parts.append("- 武館 means 'martial arts school/club' — NOT 'ring' or 'gym'.")
+        system_prompt_parts.append("- 女人 means 'woman' — if the source says 'created by a woman', translate 'woman' — do NOT truncate or omit it.")
+        system_prompt_parts.append("- 不用雙手/不用手 means 'without hands' or 'no hands' — NOT 'give him more advantage'.")
+        system_prompt_parts.append("- 失望 means 'disappointed' — 'Foshan has disappointed me' or 'Foshan's let me down' NOT 'Foshan's truly weak'.")
+        system_prompt_parts.append("- 打不死 means 'can't be beaten' is an EXCLAMATION — translate as 'Unbeatable!' or 'Can't beat me!' NOT as a statement about someone else.")
+        system_prompt_parts.append("- 好厲害 means 'amazing' or 'impressive' — NOT 'I can't believe it'.")
+        system_prompt_parts.append("- If a line is CUT OFF mid-sentence by another speaker interrupting, translate only what was said — do NOT complete the unfinished thought.")
+        system_prompt_parts.append("")
+        system_prompt_parts.append("SIMPLICITY RULE (critical — stop overcompensating):")
+        system_prompt_parts.append("- Translate EXACTLY what is there. Do NOT add words the source doesn't have.")
+        system_prompt_parts.append("- Do NOT add 'you're set', 'you're good', 'how's that', 'right this way', 'be my guest' — these are NOT in the source.")
+        system_prompt_parts.append("- Do NOT add conversational fillers ('well', 'so', 'now then') that aren't in the source.")
+        system_prompt_parts.append("- 請你離開 means simply 'Please leave.' — do NOT add 'and you're set' or 'and go'.")
+        system_prompt_parts.append("- 請便 means 'go ahead' or 'suit yourself' — do NOT add 'right this way' or 'be my guest'.")
+        system_prompt_parts.append("- 帶我進去 means 'take me inside' or 'go back inside' — do NOT add extra words.")
+        system_prompt_parts.append("- Keep translations SHORT and LITERAL when the source is short. A 3-word source = a 3-5 word translation, NOT a 10-word translation.")
+        system_prompt_parts.append("- Do NOT add stage directions, emotional coloring, or dramatic phrasing not present in the source.")
+        system_prompt_parts.append("- When in doubt, translate word-for-word. A plain literal translation is ALWAYS better than a clever embellished one.")
         system_prompt_parts.append("")
         system_prompt_parts.append("TONE AND EMOTIONAL STANCE:")
         system_prompt_parts.append("- This is a classic period martial arts film. Characters speak with dignity, restraint, and warmth.")

@@ -1,14 +1,15 @@
 # ============================================
 # DUBVERSE BACKEND DOCKERFILE — GPU SERVERLESS
-# CUDA 12.1 + cuDNN 8 + Python 3.11
+# CUDA 12.8 + cuDNN 9 + Python 3.11
 # For RunPod Serverless Endpoints
+# CUDA 12.8 required for Blackwell (sm_120) support
 #
 # LEAN IMAGE — models download at runtime via
 # _warm_models() in handler.py, NOT at build time.
 # Target size: ~4-6GB (down from 16GB+)
 # ============================================
 
-FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1

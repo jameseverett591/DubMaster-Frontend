@@ -1452,10 +1452,16 @@ class DubbingService:
 
                 # TTS-only phonetic substitutions — display/transcript text unchanged
                 tts_text = re.sub(r'\bIp Man\b', 'Yip Man', text, flags=re.IGNORECASE)
-                tts_text = re.sub(r'\bMaster Shin\b', 'Master Sheen', tts_text, flags=re.IGNORECASE)
-                tts_text = re.sub(r'\bMaster Xin\b', 'Master Sheen', tts_text, flags=re.IGNORECASE)
-                tts_text = re.sub(r'\bMaster Jin\b', 'Master Sheen', tts_text, flags=re.IGNORECASE)
-                tts_text = re.sub(r'\bMaster Xing\b', 'Master Sheen', tts_text, flags=re.IGNORECASE)
+                # Canonical name is "Master Jin", matching the full name
+                # "Jin Shan Zhao" used on his introduction. English TTS already
+                # says "Jin" as /dʒɪn/, which is correct for 金, so no
+                # respelling is needed. Normalise any stray romanisation that
+                # slipped past the glossary so the spoken name matches the
+                # subtitle instead of diverging from it.
+                tts_text = re.sub(
+                    r'\bMaster (?:Shin|Sheen|Xin|Xing|Kin|Gam)\b',
+                    'Master Jin', tts_text, flags=re.IGNORECASE,
+                )
                 tts_text = re.sub(r'\bWing Chun\b', 'Wing Chun', tts_text)  # already correct
                 if tts_text != text:
                     logger.info(f"[PHONETIC] seg {i}: {text!r} -> {tts_text!r}")
