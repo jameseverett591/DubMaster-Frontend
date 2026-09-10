@@ -13,7 +13,7 @@ import time
 # Image version stamp — confirms which Docker image the worker is running.
 # Updated on every build.  If the log doesn't show this version, the worker
 # is running a cached/old image.
-_WORKER_IMAGE_VERSION = "v81-turn-split-protect"
+_WORKER_IMAGE_VERSION = "v83-diarization-fragment-filter"
 print(f"handler.py: IMAGE_VERSION={_WORKER_IMAGE_VERSION}", flush=True)
 print(f"handler.py: CANTONESE_ASR_ENGINES={os.getenv('CANTONESE_ASR_ENGINES', '(not set)')}", flush=True)
 print(f"handler.py: DEEPGRAM_API_KEY={'set' if os.getenv('DEEPGRAM_API_KEY') else 'NOT SET'}", flush=True)
@@ -276,6 +276,37 @@ def _split_segment_by_diarization(
     intervals = merged
     # Drop zero-length turns so we do not create empty output segments.
     intervals = [i for i in intervals if i[1] > i[0]]
+
+    # Filter out short diarization intervals that would over-split good
+    # segments. If an interval is shorter than the minimum fragment
+    # duration, merge it with the adjacent interval that has the longer
+    # duration (assigning it to that speaker). This prevents noisy
+    # diarization from creating tiny fragments like "I understand," /
+    # "Master Shin," from what should be one segment.
+    min_fragment_dur = float(os.getenv("DIARIZATION_MIN_FRAGMENT_DURATION", "1.5"))
+    if len(intervals) > 1:
+        filtered = [intervals[0]]
+        for inv in intervals[1:]:
+            prev = filtered[-1]
+            inv_dur = inv[1] - inv[0]
+            prev_dur = prev[1] - prev[0]
+            # If this interval is too short, merge it with the previous one.
+            if inv_dur < min_fragment_dur:
+                filtered[-1] = [prev[0], max(prev[1], inv[1]), prev[2]]
+            # If the previous interval is too short, merge it with this one.
+            elif prev_dur < min_fragment_dur:
+                filtered[-1] = [prev[0], inv[1], inv[2]]
+            else:
+                filtered.append(inv)
+        intervals = [i for i in filtered if i[1] > i[0]]
+        # Re-merge adjacent same-speaker intervals after filtering.
+        merged2 = []
+        for inv in intervals:
+            if merged2 and inv[2] == merged2[-1][2] and inv[0] <= merged2[-1][1] + 0.25:
+                merged2[-1][1] = max(merged2[-1][1], inv[1])
+            else:
+                merged2.append(inv)
+        intervals = merged2
 
     # No usable diarization: split long segments by punctuation, keep one speaker.
     if not intervals:
