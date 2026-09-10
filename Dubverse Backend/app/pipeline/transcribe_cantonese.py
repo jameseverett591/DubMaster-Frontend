@@ -315,16 +315,7 @@ def transcribe_cantonese(
             # non-overlapping gaps, so they never overwrite the primary text.
             merged = deepgram_segments
 
-            # Text-based turn detection: split long single-speaker segments
-            # at clear conversational markers (Q&A, gratitude, address
-            # terms) where acoustic diarization failed to separate two
-            # speakers trading lines with very short gaps. Runs BEFORE
-            # rescoring so the rescoring pass sees correctly-split segments.
-            try:
-                from app.pipeline.turn_detection import detect_turn_splits
-                merged = detect_turn_splits(merged, job_id=job_id, source_language=source_language)
-            except Exception as e:
-                logger.warning(f"[CANTONESE-ASR] Turn detection failed: {e}")
+            # Turn detection DISABLED for editor evaluation.
 
             # Rescore low-confidence segments (likely homophone/garbled-
             # character errors) BEFORE gap-fill, so the two correction

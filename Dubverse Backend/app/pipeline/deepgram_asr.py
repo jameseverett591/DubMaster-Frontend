@@ -220,6 +220,55 @@ def transcribe_with_deepgram(
         "smart_format": "true",
     }
 
+    # Keyterm boosting (Nova-3 only). Boosts recognition of Cantonese
+    # words that Deepgram's acoustic model consistently mishears in
+    # martial-arts film dialogue. Without boosting, 行開 ("walk away")
+    # gets misheard as 推搪祖師, 收聲 ("shut up") as 走開, and 女人
+    # ("woman") gets truncated out of 創我 ("created by...").
+    # Repeat the keyterm param once per term — Deepgram's API requires
+    # this rather than a comma-separated list.
+    _DEFAULT_KEYTERMS_YUE = [
+        # Address terms / names
+        "葉問", "葉太太", "金山爪", "金師父", "文哥", "全哥", "王叔",
+        # Martial arts terms
+        "武館", "武術", "永春拳", "詠春", "切磋", "打", "功夫",
+        # Common misheard verbs/particles
+        "行開", "收聲", "閉嘴", "出去", "離開", "走開",
+        "別推搪", "別行開",
+        # Common nouns that get truncated
+        "女人", "男人", "師父", "徒弟", "師傅",
+        # Common phrases
+        "不怕", "怕了", "怕老婆", "尊重",
+        "失望", "弱", "厲害",
+    ]
+    _DEFAULT_KEYTERMS_ZH = [
+        "叶问", "叶太太", "金山爪", "金师父", "文哥", "全哥", "王叔",
+        "武馆", "武术", "咏春", "切磋", "功夫",
+        "走开", "收声", "闭嘴", "出去", "离开",
+        "女人", "男人", "师父", "徒弟",
+        "不怕", "怕老婆", "尊重", "失望", "厉害",
+    ]
+    _is_yue = language == "zh-HK"
+    _keyterm_env = os.getenv(
+        "DEEPGRAM_KEYTERMS_YUE" if _is_yue else "DEEPGRAM_KEYTERMS_ZH", ""
+    ).strip()
+    if _keyterm_env:
+        # Allow override via env (comma-separated)
+        _keyterms = [t.strip() for t in _keyterm_env.split(",") if t.strip()]
+    else:
+        _keyterms = _DEFAULT_KEYTERMS_YUE if _is_yue else _DEFAULT_KEYTERMS_ZH
+
+    if _keyterms:
+        # Convert dict params to list of tuples so keyterm can repeat.
+        # requests accepts params as either dict or list of (key, value) tuples.
+        params = [(k, v) for k, v in params.items()]
+        for t in _keyterms:
+            params.append(("keyterm", t))
+        logger.info(
+            f"[DEEPGRAM] job={job_id} boosting {len(_keyterms)} keyterms "
+            f"(lang={language}): {_keyterms[:8]}..."
+        )
+
     # Determine content type from file extension.
     ext = os.path.splitext(str(audio_path))[1].lower()
     content_type_map = {
