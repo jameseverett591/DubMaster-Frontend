@@ -71,6 +71,12 @@ _HALLUCINATION_PHRASES = {
     "assalamu alaikum",
     "alhamdulillah",
     "la ilaha illallah",
+    # Cantonese/Mandarin short phrases Whisper hallucinates from silence
+    # at the end of clips (often after the dialogue has ended).
+    "走呀",
+    "走呀 走呀",
+    "走開",
+    "打不死",
 }
 
 _WHISPER_MODELS: Dict[Tuple[str, str, str], Any] = {}
