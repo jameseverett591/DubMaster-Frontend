@@ -39,11 +39,48 @@ from app.services.adaptation_engine.policy import (
 )
 
 # Split after .!? followed by whitespace + uppercase letter.
-# Em-dash variant catches ". — Next sentence" patterns from some LLM outputs.
+#
+# The em-dash branch splits on any spaced em-dash and deliberately does NOT
+# require an uppercase letter after the dash. The LLM welds two spoken beats
+# into one line with a lowercase continuation ("...afraid of their wives —
+# only men who respect them"), and the old (?=[A-Z]) lookahead let every one
+# of those through untouched. An actor cannot perform a single subtitle
+# carrying two beats, so splitting here is what keeps our pacing close to a
+# human dub. Whitespace is still required on both sides, which leaves a
+# trailing dash ("...he'll lose —") alone rather than producing an empty tail.
 _SENTENCE_SPLIT_RE = re.compile(
     r'(?<=[.!?])\s+(?=[A-Z])'
-    r'|\s+—\s+(?=[A-Z])'
+    r'|\s+—\s+'
 )
+
+_TERMINAL_PUNCT = '.!?。！？…'
+
+
+def _tidy_split_fragments(parts: list) -> list:
+    """Make split fragments able to stand alone as subtitles.
+
+    Splitting on an em-dash leaves a tail that starts lowercase and a head
+    with no terminal punctuation ("...their wives" / "only men who respect
+    them."). Each fragment becomes its own subtitle *and* its own TTS unit,
+    so both halves are wrong as-is: the reader sees a lowercase line, and
+    the voice gets no sentence-final prosody to land the beat on.
+
+    Capitalise every fragment, and close each non-final one with a full stop
+    unless it already ends in terminal punctuation. Fragments produced by the
+    .!? branch are untouched, since its lookarounds already guarantee both.
+    """
+    tidied = []
+    last = len(parts) - 1
+    for i, part in enumerate(parts):
+        if part and part[0].islower():
+            part = part[0].upper() + part[1:]
+        if i < last:
+            part = part.rstrip(',;:')
+            if part and part[-1] not in _TERMINAL_PUNCT:
+                part += '.'
+        tidied.append(part)
+    return tidied
+
 
 # ── Natural speech rate constants ─────────────────────────────────────────────
 # All tunable via environment variables so RunPod instances can be dialled in
@@ -185,6 +222,7 @@ def split_translated_sentences(segments: list) -> list:
         text = (seg.get("translated_text") or seg.get("text") or "").strip()
         text = _TITLE_ABBREV_RE.sub(lambda m: m.group(1) + '\x00', text)
         sentences = [s.replace('\x00', '.').strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
+        sentences = _tidy_split_fragments(sentences)
         if len(sentences) <= 1:
             out.append(seg)
             continue
@@ -525,11 +563,11 @@ class TranslationService:
             "Southern Boxing": "Southern Fist",
             "Northern Fist Boxing": "Northern Fist",
             "Southern Fist Boxing": "Southern Fist",
-            "Master Xing": "Master Shin",
-            "Master Xin": "Master Shin",
-            "Master Jin": "Master Shin",
-            "Master Kin": "Master Shin",
-            "Master Gam": "Master Shin",
+            "Master Xing": "Master Jin",
+            "Master Xin": "Master Jin",
+            "Master Shin": "Master Jin",
+            "Master Kin": "Master Jin",
+            "Master Gam": "Master Jin",
             # LLM hallucinations observed on short Cantonese utterances
             "Fire Mindup": "Please",
             "fire mindup": "Please",
