@@ -181,6 +181,18 @@ _CJK_SHARED: Dict[str, str] = {
     "黄少三": "Huang Shaosan",
     "黃少三": "Huang Shaosan",
 
+    # Ip Man's wife, Cheung Wing-sing (張永成) — the movie's own English
+    # subtitles romanize her given name "Wensing". Deepgram misheard 永成
+    # as 龍澄 at 0.33 confidence with no surrounding context to correct
+    # from (a bare vocative, said once) -- the ASR-rescore LLM pass can't
+    # safely resolve this either, since it has zero acoustic signal and no
+    # real-world basis to prefer one 2-character name over another. This
+    # is a deterministic fix instead: catch both the correct transcription
+    # and this specific observed mishearing.
+    "永成": "Wensing",
+    "龍澄": "Wensing",
+    "龙澄": "Wensing",
+
 }
 
 # ---------------------------------------------------------------------------
