@@ -8705,3 +8705,63 @@ async def get_scene_summary(job_id: str, request: Request):
             _json.dump(cache, f, ensure_ascii=False, indent=2)
 
     return result
+
+
+_VIDEO_NOTES_PRESETS = {"smart", "summary", "core_points", "chapters", "study_notes"}
+
+
+@router.post("/jobs/{job_id}/video-notes", dependencies=[Depends(_dep_job_access)])
+async def get_video_notes(job_id: str, request: Request):
+    """Generate (or return cached) whole-video AI Notes + chapter cards.
+
+    The videotranscriber.ai-style panel: timestamped beats over the entire
+    transcript plus titled chapter summaries with inline [MM:SS-MM:SS]
+    markers. Body: {preset?: "smart" | "summary" | "core_points" |
+    "chapters" | "study_notes"} -- default "smart" is tuned for a dubbing
+    director (who wants, what the line DOES) rather than a student.
+
+    Cached per job per preset in video_notes.json.
+    """
+    from app.services.scene_summary import generate_video_notes
+
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    verify_jwt(token)
+    body = await request.json() if (await request.body()) else {}
+    preset = (body.get("preset") or "smart").strip()
+    if preset not in _VIDEO_NOTES_PRESETS:
+        raise HTTPException(status_code=400, detail=f"unknown preset '{preset}'")
+
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    all_segments = sorted(data.get("segments", []), key=lambda s: s.get("start", 0))
+    if not all_segments:
+        raise HTTPException(status_code=404, detail="Job has no segments")
+
+    cache_path = os.path.join(settings.DUBBED_DIR, job_id, "video_notes.json")
+    cache: dict = {}
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cache = _json.load(f)
+        except Exception:
+            cache = {}
+    # Invalidate when the transcript changed: key the cache on preset plus a
+    # cheap fingerprint of the segment list (count + first/last boundary).
+    fp = f"{len(all_segments)}:{all_segments[0].get('start')}:{all_segments[-1].get('end')}"
+    cache_key = f"{preset}:{fp}"
+    if cache_key in cache:
+        return cache[cache_key]
+
+    result = generate_video_notes(all_segments, preset=preset, job_id=job_id)
+
+    if result.get("status") == "ok":
+        cache[cache_key] = result
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            _json.dump(cache, f, ensure_ascii=False, indent=2)
+
+    return result
