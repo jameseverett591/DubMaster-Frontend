@@ -76,6 +76,7 @@ import { FloatingEmotionChart } from '@/components/editor/floating-emotion-chart
 import { AdvancedChordBrowser } from '@/components/editor/advanced-chord-browser'
 import { CharacterProfilesPanel } from '@/components/editor/character-profiles-panel'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
+import { SceneSummaryPanel } from '@/components/editor/scene-summary-panel'
 import VelmaPanel from '@/components/editor/velma-panel'
 import RespeecherPanel from '@/components/editor/respeecher-panel'
 import SeedLibraryPanel, { buildSeedLibrary } from '@/components/editor/seed-library-panel'
@@ -1240,7 +1241,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'respeecher' | 'perform' | 'seeds' | 'studio' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'ei-library' | 'nuances' | 'chord' | 'advanced' | 'characters' | 'testclips'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'respeecher' | 'perform' | 'seeds' | 'studio' | 'scene' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'ei-library' | 'nuances' | 'chord' | 'advanced' | 'characters' | 'testclips'>('result')
   const [velmaEnrichLoading, setVelmaEnrichLoading] = useState(false)
   const [velmaEnrichResult, setVelmaEnrichResult] = useState<{ patched: number; total: number } | null>(null)
 
@@ -2058,6 +2059,60 @@ export function DubVerseEditor({
       ? importedSegments.filter(Boolean)
       : (Array.isArray(segments) ? segments : []).filter(Boolean)
   ), [importedSegments, importedSegmentsJobId, jobId, segments])
+
+  // ── Transcript source-audio player + karaoke highlight ────────────────────
+  // The bar above the transcript plays the ISOLATED VOCALS stem — the cleanest
+  // source-language signal (what ASR/diarization actually heard), not the full
+  // mix and never the dub.
+  //
+  // TWO PLAYHEADS, TWO RULESETS. currentTime belongs to the video/timeline
+  // transport — the needle, the picture, the captions. srcTime belongs to the
+  // transcript player — the bar slider, the vocals element, the karaoke sweep.
+  // Neither is allowed to move the other: clicking a transcript line positions
+  // the TRANSCRIPT player only, and dragging the timeline needle never touches
+  // the vocals element. While the transcript player has never been run, its
+  // indicator idles on the main playhead (that is where the audio would start).
+  const srcAudioRef = useRef<HTMLAudioElement | null>(null)
+  const [srcPlaying, setSrcPlaying] = useState(false)
+  const [srcFailed, setSrcFailed] = useState(false)
+  // srcTime is stored in TIMELINE time — converted to source time only at the
+  // element boundary (seek), and converted back on the way out (timeupdate).
+  const [srcTime, setSrcTime] = useState(0)
+  const [srcArmed, setSrcArmed] = useState(false) // has the transcript player been positioned/used
+  const [srcRate, setSrcRate] = useState(1)
+
+  // Idle mirror: until the transcript player has been used, its indicator
+  // tracks the main playhead. Once armed it owns its position.
+  useEffect(() => {
+    if (!srcArmed && !srcPlaying) setSrcTime(currentTime)
+  }, [currentTime, srcArmed, srcPlaying])
+
+  // The clock the transcript highlight follows: whichever playhead is RUNNING;
+  // when both are paused, the armed transcript player's own position wins so
+  // the karaoke sits on the line the director parked it on.
+  const transcriptClock = srcPlaying ? srcTime
+    : isPlaying ? currentTime
+    : srcArmed ? srcTime
+    : currentTime
+
+  /** Transcript row under the transcript clock. Drives the moving "now
+   *  playing" wash and the per-word karaoke fill in the English line. -1 in
+   *  silence/gaps. */
+  const nowPlayingIndex = useMemo(() => {
+    const t = transcriptClock
+    return displaySegments.findIndex(s => t >= s.start_time && t < s.end_time)
+  }, [displaySegments, transcriptClock])
+
+  // Keep the playing row on screen as the highlight walks down the transcript.
+  const lastAutoScrolledRowRef = useRef(-1)
+  useEffect(() => {
+    if (!isPlaying && !srcPlaying) return
+    if (nowPlayingIndex < 0 || nowPlayingIndex === lastAutoScrolledRowRef.current) return
+    lastAutoScrolledRowRef.current = nowPlayingIndex
+    document
+      .querySelector(`[data-segment-row][data-index="${nowPlayingIndex}"]`)
+      ?.scrollIntoView({ block: 'nearest' })
+  }, [nowPlayingIndex, isPlaying, srcPlaying])
 
   // Every recorded Respeecher take across the job, flattened out of the segments.
   // Built here rather than inside the panel so the tab can be sized without
@@ -5192,6 +5247,107 @@ export function DubVerseEditor({
   commitOrStageRef.current = commitOrStage
   displaySegmentsRef.current = displaySegments
 
+  /** Shared transport play/pause — the timeline control and the audio player
+   *  bar above the transcript both run this so the two can never disagree on
+   *  what "play" does (autoplay policy, RPT stitch, pause bookkeeping). */
+  const handlePlayToggle = useCallback(async (modeOverride?: 'original' | 'dubbed' | 'preview') => {
+    const mode = modeOverride ?? playbackMode
+    if (modeOverride && modeOverride !== playbackMode) setPlaybackMode(modeOverride)
+    // Drive video play/pause synchronously BEFORE any await
+    // so Chrome's autoplay policy isn't violated for audio
+    if (videoRef.current) {
+      if (isPlaying) {
+        // Pause: stop the stitch source directly + sync the ref so the
+        // seek/effect races can't leave audio running under a paused video.
+        stopAllRptAudio()
+        videoRef.current.pause()
+        // Persist the playhead so UI that reads currentTime state sees the
+        // pause position, not the last 1s snapshot.
+        setCurrentTime(currentTimeRef.current)
+      } else {
+        // The transcript player owns its own <audio> element (isolated vocals
+        // stem). Transport play must silence it or two clocks run at once.
+        srcAudioRef.current?.pause()
+        // Clear any stuck scrub flag. It halts the rAF loop entirely, so
+        // recovering by pressing play beats making the user reload.
+        isDraggingNeedleRef.current = false
+        // Play from the PLAYHEAD, always. The playhead marks the spot.
+        //
+        // This used to snap to the selected segment whenever the playhead
+        // sat outside it, so that pressing play again re-auditioned the
+        // line. The cost was that parking the playhead in a silent stretch
+        // and pressing play jumped to the selected line instead — which
+        // makes timing a dub against picture impossible, because the quiet
+        // run-up to a line is exactly the part you need to watch.
+        //
+        // Auditioning one line still works: clicking a segment seeks to it,
+        // and play then starts there.
+        const _from = currentTime
+        lastStartPosRef.current = _from  // save start pos for Stop
+        rptCancelRef.current = false     // allow the stitch to (re)schedule
+        const sourceFrom = timelineToSourceTime(_from, scenesRef.current) ?? _from
+        videoRef.current.currentTime = sourceFrom
+        videoRef.current.play().catch(() => {})
+      }
+    }
+    // Create and resume AudioContext inside user gesture
+    // to satisfy browser autoplay policy
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContext()
+    }
+    if (audioContextRef.current.state === 'suspended') {
+      await audioContextRef.current.resume()
+    }
+    audioStartTimeRef.current = audioContextRef.current?.currentTime ?? null
+    // If in Preview and buffer not ready, stitch first
+    if (mode === 'preview' && !isPlaying && !rptBufferRef.current) {
+      lastStartPosRef.current = currentTime
+      const ctx = audioContextRef.current
+      const resolved = displaySegmentsRef.current.map(seg => ({
+        ...seg,
+        audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
+        committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
+      }))
+      stitchWith(resolved, ctx).then(result => {
+        if (result) {
+          rptBufferRef.current = result.buffer
+          setIsPlaying(true)
+        }
+      })
+    } else {
+      setIsPlaying(!isPlaying)
+    }
+  }, [isPlaying, currentTime, playbackMode, jobId, stitchWith, setIsPlaying, setCurrentTime, stopAllRptAudio, setPlaybackMode])
+
+  /** Transcript-bar play/pause — runs the ISOLATED VOCALS stem so the director
+   *  hears exactly what ASR heard while reading the translation underneath.
+   *  The element's own timeupdate is the clock (writes currentTime at the
+   *  standard 250ms cadence); the picture follows via the playhead effect.
+   *  Falls back to the video's original audio track if the stem is absent. */
+  const handleSrcAudioToggle = useCallback(() => {
+    const a = srcAudioRef.current
+    if (!a || srcFailed || !jobId) {
+      handlePlayToggle('original')
+      return
+    }
+    if (srcPlaying) {
+      a.pause()
+      return
+    }
+    // Mutually exclusive audio: the video transport keeps ITS playhead but its
+    // audio must stop — two sources at once is noise, not separation.
+    if (isPlaying) playbackStop()
+    // Re-mint the token every play — the baked URL 401s once Supabase rotates.
+    a.src = apiClient.refreshMediaUrl(apiClient.toAbsoluteUrl(`/api/media/${jobId}/separated/vocals`))
+    // Seek from THIS player's playhead (srcTime, timeline space → source space).
+    a.currentTime = timelineToSourceTime(srcTime, scenesRef.current) ?? srcTime
+    a.playbackRate = srcRate
+    a.play().catch(() => {
+      setSrcFailed(true)
+      handlePlayToggle('original')
+    })
+  }, [srcPlaying, srcFailed, srcTime, srcRate, jobId, isPlaying, playbackStop, handlePlayToggle])
+
   // Manual "make room" for a segment whose audio won't fit even after the automatic
   // expand-into-gaps. Grows this segment's slot and RIPPLES every later segment right
   // by the same amount (so nothing collides), then regenerates it into the bigger slot.
@@ -6997,7 +7153,82 @@ export function DubVerseEditor({
               </SelectContent>
             </Select>
           </div>
-          
+
+          {/* Audio player bar — plays the ORIGINAL source audio (the isolated
+              vocals stem ASR heard; falls back to the video's own audio track
+              if the stem is missing), never the dub. The now-playing row glows
+              and each English word lights green as the source line sweeps past
+              it. Seeking here moves the real playhead (the picture-follows-
+              playhead effect keeps the video element in step). */}
+          {activeVideoUrl && (
+            <div className="flex items-center gap-2 px-3 py-1.5 border-b border-neutral-800 bg-neutral-900/70 shrink-0">
+              <audio
+                ref={srcAudioRef}
+                preload="auto"
+                onPlay={() => setSrcPlaying(true)}
+                onPause={() => setSrcPlaying(false)}
+                onEnded={() => setSrcPlaying(false)}
+                onError={() => setSrcFailed(true)}
+                onTimeUpdate={(e) => {
+                  // The vocals element drives the TRANSCRIPT playhead (srcTime),
+                  // not the video clock — same 250ms throttle the video handler
+                  // uses, converted back to timeline time.
+                  const a = e.currentTarget
+                  const now = performance.now()
+                  if (now - lastTimeStateWriteRef.current < 250) return
+                  lastTimeStateWriteRef.current = now
+                  setSrcTime(sourceToTimelineTime(a.currentTime, scenesRef.current) ?? a.currentTime)
+                }}
+              />
+              <button
+                type="button"
+                onClick={handleSrcAudioToggle}
+                className="h-7 w-7 rounded-full bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-300 hover:bg-amber-500/30 transition-colors shrink-0"
+                title={isPlaying || srcPlaying ? t('Pause') : t('Play original audio')}
+              >
+                {isPlaying || srcPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5 ml-0.5" />}
+              </button>
+              <span className="text-[10px] font-mono text-slate-400 tabular-nums w-11 text-right shrink-0">
+                {formatTime(srcTime)}
+              </span>
+              <Slider
+                value={[srcTime]}
+                max={Math.max(videoDuration, 0.1)}
+                step={0.1}
+                onValueChange={([v]) => {
+                  // Transcript-player seek: moves THIS player's indicator and
+                  // the vocals element — never the video/timeline playhead.
+                  setSrcTime(v)
+                  setSrcArmed(true)
+                  if (srcAudioRef.current) {
+                    srcAudioRef.current.currentTime = timelineToSourceTime(v, scenesRef.current) ?? v
+                  }
+                }}
+                className="flex-1"
+              />
+              <span className="text-[10px] font-mono text-slate-500 tabular-nums w-11 shrink-0">
+                {formatTime(videoDuration)}
+              </span>
+              <Select
+                value={String(srcRate)}
+                onValueChange={(v) => {
+                  const r = parseFloat(v)
+                  setSrcRate(r)
+                  if (srcAudioRef.current) srcAudioRef.current.playbackRate = r
+                }}
+              >
+                <SelectTrigger className="h-6 w-16 bg-neutral-800 border-neutral-700 text-[10px] text-slate-300 shrink-0">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {[0.5, 0.75, 1, 1.25, 1.5, 2].map(r => (
+                    <SelectItem key={r} value={String(r)}>{r}x</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
 {/* Transcription status */}
           {isTranscribing && (
             <div className="flex-1 flex flex-col items-center justify-center gap-4 p-8">
@@ -7100,6 +7331,12 @@ export function DubVerseEditor({
                   className={cn(
                     'flex items-start gap-3 px-4 py-3 border-b border-slate-800/50 transition-colors relative group',
                     selectedSegmentIndex === index && 'bg-slate-800/50 ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
+                    // Now-playing wash — a throbbing transparent highlighter
+                    // that walks down the rows with the source audio. Static
+                    // dim wash when paused so the playhead's row stays legible.
+                    nowPlayingIndex === index && (isPlaying || srcPlaying
+                      ? 'bg-cyan-500/[0.09] animate-pulse'
+                      : 'bg-cyan-500/[0.05]'),
                     isAssignmentPulse && 'ring-2 ring-amber-400/60 shadow-[0_0_6px_2px_rgba(245,158,11,0.22)] animate-pulse',
                     dragReorder?.fromIndex === index && 'opacity-50 bg-amber-500/10',
                     dragReorder?.toIndex === index && 'border-t-2 border-t-amber-500',
@@ -7111,6 +7348,18 @@ export function DubVerseEditor({
                   onClick={() => {
                     selectSegment(index)
                     editorContainerRef.current?.focus()
+                    // Row clicks belong to the TRANSCRIPT player: position its
+                    // indicator and the vocals element at this line. Deliberately
+                    // does NOT touch currentTime/videoRef — the video playhead is
+                    // the transport's ruleset and a text click is not a timeline
+                    // scrub. (The selection effect's "SELECTING IS NOT
+                    // NAVIGATING" note explains why drags/edits never seek.)
+                    const t = segStartOf(segment)
+                    setSrcTime(t)
+                    setSrcArmed(true)
+                    if (srcAudioRef.current) {
+                      srcAudioRef.current.currentTime = timelineToSourceTime(t, scenesRef.current) ?? t
+                    }
                   }}
                   onDragEnter={(e) => {
                     const types = Array.from(e.dataTransfer.types || [])
@@ -7689,7 +7938,38 @@ export function DubVerseEditor({
                               />
                             )}
                             {(segment.preview_text ?? segment.active_text ?? segment.target_text)
-                              || <span className="text-slate-500 italic">Enter text…</span>}
+                              ? (() => {
+                                  const text = (segment.preview_text ?? segment.active_text ?? segment.target_text) as string
+                                  // Karaoke fill — only on the row under the playhead. Words are
+                                  // weighted by CHARACTER COUNT, not word count: "extraordinary"
+                                  // takes longer to say than "a", and the green sweep would visibly
+                                  // race the audio on long words if every word got the same slice.
+                                  if (index !== nowPlayingIndex || !text) return text
+                                  const dur = Math.max(segment.end_time - segment.start_time, 0.01)
+                                  const frac = Math.min(Math.max((transcriptClock - segment.start_time) / dur, 0), 1)
+                                  const words = text.split(/(\s+)/) // keep whitespace tokens so spacing survives
+                                  const totalChars = words.reduce((n, w) => n + w.length, 0) || 1
+                                  let acc = 0
+                                  return words.map((w, wi) => {
+                                    const wStart = acc / totalChars
+                                    acc += w.length
+                                    if (/^\s+$/.test(w)) return w
+                                    // ONE highlighter: only the word the source audio is
+                                    // currently inside lights up — the ones already spoken
+                                    // go back to normal, so the green spot visibly travels.
+                                    const covering = frac >= wStart && frac < acc / totalChars
+                                    return (
+                                      <span
+                                        key={wi}
+                                        className={cn(
+                                          'rounded-sm transition-colors',
+                                          covering && 'bg-emerald-400/50 text-emerald-50 shadow-[0_0_6px_rgba(52,211,153,0.5)]',
+                                        )}
+                                      >{w}</span>
+                                    )
+                                  })
+                                })()
+                              : <span className="text-slate-500 italic">Enter text…</span>}
                           </div>
                         )}
                         {/* Subtle QC icon on hover — clicking selects segment and opens Quality tab */}
@@ -8135,6 +8415,7 @@ export function DubVerseEditor({
                 { id: 'perform',    label: 'Voice Changer', feature: 'voiceChanger' },
                 { id: 'seeds',      label: 'Seed Library', feature: 'respeecher' },
                 { id: 'studio',     label: 'Studio',       feature: 'studioCollaboration' },
+                { id: 'scene',      label: 'Scene' },
                 { id: 'adaptation', label: 'Adaptation' },
                 { id: 'speakers',   label: 'Speakers' },
                 { id: 'library',    label: 'Voice Library' },
@@ -8556,6 +8837,13 @@ export function DubVerseEditor({
           {rightPanelTab === 'studio' && hasFeature('studioCollaboration') && (
             <div className="flex-1 min-h-0 flex items-center justify-center text-slate-500 text-sm bg-neutral-950">
               {t('Studio coming soon')}
+            </div>
+          )}
+
+          {/* Scene tab */}
+          {rightPanelTab === 'scene' && (
+            <div className="flex-1 min-h-0 overflow-y-auto bg-neutral-950">
+              <SceneSummaryPanel />
             </div>
           )}
 
@@ -9703,69 +9991,7 @@ export function DubVerseEditor({
               variant="ghost"
               size="sm"
               className="h-8 w-8 p-0"
-              onClick={async () => {
-                // Drive video play/pause synchronously BEFORE any await
-                // so Chrome's autoplay policy isn't violated for audio
-                if (videoRef.current) {
-                  if (isPlaying) {
-                    // Pause: stop the stitch source directly + sync the ref so the
-                    // seek/effect races can't leave audio running under a paused video.
-                    stopAllRptAudio()
-                    videoRef.current.pause()
-                    // Persist the playhead so UI that reads currentTime state sees the
-                    // pause position, not the last 1s snapshot.
-                    setCurrentTime(currentTimeRef.current)
-                  } else {
-                    // Clear any stuck scrub flag. It halts the rAF loop entirely, so
-                    // recovering by pressing play beats making the user reload.
-                    isDraggingNeedleRef.current = false
-                    // Play from the PLAYHEAD, always. The playhead marks the spot.
-                    //
-                    // This used to snap to the selected segment whenever the playhead
-                    // sat outside it, so that pressing play again re-auditioned the
-                    // line. The cost was that parking the playhead in a silent stretch
-                    // and pressing play jumped to the selected line instead — which
-                    // makes timing a dub against picture impossible, because the quiet
-                    // run-up to a line is exactly the part you need to watch.
-                    //
-                    // Auditioning one line still works: clicking a segment seeks to it,
-                    // and play then starts there.
-                    const _from = currentTime
-                    lastStartPosRef.current = _from  // save start pos for Stop
-                    rptCancelRef.current = false     // allow the stitch to (re)schedule
-                    const sourceFrom = timelineToSourceTime(_from, scenesRef.current) ?? _from
-                    videoRef.current.currentTime = sourceFrom
-                    videoRef.current.play().catch(() => {})
-                  }
-                }
-                // Create and resume AudioContext inside user gesture
-                // to satisfy browser autoplay policy
-                if (!audioContextRef.current) {
-                  audioContextRef.current = new AudioContext()
-                }
-                if (audioContextRef.current.state === 'suspended') {
-                  await audioContextRef.current.resume()
-                }
-                audioStartTimeRef.current = audioContextRef.current?.currentTime ?? null
-                // If in Preview and buffer not ready, stitch first
-                if (playbackMode === 'preview' && !isPlaying && !rptBufferRef.current) {
-                  lastStartPosRef.current = currentTime
-                  const ctx = audioContextRef.current
-                  const resolved = displaySegmentsRef.current.map(seg => ({
-                    ...seg,
-                    audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
-                    committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
-                  }))
-                  stitchWith(resolved, ctx).then(result => {
-                    if (result) {
-                      rptBufferRef.current = result.buffer
-                      setIsPlaying(true)
-                    }
-                  })
-                } else {
-                  setIsPlaying(!isPlaying)
-                }
-              }}
+              onClick={() => handlePlayToggle()}
             >
               {isPlaying
                 ? <Pause className={playbackMode === 'preview' ? 'h-4 w-4 text-amber-400' : 'h-4 w-4'} />
