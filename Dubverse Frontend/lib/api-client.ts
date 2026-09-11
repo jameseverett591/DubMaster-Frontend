@@ -14,6 +14,39 @@ export interface CharacterProfile {
   speech_style: string
 }
 
+export interface SceneSummary {
+  status: 'ok' | 'skipped' | 'error'
+  reason?: string
+  scene_beat?: string
+  speaker_persona?: string | null
+  line_function?: string
+  stakes_tags?: string[]
+  original_performance?: string | null
+}
+
+export type VideoNotesPreset = 'smart' | 'summary' | 'core_points' | 'chapters' | 'study_notes'
+
+export interface VideoNote {
+  start: number
+  text: string
+}
+
+export interface VideoChapter {
+  title: string
+  start: number | null
+  end: number | null
+  summary: string
+}
+
+export interface VideoNotes {
+  status: 'ok' | 'skipped' | 'error'
+  reason?: string
+  preset?: VideoNotesPreset
+  video_title?: string
+  notes?: VideoNote[]
+  chapters?: VideoChapter[]
+}
+
 // ============================================================================
 // CUSTOM ERRORS
 // ============================================================================
@@ -1104,6 +1137,35 @@ class DubVerseAPIClient {
       body: JSON.stringify({ character_profiles: profiles }),
     })
     if (!response.ok) throw new Error('Failed to save character profiles')
+  }
+
+  async getSceneSummary(
+    jobId: string,
+    segmentIndex: number,
+    sceneStart?: number,
+    sceneEnd?: number
+  ): Promise<SceneSummary> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/scene-summary`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({
+        segment_index: segmentIndex,
+        ...(sceneStart !== undefined ? { scene_start: sceneStart } : {}),
+        ...(sceneEnd !== undefined ? { scene_end: sceneEnd } : {}),
+      }),
+    })
+    if (!response.ok) throw new Error('Failed to load scene summary')
+    return response.json()
+  }
+
+  async getVideoNotes(jobId: string, preset: VideoNotesPreset = 'smart'): Promise<VideoNotes> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/video-notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ preset }),
+    })
+    if (!response.ok) throw new Error('Failed to load video notes')
+    return response.json()
   }
 
   async regenerateSegment(
