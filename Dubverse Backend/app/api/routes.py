@@ -52,6 +52,7 @@ from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
 from app.services.respeecher_service import respeecher_tts
 from app.services.vozo_service import vozo_service, VOZO_STATUS_MAP, POLL_INTERVAL_SEC, MAX_POLL_ATTEMPTS
+from app.services.scene_summary import generate_scene_summary
 from app.utils.language import normalize_language_code
 
 logger = logging.getLogger(__name__)
@@ -8594,3 +8595,173 @@ async def save_character_profiles(job_id: str, request: Request):
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(profiles, f, ensure_ascii=False, indent=2)
     return {"status": "ok", "count": len(profiles)}
+
+
+@router.post("/jobs/{job_id}/scene-summary", dependencies=[Depends(_dep_job_access)])
+async def get_scene_summary(job_id: str, request: Request):
+    """Generate (or return cached) Scene Summary for one segment.
+
+    Spec: plan-8012dcdb5d41cf3b.md, Feature A. Gives a director who doesn't
+    speak the source language plain-English context (scene beat, speaker
+    persona, this line's pragmatic function, stakes tags) so they can judge
+    whether a translation serves the scene -- without ever inventing
+    dialogue or plot the source lines don't support.
+
+    Body: {segment_index: int, scene_start?: float, scene_end?: float}.
+    If scene_start/scene_end are omitted, a scene window is derived
+    automatically: the segment plus any neighbors within
+    SCENE_SUMMARY_GAP_SEC of each other -- a stand-in for the frontend's
+    real Scene ranges until that's wired through.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    verify_jwt(token)
+    body = await request.json()
+    segment_index = body.get("segment_index")
+    if segment_index is None:
+        raise HTTPException(status_code=400, detail="segment_index is required")
+
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    all_segments = data.get("segments", [])
+
+    target_seg = next((s for s in all_segments if s.get("transcript_index") == segment_index), None)
+    if target_seg is None:
+        raise HTTPException(status_code=404, detail=f"Segment with transcript_index={segment_index} not found")
+
+    scene_start = body.get("scene_start")
+    scene_end = body.get("scene_end")
+    ordered = sorted(all_segments, key=lambda s: s.get("start", 0))
+    if scene_start is None or scene_end is None:
+        gap_sec = float(os.environ.get("SCENE_SUMMARY_GAP_SEC", "8.0"))
+        target_pos = next(i for i, s in enumerate(ordered) if s.get("transcript_index") == segment_index)
+        lo = target_pos
+        while lo > 0 and ordered[lo].get("start", 0) - ordered[lo - 1].get("end", 0) <= gap_sec:
+            lo -= 1
+        hi = target_pos
+        while hi < len(ordered) - 1 and ordered[hi + 1].get("start", 0) - ordered[hi].get("end", 0) <= gap_sec:
+            hi += 1
+        scene_segments = ordered[lo:hi + 1]
+        target_index = target_pos - lo
+    else:
+        scene_segments = [s for s in ordered if scene_start <= s.get("start", 0) <= scene_end]
+        target_index_or_none = next(
+            (i for i, s in enumerate(scene_segments) if s.get("transcript_index") == segment_index), None
+        )
+        if target_index_or_none is None:
+            raise HTTPException(status_code=400, detail="segment_index not within given scene range")
+        target_index = target_index_or_none
+
+    # Cache keyed by segment + scene boundary, so a changed scene range
+    # naturally invalidates the cached entry instead of needing explicit
+    # invalidation bookkeeping.
+    cache_path = os.path.join(settings.DUBBED_DIR, job_id, "scene_summaries.json")
+    cache_key = f"{segment_index}:{scene_segments[0].get('start')}:{scene_segments[-1].get('end')}"
+    cache: dict = {}
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cache = _json.load(f)
+        except Exception:
+            cache = {}
+    if cache_key in cache:
+        return cache[cache_key]
+
+    # Original performance: Velma emotion/accent when present (non-Cantonese
+    # jobs), else emotion2vec's original_emotions from the QC analysis file
+    # when Velma was skipped (Cantonese/Mandarin). Factual data, passed
+    # through as-is -- never something the LLM guesses at.
+    original_performance = None
+    velma_emotion = target_seg.get("velma_emotion")
+    if velma_emotion:
+        accent = target_seg.get("velma_accent")
+        original_performance = f"emotion: {velma_emotion}" + (f", accent: {accent}" if accent else "")
+    else:
+        analysis_path = os.path.join(settings.DUBBED_DIR, job_id, "analysis_en.json")
+        if os.path.exists(analysis_path):
+            try:
+                with open(analysis_path, "r", encoding="utf-8") as f:
+                    analysis = _json.load(f)
+                for score in analysis.get("emotion_preservation", {}).get("segment_scores", []):
+                    if abs(score.get("start", -1) - target_seg.get("start", 0)) < 0.5:
+                        emotions = score.get("original_emotions") or []
+                        if emotions:
+                            original_performance = "original vocal emotion: " + ", ".join(emotions)
+                        break
+            except Exception as e:
+                logger.warning(f"[SCENE-SUMMARY] job={job_id} failed to read analysis for original_performance: {e}")
+
+    result = generate_scene_summary(
+        scene_segments, target_index, job_id=job_id, original_performance=original_performance
+    )
+
+    if result.get("status") == "ok":
+        cache[cache_key] = result
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            _json.dump(cache, f, ensure_ascii=False, indent=2)
+
+    return result
+
+
+_VIDEO_NOTES_PRESETS = {"smart", "summary", "core_points", "chapters", "study_notes"}
+
+
+@router.post("/jobs/{job_id}/video-notes", dependencies=[Depends(_dep_job_access)])
+async def get_video_notes(job_id: str, request: Request):
+    """Generate (or return cached) whole-video AI Notes + chapter cards.
+
+    The videotranscriber.ai-style panel: timestamped beats over the entire
+    transcript plus titled chapter summaries with inline [MM:SS-MM:SS]
+    markers. Body: {preset?: "smart" | "summary" | "core_points" |
+    "chapters" | "study_notes"} -- default "smart" is tuned for a dubbing
+    director (who wants, what the line DOES) rather than a student.
+
+    Cached per job per preset in video_notes.json.
+    """
+    from app.services.scene_summary import generate_video_notes
+
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    verify_jwt(token)
+    body = await request.json() if (await request.body()) else {}
+    preset = (body.get("preset") or "smart").strip()
+    if preset not in _VIDEO_NOTES_PRESETS:
+        raise HTTPException(status_code=400, detail=f"unknown preset '{preset}'")
+
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    all_segments = sorted(data.get("segments", []), key=lambda s: s.get("start", 0))
+    if not all_segments:
+        raise HTTPException(status_code=404, detail="Job has no segments")
+
+    cache_path = os.path.join(settings.DUBBED_DIR, job_id, "video_notes.json")
+    cache: dict = {}
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cache = _json.load(f)
+        except Exception:
+            cache = {}
+    # Invalidate when the transcript changed: key the cache on preset plus a
+    # cheap fingerprint of the segment list (count + first/last boundary).
+    fp = f"{len(all_segments)}:{all_segments[0].get('start')}:{all_segments[-1].get('end')}"
+    cache_key = f"{preset}:{fp}"
+    if cache_key in cache:
+        return cache[cache_key]
+
+    result = generate_video_notes(all_segments, preset=preset, job_id=job_id)
+
+    if result.get("status") == "ok":
+        cache[cache_key] = result
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            _json.dump(cache, f, ensure_ascii=False, indent=2)
+
+    return result
