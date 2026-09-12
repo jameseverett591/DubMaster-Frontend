@@ -48,6 +48,62 @@ export interface VideoNotes {
 }
 
 // ============================================================================
+// RULEBOOK — Feature B: the director's accumulated decisions, applied forward.
+// Spec: plan-8012dcdb5d41cf3b.md §5. A rule is a typed, scoped, reviewable
+// override; job scope is the staging area, global scope is the cross-job
+// library. Nothing is learned silently — inferred rules arrive disabled.
+// ============================================================================
+
+export type RuleClass =
+  | 'name_mapping'     // source name/term → forced English rendering
+  | 'persona'          // speaker slot → character profile
+  | 'stance'           // scene-style directive (register/stance)
+  | 'translation_fix'  // exact source line → forced target line
+  | 'delivery'         // speaker → emotion/speed/pitch defaults
+  | 'glossary'         // source term → canonical English term
+
+export type RuleScope = 'job' | 'global'
+
+export interface RuleConditions {
+  speaker?: string
+  stakes_tags?: string[]
+  when?: string | string[]
+  traits?: string[] | string
+  speech_style?: string
+  emotion?: string
+  speed?: number
+  pitch?: number
+}
+
+export interface Rule {
+  id: string
+  class: RuleClass
+  scope: RuleScope
+  source_pattern: string
+  target: string
+  conditions: RuleConditions
+  enabled: boolean
+  inferred?: boolean
+  created_from_job?: string | null
+  created_at?: string
+  notes?: string
+}
+
+export interface EffectiveRules {
+  localized_aliases: Record<string, string>
+  character_profiles: Array<{ name: string; speaker?: string; traits: string[]; speech_style: string }>
+  stance_directives: string[]
+  translation_fixes: Record<string, string>
+  delivery: Record<string, { emotion?: string; speed?: number; pitch?: number }>
+  applied_rule_ids: string[]
+}
+
+export interface RulebookResponse {
+  rules: Rule[]
+  effective: EffectiveRules
+}
+
+// ============================================================================
 // CUSTOM ERRORS
 // ============================================================================
 
@@ -1166,6 +1222,75 @@ class DubVerseAPIClient {
     })
     if (!response.ok) throw new Error('Failed to load video notes')
     return response.json()
+  }
+
+  // ── Rulebook ──────────────────────────────────────────────────────────────
+  // Job rules + the caller's global rules merged in one view; `effective`
+  // carries the resolved params the pipeline will apply.
+  async getRulebook(jobId: string): Promise<RulebookResponse> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/rulebook`, {
+      headers: this._authHeaders(),
+    })
+    if (!response.ok) throw new Error('Failed to load rulebook')
+    return response.json()
+  }
+
+  async addRule(
+    jobId: string,
+    rule: {
+      class: RuleClass
+      source_pattern?: string
+      target?: string
+      conditions?: RuleConditions
+      notes?: string
+      scope?: RuleScope
+    }
+  ): Promise<Rule> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/rulebook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify(rule),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || 'Failed to add rule')
+    }
+    return (await response.json()).rule
+  }
+
+  async updateRule(
+    jobId: string,
+    ruleId: string,
+    updates: Partial<Pick<Rule, 'target' | 'source_pattern' | 'notes' | 'enabled' | 'conditions'>>
+  ): Promise<Rule> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/rulebook/${ruleId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify(updates),
+    })
+    if (!response.ok) throw new Error('Failed to update rule')
+    return (await response.json()).rule
+  }
+
+  async deleteRule(jobId: string, ruleId: string, scope: RuleScope = 'job'): Promise<void> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/rulebook/${ruleId}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ scope }),
+    })
+    if (!response.ok) throw new Error('Failed to delete rule')
+  }
+
+  async promoteRule(jobId: string, ruleId: string): Promise<Rule> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/rulebook/${ruleId}/promote`, {
+      method: 'POST',
+      headers: this._authHeaders(),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || 'Failed to promote rule')
+    }
+    return (await response.json()).rule
   }
 
   async regenerateSegment(
