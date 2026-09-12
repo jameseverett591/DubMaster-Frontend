@@ -1639,7 +1639,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         max_speakers = int(os.getenv("DIARIZATION_MAX_SPEAKERS", "6"))
 
     # Cantonese quality defaults for GPU worker:
-    # - Prefer WenetSpeech-Yue CTC as primary ASR (CPU, low latency, Cantonese-specific)
+    # - Deepgram Nova-3 as primary ASR (cloud, Cantonese-specific model)
     # - Keep Whisper large-v3 as fallback / gap-fill
     # - Disable Paraformer for yue (Mandarin-focused, often produces blob/junk)
     if whisper_language.lower() == "yue":
@@ -1689,7 +1689,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         gpu_env_vars["WHISPER_LANGUAGE"] = whisper_language
         if whisper_language.lower() == "yue":
             gpu_env_vars.setdefault("WHISPER_MODEL", os.environ.get("WHISPER_MODEL", "large-v3"))
-            gpu_env_vars.setdefault("CANTONESE_ASR_ENGINES", os.environ.get("CANTONESE_ASR_ENGINES", "deepgram,wenetspeech,whisper"))
+            gpu_env_vars.setdefault("CANTONESE_ASR_ENGINES", os.environ.get("CANTONESE_ASR_ENGINES", "deepgram,whisper"))
             # Let the worker pick its VAD threshold (default 0.15 for Cantonese).
             # Explicitly setting VAD_THRESHOLD=0 disabled VAD and caused the worker
             # to return empty transcripts on long-form mixed-content films.
@@ -1891,14 +1891,12 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
     await asyncio.to_thread(_fetch_gpu_stems, job_id, result.get("stems") or {})
 
     # Try Velma diarization first (primary source) — but skip it for all Chinese
-    # jobs, because WenetSpeech is now the primary ASR for Cantonese and Mandarin.
-    # Velma is a generalist multilingual STT/diarization product; repeated direct
-    # A/B testing on Cantonese showed the same mistranscribed lines regardless of
-    # which worker engine ran, so its Cantonese transcription is unreliable.
-    # WenetSpeech-Yue was trained on 21,800 hours of Cantonese-specific speech
-    # and is not hobbled by this. For Mandarin, the same WenetSpeech model is
-    # best-in-class for Chinese. These jobs fall through to the existing
-    # "Velma unavailable" path below, which uses the worker's own transcript
+    # jobs. Velma is a generalist multilingual STT/diarization product; repeated
+    # direct A/B testing on Cantonese showed the same mistranscribed lines
+    # regardless of which worker engine ran, so its Cantonese transcription is
+    # unreliable. Deepgram Nova-3's zh-HK/zh models are the primary ASR for
+    # Chinese jobs instead. These jobs fall through to the existing "Velma
+    # unavailable" path below, which uses the worker's own transcript
     # + pyannote diarization.
     _chinese_langs = {
         "yue", "zh-yue", "yue-hk", "zh-hk",
@@ -1907,7 +1905,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
     _is_chinese_job = (job_source_lang or "").lower().strip().replace("_", "-") in _chinese_langs
     velma_result = None
     if _is_chinese_job:
-        logger.info(f"Job {job_id}: Chinese job — skipping Velma, using WenetSpeech + pyannote instead")
+        logger.info(f"Job {job_id}: Chinese job — skipping Velma, using Deepgram + pyannote instead")
     elif os.getenv("MODULATE_API_KEY") and video_path:
         try:
             logger.info(f"Job {job_id}: RunPod path — attempting Velma diarization (primary)")
@@ -1955,7 +1953,7 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
 
         # TEMPORARY DIAGNOSTIC TOGGLE (2026-09-08): Velma's own transcription
         # normally wins for `text` unconditionally -- the RunPod worker's ASR
-        # output (WenetSpeech-Yue/Tencent/Whisper) is only ever used to borrow
+        # output (Deepgram/Tencent/Whisper) is only ever used to borrow
         # a confidence score via time-overlap matching, never for the actual
         # dialogue text. That means no worker-side ASR engine change, however
         # good, can ever affect final transcript quality while Velma succeeds.

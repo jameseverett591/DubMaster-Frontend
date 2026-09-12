@@ -52,8 +52,6 @@ openai-whisper>=20231117
 funasr>=1.0.0
 modelscope>=1.9.0
 
-# WenetSpeech-Yue INT8 CTC — runs on CPU, no GPU needed
-sherpa-onnx>=1.11.1
 
 # ============================================
 # TEXT-TO-SPEECH

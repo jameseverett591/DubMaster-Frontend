@@ -6,7 +6,7 @@ Deepgram Nova-3 supports:
   - Mandarin Simplified:     zh, zh-CN, zh-Hans
   - Mandarin Traditional:    zh-TW, zh-Hant
 
-Key advantages over WenetSpeech:
+Key advantages:
   - Built-in speaker diarization (no separate pyannote pass needed)
   - Built-in punctuation (prevents mid-sentence fragmentation)
   - Cloud API — no local model, no VAD chunking, no int8 quantization
