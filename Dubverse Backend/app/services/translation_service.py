@@ -696,6 +696,7 @@ class TranslationService:
         velma_context: Optional[Dict] = None,
         dubbing_style: Optional[str] = None,
         localized_aliases: Optional[Dict[str, str]] = None,
+        job_id: Optional[str] = None,
     ) -> List[Dict]:
         # Load the glossary for the incoming source language so every downstream
         # call to _apply_glossary_pre/_post uses the correct language-specific terms.
@@ -706,6 +707,41 @@ class TranslationService:
             f"[TRANSLATE] Loaded glossary for source_language='{source_language}' "
             f"({len(self._glossary_sorted)} entries)"
         )
+
+        # ── Rulebook (Feature B) — the director's standing decisions resolve
+        # here so EVERY caller (dub, translate-only, retranslate) inherits them
+        # without per-route wiring. Job rules override global; both land on the
+        # injection points the pipeline already had (aliases, personas,
+        # prompt directives, post-translation fixes).
+        self._rulebook_directives: List[str] = []
+        self._rulebook_fixes: Dict[str, str] = {}
+        if job_id:
+            try:
+                from app.services.job_manager import job_manager
+                from app.services.rulebook import (
+                    load_job_rules, load_global_rules, resolve_rules,
+                    merge_character_profiles,
+                )
+                _job = await job_manager.get_job(job_id)
+                _uid = getattr(_job, "user_id", "") if _job else ""
+                _rb = resolve_rules(load_job_rules(job_id), load_global_rules(_uid))
+                if _rb["localized_aliases"]:
+                    localized_aliases = {**(localized_aliases or {}), **_rb["localized_aliases"]}
+                if _rb["character_profiles"]:
+                    character_profiles = merge_character_profiles(
+                        character_profiles, _rb["character_profiles"]
+                    )
+                self._rulebook_directives = _rb["stance_directives"]
+                self._rulebook_fixes = _rb["translation_fixes"]
+                if _rb["applied_rule_ids"]:
+                    logger.info(
+                        f"[RULEBOOK] {job_id}: {len(_rb['applied_rule_ids'])} rule(s) active — "
+                        f"{len(_rb['localized_aliases'])} aliases, {len(_rb['character_profiles'])} personas, "
+                        f"{len(_rb['stance_directives'])} directives, {len(_rb['translation_fixes'])} fixes"
+                    )
+            except Exception as _rb_exc:
+                # A broken rulebook must never block translation.
+                logger.warning(f"[RULEBOOK] {job_id}: resolve failed, continuing without rules: {_rb_exc}")
 
         source_norm = normalize_language_code(source_language, allow_auto=True)
         target_norm = normalize_language_code(target_language, strict=True)
@@ -822,6 +858,7 @@ class TranslationService:
                     translated = result
                     # Adaptation pass disabled — rewrites cause synonym substitution and
                     # paraphrasing that breaks word-for-word fidelity to the source script.
+                    self._apply_rulebook_fixes(translated)
                     return translated
                 logger.warning("[TRANSLATE] Claude Cantonese translation failed — trying GPT")
 
@@ -834,6 +871,7 @@ class TranslationService:
                     localized_aliases=localized_aliases,
                 )
                 if result is not None:
+                    self._apply_rulebook_fixes(result)
                     return result
                 logger.warning("[TRANSLATE] GPT-4 Cantonese translation failed — falling back")
 
@@ -854,6 +892,7 @@ class TranslationService:
             ) / max(1, len(segments))
             if change_ratio >= 0.2:
                 logger.info(f"[TRANSLATE] DeepL batch: {change_ratio:.0%} of segments changed")
+                self._apply_rulebook_fixes(result)
                 return result
             logger.warning(
                 f"[TRANSLATE] DeepL batch change rate too low ({change_ratio:.0%}) — "
@@ -868,14 +907,30 @@ class TranslationService:
                 localized_aliases=localized_aliases,
             )
             if result is not None:
+                self._apply_rulebook_fixes(result)
                 return result
 
         # Last resort: free Google Translate via deep_translator (scraping)
-        return await self._translate_segments_batch(
+        result = await self._translate_segments_batch(
             segments, source_norm, target_norm,
             dubbing_style=dubbing_style,
             localized_aliases=localized_aliases,
         )
+        self._apply_rulebook_fixes(result)
+        return result
+
+
+    def _apply_rulebook_fixes(self, segments: Optional[List[Dict]]) -> None:
+        """Apply the director's translation_fix rules to translated output.
+
+        Exact-source-match overrides only (see rulebook.apply_translation_fixes);
+        partial matches are already covered by the prompt hint. No-ops when the
+        job has no rulebook — _rulebook_fixes defaults to {}."""
+        fixes = getattr(self, "_rulebook_fixes", None)
+        if not fixes or not segments:
+            return
+        from app.services.rulebook import apply_translation_fixes
+        apply_translation_fixes(segments, fixes)
 
     # ── Batch-translation line markers ────────────────────────────────────────
     # Shared by _translate_segments_claude and _translate_segments_gpt. Both send
@@ -1066,6 +1121,16 @@ class TranslationService:
                 style = cp.get("speech_style", "")
                 system_prompt_parts.append(f"- {name}: traits=[{traits}]. Speech style: {style}")
             system_prompt_parts.append("Apply these character voices consistently across all lines.")
+
+        # Rulebook — the director's standing rules (stance directives +
+        # exact-match translation overrides). Resolved in translate_segments.
+        _rb_prompt = ""
+        if getattr(self, "_rulebook_directives", None) or getattr(self, "_rulebook_fixes", None):
+            from app.services.rulebook import build_rulebook_prompt
+            _rb_prompt = build_rulebook_prompt(self._rulebook_directives, self._rulebook_fixes)
+        if _rb_prompt:
+            system_prompt_parts.append("")
+            system_prompt_parts.append(_rb_prompt)
 
         # Velma scene context — summary, topics, speaker roles, sentiment
         if velma_context:
@@ -1458,6 +1523,16 @@ class TranslationService:
                 style = cp.get("speech_style", "")
                 system_prompt_parts.append(f"- {name}: traits=[{traits}]. Speech style: {style}")
             system_prompt_parts.append("Apply these character voices consistently across all lines.")
+
+        # Rulebook — the director's standing rules (stance directives +
+        # exact-match translation overrides). Resolved in translate_segments.
+        _rb_prompt = ""
+        if getattr(self, "_rulebook_directives", None) or getattr(self, "_rulebook_fixes", None):
+            from app.services.rulebook import build_rulebook_prompt
+            _rb_prompt = build_rulebook_prompt(self._rulebook_directives, self._rulebook_fixes)
+        if _rb_prompt:
+            system_prompt_parts.append("")
+            system_prompt_parts.append(_rb_prompt)
 
         # Speaker gender map — prevents him/her pronoun errors in translation
         _gender_map_gpt: dict = {}

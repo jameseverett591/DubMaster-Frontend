@@ -279,9 +279,9 @@ def fill_gaps_with_fallbacks(
 ) -> List[Dict[str, Any]]:
     """Add fallback segments that do not overlap the primary segments.
 
-    Used when WenetSpeech is the primary Chinese ASR: Tencent/Paraformer/Whisper
-    segments are only added where WenetSpeech left a gap, so the primary
-    transcript is never overwritten by a weaker engine.
+    Tencent/Paraformer/Whisper segments are only added where the primary
+    (Deepgram) left a gap, so the primary transcript is never overwritten
+    by a weaker engine.
     """
     if not fallback_segments:
         return primary_segments
