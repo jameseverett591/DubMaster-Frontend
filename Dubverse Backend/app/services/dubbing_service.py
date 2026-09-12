@@ -1228,6 +1228,7 @@ class DubbingService:
                     velma_context=_velma_context,
                     dubbing_style=dubbing_style,
                     localized_aliases=localized_aliases,
+                    job_id=job_id,
                 )
                 logger.info(f"Translation complete for {len(transcript)} segments")
                 if transcript:

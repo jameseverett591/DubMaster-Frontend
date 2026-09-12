@@ -5045,6 +5045,7 @@ async def translate_only(request: DubRequest, http_request: Request):
             velma_context=_velma_context,
             dubbing_style=_effective_dubbing_style,
             localized_aliases=_effective_localized_aliases,
+            job_id=request.job_id,
         )
 
         _NOISE_WORDS = {
@@ -6855,6 +6856,7 @@ async def retranslate_job(job_id: str, request: Request):
             velma_context=velma_context,
             dubbing_style=getattr(job, "dubbing_style", None),
             localized_aliases=getattr(job, "localized_aliases", None),
+            job_id=job_id,
         )
     except Exception as exc:
         logger.error(f"[RETRANSLATE] Translation failed for job {job_id}: {exc}")
@@ -8595,6 +8597,170 @@ async def save_character_profiles(job_id: str, request: Request):
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(profiles, f, ensure_ascii=False, indent=2)
     return {"status": "ok", "count": len(profiles)}
+
+
+# ---------------------------------------------------------------------------
+# Rulebook — Feature B of the Dubbing Studio Platform spec
+# (plan-8012dcdb5d41cf3b.md §5). Per-job rules live in
+# data/dubbed/{job_id}/rulebook.json; global rules live in the Supabase
+# `director_rules` table keyed by user_id. Job scope is the staging area —
+# a rule is captured per job and explicitly promoted to global.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_rulebook(job_id: str, user_id: str = "") -> Dict[str, Any]:
+    """Effective ruleset for a job: global rules first, job rules override."""
+    from app.services.rulebook import load_job_rules, load_global_rules, resolve_rules
+    return resolve_rules(
+        job_rules=load_job_rules(job_id),
+        global_rules=load_global_rules(user_id) if user_id else [],
+    )
+
+
+def _rulebook_translation_kwargs(job_id: str, user_id: str = "") -> Dict[str, Any]:
+    """The kwargs translation call sites merge into their existing params:
+    rulebook aliases win over stored job aliases (the rule is the director's
+    latest explicit decision), and rule personas override same-named profiles."""
+    from app.services.rulebook import merge_character_profiles
+    rb = _resolve_rulebook(job_id, user_id)
+    return {
+        "localized_aliases": rb["localized_aliases"],
+        "character_profiles": rb["character_profiles"],
+        "rulebook_directives": rb["stance_directives"],
+        "translation_fixes": rb["translation_fixes"],
+        "_merge_profiles": merge_character_profiles,
+        "_resolved": rb,
+    }
+
+
+@router.get("/jobs/{job_id}/rulebook", dependencies=[Depends(_dep_job_access)])
+async def get_rulebook(job_id: str, request: Request):
+    """Return this job's rules plus the caller's global rules, merged view.
+
+    Response: {rules: [...], effective: {localized_aliases, character_profiles,
+    stance_directives, translation_fixes, delivery, applied_rule_ids}}
+    """
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+    from app.services.rulebook import load_job_rules, load_global_rules
+    job_rules = load_job_rules(job_id)
+    global_rules = load_global_rules(user_id)
+    return {
+        "rules": global_rules + job_rules,
+        "effective": _resolve_rulebook(job_id, user_id),
+    }
+
+
+@router.post("/jobs/{job_id}/rulebook", dependencies=[Depends(_dep_job_access)])
+async def add_rulebook_rule(job_id: str, request: Request):
+    """Capture a rule. Body: {class, source_pattern?, target?, conditions?,
+    notes?, scope?: "job"|"global"}. scope=global writes straight to Supabase;
+    anything else lands in the job's rulebook.json staging area."""
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+    body = await request.json()
+    from app.services.rulebook import new_rule, load_job_rules, save_job_rules, save_global_rule, RULE_CLASSES
+
+    rule_class = (body.get("class") or "").strip()
+    if rule_class not in RULE_CLASSES:
+        raise HTTPException(status_code=400, detail=f"class must be one of {sorted(RULE_CLASSES)}")
+
+    scope = (body.get("scope") or "job").strip()
+    rule = new_rule(
+        rule_class=rule_class,
+        source_pattern=body.get("source_pattern") or "",
+        target=body.get("target") or "",
+        scope=scope,
+        conditions=body.get("conditions") or {},
+        notes=body.get("notes") or "",
+        created_from_job=job_id,
+        inferred=bool(body.get("inferred", False)),
+    )
+    if scope == "global":
+        saved = save_global_rule(user_id, rule)
+        if saved is None:
+            raise HTTPException(status_code=503, detail="Global rulebook unavailable")
+        return {"status": "ok", "rule": saved}
+
+    rules = load_job_rules(job_id)
+    rules.append(rule)
+    save_job_rules(job_id, rules)
+    return {"status": "ok", "rule": rule}
+
+
+@router.patch("/jobs/{job_id}/rulebook/{rule_id}", dependencies=[Depends(_dep_job_access)])
+async def update_rulebook_rule(job_id: str, rule_id: str, request: Request):
+    """Update a rule's fields (target, conditions, notes, enabled toggle)."""
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    verify_jwt(token)
+    body = await request.json()
+    from app.services.rulebook import load_job_rules, save_job_rules
+
+    rules = load_job_rules(job_id)
+    for rule in rules:
+        if rule.get("id") == rule_id:
+            for key in ("target", "source_pattern", "notes", "enabled"):
+                if key in body:
+                    rule[key] = body[key]
+            if "conditions" in body and isinstance(body["conditions"], dict):
+                rule["conditions"] = body["conditions"]
+            save_job_rules(job_id, rules)
+            return {"status": "ok", "rule": rule}
+    raise HTTPException(status_code=404, detail="Rule not found")
+
+
+@router.delete("/jobs/{job_id}/rulebook/{rule_id}", dependencies=[Depends(_dep_job_access)])
+async def delete_rulebook_rule(job_id: str, rule_id: str, request: Request):
+    """Delete a rule — job scope deletes from rulebook.json; scope=global
+    (in the body) deletes from Supabase."""
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+    from app.services.rulebook import load_job_rules, save_job_rules, delete_global_rule
+
+    body = await request.json() if (await request.body()) else {}
+    if body.get("scope") == "global":
+        if not delete_global_rule(user_id, rule_id):
+            raise HTTPException(status_code=503, detail="Global rulebook unavailable")
+        return {"status": "ok"}
+
+    rules = load_job_rules(job_id)
+    kept = [r for r in rules if r.get("id") != rule_id]
+    if len(kept) == len(rules):
+        raise HTTPException(status_code=404, detail="Rule not found")
+    save_job_rules(job_id, kept)
+    return {"status": "ok"}
+
+
+@router.post("/jobs/{job_id}/rulebook/{rule_id}/promote", dependencies=[Depends(_dep_job_access)])
+async def promote_rulebook_rule(job_id: str, rule_id: str, request: Request):
+    """Promote a job-scoped rule to the global rulebook — the director confirms
+    carrying this decision forward to every future job."""
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+    from app.services.rulebook import load_job_rules, save_global_rule
+
+    rule = next((r for r in load_job_rules(job_id) if r.get("id") == rule_id), None)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    saved = save_global_rule(user_id, rule)
+    if saved is None:
+        raise HTTPException(status_code=503, detail="Global rulebook unavailable")
+    return {"status": "ok", "rule": saved}
+
+
+@router.get("/rulebook", dependencies=[Depends(_dep_auth)])
+async def get_global_rulebook(request: Request):
+    """The director's global rulebook — every rule carried across jobs."""
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    user_id = verify_jwt(token)
+    from app.services.rulebook import load_global_rules
+    return {"rules": load_global_rules(user_id)}
 
 
 @router.post("/jobs/{job_id}/scene-summary", dependencies=[Depends(_dep_job_access)])
