@@ -77,6 +77,7 @@ import { AdvancedChordBrowser } from '@/components/editor/advanced-chord-browser
 import { CharacterProfilesPanel } from '@/components/editor/character-profiles-panel'
 import { AdaptationPanel } from '@/components/editor/adaptation-panel'
 import { SceneSummaryPanel } from '@/components/editor/scene-summary-panel'
+import { RulebookPanel, RuleCaptureDialog } from '@/components/editor/rulebook-panel'
 import VelmaPanel from '@/components/editor/velma-panel'
 import RespeecherPanel from '@/components/editor/respeecher-panel'
 import SeedLibraryPanel, { buildSeedLibrary } from '@/components/editor/seed-library-panel'
@@ -197,6 +198,7 @@ interface SegmentContextMenuProps {
   onSelect: (index: number) => void
   onRenameSpeaker: (index: number) => void
   onShowProfile: (index: number, x: number, y: number) => void
+  onAddToRulebook: (index: number) => void
   onGroupSelect: () => void
   onClearGroup: () => void
   groupSelectActive: boolean
@@ -231,6 +233,7 @@ function SegmentContextMenu({
   onSelect,
   onRenameSpeaker,
   onShowProfile,
+  onAddToRulebook,
   onGroupSelect,
   onClearGroup,
   groupSelectActive,
@@ -361,6 +364,12 @@ function SegmentContextMenu({
           className="text-xs gap-2"
         >
           🎭 Character Profile
+        </ContextMenuItem>
+        <ContextMenuItem
+          onClick={(e) => { e.stopPropagation(); onAddToRulebook(index) }}
+          className="text-xs gap-2 text-amber-400 focus:text-amber-400"
+        >
+          📕 Add to Rulebook
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem className="text-xs gap-2 text-blue-400 focus:text-blue-400">
@@ -1241,7 +1250,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'respeecher' | 'perform' | 'seeds' | 'studio' | 'scene' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'ei-library' | 'nuances' | 'chord' | 'advanced' | 'characters' | 'testclips'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'respeecher' | 'perform' | 'seeds' | 'studio' | 'scene' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'ei-library' | 'nuances' | 'chord' | 'advanced' | 'characters' | 'testclips' | 'rulebook'>('result')
   const [velmaEnrichLoading, setVelmaEnrichLoading] = useState(false)
   const [velmaEnrichResult, setVelmaEnrichResult] = useState<{ patched: number; total: number } | null>(null)
 
@@ -1411,6 +1420,9 @@ export function DubVerseEditor({
   const [characterProfileOpen, setCharacterProfileOpen] = useState<{
     segmentIndex: number; x: number; y: number
   } | null>(null)
+  // "Add to Rulebook" — right-click capture path (Feature B). Holds the segment
+  // index being captured; the dialog pre-fills from that segment's texts.
+  const [ruleCaptureIndex, setRuleCaptureIndex] = useState<number | null>(null)
   const [askAiPrompt, setAskAiPrompt] = useState('')
   const [askAiLoading, setAskAiLoading] = useState(false)
   const [askAiResult, setAskAiResult] = useState<{ suggestion: string; explanation: string } | null>(null)
@@ -7321,6 +7333,7 @@ export function DubVerseEditor({
                     setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
                   }}
                   onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
+                  onAddToRulebook={(idx) => setRuleCaptureIndex(idx)}
                   onGroupSelect={enterGroupSelectMode}
                   onClearGroup={clearGroupSelection}
                   groupSelectActive={groupSelectMode || groupSelectedSegments.size > 0}
@@ -8416,6 +8429,7 @@ export function DubVerseEditor({
                 { id: 'seeds',      label: 'Seed Library', feature: 'respeecher' },
                 { id: 'studio',     label: 'Studio',       feature: 'studioCollaboration' },
                 { id: 'scene',      label: 'Scene' },
+                { id: 'rulebook',   label: 'Rulebook' },
                 { id: 'adaptation', label: 'Adaptation' },
                 { id: 'speakers',   label: 'Speakers' },
                 { id: 'library',    label: 'Voice Library' },
@@ -8844,6 +8858,13 @@ export function DubVerseEditor({
           {rightPanelTab === 'scene' && (
             <div className="flex-1 min-h-0 overflow-y-auto bg-neutral-950">
               <SceneSummaryPanel />
+            </div>
+          )}
+
+          {/* Rulebook tab — the director's accumulated decisions */}
+          {rightPanelTab === 'rulebook' && (
+            <div className="flex-1 min-h-0 overflow-hidden bg-neutral-950">
+              <RulebookPanel />
             </div>
           )}
 
@@ -9393,6 +9414,15 @@ export function DubVerseEditor({
           stagedEmotions={stagedEmotions}
           stagedSpeeds={stagedSpeeds}
           stagedVoices={stagedVoices}
+        />
+      )}
+
+      {/* Add to Rulebook — right-click → "📕 Add to Rulebook" capture dialog.
+          The segment's source/target pre-fill the form; saving POSTs a rule. */}
+      {ruleCaptureIndex !== null && displaySegments[ruleCaptureIndex] && (
+        <RuleCaptureDialog
+          segmentIndex={ruleCaptureIndex}
+          onClose={() => setRuleCaptureIndex(null)}
         />
       )}
 
@@ -10521,6 +10551,7 @@ export function DubVerseEditor({
                 setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
               }}
               onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
+              onAddToRulebook={(idx) => setRuleCaptureIndex(idx)}
               onGroupSelect={enterGroupSelectMode}
               onClearGroup={clearGroupSelection}
               groupSelectActive={groupSelectMode || groupSelectedSegments.size > 0}
@@ -11616,6 +11647,7 @@ export function DubVerseEditor({
                         setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
                       }}
                       onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
+                      onAddToRulebook={(idx) => setRuleCaptureIndex(idx)}
                       onGroupSelect={enterGroupSelectMode}
                       onClearGroup={clearGroupSelection}
                       groupSelectActive={groupSelectMode || groupSelectedSegments.size > 0}
@@ -11936,6 +11968,7 @@ export function DubVerseEditor({
                         setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
                       }}
                       onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
+                      onAddToRulebook={(idx) => setRuleCaptureIndex(idx)}
                       onGroupSelect={enterGroupSelectMode}
                       onClearGroup={clearGroupSelection}
                       groupSelectActive={groupSelectMode || groupSelectedSegments.size > 0}
