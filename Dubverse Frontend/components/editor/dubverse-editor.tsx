@@ -1007,6 +1007,10 @@ export function DubVerseEditor({
   const videoTrackRef = useRef<HTMLDivElement>(null)
   const overviewBarRef = useRef<HTMLDivElement>(null)
   const overviewThumbRef = useRef<HTMLDivElement>(null)
+  /** Stashed by the Source/Dubbed toggle before the src swap reloads the
+   *  element — restored on loadedmetadata so A/B compare never loses your
+   *  place or drops playback. */
+  const pendingResumeRef = useRef<{ at: number; playing: boolean } | null>(null)
   /** True while a pan drag owns the thumb, so the scroll listener does not also
    *  measure. Every measurement during a drag is a forced synchronous layout. */
   const panningRef = useRef(false)
@@ -3337,6 +3341,34 @@ export function DubVerseEditor({
   useEffect(() => {
     videoRetriedRef.current = false
   }, [activeVideoUrl])
+
+  // Restore position + play state after a Source/Dubbed src swap. The swap is
+  // deliberate — dropping both on every compare made the toggle useless.
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    const restore = () => {
+      const p = pendingResumeRef.current
+      if (!p) return
+      pendingResumeRef.current = null
+      try { v.currentTime = p.at } catch {}
+      if (p.playing) v.play().catch(() => {})
+    }
+    v.addEventListener('loadedmetadata', restore)
+    return () => v.removeEventListener('loadedmetadata', restore)
+  }, [])
+
+  // Stash BEFORE the mode change — the src swap is React's render output, so
+  // the pre-swap element state is only readable here, at click time.
+  const switchPlaybackMode = useCallback((mode: 'original' | 'dubbed' | 'preview') => {
+    const v = videoRef.current
+    const dubbedNow = playbackMode === 'dubbed' && !!activeDubbedVideoUrl
+    const dubbedNext = mode === 'dubbed' && !!activeDubbedVideoUrl
+    if (v && dubbedNow !== dubbedNext) {
+      pendingResumeRef.current = { at: v.currentTime, playing: !v.paused }
+    }
+    setPlaybackMode(mode)
+  }, [playbackMode, activeDubbedVideoUrl, setPlaybackMode])
 
   // Track which URL we've already extracted thumbnails for
   const lastExtractedUrlRef = useRef<string | null>(null)
@@ -5821,10 +5853,11 @@ export function DubVerseEditor({
       }
       setPlaybackMode('dubbed')
       if (videoRef.current) {
+        // Post-render QC is "same moment, new version" — keep the playhead
+        // where the director left it instead of restarting at 0.
+        pendingResumeRef.current = { at: videoRef.current.currentTime, playing: false }
         videoRef.current.load()
-        videoRef.current.currentTime = 0
       }
-      setCurrentTime(0)
       setTimeout(() => setRebuildProgress(0), 2000)
     } catch (err: any) {
       if (rebuildIntervalRef.current) clearInterval(rebuildIntervalRef.current)
@@ -8588,9 +8621,9 @@ export function DubVerseEditor({
                   variant="ghost"
                   size="sm"
                   className={cn('h-6 text-[11px] px-2', playbackMode === 'original' ? 'text-white' : 'text-slate-500')}
-                  onClick={() => setPlaybackMode('original')}
+                  onClick={() => switchPlaybackMode('original')}
                 >
-                  {t('Original')}
+                  {t('Source')}
                 </Button>
                 <Button
                   variant="ghost"
@@ -8599,9 +8632,11 @@ export function DubVerseEditor({
                     'h-6 text-[11px] px-3 rounded-full',
                     playbackMode === 'dubbed' ? 'bg-slate-700 text-white' : 'text-slate-500'
                   )}
-                  onClick={() => setPlaybackMode('dubbed')}
+                  onClick={() => switchPlaybackMode('dubbed')}
+                  disabled={!activeDubbedVideoUrl}
+                  title={activeDubbedVideoUrl ? t('Watch the rendered dub') : t('Render with Make Movie first')}
                 >
-                  {t('Translated')}
+                  {t('Dubbed')}
                 </Button>
                 <Button
                   variant="ghost"
@@ -8612,7 +8647,7 @@ export function DubVerseEditor({
                       ? 'bg-amber-600/40 text-amber-300 ring-1 ring-amber-500/50'
                       : 'text-slate-500'
                   )}
-                  onClick={() => setPlaybackMode('preview')}
+                  onClick={() => switchPlaybackMode('preview')}
                 >
                   {t('Preview')}
                 </Button>
@@ -10411,6 +10446,8 @@ export function DubVerseEditor({
                 <QCQualityPanel
                   report={qcReport}
                   segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
+                  jobId={jobId}
+                  segmentIndex={selectedSegmentIndex !== null ? (displaySegments[selectedSegmentIndex]?.transcript_index ?? selectedSegmentIndex) : null}
                   onJumpToTime={(t) => {
                     setCurrentTime(t)
                     if (videoRef.current) videoRef.current.currentTime = t

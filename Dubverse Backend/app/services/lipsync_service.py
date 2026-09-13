@@ -12,7 +12,9 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 SYNCLABS_API_BASE = "https://api.sync.so"
-SYNCLABS_MODEL = "sync-1.6.0"
+# sync.so v2 models: sync-3 | lipsync-2 | lipsync-2-pro | lipsync-1.9.0-beta | react-1
+# (sync-1.6.0 was retired with the old flat {audioUrl, videoUrl} payload).
+SYNCLABS_MODEL = "lipsync-2"
 POLL_INTERVAL_SEC = 10
 MAX_POLL_ATTEMPTS = 60  # 10 minutes max
 
@@ -32,6 +34,7 @@ class LipSyncService:
         video_path: str,
         audio_path: str,
         output_path: str,
+        access_token: str = "",
     ) -> bool:
         """
         Send the original video + dubbed audio to Sync.Labs, wait for the
@@ -45,8 +48,11 @@ class LipSyncService:
             return False
 
         audio_filename = Path(audio_path).name
-        video_url = f"{self.public_base_url}/api/media/{job_id}/video"
-        audio_url = f"{self.public_base_url}/api/media/{job_id}/audio/{audio_filename}"
+        # Media routes require _dep_job_access; vendors can't send headers, so
+        # the JWT travels as access_token — the same pattern the <video> tag uses.
+        qs = f"?access_token={access_token}" if access_token else ""
+        video_url = f"{self.public_base_url}/api/media/{job_id}/video{qs}"
+        audio_url = f"{self.public_base_url}/api/media/{job_id}/audio/{audio_filename}{qs}"
 
         logger.info(f"[LIPSYNC] Job {job_id}: videoUrl={video_url}")
         logger.info(f"[LIPSYNC] Job {job_id}: audioUrl={audio_url}")
@@ -74,10 +80,21 @@ class LipSyncService:
             "x-api-key": self.api_key,
             "Content-Type": "application/json",
         }
+        # v2 shape: inputs are typed objects, not flat *Url fields. The video
+        # and audio must match duration; cut_off trims an overlong tail rather
+        # than the default bounce, which would loop the picture to fit audio.
+        # active_speaker_detection keeps lip edits on whoever is actually
+        # talking — the multi-face case LipDub's API doesn't handle.
         payload = {
-            "audioUrl": audio_url,
-            "videoUrl": video_url,
             "model": SYNCLABS_MODEL,
+            "input": [
+                {"type": "video", "url": video_url},
+                {"type": "audio", "url": audio_url},
+            ],
+            "options": {
+                "sync_mode": "cut_off",
+                "active_speaker_detection": {"auto_detect": True},
+            },
         }
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
@@ -122,8 +139,11 @@ class LipSyncService:
 
             if status == "COMPLETED":
                 return data.get("outputUrl")
-            elif status == "FAILED":
-                logger.error(f"[LIPSYNC] Job {job_id}: Sync.Labs reported FAILED — {data}")
+            elif status in ("FAILED", "REJECTED"):
+                logger.error(
+                    f"[LIPSYNC] Job {job_id}: Sync.Labs reported {status} — "
+                    f"{data.get('errorCode')}: {data.get('error')}"
+                )
                 return None
 
         logger.error(

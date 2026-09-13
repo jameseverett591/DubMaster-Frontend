@@ -1908,7 +1908,8 @@ class DubbingService:
                     trimmed_dur = await asyncio.to_thread(self._get_audio_duration, silence_trimmed_path)
                     orig_dur = await asyncio.to_thread(self._get_audio_duration, final_path)
                     silence_removed = orig_dur - trimmed_dur
-                    if silence_removed > 0.08:  # only swap if >80ms was trimmed
+                    if silence_removed > 0.02:  # keep trims down to ~20ms — residual
+                        # lead-ins under 80ms still show up in lip-sync
                         logger.info(f"[SILENCE-TRIM] seg {i}: removed {silence_removed:.3f}s leading silence")
                         final_path = silence_trimmed_path
 
@@ -2000,11 +2001,27 @@ class DubbingService:
                             f"(needed {_speed_applied:.2f}x — tail may be cut)"
                         )
 
+                # Borrowed room is for SIZING only — it told the fit loop how
+                # much space the line could use. PLACEMENT should move earlier
+                # only when the fitted audio actually needs the room: the old
+                # unconditional start_time - _borrow put every segment with a
+                # >50ms leading gap up to _MAX_BORROW early — the systematic
+                # lip-sync lead users kept dragging back by hand. Now: place at
+                # start_time unless the audio's tail would overflow the next
+                # segment's start, in which case sit just early enough to fit.
+                if next_start is not None:
+                    _final_start = max(
+                        _window_start,
+                        min(start_time, next_start - 0.05 - actual_duration),
+                    )
+                else:
+                    _final_start = start_time
+
                 overlap_with_prev = ""
                 if audio_segments:
                     prev_end = audio_segments[-1]["end"]
-                    if _placed_start < prev_end:
-                        overlap_with_prev = f" OVERLAP={prev_end - _placed_start:.3f}s with seg {len(audio_segments)-1}"
+                    if _final_start < prev_end:
+                        overlap_with_prev = f" OVERLAP={prev_end - _final_start:.3f}s with seg {len(audio_segments)-1}"
 
                 logger.info(
                     f"[TIMING] seg={i} speaker={speaker} "
@@ -2016,8 +2033,8 @@ class DubbingService:
                     f"slot={_fit_target:.3f}s "
                     f"tts_dur={actual_duration:.3f}s "
                     f"delta={actual_duration - _fit_target:+.3f}s "
-                    f"borrow={start_time - _placed_start:.3f}s "
-                    f"placed_at=[{_placed_start:.3f}-{_placed_start + actual_duration:.3f}]"
+                    f"borrow={start_time - _final_start:.3f}s "
+                    f"placed_at=[{_final_start:.3f}-{_final_start + actual_duration:.3f}]"
                     f"{overlap_with_prev}"
                 )
 
@@ -2061,8 +2078,8 @@ class DubbingService:
                     "path": final_path,
                     "audio_url": _audio_filename,
                     "committed_audio_url": _audio_filename,
-                    "start": _placed_start,
-                    "end": _placed_start + actual_duration,
+                    "start": _final_start,
+                    "end": _final_start + actual_duration,
                     "duration": actual_duration,
                     # The ORIGINAL transcript window, before any borrow or fit.
                     # timing_diagnostics used to write the placed position as
@@ -2968,11 +2985,12 @@ class DubbingService:
         input_path: str,
         output_path: str,
         silence_threshold_db: float = -40.0,
-        min_silence_duration: float = 0.1,
+        min_silence_duration: float = 0.02,
     ) -> bool:
         """Remove leading silence from a TTS audio file.
-        Fish Audio inline cloning often prepends 0.5-2s of silence before speech.
-        Only trims if >100ms of silence is detected so normal attack isn't clipped.
+        Fish Audio inline cloning often prepends silence before speech, and
+        residual lead-ins of 30-100ms are audible in lip-sync — hence 20ms,
+        not the old 100ms floor that let them through.
         """
         try:
             cmd = [
@@ -4530,7 +4548,7 @@ class DubbingService:
                     await asyncio.to_thread(self._get_audio_duration, final_path)
                     - await asyncio.to_thread(self._get_audio_duration, trimmed_path)
                 )
-                if silence_removed > 0.08:
+                if silence_removed > 0.02:
                     final_path = trimmed_path
 
             actual_dur = await asyncio.to_thread(self._get_audio_duration, final_path)
