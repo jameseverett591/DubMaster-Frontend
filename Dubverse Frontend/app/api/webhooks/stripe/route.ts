@@ -15,7 +15,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 // redeliver this webhook. A non-2xx throws so Stripe retries; the backend
 // returns already_applied on the retry instead of double-crediting.
 async function creditWallet(userId: string, amountCents: number, paymentId: string) {
-  const res = await fetch(`${API_BASE}/internal/quota/credit`, {
+  const res = await fetch(`${API_BASE}/api/internal/quota/credit`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
