@@ -1,7 +1,9 @@
 'use client'
 
-import { Clock, Gauge, VolumeX, Volume2, Heart, FileText, Wrench } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Clock, Gauge, VolumeX, Volume2, Heart, FileText, Wrench, RefreshCw, ScanFace } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { apiClient } from '@/lib/api-client'
 import type { QCReport, QCFinding, Segment } from '@/lib/editor-types'
 
 import { findingIsAutoFixable } from '@/lib/qc-fixes'
@@ -10,11 +12,31 @@ import { useT } from '@/lib/use-t'
 interface QCQualityPanelProps {
   report: QCReport | null
   segment?: Segment | null
+  /** Job + transcript_index of the selected segment, for per-segment scoring. */
+  jobId?: string
+  segmentIndex?: number | null
   onJumpToTime?: (seconds: number) => void
   onSelectFinding?: (finding: QCFinding) => void
   onSelectSegment?: (segmentIndex: number) => void
   onApplyFix?: (finding: QCFinding) => void
   selectedRetranscriptionIndex?: number
+}
+
+interface LipWindow {
+  start: number
+  end: number
+  /** Audio-vs-audio timing — the trusted metric. */
+  audioScore?: number
+  audioOffset?: number
+  audioCorr?: number
+  audioSeverity?: string
+  audioReason?: string
+  /** Mouth-movement visual scorer — supplementary, needs readable faces. */
+  visualScore?: number
+  visualOffset?: number
+  faceCoverage?: number
+  visualReason?: string
+  at: number
 }
 
 function formatTimeShort(seconds: number): string {
@@ -54,15 +76,184 @@ function statusBadge(status: 'ok' | 'warn' | 'fail') {
   return <span className="text-[10px] px-2 py-0.5 rounded-full border border-red-500/40 text-red-300 bg-red-500/10">Fail</span>
 }
 
-export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding, onSelectSegment, onApplyFix, selectedRetranscriptionIndex }: QCQualityPanelProps) {
+export function QCQualityPanel({ report, segment, jobId, segmentIndex, onJumpToTime, onSelectFinding, onSelectSegment, onApplyFix, selectedRetranscriptionIndex }: QCQualityPanelProps) {
   const t = useT()
+
+  // Per-minute lip-sync scores, keyed by window start. Single segments are too
+  // short for a stable correlation, so the monitor scores ~60s windows up front
+  // and re-scores an edited span (snapped to the minute grid) on demand. The
+  // first score per window is its baseline — the point is the delta after the
+  // user's manual timing edit / regenerated take, not the number alone.
+  const [lipWindows, setLipWindows] = useState<Record<string, LipWindow>>({})
+  const [lipBaseline, setLipBaseline] = useState<Record<string, number>>({})
+  const [lipLoading, setLipLoading] = useState(false)
+  const [lipScoringKey, setLipScoringKey] = useState<string | null>(null)
+  const [scoreError, setScoreError] = useState<string | null>(null)
+  const lipLoaded = useRef<string | null>(null)
+
+  // Upfront pass: score every minute of the timeline once, on entry.
+  useEffect(() => {
+    if (!jobId || lipLoaded.current === jobId) return
+    lipLoaded.current = jobId
+    setLipLoading(true)
+    apiClient.analyzeLipSync(jobId)
+      .then((res) => {
+        if (!res.windows) return
+        const map: Record<string, LipWindow> = {}
+        const base: Record<string, number> = {}
+        for (const w of res.windows) {
+          const k = w.start.toFixed(2)
+          map[k] = {
+            start: w.start, end: w.end,
+            audioScore: w.audio?.score, audioOffset: w.audio?.offset_ms,
+            audioCorr: w.audio?.correlation, audioSeverity: w.audio?.severity,
+            audioReason: w.audio?.reason,
+            visualScore: w.visual?.sync_score, visualOffset: w.visual?.offset_ms,
+            faceCoverage: w.visual?.face_coverage, visualReason: w.visual?.reason,
+            at: Date.now(),
+          }
+          if (w.audio?.status === 'ok' && typeof w.audio.score === 'number') base[k] = w.audio.score
+        }
+        setLipWindows(map)
+        setLipBaseline(base)
+      })
+      .catch((e) => setScoreError(e.message || 'Lip-sync analysis failed'))
+      .finally(() => setLipLoading(false))
+  }, [jobId])
+
+  const scoreRange = async (start: number, end: number) => {
+    if (!jobId) return
+    const k = start.toFixed(2)
+    setLipScoringKey(k)
+    setScoreError(null)
+    try {
+      const w = await apiClient.analyzeLipSync(jobId, { start, end })
+      const merged: LipWindow = {
+        start: w.start ?? start, end: w.end ?? end,
+        audioScore: w.audio?.score, audioOffset: w.audio?.offset_ms,
+        audioCorr: w.audio?.correlation, audioSeverity: w.audio?.severity,
+        audioReason: w.audio?.reason,
+        visualScore: w.visual?.sync_score, visualOffset: w.visual?.offset_ms,
+        faceCoverage: w.visual?.face_coverage, visualReason: w.visual?.reason,
+        at: Date.now(),
+      }
+      setLipWindows(prev => ({ ...prev, [k]: merged }))
+      if (merged.audioScore !== undefined) {
+        setLipBaseline(prev => (prev[k] === undefined ? { ...prev, [k]: merged.audioScore! } : prev))
+      } else if (merged.audioReason) {
+        setScoreError(merged.audioReason)
+      }
+    } catch (e: any) {
+      setScoreError(e.message || 'Lip-sync scoring failed')
+    } finally {
+      setLipScoringKey(null)
+    }
+  }
+
+  // Re-analyze the SELECTED segment's committed span, snapped out to the
+  // minute grid — a fix crossing a boundary scores e.g. 1:00–1:30 as one
+  // window, so the delta covers the whole affected range.
+  const rescoreSelectedSpan = async () => {
+    if (!segment) return
+    const s = segment.committed_start_time ?? segment.start_time ?? 0
+    const e = segment.committed_end_time ?? segment.end_time ?? 0
+    if (e <= s) return
+    await scoreRange(Math.floor(s / 60) * 60, Math.ceil(e / 60) * 60)
+  }
+
+  const lipSyncCard = jobId ? (
+    <div className="m-3 mb-0 p-3 rounded-xl bg-neutral-900 border border-neutral-800">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-1.5">
+          <ScanFace className="h-4 w-4 text-cyan-400" />{t('Lip Sync — per minute')}
+        </h3>
+        <button
+          onClick={rescoreSelectedSpan}
+          disabled={!segment || lipScoringKey !== null}
+          title={segment ? 'Re-score this segment’s minute window' : 'Select a segment to re-score its window'}
+          className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border border-cyan-500/40 text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 disabled:opacity-50 cursor-pointer"
+        >
+          <RefreshCw className={cn('h-3 w-3', lipScoringKey !== null && 'animate-spin')} />
+          {lipScoringKey !== null ? t('Scoring…') : t('Re-analyze')}
+        </button>
+      </div>
+
+      {lipLoading ? (
+        <p className="text-xs text-slate-500">{t('Scoring the timeline, minute by minute…')}</p>
+      ) : Object.keys(lipWindows).length === 0 ? (
+        <p className="text-xs text-slate-500">{scoreError ?? t('No lip-sync scores yet.')}</p>
+      ) : (
+        <div className="flex flex-col gap-1">
+          {Object.values(lipWindows).sort((a, b) => a.start - b.start).map((w) => {
+            const k = w.start.toFixed(2)
+            const delta = (lipBaseline[k] !== undefined && w.audioScore !== undefined)
+              ? w.audioScore - lipBaseline[k] : 0
+            const showDelta = delta !== 0
+            return (
+              <div key={k} className="flex items-center justify-between py-1 px-1 -mx-1 rounded hover:bg-neutral-800/50">
+                <span className="text-xs text-slate-400">
+                  {formatTimeShort(w.start)}–{formatTimeShort(w.end)}
+                </span>
+                <span className="flex items-center gap-2 text-xs">
+                  {/* audio-vs-audio: the trusted timing metric */}
+                  {w.audioScore !== undefined ? (
+                    <>
+                      <span className={cn('font-semibold',
+                        w.audioSeverity === 'good' ? 'text-emerald-400'
+                        : w.audioSeverity === 'fair' ? 'text-yellow-400' : 'text-red-400')}
+                        title={`rhythm score ${w.audioScore}/100 · corr ${w.audioCorr}`}>
+                        {w.audioScore}
+                      </span>
+                      {showDelta && (
+                        <span className={delta > 0 ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}>
+                          {delta > 0 ? '+' : ''}{delta}
+                        </span>
+                      )}
+                      {w.audioOffset !== undefined && (
+                        <span className="text-slate-500">{w.audioOffset > 0 ? '+' : ''}{w.audioOffset}ms</span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-slate-500 max-w-[160px] truncate"
+                      title={w.audioReason}>{w.audioReason ?? '—'}</span>
+                  )}
+                  {/* visual: face-based, secondary */}
+                  {w.visualScore !== undefined && (
+                    <span className="text-slate-500"
+                      title={`visual score ${w.visualScore} · mouth-movement offset ${w.visualOffset}ms${w.faceCoverage !== undefined ? ` · face ${Math.round(w.faceCoverage * 100)}%` : ''}`}>
+                      👁 {w.visualScore}
+                    </span>
+                  )}
+                  {w.visualScore === undefined && w.visualReason && (
+                    <span className="text-slate-600" title={w.visualReason}>👁 —</span>
+                  )}
+                  <button
+                    onClick={() => scoreRange(w.start, w.end)}
+                    disabled={lipScoringKey !== null}
+                    title="Re-score this window"
+                    className="text-slate-500 hover:text-cyan-300 disabled:opacity-40 cursor-pointer"
+                  >
+                    <RefreshCw className={cn('h-3 w-3', lipScoringKey === k && 'animate-spin text-cyan-300')} />
+                  </button>
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+      {scoreError && !lipLoading && <p className="text-[10px] text-red-400 mt-1">{scoreError}</p>}
+    </div>
+  ) : null
 
   if (!report) {
     return (
-      <div className="flex flex-col items-center justify-center h-full text-slate-500 text-sm p-6 gap-2">
-        <Gauge className="h-8 w-8 opacity-40" />
-        <p>{t('Not yet analyzed.')}</p>
-        <p className="text-xs text-slate-600">{t('Quality analysis runs after the dub is rebuilt.')}</p>
+      <div className="flex flex-col h-full overflow-y-auto bg-neutral-950">
+        {lipSyncCard}
+        <div className="flex flex-col items-center justify-center flex-1 text-slate-500 text-sm p-6 gap-2">
+          <Gauge className="h-8 w-8 opacity-40" />
+          <p>{t('Not yet analyzed.')}</p>
+          <p className="text-xs text-slate-600">{t('Quality analysis runs after the dub is rebuilt.')}</p>
+        </div>
       </div>
     )
   }
@@ -78,6 +269,7 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
 
   return (
     <div className="flex flex-col gap-3 p-3 overflow-y-auto h-full bg-neutral-950 text-white">
+      {lipSyncCard}
       {/* Score header */}
       <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-4">
         <div className="flex items-center justify-between mb-3">

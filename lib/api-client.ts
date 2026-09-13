@@ -558,6 +558,28 @@ export interface QualityAnalysis {
   summary: AnalysisSummary
 }
 
+export interface LipSyncWindowResult {
+  start: number
+  end: number
+  visual?: {
+    status: string
+    sync_score?: number
+    correlation?: number
+    offset_ms?: number
+    face_coverage?: number
+    severity?: string
+    reason?: string
+  }
+  audio?: {
+    status: string
+    score?: number
+    correlation?: number
+    offset_ms?: number
+    severity?: string
+    reason?: string
+  }
+}
+
 export type AnalysisStatus = 'idle' | 'running' | 'complete' | 'error'
 
 export interface AnalysisResponse {
@@ -1699,6 +1721,47 @@ class DubVerseAPIClient {
       throw new Error(detail || `Failed to rebuild video: ${response.statusText}`)
     }
     return response.json()
+  }
+
+  /** Per-segment lip-sync score — original-video mouth movement vs the
+   *  segment's CURRENT audio file + committed timing. Runs without a rebuild,
+   *  so it reflects manual timing edits and regenerated takes immediately.
+   *  NOTE: single segments are usually too short for a stable correlation —
+   *  prefer analyzeLipSync (minute windows / edited spans). */
+  async analyzeSegmentLipSync(
+    jobId: string,
+    segmentIndex: number,
+  ): Promise<{ status: string; sync_score?: number; correlation?: number; offset_ms?: number; face_coverage?: number; severity?: string; reason?: string }> {
+    const res = await this._fetch(`${this.baseURL}/api/analyze-segment/${jobId}/${segmentIndex}`, {
+      method: 'POST',
+      headers: this._authHeaders(),
+    })
+    if (!res.ok) throw new Error(await this._detail(res))
+    return res.json()
+  }
+
+  /** Minute-window lip-sync scoring. `range` omitted → every 60s window of
+   *  the timeline (the upfront pass); {start,end} → re-score one span, e.g.
+   *  an edit's full committed range snapped to the minute grid. The dubbed
+   *  signal is rebuilt from the segments' current audio + committed times —
+   *  manual lip-sync adjustments and regenerated takes are what get scored. */
+  async analyzeLipSync(
+    jobId: string,
+    range?: { start: number; end: number },
+  ): Promise<{
+    status: string
+    windows?: LipSyncWindowResult[]
+    start?: number; end?: number
+    sync_score?: number; correlation?: number; offset_ms?: number
+    face_coverage?: number; severity?: string; reason?: string
+  }> {
+    const res = await this._fetch(`${this.baseURL}/api/analyze-lipsync/${jobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify(range ?? {}),
+    })
+    if (!res.ok) throw new Error(await this._detail(res))
+    return res.json()
   }
 
   async commitSegmentTiming(
