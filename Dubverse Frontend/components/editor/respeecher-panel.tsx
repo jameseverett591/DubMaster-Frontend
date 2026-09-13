@@ -5,6 +5,7 @@ import { Mic2, Star, AlertTriangle, Loader2, Play, Pause, Lock, Unlock, RotateCc
 import { apiClient } from '@/lib/api-client'
 import type { RespeecherVoice } from '@/lib/api-client'
 import type { Segment } from '@/lib/editor-types'
+import { useEditorStore } from '@/lib/editor-store'
 import { Slider } from '@/components/ui/slider'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
@@ -170,6 +171,101 @@ export default function RespeecherPanel({
   const [locked, setLocked] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
 
+  // ── Fish voice preview ────────────────────────────────────────
+  // The Fish Audio half re-renders this segment with the speaker's MAPPED
+  // voice — previously there was no way to hear that voice before spending a
+  // re-render on it. This plays its sample: custom clones serve their stored
+  // clip, catalog voices go through the same /api/voice-preview route the
+  // Voice Library uses. Preset keys (male-1…) are resolved to their real
+  // reference_id first — the preview route passes the id straight to Fish,
+  // which 404s on a slug.
+  const speakerVoiceMap = useEditorStore((s) => s.speakerVoiceMap)
+  const fishVoiceId = segment?.speaker_id ? speakerVoiceMap[segment.speaker_id] : undefined
+  const fishIsPreset = !!fishVoiceId && /^(male|female|child)-\d+$/.test(fishVoiceId)
+  const [customVoiceIds, setCustomVoiceIds] = useState<Set<string>>(new Set())
+  const [presetLabels, setPresetLabels] = useState<Record<string, string>>({})
+  useEffect(() => {
+    let cancelled = false
+    apiClient.getCustomVoices()
+      .then((vs) => { if (!cancelled) setCustomVoiceIds(new Set(vs.map((v) => v.voice_id))) })
+      .catch(() => {})
+    apiClient.getPresetVoiceLabels()
+      .then((m) => { if (!cancelled) setPresetLabels(m) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+  // ref_id -> "Male 1" comes back inverted to "male-1" -> ref_id.
+  const resolvedFishVoiceId = useMemo(() => {
+    if (!fishVoiceId) return undefined
+    if (!fishIsPreset) return fishVoiceId
+    const hit = Object.entries(presetLabels).find(
+      ([, label]) => label.toLowerCase().replace(/\s+/g, '-') === fishVoiceId
+    )
+    return hit?.[0]
+  }, [fishVoiceId, fishIsPreset, presetLabels])
+  const fishPreviewable = !!resolvedFishVoiceId
+  const fishAudioRef = useRef<HTMLAudioElement | null>(null)
+  const [fishPreviewing, setFishPreviewing] = useState(false)
+  const stopFishPreview = useCallback(() => {
+    const a = fishAudioRef.current
+    if (a) { a.onended = null; a.onerror = null; a.pause(); fishAudioRef.current = null }
+    setFishPreviewing(false)
+  }, [])
+  // A stale sample must not follow a segment switch or survive unmount.
+  useEffect(() => () => stopFishPreview(), [stopFishPreview])
+  useEffect(() => { stopFishPreview() }, [segment?.id, stopFishPreview])
+
+  const previewFishVoice = useCallback(async () => {
+    if (!resolvedFishVoiceId) return
+    if (fishPreviewing) { stopFishPreview(); return }
+    try {
+      const src = customVoiceIds.has(resolvedFishVoiceId)
+        ? apiClient.getCustomVoiceSampleUrl(resolvedFishVoiceId)
+        : await apiClient.mediaUrl(`/api/voice-preview/${encodeURIComponent(resolvedFishVoiceId)}`)
+      const a = new Audio(src)
+      a.onended = () => { if (fishAudioRef.current === a) setFishPreviewing(false) }
+      a.onerror = () => { if (fishAudioRef.current === a) setFishPreviewing(false) }
+      fishAudioRef.current = a
+      setFishPreviewing(true)
+      await a.play()
+    } catch {
+      setFishPreviewing(false)
+    }
+  }, [resolvedFishVoiceId, fishPreviewing, customVoiceIds, stopFishPreview])
+
+  // ── Respeecher voice preview ──────────────────────────────────
+  // Per-row audition. The catalogue has no sample field, so the backend
+  // generates one take per voice and caches it on disk — first click costs a
+  // single metered render, every later play is free. Separate player from the
+  // Fish preview so auditioning a Respeecher voice never interrupts a Fish
+  // sample mid-play.
+  const rspAudioRef = useRef<HTMLAudioElement | null>(null)
+  const [rspPreviewingId, setRspPreviewingId] = useState<string | null>(null)
+  const stopRspPreview = useCallback(() => {
+    const a = rspAudioRef.current
+    if (a) { a.onended = null; a.onerror = null; a.pause(); rspAudioRef.current = null }
+    setRspPreviewingId(null)
+  }, [])
+  useEffect(() => () => stopRspPreview(), [stopRspPreview])
+
+  const previewRespeecherVoice = useCallback(async (voiceId: string) => {
+    if (rspPreviewingId === voiceId) { stopRspPreview(); return }
+    stopRspPreview()
+    try {
+      const src = await apiClient.mediaUrl(
+        `/api/respeecher/voice-preview/${encodeURIComponent(voiceId)}`
+      )
+      const a = new Audio(src)
+      a.onended = () => { if (rspAudioRef.current === a) setRspPreviewingId(null) }
+      a.onerror = () => { if (rspAudioRef.current === a) setRspPreviewingId(null) }
+      rspAudioRef.current = a
+      setRspPreviewingId(voiceId)
+      await a.play()
+    } catch {
+      setRspPreviewingId(null)
+    }
+  }, [rspPreviewingId, stopRspPreview])
+
   useEffect(() => {
     let cancelled = false
     setLoading(true)
@@ -222,6 +318,24 @@ export default function RespeecherPanel({
     }
     return out
   }, [voices])
+
+  // Take files are deterministic ({stem}_takeN.mp3) and overwritten on every
+  // race, but the player URL carried no cache-buster — a re-render served the
+  // OLD bodies from cache, which read as "stuck on the same three samples".
+  // Keying the URL by the take's seed gives every new race a fresh URL while an
+  // unchanged take (same seed = same audio) still hits the cache.
+  const takePathsKey = (segment?.respeecher_takes ?? []).join('|')
+  const takeSeedsKey = (segment?.respeecher_take_seeds ?? []).join('|')
+  const takeSrcs = useMemo(() => {
+    const takes = segment?.respeecher_takes ?? []
+    const seeds = segment?.respeecher_take_seeds ?? []
+    return takes.map((p, i) => {
+      const base = apiClient.getAudioFileUrl(jobId, basename(p))
+      const s = seeds[i]
+      return s != null ? `${base}&tk=${s}` : base
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId, takePathsKey, takeSeedsKey])
 
   if (!segment) {
     return (
@@ -327,6 +441,29 @@ export default function RespeecherPanel({
               {t('Fish Audio')}
             </button>
           </div>
+          {fishVoiceId && (
+            <button
+              type="button"
+              onClick={previewFishVoice}
+              disabled={!fishPreviewable}
+              title={
+                fishPreviewable
+                  ? `Preview this speaker's mapped Fish voice`
+                  : `'${fishVoiceId}' preset has no configured voice — nothing to preview`
+              }
+              aria-label={t("Preview this speaker's Fish voice")}
+              className={cn(
+                'shrink-0 h-6 w-6 rounded-full border flex items-center justify-center transition-colors',
+                !fishPreviewable
+                  ? 'border-slate-800 text-slate-600 cursor-not-allowed'
+                  : fishPreviewing
+                    ? 'border-amber-400/60 bg-amber-500/25 text-amber-200'
+                    : 'border-amber-500/40 text-amber-300/90 hover:border-amber-400/60 hover:text-amber-200 hover:bg-amber-500/10'
+              )}
+            >
+              {fishPreviewing ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3 ml-px" />}
+            </button>
+          )}
         </div>
         <button
           onClick={clearPanel}
@@ -367,7 +504,7 @@ export default function RespeecherPanel({
                 {i === 0 ? 'live' : `alt${i}`}
               </span>
               <TakePlayer
-                src={apiClient.getAudioFileUrl(jobId, basename(p))}
+                src={takeSrcs[i]}
                 accent={i === 0}
               />
             </div>
@@ -417,11 +554,29 @@ export default function RespeecherPanel({
                     )}
                   >
                     <span className="flex items-center gap-1 min-w-0">
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        aria-label={t(`Preview ${v.full_name || v.id}`)}
+                        title={t('Preview voice')}
+                        onClick={(e) => { e.stopPropagation(); previewRespeecherVoice(v.id) }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); previewRespeecherVoice(v.id) } }}
+                        className={cn(
+                          'shrink-0 h-4 w-4 rounded-full flex items-center justify-center transition-colors',
+                          rspPreviewingId === v.id
+                            ? 'bg-cyan-500/30 text-cyan-200'
+                            : 'text-cyan-300/70 hover:text-cyan-200 hover:bg-cyan-500/20'
+                        )}
+                      >
+                        {rspPreviewingId === v.id
+                          ? <Pause className="h-2.5 w-2.5" />
+                          : <Play className="h-2.5 w-2.5 ml-px" />}
+                      </span>
                       {v.is_best && <Star className="h-2.5 w-2.5 text-amber-400 shrink-0" />}
                       <span className="truncate text-[10px]">{v.full_name || v.id}</span>
                     </span>
                     {v.accent && (
-                      <span className="block text-[9px] text-slate-500 truncate">{v.accent}</span>
+                      <span className="block text-[9px] text-slate-500 truncate pl-5">{v.accent}</span>
                     )}
                   </button>
                 ))}

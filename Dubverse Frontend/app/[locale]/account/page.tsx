@@ -15,7 +15,7 @@ import {
   ExternalLink, Loader2, Clock, Plus, AlertTriangle, Trash2,
 } from "lucide-react"
 import Link from "next/link"
-import { BonusMinutesDialog } from "@/components/bonus-minutes-dialog"
+
 import {
   Dialog,
   DialogContent,
@@ -25,33 +25,29 @@ import {
 } from "@/components/ui/dialog"
 import { Header } from "@/components/header"
 import type { Database } from "@/lib/supabase/types"
-import { PLAN_MINUTES, PLAN_MINUTES_DEFAULT, type PlanType } from "@/lib/plan-features"
+import { useUsage } from "@/hooks/use-usage"
 import { useT } from '@/lib/use-t'
 
 type Profile = Database["public"]["Tables"]["profiles"]["Row"]
 type Subscription = Database["public"]["Tables"]["subscriptions"]["Row"]
-type Usage = Database["public"]["Tables"]["usage"]["Row"]
 type Payment = Database["public"]["Tables"]["payments"]["Row"]
 
 
 const PLAN_COLORS: Record<string, string> = {
-  basic: "#22D3EE",
-  premium: "#A855F7",
-  professional: "#FDB022",
+  free: "#22D3EE",
+  pro: "#A855F7",
 }
 
 export default function AccountPage() {
   const t = useT()
   const [profile, setProfile] = useState<Profile | null>(null)
   const [subscription, setSubscription] = useState<Subscription | null>(null)
-  const [usage, setUsage] = useState<Usage | null>(null)
   const [payments, setPayments] = useState<Payment[]>([])
   const [email, setEmail] = useState("")
   const [fullName, setFullName] = useState("")
   const [saving, setSaving] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [bonusBalance, setBonusBalance] = useState(0)
-  const [bonusDialogOpen, setBonusDialogOpen] = useState(false)
+  const quota = useUsage()
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [deleteConfirmText, setDeleteConfirmText] = useState("")
   const [deleting, setDeleting] = useState(false)
@@ -72,19 +68,14 @@ export default function AccountPage() {
 
     const { data: profileData } = await supabase.from("profiles").select("*").eq("id", user.id).single() as { data: Profile | null }
     const { data: subData } = await supabase.from("subscriptions").select("*").eq("user_id", user.id).in("status", ["active", "trialing"]).limit(1).single() as { data: Subscription | null }
-    const { data: usageData } = await supabase.from("usage").select("*").eq("user_id", user.id).order("month", { ascending: false }).limit(1).single() as { data: Usage | null }
     const { data: paymentsData } = await supabase.from("payments").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(10) as { data: Payment[] | null }
-
-    const { data: bonusData } = await supabase.from("bonus_minutes").select("balance").eq("user_id", user.id).single() as { data: { balance: number } | null }
 
     if (profileData) {
       setProfile(profileData)
       setFullName(profileData.full_name || "")
     }
     if (subData) setSubscription(subData)
-    if (usageData) setUsage(usageData)
     if (paymentsData) setPayments(paymentsData)
-    if (bonusData) setBonusBalance(bonusData.balance)
 
     setLoading(false)
   }
@@ -130,6 +121,18 @@ export default function AccountPage() {
     }
   }
 
+  async function handleTopUp() {
+    const { data: { session } } = await supabase.auth.getSession()
+    if (!session) return
+    const res = await fetch("/api/create-wallet-checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: session.user.id, email: session.user.email }),
+    })
+    const { url } = await res.json()
+    if (url) window.location.href = url
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-[#020817] flex items-center justify-center">
@@ -138,10 +141,10 @@ export default function AccountPage() {
     )
   }
 
-  const planLimit = PLAN_MINUTES[(subscription?.plan_type || "basic") as PlanType] ?? PLAN_MINUTES_DEFAULT
-  const minutesUsed = usage?.minutes_used || 0
+  const planLimit = quota.planLimit
+  const minutesUsed = quota.minutesUsed
   const usagePercent = planLimit > 0 ? Math.min((minutesUsed / planLimit) * 100, 100) : 0
-  const planColor = PLAN_COLORS[subscription?.plan_type || "basic"] || "#22D3EE"
+  const planColor = subscription ? "#A855F7" : "#22D3EE"
 
   return (
     <div className="min-h-screen bg-[#020817] relative overflow-hidden">
@@ -259,51 +262,43 @@ export default function AccountPage() {
                       </div>
                     )}
 
-                    {/* Usage */}
-                    {planLimit > 0 && (
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="text-[#94A3B8]">{t('Monthly Usage')}</span>
-                          <span className="text-white font-medium">
-                            {minutesUsed} / {planLimit} minutes
-                          </span>
-                        </div>
-                        <Progress value={usagePercent} className="h-2" />
-                        {usagePercent >= 80 && (
-                          <p className="text-yellow-400 text-xs">
-                            {usagePercent >= 100
-                              ? t('Usage limit reached. Upgrade for more minutes.') : t('Approaching usage limit.')}
-                          </p>
-                        )}
+                    {/* Usage — included render minutes from the quota row */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-[#94A3B8]">{t('Monthly Usage')}</span>
+                        <span className="text-white font-medium">
+                          {minutesUsed} / {planLimit} minutes
+                        </span>
                       </div>
-                    )}
+                      <Progress value={usagePercent} className="h-2" />
+                      {usagePercent >= 80 && (
+                        <p className="text-yellow-400 text-xs">
+                          {usagePercent >= 100
+                            ? t('Usage limit reached. Upgrade for more minutes.') : t('Approaching usage limit.')}
+                        </p>
+                      )}
+                    </div>
 
-                    {planLimit < 0 && (
-                      <p className="text-[#10B981] text-sm font-medium">
-                        {t('Unlimited usage on Professional plan')}
-                      </p>
-                    )}
-
-                    {/* Bonus Minutes */}
+                    {/* Wallet credit */}
                     <div className="bg-[#0F172A] rounded-lg p-4 border border-[#1E293B] space-y-2">
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <Clock className="h-4 w-4 text-[#22D3EE]" />
-                          <span className="text-[#94A3B8] text-sm">{t('Bonus Minutes Banked')}</span>
+                          <span className="text-[#94A3B8] text-sm">Wallet credit</span>
                         </div>
-                        <span className="text-[#22D3EE] font-semibold">{bonusBalance} minutes</span>
+                        <span className="text-[#22D3EE] font-semibold">{Math.floor(quota.bonusBalance)} minutes</span>
                       </div>
                       <p className="text-[#64748B] text-xs">
-                        {t('Bonus minutes never expire and carry over month-to-month. Used after your plan minutes.')}
+                        Prepaid render credit — never expires, used after your monthly included minutes.
                       </p>
                       <Button
-                        onClick={() => setBonusDialogOpen(true)}
+                        onClick={handleTopUp}
                         size="sm"
                         variant="outline"
                         className="border-[#22D3EE]/30 text-[#22D3EE] hover:bg-[#22D3EE]/10 cursor-pointer mt-1"
                       >
                         <Plus className="h-3 w-3 mr-1" />
-                        {t('Buy More Minutes')}
+                        Add credit
                       </Button>
                     </div>
 
@@ -315,7 +310,7 @@ export default function AccountPage() {
                       >
                         {t('Manage Subscription')}
                       </Button>
-                      {subscription.plan_type !== "professional" && (
+                      {subscription.plan_type !== "pro" && (
                         <Button asChild className="bg-gradient-to-r from-[#A855F7] to-[#7C3AED] text-white">
                           <Link href="/subscribe?upgrade=true">{t('Upgrade Plan')}</Link>
                         </Button>
@@ -515,15 +510,6 @@ export default function AccountPage() {
           </div>
         </DialogContent>
       </Dialog>
-
-      <BonusMinutesDialog
-        open={bonusDialogOpen}
-        onOpenChange={setBonusDialogOpen}
-        planMinutesUsed={minutesUsed}
-        planMinutesLimit={planLimit}
-        bonusBalance={bonusBalance}
-        planType={subscription?.plan_type}
-      />
     </div>
   )
 }

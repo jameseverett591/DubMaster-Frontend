@@ -400,6 +400,15 @@ def transcribe_cantonese(
         else:
             merged = []
 
+        # ── Dedupe ──
+        # The Deepgram path never ran this: dedupe lived only inside the legacy
+        # Tencent+Paraformer merge. Deepgram utterances plus the diarization
+        # re-split leave the same line twice — identical start times, or two
+        # overlapping utterances that both transcribed the same phrase — and
+        # each copy went on to be translated and voiced. See _deduplicate_segments.
+        from app.pipeline.asr_merge import deduplicate_segments
+        merged = deduplicate_segments(merged)
+
         # ── Filter repetition loops in merged output ──
         from app.pipeline.transcribe_audio import _filter_repetition_loops, _filter_hallucinations
         merged = _filter_repetition_loops(merged)

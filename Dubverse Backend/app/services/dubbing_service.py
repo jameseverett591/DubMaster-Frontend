@@ -439,8 +439,20 @@ class DubbingService:
             return transcript
 
         MAX_MERGED_CHARS = 80  # hard cap on already-accumulated text before merging more
-        MAX_MERGE_COUNT = 2    # never chain more than 2 segments into one TTS call
+        MAX_MERGE_COUNT = 3    # a sentence torn into three fragments is common; four is not
         MAX_MERGED_DURATION = 8.0  # never create a merged segment longer than 8 seconds
+        # How far the next fragment may START BEFORE the previous one ENDS and
+        # still be the same utterance. The old rule was `gap >= 0.0`, which made
+        # overlapping same-speaker segments unmergeable — and overlap is exactly
+        # the signature of a sentence the ASR tore in two (word-level timestamps
+        # bleed across the cut: 看挺適|合你 came out as [27.88-31.08] and
+        # [30.62-32.22], gap -0.46s, and was translated as two separate lines).
+        # Bounded so genuine crosstalk between two utterances a second apart is
+        # still kept separate. Same-speaker only, as before.
+        MAX_OVERLAP = 0.6
+
+        def _is_cjk(s: str) -> bool:
+            return bool(re.search(r"[\u4e00-\u9fff]", s))
 
         merged: List[Dict] = [dict(transcript[0])]  # deep-ish copy
         merge_counts: List[int] = [1]
@@ -449,13 +461,26 @@ class DubbingService:
             prev = merged[-1]
             gap = float(seg.get("start", 0)) - float(prev.get("end", 0))
             same_speaker = (seg.get("speaker") or "speaker-1") == (prev.get("speaker") or "speaker-1")
-            merged_text = prev["text"].rstrip() + " " + seg.get("text", "").lstrip()
+            # CJK has no inter-word space; a space inserted at the join point
+            # looks like a word boundary to the translator and to the
+            # punctuation-snap splitter, right where the tear was.
+            joiner = "" if _is_cjk(prev["text"]) and _is_cjk(seg.get("text", "")) else " "
+            merged_text = prev["text"].rstrip() + joiner + seg.get("text", "").lstrip()
             merged_duration = float(seg.get("end", 0)) - float(prev.get("start", 0))
 
-            if same_speaker and gap >= 0.0 and gap < max_gap and len(merged_text) <= MAX_MERGED_CHARS and merge_counts[-1] < MAX_MERGE_COUNT and merged_duration <= MAX_MERGED_DURATION:
+            if same_speaker and -MAX_OVERLAP <= gap < max_gap and len(merged_text) <= MAX_MERGED_CHARS and merge_counts[-1] < MAX_MERGE_COUNT and merged_duration <= MAX_MERGED_DURATION:
                 # Merge: extend the previous segment
                 prev["text"]  = merged_text
-                prev["end"]   = seg.get("end", prev["end"])
+                prev["end"]   = max(float(prev["end"]), float(seg.get("end", prev["end"])))
+                # Carry word timing forward. split_translated_sentences uses
+                # the merged segment's `words` to hand each English sentence
+                # its own slice of source text by timestamp; with only the
+                # first fragment's words present it fell back to a raw
+                # character split and re-tore the source at the same place.
+                if prev.get("words") or seg.get("words"):
+                    prev["words"] = list(prev.get("words") or []) + list(seg.get("words") or [])
+                if seg.get("confidence") is not None and prev.get("confidence") is not None:
+                    prev["confidence"] = min(float(prev["confidence"]), float(seg["confidence"]))
                 merge_counts[-1] += 1
                 logger.info(
                     f"[MERGE] Merged segment into [{prev['start']:.2f}-{prev['end']:.2f}] "
@@ -1156,6 +1181,43 @@ class DubbingService:
 
             # Stabilize speaker assignments to prevent voice jumping.
             transcript = self._stabilize_speakers(transcript)
+
+            # Dedupe BEFORE merging. Transcription runs on the GPU worker, whose
+            # image may lag this code, so the same pass also lives here where
+            # the transcript lands: a repeated phrase at an utterance join, or
+            # one line emitted twice, would otherwise be concatenated by the
+            # merge below and then translated — and voiced — twice.
+            try:
+                from app.pipeline.asr_merge import deduplicate_segments
+                transcript = deduplicate_segments(transcript)
+            except Exception as _dd_err:
+                logger.warning(f"[DEDUP] skipped: {_dd_err}")
+
+            # Known ASR mishearings — backend copy of the worker's
+            # _ASR_CORRECTIONS map. The GPU image lags this code, and even a
+            # rebuilt worker can't catch a substitution like 收聲-for-打得 via
+            # keyterms: 收聲 is itself legitimate vocabulary, so boosting it
+            # helps one line and hurts another. Phrase-level corrections are
+            # context-bearing enough to be safe.
+            if source_norm.lower() in ("yue", "zh", "cmn", "zh-cn", "zh-hk", "zh-yue"):
+                _ASR_CORRECTIONS = {
+                    # Deepgram hears 收聲 for 打得 at this collocation; the two
+                    # are near-homophonic and both plausible alone. Boosting
+                    # both already happened via keyterms — the model still
+                    # picked the wrong one, so correct the phrase, not the word.
+                    "居然沒有收聲": "居然沒有一個打得",
+                    "居然沒收聲": "居然沒有一個打得",
+                    "沒有收聲": "沒有一個打得",
+                }
+                for _seg in transcript:
+                    _txt = _seg.get("text", "")
+                    for _wrong, _right in _ASR_CORRECTIONS.items():
+                        if _wrong in _txt:
+                            _seg["text"] = _txt.replace(_wrong, _right)
+                            logger.info(
+                                f"[ASR-CORRECT] '{_wrong}' -> '{_right}' at {_seg.get('start', 0):.2f}s"
+                            )
+                            _txt = _seg["text"]
 
             # Merge consecutive same-speaker segments with small gaps to produce
             # longer, more natural TTS calls and uniform pacing.

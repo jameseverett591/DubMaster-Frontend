@@ -8,15 +8,12 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Badge } from "@/components/ui/badge"
-import { Mic2, Mail, Lock, User, Github, Check, Loader2, Eye, EyeOff } from "lucide-react"
+import { Mic2, Mail, Lock, User, Github, Loader2, Eye, EyeOff } from "lucide-react"
 import Link from "next/link"
 import { useT } from '@/lib/use-t'
 
 export default function SignUpPage() {
   const tUi = useT()
-  const [selectedPlan, setSelectedPlan] = useState<"basic" | "premium" | "professional">("basic")
-  const [isYearly, setIsYearly] = useState(false)
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
@@ -32,63 +29,7 @@ export default function SignUpPage() {
   const t = useTranslations('auth')
   const tc = useTranslations('common')
   const tn = useTranslations('nav')
-  const tp = useTranslations('pricing')
   const te = useTranslations('errors')
-
-  const tiers = [
-    {
-      key: "basic" as const,
-      name: tp('basic.name'),
-      tagline: tp('basic.tagline'),
-      monthlyPrice: 20,
-      yearlyPrice: 192,
-      yearlySavings: 48,
-      color: "#22D3EE",
-      features: [
-        tp('basic.features.minutes'),
-        tp('basic.features.voiceCloning'),
-        tp('basic.features.autoDubbing'),
-        tp('basic.features.languages'),
-        tp('basic.features.qc'),
-        tp('basic.features.turnaround'),
-      ],
-    },
-    {
-      key: "premium" as const,
-      name: tp('premium.name'),
-      tagline: tp('premium.taglineShort'),
-      monthlyPrice: 49,
-      yearlyPrice: 470,
-      yearlySavings: 118,
-      color: "#A855F7",
-      features: [
-        tp('premium.features.minutes'),
-        tp('premium.features.editor'),
-        tp('premium.features.qc'),
-        tp('premium.features.turnaround'),
-        tp('premium.features.emotion'),
-        tp('premium.features.rollover'),
-      ],
-      popular: true,
-    },
-    {
-      key: "professional" as const,
-      name: tp('professional.name'),
-      tagline: tp('professional.taglineShort'),
-      monthlyPrice: 149,
-      yearlyPrice: 1430,
-      yearlySavings: 358,
-      color: "#FDB022",
-      features: [
-        tp('professional.features.unlimited'),
-        tp('professional.features.allFeatures'),
-        tp('professional.features.revisions'),
-        tp('professional.features.manager'),
-        tp('professional.features.whiteLabel'),
-        tp('professional.features.api'),
-      ],
-    },
-  ]
 
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -106,7 +47,7 @@ export default function SignUpPage() {
       email,
       password,
       options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback?plan=${selectedPlan}&interval=${isYearly ? 'year' : 'month'}`,
+        emailRedirectTo: `${window.location.origin}/auth/callback`,
         data: { full_name: fullName },
       },
     })
@@ -116,8 +57,9 @@ export default function SignUpPage() {
       setLoading(false)
     } else if (data.user) {
       if (data.session) {
-        // Email confirmation not required — go straight to checkout
-        router.push(`/checkout?plan=${selectedPlan}&interval=${isYearly ? 'year' : 'month'}`)
+        // Email confirmation not required — straight into the studio. Renders
+        // are metered, signup isn't: the account starts on the free tier.
+        router.push("/studio")
       } else {
         // Email confirmation required — the email link includes plan/interval
         setSuccess(true)
@@ -127,16 +69,10 @@ export default function SignUpPage() {
   }
 
   const handleOAuth = async (provider: "google" | "github") => {
-    // Store selected plan before OAuth redirect
-    sessionStorage.setItem('selectedPlan', JSON.stringify({
-      planKey: selectedPlan,
-      isYearly
-    }))
-
     await supabase.auth.signInWithOAuth({
       provider,
       options: {
-        redirectTo: `${window.location.origin}/auth/callback?plan=${selectedPlan}&interval=${isYearly ? 'year' : 'month'}`,
+        redirectTo: `${window.location.origin}/auth/callback`,
       },
     })
   }
@@ -151,7 +87,7 @@ export default function SignUpPage() {
             </div>
             <CardTitle className="text-2xl text-white">{t('checkEmail')}</CardTitle>
             <CardDescription className="text-[#94A3B8]"
-              dangerouslySetInnerHTML={{ __html: t('confirmEmailMessage', { email, plan: tiers.find(tier => tier.key === selectedPlan)?.name ?? selectedPlan }) }}
+              dangerouslySetInnerHTML={{ __html: t('confirmEmailMessage', { email, plan: 'Free' }) }}
             />
           </CardHeader>
         </Card>
@@ -175,108 +111,11 @@ export default function SignUpPage() {
             <span className="text-2xl font-bold text-white">{tc('dubmaster')}</span>
           </Link>
           <h1 className="text-3xl md:text-4xl font-bold text-white mb-2">
-            {t('choosePlanAndCreate')}
+            {t('createAccount')}
           </h1>
           <p className="text-[#94A3B8] text-lg">
-            {t('selectPlanAndStart')}
+            Every feature unlocked — you only pay to render. 3 free minutes every month.
           </p>
-        </div>
-
-        {/* Billing Toggle */}
-        <div className="flex items-center justify-center gap-3 mb-8">
-          <span className={`text-sm font-medium transition-colors ${!isYearly ? "text-white" : "text-[#64748B]"}`}>
-            {tp('monthly')}
-          </span>
-          <button
-            onClick={() => setIsYearly(!isYearly)}
-            className="relative w-12 h-6 rounded-full transition-all duration-300 bg-[#A855F7] shadow-[0_0_10px_rgba(168,85,247,0.4)]"
-          >
-            <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform duration-300 ${isYearly ? "translate-x-6" : "translate-x-0"}`} />
-          </button>
-          <span className={`text-sm font-medium transition-colors ${isYearly ? "text-white" : "text-[#64748B]"}`}>
-            {tp('yearly')} <span className="text-[#10B981]">({tp('saveUpTo')})</span>
-          </span>
-        </div>
-
-        {/* Plan Selection Cards */}
-        <div className="grid md:grid-cols-3 gap-6 mb-12">
-          {tiers.map((tier) => {
-            const isSelected = selectedPlan === tier.key
-            const isPremium = tier.popular
-
-            return (
-              <button
-                key={tier.key}
-                onClick={() => setSelectedPlan(tier.key)}
-                className="relative text-left transition-all duration-300"
-              >
-                {isPremium && (
-                  <div className="absolute -top-3 left-1/2 -translate-x-1/2 z-10">
-                    <Badge className="bg-gradient-to-r from-[#FDB022] to-[#F59E0B] text-black font-bold px-3 py-1 text-xs">
-                      {tp('mostPopular')}
-                    </Badge>
-                  </div>
-                )}
-
-                <Card
-                  className={`h-full transition-all duration-300 ${
-                    isSelected
-                      ? "border-2 shadow-[0_0_30px_rgba(168,85,247,0.4)] scale-105"
-                      : "border hover:border-[#A855F7]/50"
-                  }`}
-                  style={{
-                    borderColor: isSelected ? tier.color : "#334155",
-                    backgroundColor: "#020817",
-                  }}
-                >
-                  <div
-                    className="absolute top-0 left-0 right-0 h-0.5"
-                    style={{
-                      background: `linear-gradient(90deg, ${tier.color}, ${tier.color}80, ${tier.color})`,
-                    }}
-                  />
-
-                  <CardHeader className={isPremium ? "pt-8" : "pt-6"}>
-                    <CardTitle className="text-xl text-white flex items-center justify-between">
-                      {tier.name}
-                      {isSelected && (
-                        <div
-                          className="w-6 h-6 rounded-full flex items-center justify-center"
-                          style={{ backgroundColor: tier.color }}
-                        >
-                          <Check className="h-4 w-4 text-white" />
-                        </div>
-                      )}
-                    </CardTitle>
-
-                    <div className="mt-4">
-                      <div className="flex items-baseline gap-1">
-                        <span className="text-3xl font-bold" style={{ color: tier.color }}>
-                          ${isYearly ? tier.yearlyPrice.toLocaleString() : tier.monthlyPrice.toLocaleString()}
-                        </span>
-                        <span className="text-[#94A3B8]">/{isYearly ? tp('perYear') : tp('perMonth')}</span>
-                      </div>
-                      {isYearly && (
-                        <p className="text-[#10B981] text-sm mt-1 font-medium">
-                          {tp('savePerYear', { amount: tier.yearlySavings.toLocaleString() })}
-                        </p>
-                      )}
-                    </div>
-                  </CardHeader>
-
-                  <CardContent className="space-y-3">
-                    <p className="text-[#94A3B8] text-sm italic mb-3">{tier.tagline}</p>
-                    {tier.features.map((feature, i) => (
-                      <div key={i} className="flex items-start gap-2">
-                        <Check className="h-4 w-4 mt-0.5 shrink-0" style={{ color: tier.color }} />
-                        <span className="text-[#E2E8F0] text-sm">{feature}</span>
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
-              </button>
-            )
-          })}
         </div>
 
         {/* Sign Up Form */}
@@ -286,9 +125,7 @@ export default function SignUpPage() {
           <CardHeader className="text-center pb-4">
             <CardTitle className="text-2xl text-white">{t('createAccount')}</CardTitle>
             <CardDescription className="text-[#94A3B8]">
-              {t('youSelected')} <strong style={{ color: tiers.find(t => t.key === selectedPlan)?.color }}>
-                {tiers.find(t => t.key === selectedPlan)?.name}
-              </strong> ({isYearly ? tp('yearly') : tp('monthly')})
+              Free tier — 3 render minutes/month, no card required.
             </CardDescription>
           </CardHeader>
 
@@ -417,9 +254,6 @@ export default function SignUpPage() {
                 type="submit"
                 disabled={loading}
                 className="w-full bg-gradient-to-r from-[#A855F7] to-[#22D3EE] text-white font-semibold hover:opacity-90 cursor-pointer disabled:opacity-50"
-                style={{
-                  background: loading ? undefined : `linear-gradient(90deg, ${tiers.find(t => t.key === selectedPlan)?.color}, #22D3EE)`,
-                }}
               >
                 {loading ? (
                   <>
@@ -427,7 +261,7 @@ export default function SignUpPage() {
                     {t('creatingAccount')}
                   </>
                 ) : (
-                  t('createAccountAndStart', { plan: tiers.find(t => t.key === selectedPlan)?.name })
+                  t('createAccount')
                 )}
               </Button>
             </form>

@@ -164,21 +164,52 @@ def delete_global_rule(user_id: str, rule_id: str) -> bool:
 # Resolution — merge scopes into the params the pipeline already understands.
 # ---------------------------------------------------------------------------
 
+# Language families a rule can be scoped to via conditions.languages.
+# A rule carrying conditions.languages=["yue","zh","cmn",...] only applies
+# when the job's source language is in that set; no languages condition
+# means the rule applies to every job.
+CJK_SOURCE_LANGS = {
+    "yue", "zh-yue", "zh-hk", "yue-hk", "zh", "cmn", "zho",
+    "zh-cn", "zh-tw", "zh-hans", "zh-hant", "zh-sg",
+}
+
+# UI shortcut: the "Cantonese / Mandarin" section in the panel is just a
+# languages condition pre-filled with the CJK family.
+CJK_LANGUAGE_SCOPE = sorted(CJK_SOURCE_LANGS)
+
+
+def _language_matches(rule: Dict[str, Any], source_language: Optional[str]) -> bool:
+    """A rule applies when it carries no languages condition (global to all
+    source languages) or when the job's source language is in its list."""
+    langs = (rule.get("conditions") or {}).get("languages")
+    if not langs:
+        return True
+    src = (source_language or "").lower().strip()
+    if not src:
+        return False
+    return src in {str(l).lower().strip() for l in langs}
+
+
 def resolve_rules(
     job_rules: Optional[List[Dict[str, Any]]] = None,
     global_rules: Optional[List[Dict[str, Any]]] = None,
+    source_language: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Effective ruleset for one job.
 
     Global rules apply first; job rules override them (spec §10 precedence:
     job > global, explicit > inferred). Disabled rules never apply — an
-    inferred rule arrives disabled until the director accepts it.
+    inferred rule arrives disabled until the director accepts it. Rules
+    carrying conditions.languages only fire when the job's source language
+    matches (the Cantonese/Mandarin section).
 
     Returns the merged translation/TTS params plus the rule ids that fired,
     so "Rules applied (N)" is a fact, not a guess.
     """
-    all_rules = [r for r in (global_rules or []) if r.get("enabled")] + \
-                [r for r in (job_rules or []) if r.get("enabled")]
+    all_rules = [
+        r for r in (global_rules or []) + (job_rules or [])
+        if r.get("enabled") and _language_matches(r, source_language)
+    ]
 
     localized_aliases: Dict[str, str] = {}
     character_profiles: Dict[str, Dict[str, Any]] = {}   # keyed by name — job wins

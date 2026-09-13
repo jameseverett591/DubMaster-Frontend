@@ -73,7 +73,15 @@ export interface RuleConditions {
   emotion?: string
   speed?: number
   pitch?: number
+  // Source-language scope — e.g. ['yue','zh','cmn',...] for the
+  // Cantonese/Mandarin section. Absent = applies to every source language.
+  languages?: string[]
 }
+
+export const CJK_LANGUAGE_SCOPE = [
+  'yue', 'zh-yue', 'zh-hk', 'yue-hk', 'zh', 'cmn', 'zho',
+  'zh-cn', 'zh-tw', 'zh-hans', 'zh-hant', 'zh-sg',
+]
 
 export interface Rule {
   id: string
@@ -1682,7 +1690,13 @@ class DubVerseAPIClient {
     if (!response.ok) {
       if (response.status === 404) throw new JobNotFoundError(jobId)
       const error = await response.json().catch(() => ({ detail: response.statusText }))
-      throw new Error(error.detail || `Failed to rebuild video: ${response.statusText}`)
+      // detail may be a structured object — the 402 quota response carries
+      // {code, message, shortfall_cents, balance} — so surface its message,
+      // not "[object Object]".
+      const detail = typeof error.detail === 'object' && error.detail !== null
+        ? (error.detail.message ?? JSON.stringify(error.detail))
+        : error.detail
+      throw new Error(detail || `Failed to rebuild video: ${response.statusText}`)
     }
     return response.json()
   }
@@ -2030,6 +2044,7 @@ export function getStatusMessage(status: JobStatusValue): string {
     extracting_audio: 'Extracting audio track...',
     diarizing: 'Identifying speakers...',
     transcribing: 'Transcribing with Whisper...',
+    ready_for_review: 'Ready for review',
     ready_for_voice_selection: 'Ready for voice selection',
     translating: 'Translating dialogue...',
     synthesizing: 'Generating dubbed audio...',

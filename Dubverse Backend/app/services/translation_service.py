@@ -385,6 +385,37 @@ def split_translated_sentences(segments: list) -> list:
     return out
 
 
+# How many already-translated lines each chunk is shown from the chunks before
+# it. Enough to carry a running exchange (who was just threatened, what "that
+# plan" is) without spending the token budget on the whole film.
+_CONTEXT_LINES = 12
+
+
+def build_prior_context_block(prior: List[Dict], limit: int = _CONTEXT_LINES) -> str:
+    """Read-only continuity block for chunked translation.
+
+    Chunks used to be translated in isolation: chunk N saw none of chunk N-1,
+    so every referent — 佢/他 ('him'), 'that', 'as I said' — had to be guessed
+    from the static scene summary alone, and the guesses compounded over a
+    long film. This hands each chunk the tail of what was ALREADY translated,
+    source → target, so pronouns and running names resolve against the actual
+    preceding dialogue rather than nothing.
+    """
+    tail = [s for s in (prior or []) if (s.get("text") or "").strip()][-limit:]
+    if not tail:
+        return ""
+    lines = []
+    for s in tail:
+        spk = s.get("speaker") or s.get("speaker_label") or "?"
+        src = (s.get("source_text") or "").strip().replace("\n", " ")[:60]
+        tgt = (s.get("text") or "").strip().replace("\n", " ")[:90]
+        lines.append(f"[{spk}] {src} → {tgt}" if src else f"[{spk}] {tgt}")
+    return (
+        "PRECEDING DIALOGUE (already translated — continuity only; do NOT translate, "
+        "re-output, or mark these):\n" + "\n".join(lines) + "\n\n"
+    )
+
+
 def _aligned(result, chunk, provider: str, start: int):
     """Return result only if it lines up 1:1 with the chunk that was sent.
 
@@ -710,11 +741,20 @@ class TranslationService:
 
         # ── Rulebook (Feature B) — the director's standing decisions resolve
         # here so EVERY caller (dub, translate-only, retranslate) inherits them
-        # without per-route wiring. Job rules override global; both land on the
-        # injection points the pipeline already had (aliases, personas,
-        # prompt directives, post-translation fixes).
+        # without per-route wiring. The rulebook is GLOBAL — it applies to
+        # every job and every source language. Individual rules may carry a
+        # conditions.languages scope (e.g. the Cantonese/Mandarin section),
+        # which resolve_rules filters against source_norm.
         self._rulebook_directives: List[str] = []
         self._rulebook_fixes: Dict[str, str] = {}
+        _src_lower = (source_language or "").lower().strip()
+        # The empty-source integrity guard below stays CJK-scoped — its
+        # failure mode (LLM fabricating lines from punctuation scraps) is
+        # specific to the Cantonese/Mandarin pipeline.
+        self._cjk_source = _src_lower in {
+            "yue", "zh-yue", "zh-hk", "yue-hk", "zh", "cmn", "zho",
+            "zh-cn", "zh-tw", "zh-hans", "zh-hant", "zh-sg",
+        }
         if job_id:
             try:
                 from app.services.job_manager import job_manager
@@ -724,7 +764,11 @@ class TranslationService:
                 )
                 _job = await job_manager.get_job(job_id)
                 _uid = getattr(_job, "user_id", "") if _job else ""
-                _rb = resolve_rules(load_job_rules(job_id), load_global_rules(_uid))
+                _rb = resolve_rules(
+                    load_job_rules(job_id),
+                    load_global_rules(_uid),
+                    source_language=source_language,
+                )
                 if _rb["localized_aliases"]:
                     localized_aliases = {**(localized_aliases or {}), **_rb["localized_aliases"]}
                 if _rb["character_profiles"]:
@@ -742,6 +786,17 @@ class TranslationService:
             except Exception as _rb_exc:
                 # A broken rulebook must never block translation.
                 logger.warning(f"[RULEBOOK] {job_id}: resolve failed, continuing without rules: {_rb_exc}")
+
+        # Speaker -> persona map for per-segment annotation in the batch
+        # prompts. Rulebook persona rules carry a `speaker` field; user-set
+        # character profiles may too. This is what lets the translator know a
+        # line is Mrs. Ip's (dismissive, protective) rather than a generic
+        # utterance — fixing classes like sarcasm-read-as-invitation.
+        self._speaker_personas: Dict[str, Dict] = {
+            str(cp.get("speaker") or "").strip(): cp
+            for cp in (character_profiles or [])
+            if isinstance(cp, dict) and cp.get("speaker")
+        }
 
         source_norm = normalize_language_code(source_language, allow_auto=True)
         target_norm = normalize_language_code(target_language, strict=True)
@@ -767,6 +822,13 @@ class TranslationService:
             if conf is None:
                 seg["translation_flagged"] = True
                 seg["flag_reason"] = "unknown_asr_provenance"
+            elif seg.get("gap_filled"):
+                # Fallback engine filled a hole the primary left — usually the
+                # noisy stretch at the scene's tail. Whisper's self-reported
+                # confidence isn't calibrated to Deepgram's, so it can't clear
+                # the gate on its own.
+                seg["translation_flagged"] = True
+                seg["flag_reason"] = "gap_filled_fallback_asr"
             elif conf < LOW_CONFIDENCE_THRESHOLD:
                 seg["translation_flagged"] = True
                 seg["flag_reason"] = "low_asr_confidence"
@@ -927,10 +989,37 @@ class TranslationService:
         partial matches are already covered by the prompt hint. No-ops when the
         job has no rulebook — _rulebook_fixes defaults to {}."""
         fixes = getattr(self, "_rulebook_fixes", None)
-        if not fixes or not segments:
+        if fixes and segments:
+            from app.services.rulebook import apply_translation_fixes
+            apply_translation_fixes(segments, fixes)
+        # Source-integrity guard is Cantonese/Mandarin-only — its failure mode
+        # (LLM fabricating a line from punctuation-only CJK scraps) is specific
+        # to this pipeline.
+        if getattr(self, "_cjk_source", False):
+            self._enforce_source_integrity(segments)
+
+    @staticmethod
+    def _enforce_source_integrity(segments: Optional[List[Dict]]) -> None:
+        """A segment whose source is punctuation-only ("..", "吧有沒有" scraps
+        that carry no sentence) has nothing to translate — but an LLM shown "..""
+        inside a batch will still invent a plausible-sounding line for it.
+        Zero the translation and flag it for review instead: an empty line is
+        honest, a fabricated one contaminates the dub."""
+        if not segments:
             return
-        from app.services.rulebook import apply_translation_fixes
-        apply_translation_fixes(segments, fixes)
+        for seg in segments:
+            src = (seg.get("source_text") or "").strip()
+            # Anything with a CJK ideograph or a word character has content.
+            if src and not re.search(r"[一-鿿A-Za-z0-9]", src):
+                if seg.get("text", "").strip():
+                    seg["text"] = ""
+                    seg["translation_flagged"] = True
+                    seg["flag_reason"] = "empty_source"
+                    seg.setdefault("qc_findings", []).append({
+                        "code": "empty_source",
+                        "reason": "Source segment carried no translatable content; "
+                                  "LLM output suppressed rather than fabricated.",
+                    })
 
     # ── Batch-translation line markers ────────────────────────────────────────
     # Shared by _translate_segments_claude and _translate_segments_gpt. Both send
@@ -946,6 +1035,22 @@ class TranslationService:
         retries) so a retry can't anchor on the same failure pattern."""
         return [secrets.token_hex(3) for _ in range(n)]
 
+    def _speaker_tag(self, seg: Dict) -> str:
+        """Short persona tag for a batch line, e.g. ' [Mrs. Ip — clipped, dismissive]'.
+
+        Personas resolve through the speaker field — character_profiles and
+        rulebook persona rules both carry it. Empty string when the segment's
+        speaker has no profile, so unmapped speakers cost nothing."""
+        cp = getattr(self, "_speaker_personas", {}).get(seg.get("speaker") or "")
+        if not cp:
+            return ""
+        name = cp.get("name") or seg.get("speaker", "")
+        traits = cp.get("traits") or []
+        if isinstance(traits, str):
+            traits = [t.strip() for t in traits.split(",") if t.strip()]
+        tag = name if not traits else f"{name} — {', '.join(traits[:3])}"
+        return f" [{tag}]"
+
     def _parse_marked_reply(self, reply: str) -> List[Tuple[str, str]]:
         """(marker, text) pairs in reply order. Deliberately preserves duplicates
         and doesn't dedupe — _validate_marked_mapping decides what's fatal."""
@@ -953,7 +1058,11 @@ class TranslationService:
         for line in reply.splitlines():
             m = _MARKER_LINE_RE.match(line)
             if m:
-                pairs.append((m.group(1), m.group(2).strip()))
+                text = m.group(2).strip()
+                # Defensive: the model is told not to echo the [Name — traits]
+                # speaker tag, but strip a leading one if it leaks through.
+                text = re.sub(r"^\[[^\]\n]{0,50}—[^\]\n]{0,80}\]\s*", "", text)
+                pairs.append((m.group(1), text))
         return pairs
 
     def _validate_marked_mapping(
@@ -984,12 +1093,21 @@ class TranslationService:
         velma_context: Optional[Dict] = None,
         dubbing_style: Optional[str] = None,
         localized_aliases: Optional[Dict[str, str]] = None,
+        film_segments: Optional[List[Dict]] = None,
+        prior_context: Optional[List[Dict]] = None,
     ) -> Optional[List[Dict]]:
         """
         Translate segments using Claude via the Anthropic API.
 
         Primary LLM translator for Cantonese → English dubbing.
         Claude understands Cantonese grammar, particles, and martial-arts context.
+
+        film_segments: the WHOLE job's segments when `segments` is one chunk of
+            it. Name mappings and the cast/pronoun list are built from this, so
+            a name is rendered the same way in chunk 9 as in chunk 3 and a
+            speaker who happens to be silent in this chunk is still in the cast.
+        prior_context: already-translated segments from the preceding chunks,
+            shown read-only for continuity (see build_prior_context_block).
         """
         import httpx
 
@@ -1003,10 +1121,20 @@ class TranslationService:
             results: List[Dict] = []
             for start in range(0, len(segments), _CHUNK_SIZE):
                 chunk = segments[start:start + _CHUNK_SIZE]
+                # Every chunk is handed the whole film for names/cast and the
+                # tail of what has already been translated for continuity.
+                # Previously each chunk was a cold start — see the module
+                # docstring on build_prior_context_block for what that cost.
+                _ctx = dict(
+                    film_segments=segments,
+                    prior_context=results[-_CONTEXT_LINES:],
+                )
                 chunk_result = _aligned(
                     await self._translate_segments_claude(
                         chunk, target_language, source_language, character_profiles,
+                        velma_context=velma_context,
                         dubbing_style=dubbing_style, localized_aliases=localized_aliases,
+                        **_ctx,
                     ),
                     chunk, "Claude", start,
                 )
@@ -1026,7 +1154,9 @@ class TranslationService:
                     chunk_result = _aligned(
                         await self._translate_segments_claude(
                             chunk, target_language, source_language, character_profiles,
+                            velma_context=velma_context,
                             dubbing_style=dubbing_style, localized_aliases=localized_aliases,
+                            **_ctx,
                         ),
                         chunk, "Claude (retry)", start,
                     )
@@ -1039,6 +1169,7 @@ class TranslationService:
                         await self._translate_segments_gpt(
                             chunk, target_language, source_language, character_profiles,
                             dubbing_style=dubbing_style, localized_aliases=localized_aliases,
+                            **_ctx,
                         ),
                         chunk, "GPT-4", start,
                     )
@@ -1067,6 +1198,10 @@ class TranslationService:
         target_name = LANGUAGE_NAMES.get(target_language, "English")
 
         texts = [seg.get("text", "") for seg in segments]
+        # Film-wide views for the prompt sections that must be consistent
+        # across chunks. Falls back to this chunk when translating unchunked.
+        _film = film_segments or segments
+        _film_texts = [s.get("source_text") or s.get("text", "") for s in _film]
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
         entity_replacements_per_seg: List[List[Tuple[str, str]]] = []
@@ -1086,9 +1221,11 @@ class TranslationService:
 
         def _build_marked_lines(markers: List[str]) -> str:
             return "\n".join(
-                f"[[SEG-{markers[i]}]] ({_slot(segments[i])}) {p}"
+                f"[[SEG-{markers[i]}]] ({_slot(segments[i])}){self._speaker_tag(segments[i])} {p}"
                 for i, p in enumerate(protected)
             )
+
+        _prior_block = build_prior_context_block(prior_context or [])
 
         # Select the translation prompt based on the requested dubbing style.
         # "literal" (default env fallback) preserves romanization and forbids natural rewrites.
@@ -1099,8 +1236,11 @@ class TranslationService:
 
         # Optional per-job localization mappings (e.g., Brother Gen -> Broker).
         # Only apply in natural mode; literal mode must preserve source names exactly.
+        # Built from the WHOLE film, not this chunk: a per-chunk build rendered
+        # the same character "Master Jin" in one chunk and "Brother Jin" in
+        # the next, depending on which lines happened to fall in each.
         if not _is_literal:
-            _localized_mapping = build_localized_name_mapping_prompt(texts, extra=localized_aliases)
+            _localized_mapping = build_localized_name_mapping_prompt(_film_texts, extra=localized_aliases)
             if _localized_mapping:
                 system_prompt_parts.append("")
                 system_prompt_parts.append(_localized_mapping)
@@ -1168,9 +1308,11 @@ class TranslationService:
                     "but do NOT add information not present in the source text."
                 )
 
-        # Speaker gender map — prevents him/her pronoun errors in translation
+        # Speaker gender map — prevents him/her pronoun errors in translation.
+        # Whole-film: a speaker silent in this chunk but referred to in it
+        # ("I won't kill him") must still be in the cast list to resolve.
         _gender_map: dict = {}
-        for _seg in segments:
+        for _seg in _film:
             _spk = _seg.get("speaker") or _seg.get("speaker_label", "")
             _gender = (_seg.get("speaker_gender") or _seg.get("gender") or "").lower().strip()
             if _spk and _gender and _spk not in _gender_map:
@@ -1214,7 +1356,7 @@ class TranslationService:
         system_prompt_parts.append("- Short exclamations must stay short (1-3 syllables).")
         system_prompt_parts.append("- NEVER combine two [[SEG-...]] marked lines into one answer — answer each marker separately, even short ones.")
         system_prompt_parts.append("- Do NOT echo or repeat the timing value (Xs) in your answer.")
-        system_prompt_parts.append("- Do NOT prefix with speaker names (e.g. NEVER 'Ip Man: ...').")
+        system_prompt_parts.append("- Lines may carry a bracketed speaker tag like [Mrs. Ip — clipped, dismissive] — it is context for register only. Do NOT echo it, and do NOT prefix output with speaker names (e.g. NEVER 'Ip Man: ...').")
         system_prompt_parts.append("- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.")
         system_prompt_parts.append("- [[ENTITY:n]] tokens are PROTECTED placeholders — keep them EXACTLY.")
         system_prompt_parts.append("")
@@ -1266,18 +1408,21 @@ class TranslationService:
                     f"Rules:\n"
                     f"- Translate LITERALLY. Do NOT substitute synonyms, paraphrase, or rewrite for 'naturalness'.\n"
                     f"- Keep the exact meaning of each word. 'Secretive' must stay 'secretive', not 'mysterious'.\n"
+                    f"- A bracketed tag like [Mrs. Ip — clipped, dismissive] before a line is WHO is speaking — context only, never echo it.\n"
                     f"- Preserve every line. Do NOT drop, merge, or skip any [[SEG-...]] marked line.\n"
                     f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
-                    f"{marked_lines}"
+                    f"{_prior_block}{marked_lines}"
                 )
             return (
                 f"Translate these spoken {lang_name} dialogue lines to natural {target_name} for a cinematic dubbed track.\n\n"
                 f"Rules:\n"
                 f"- You MAY rephrase for natural spoken English and use the localized name/role mappings below.\n"
                 f"- Do NOT add, remove, or combine utterances beyond what is needed for a grammatical, speakable line.\n"
+                f"- A bracketed tag like [Mrs. Ip — clipped, dismissive] before a line is WHO is speaking and how — use it for register and referents (e.g. 'you heard HER'), never echo it.\n"
                 f"- Preserve every line. Do NOT drop, merge, or skip any [[SEG-...]] marked line.\n"
-                f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
-                f"{marked_lines}"
+                f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n"
+                + (f"- The PRECEDING DIALOGUE block is what was just said — resolve pronouns, callbacks and running names against it, and keep names rendered the way they already were.\n" if _prior_block else "")
+                + f"\n{_prior_block}{marked_lines}"
             )
 
         async def _send_and_validate(markers: List[str]) -> Optional[Dict[str, str]]:
@@ -1436,9 +1581,16 @@ class TranslationService:
         allow_recursive: bool = True,
         dubbing_style: Optional[str] = None,
         localized_aliases: Optional[Dict[str, str]] = None,
+        film_segments: Optional[List[Dict]] = None,
+        prior_context: Optional[List[Dict]] = None,
     ) -> Optional[List[Dict]]:
         """
         Translate segments using GPT-4 via Azure OpenAI or OpenAI API.
+
+        film_segments / prior_context: same meaning as on the Claude path —
+        whole-film names and the tail of already-translated dialogue, so a
+        chunk that falls back to GPT keeps the same names and referents as
+        the Claude chunks around it instead of switching register mid-film.
 
         Designed for Cantonese → English where standard MT engines fail
         because they treat Cantonese speech as Standard Written Chinese,
@@ -1465,6 +1617,8 @@ class TranslationService:
 
         # Build all segment texts with glossary pre-processing
         texts = [seg.get("text", "") for seg in segments]
+        _film = film_segments or segments
+        _film_texts = [s.get("source_text") or s.get("text", "") for s in _film]
         protected: List[str] = []
         replacements_per_seg: List[List[Tuple[str, str]]] = []
         entity_replacements_per_seg: List[List[Tuple[str, str]]] = []
@@ -1488,27 +1642,29 @@ class TranslationService:
 
         def _build_marked_lines(markers: List[str]) -> str:
             return "\n".join(
-                f"[[SEG-{markers[i]}]] ({_slot(segments[i])}) {p}"
+                f"[[SEG-{markers[i]}]] ({_slot(segments[i])}){self._speaker_tag(segments[i])} {p}"
                 for i, p in enumerate(protected)
             )
+
+        _prior_block = build_prior_context_block(prior_context or [])
 
         # Build centralized system prompt from policy layer
         _gpt_is_literal = resolve_dubbing_style(dubbing_style) == "literal"
         system_prompt_parts = [get_translation_system_prompt(dubbing_style)]
 
-        detected_profile = detect_character_from_text("\n".join(texts))
+        detected_profile = detect_character_from_text("\n".join(_film_texts))
         if detected_profile:
             system_prompt_parts.append("")
             system_prompt_parts.append(detected_profile.to_prompt())
 
-        name_mapping = build_name_mapping_prompt(texts)
+        name_mapping = build_name_mapping_prompt(_film_texts)
         if name_mapping:
             system_prompt_parts.append("")
             system_prompt_parts.append(name_mapping)
 
         # Localized role/address mappings are only appropriate for natural dubbing.
         if not _gpt_is_literal:
-            localized_mapping = build_localized_name_mapping_prompt(texts, extra=localized_aliases)
+            localized_mapping = build_localized_name_mapping_prompt(_film_texts, extra=localized_aliases)
             if localized_mapping:
                 system_prompt_parts.append("")
                 system_prompt_parts.append(localized_mapping)
@@ -1556,7 +1712,7 @@ class TranslationService:
         system_prompt_parts.append("- Short exclamations must stay short (1-3 syllables).")
         system_prompt_parts.append("- NEVER combine two [[SEG-...]] marked lines into one answer — answer each marker separately, even short ones.")
         system_prompt_parts.append("- Do NOT echo or repeat the timing value (Xs) in your answer.")
-        system_prompt_parts.append("- Do NOT prefix with speaker names (e.g. NEVER 'Ip Man: ...').")
+        system_prompt_parts.append("- Lines may carry a bracketed speaker tag like [Mrs. Ip — clipped, dismissive] — it is context for register only. Do NOT echo it, and do NOT prefix output with speaker names (e.g. NEVER 'Ip Man: ...').")
         system_prompt_parts.append("- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.")
         system_prompt_parts.append("- [[ENTITY:n]] tokens are PROTECTED placeholders — keep them EXACTLY.")
         system_prompt_parts.append("")
@@ -1609,13 +1765,14 @@ class TranslationService:
                     f"- Keep the exact meaning of each word.\n"
                     f"- Preserve every line. Do NOT drop, merge, or skip any [[SEG-...]] marked line.\n"
                     f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
-                    f"{marked_lines}"
+                    f"{_prior_block}{marked_lines}"
                 )
             return (
                 f"Translate these spoken {lang_name} dialogue lines to natural {target_name} for voice actors.\n\n"
                 f"Preserve meaning, emotion, and character voice. "
-                f"Use colloquial spoken English — not formal or written style.\n\n"
-                f"{marked_lines}"
+                f"Use colloquial spoken English — not formal or written style.\n"
+                + (f"The PRECEDING DIALOGUE block is what was just said — resolve pronouns and running names against it, and keep names rendered the way they already were.\n" if _prior_block else "")
+                + f"\n{_prior_block}{marked_lines}"
             )
 
         if use_azure:
@@ -2113,7 +2270,7 @@ class TranslationService:
             return segments
 
         numbered_lines = "\n".join(
-            f"{i+1}. ({round(max(0.3, (seg.get('end', 0) or 0) - (seg.get('start', 0) or 0)), 1)}s) {seg.get('text', '')}"
+            f"{i+1}. ({round(max(0.3, (seg.get('end', 0) or 0) - (seg.get('start', 0) or 0)), 1)}s){self._speaker_tag(seg)} {seg.get('text', '')}"
             for i, seg in [(i, segments[i]) for i in adapt_indices]
         )
 
@@ -2130,6 +2287,7 @@ class TranslationService:
             "- Keep it within the timing budget (Xs) shown before each line.",
             "- Do NOT add filler words, reactions, or extra content.",
             "- Do NOT change character names or proper nouns.",
+            "- Lines may carry a bracketed speaker tag like [Mrs. Ip — clipped, dismissive] — context for register only; do NOT echo it in your answer.",
             "- Return ONLY numbered lines in the same format as input.",
         ]
 

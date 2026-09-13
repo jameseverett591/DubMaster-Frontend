@@ -3,7 +3,7 @@
 import { Clock, Gauge, VolumeX, Volume2, Heart, FileText, Wrench } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { QCReport, QCFinding, Segment } from '@/lib/editor-types'
-import { usePlan } from '@/lib/use-plan'
+
 import { findingIsAutoFixable } from '@/lib/qc-fixes'
 import { useT } from '@/lib/use-t'
 
@@ -56,7 +56,6 @@ function statusBadge(status: 'ok' | 'warn' | 'fail') {
 
 export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding, onSelectSegment, onApplyFix, selectedRetranscriptionIndex }: QCQualityPanelProps) {
   const t = useT()
-  const { hasFeature } = usePlan()
 
   if (!report) {
     return (
@@ -73,7 +72,7 @@ export function QCQualityPanel({ report, segment, onJumpToTime, onSelectFinding,
     { key: 'speed', label: 'speed' },
     { key: 'loudness', label: 'loudness' },
     { key: 'silences', label: 'silences' },
-    ...(hasFeature('lipSyncScoring') ? [{ key: 'lip_sync' as const, label: 'lip_sync' }] : []),
+    { key: 'lip_sync', label: 'lip_sync' },
     { key: 'emotion_preservation', label: 'emotion_preservation' },
   ]
 

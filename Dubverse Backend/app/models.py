@@ -95,6 +95,9 @@ class Job(BaseModel):
     # Cleared once refunded, so a job that fails twice — or a retried status
     # update — can't return the same minutes more than once.
     minutes_charged: Optional[int] = None
+    # Seconds debited by the first Make Movie render of this job. Set means
+    # "already paid": re-renders of the same job are free. See quota_service.
+    billed_seconds: Optional[int] = None
     # 0 means "not specified — let diarization decide". It must NOT default to a
     # real speaker count: the clamp in routes.py reads any value in 1..10 as an
     # explicit user choice and forces pyannote to exactly that many speakers.
