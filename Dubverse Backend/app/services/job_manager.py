@@ -76,6 +76,7 @@ async def _upsert_job(job) -> None:
             # after a restart silently never refunded, and the customer lost
             # those minutes permanently.
             "minutes_charged": job.minutes_charged,
+            "billed_seconds": job.billed_seconds,
             "created_at": job.created_at.isoformat(),
             "updated_at": job.updated_at.isoformat(),
             "completed_at": job.completed_at.isoformat() if job.completed_at else None,
@@ -144,26 +145,20 @@ class JobManager:
         async with self._lock:
             return self._jobs.get(job_id)
 
-    async def set_minutes_charged(self, job_id: str, minutes: int) -> None:
-        """Record a minutes reservation against a job, durably.
-
-        Callers used to mutate job.minutes_charged directly, which never
-        triggered an upsert — so the charge existed only in memory until some
-        later status change happened to persist it. A crash before that point
-        lost the record, and with it the ability to refund.
-
-        Writing through here puts the change inside the lock and persists it
-        immediately.
-        """
+    async def set_billed_seconds(self, job_id: str, seconds: Optional[int]) -> None:
+        """Record (or, with None, clear) the Make Movie charge on a job, durably.
+        It must persist immediately, or a restart between render and next
+        status change forgets the job was paid for and charges the customer
+        again on re-render."""
         async with self._lock:
             job = self._jobs.get(job_id)
             if not job:
-                logger.error(f"Job {job_id}: cannot record {minutes} min — job not found")
+                logger.error(f"Job {job_id}: cannot record billed_seconds={seconds} — job not found")
                 return
-            job.minutes_charged = minutes
+            job.billed_seconds = seconds
             job.updated_at = datetime.now()
             _spawn(_upsert_job(job))
-            logger.info(f"Job {job_id}: recorded {minutes} min charged")
+            logger.info(f"Job {job_id}: billed_seconds={seconds}")
     
     async def update_job_status(
         self,
@@ -193,37 +188,10 @@ class JobManager:
                 job.completed_at = datetime.now()
                 job.progress = 100
 
-            # Refund the reserved minutes when a job ends badly. Done HERE rather
-            # than at the half-dozen call sites that set FAILED, because every
-            # status change funnels through this method — a per-site refund would
-            # be one `raise` away from being missed.
-            #
-            # minutes_charged is cleared first so a repeated terminal update
-            # can't return the same minutes twice.
-            if status in (JobStatus.FAILED, JobStatus.CANCELLED) and job.minutes_charged:
-                refund = job.minutes_charged
-                job.minutes_charged = None
-                ok = False
-                try:
-                    from app.services.usage_service import adjust
-                    ok = await asyncio.to_thread(adjust, job.user_id, -refund)
-                except Exception as e:
-                    logger.error(f"Job {job_id}: refund raised: {e}", exc_info=True)
-
-                if ok:
-                    logger.info(
-                        f"Job {job_id} {status.value}: refunded {refund} min to {job.user_id}"
-                    )
-                else:
-                    # Put the claim back. Clearing it unconditionally meant a
-                    # refund that never landed could never be retried, and the
-                    # old code logged "refunded N min" either way — a line that
-                    # said money moved when it hadn't.
-                    job.minutes_charged = refund
-                    logger.error(
-                        f"Job {job_id} {status.value}: REFUND FAILED, {refund} min "
-                        f"still owed to {job.user_id or '<no owner>'}"
-                    )
+            # Render refunds live in the quota path (_unmeter_render in
+            # routes.py), keyed on billed_seconds — the old minutes_charged
+            # reservation flow is gone; the field stays on the model only for
+            # DB row compatibility.
 
             _spawn(_upsert_job(job))
             logger.info(f"Job {job_id} updated: status={status}, progress={progress}%")

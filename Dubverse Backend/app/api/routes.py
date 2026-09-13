@@ -35,7 +35,7 @@ from app.models import (
 from app.config import get_settings, upload_size_cap
 from app.storage.manager import StorageManager
 from app.services.job_manager import job_manager
-from app.services import usage_service
+from app.services import quota_service
 from app.services import tts_usage
 from app.services.supabase_client import verify_jwt
 from app.services import upload_reservations
@@ -1682,6 +1682,36 @@ async def _run_runpod_gpu_pipeline(job_id: str, video_path: str, duration: float
         if v:
             gpu_env_vars[k] = v
 
+    # Deepgram keyterms: built HERE and forwarded, not left to the worker.
+    # Two reasons. The worker image lags this code, so list changes only
+    # reached ASR after a GPU rebuild. And the worker has no Rulebook: the
+    # director's name/glossary corrections — the source forms they typed for
+    # 金山找, 詠春, whatever this film's characters are called — are exactly
+    # what the ASR keeps mishearing, and they were never fed back to it.
+    # Now a Rulebook correction on job N boosts recognition on job N+1.
+    if whisper_language.lower() in ("yue", "zh", "cmn", "zh-cn", "zh-tw", "zh-hk"):
+        try:
+            from app.pipeline.deepgram_asr import build_keyterms, _LANG_MAP as _dg_lang
+            _dg_code = _dg_lang.get(whisper_language.lower(), "zh")
+            _rb = _resolve_rulebook(job_id, getattr(job_for_lang, "user_id", "") or "")
+            _cjk_re = re.compile(r"[\u4e00-\u9fff]")
+            # Source-side patterns only (what the ASR must HEAR), CJK only,
+            # and short — a keyterm is a term, not a sentence.
+            _rb_terms = [
+                s for s in list(_rb.get("localized_aliases", {}).keys())
+                       + list(_rb.get("translation_fixes", {}).keys())
+                if _cjk_re.search(s) and len(s) <= 12
+            ]
+            _kt = build_keyterms(_dg_code, extra=_rb_terms)
+            if _kt:
+                gpu_env_vars["DEEPGRAM_KEYTERMS_YUE" if _dg_code == "zh-HK" else "DEEPGRAM_KEYTERMS_ZH"] = ",".join(_kt)
+                logger.info(
+                    f"Job {job_id}: forwarding {len(_kt)} Deepgram keyterms "
+                    f"({len(_rb_terms)} from Rulebook): {_kt[:6]}..."
+                )
+        except Exception as _kt_err:
+            logger.warning(f"Job {job_id}: keyterm build failed, worker uses its defaults: {_kt_err}")
+
     # Force per-job WHISPER_LANGUAGE into the worker env so it overrides any
     # stale value the worker container was started with. Same for the
     # Cantonese-specific defaults applied above.
@@ -3071,10 +3101,9 @@ async def upload_video(
     speaker count. Parameters that travel with the upload cannot be dropped
     between two calls, because there is only one call.
 
-    Billing is unchanged from the R2 path: the duration-scaled size cap is
-    enforced after probing, minutes are reserved before any processing starts,
-    and set_minutes_charged goes through job_manager so a crash cannot lose the
-    refund.
+    Nothing is billed here: the duration-scaled size cap and the flat
+    120-minute duration cap are enforced after probing, and billing happens
+    at the Make Movie render via quota_service.
     """
     user_id = _caller(request)
 
@@ -3162,6 +3191,17 @@ async def upload_video(
             await job_manager.delete_job(job_id)
             raise HTTPException(status_code=400, detail="Could not read that file as video")
 
+        # Flat 120-minute cap for everyone — a technical ceiling on one job's
+        # GPU time, not a plan gate. Billing happens at render, not upload.
+        if _dur > MAX_VIDEO_DURATION_SECONDS:
+            os.remove(video_path)
+            await job_manager.delete_job(job_id)
+            raise HTTPException(
+                status_code=413,
+                detail=f"Videos are limited to {MAX_VIDEO_DURATION_SECONDS // 60} minutes "
+                       f"(this file is {_dur / 60:.0f} min).",
+            )
+
         # Duration-scaled size cap — the same rule the R2 path enforced at
         # presign time, applied here against the true duration rather than a
         # claimed one.
@@ -3176,30 +3216,9 @@ async def upload_video(
                 ),
             )
 
-        # Reserve minutes before any work starts. Refunded in full by
-        # job_manager if the job ends FAILED or CANCELLED.
-        _plan = await asyncio.to_thread(_plan_for_user, user_id)
-        _plan_key = "basic" if _plan in (None, _PLAN_UNKNOWN) else _plan
-        _pool = PLAN_MINUTES.get(_plan_key)
-        if _pool:
-            _need = usage_service.minutes_for(_dur)
-            _used = await asyncio.to_thread(usage_service.get_used_minutes, user_id)
-            _left = _pool - _used
-            if _need > _left:
-                os.remove(video_path)
-                await job_manager.delete_job(job_id)
-                raise HTTPException(
-                    status_code=402,
-                    detail=(
-                        f"This video needs {_need} min but you have {max(0, _left)} "
-                        f"of your {_pool}-minute monthly allowance left."
-                    ),
-                )
-            if await asyncio.to_thread(usage_service.adjust, user_id, _need):
-                # Through job_manager, not a direct mutation: this has to persist
-                # immediately, or a crash before the next status change loses the
-                # record and the refund with it.
-                await job_manager.set_minutes_charged(job_id, _need)
+        # No charge at upload. Billing moved to the Make Movie render
+        # (_meter_render on /dub/remix): upload, transcribe, translate and
+        # edit are free; the customer pays when they produce the film.
 
         job = await job_manager.get_job(job_id)
         if job:
@@ -3539,11 +3558,25 @@ async def export_transcript_srt(job_id: str):
         h, m = divmod(m, 60)
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
+    # COMMITTED timing, not raw. `start`/`end` are the original ASR values and
+    # never change; a drag in the editor writes committed_start_time. Exporting
+    # the raw field produced SRTs that ran backwards (a line the user had moved
+    # from 1:16 to 0:55 still printed at 1:16, after the 0:58 line) — none of
+    # the user's timeline work was in the file. Then sort, because the array
+    # is in transcript order and a moved segment may no longer be.
+    def _eff(seg, committed_key, raw_key):
+        v = seg.get(committed_key)
+        return float(v) if v is not None else float(seg.get(raw_key, 0) or 0)
+
+    ordered = sorted(
+        data.get("segments", []),
+        key=lambda s: _eff(s, "committed_start_time", "start"),
+    )
     lines = []
-    for i, seg in enumerate(data.get("segments", []), start=1):
+    for i, seg in enumerate(ordered, start=1):
         text = (seg.get("committed_adapted_text") or seg.get("text") or "").strip()
-        start = float(seg.get("start", 0))
-        end = float(seg.get("end", 0))
+        start = _eff(seg, "committed_start_time", "start")
+        end = _eff(seg, "committed_end_time", "end")
         lines.append(str(i))
         lines.append(f"{_srt_time(start)} --> {_srt_time(end)}")
         lines.append(text)
@@ -4331,9 +4364,6 @@ async def save_project(job_id: str, request: Request, body: SaveProjectBody = Sa
     if getattr(job, "user_id", None) and job.user_id != caller:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    _plan = await asyncio.to_thread(_plan_for_user, caller)
-    _plan_key = "basic" if _plan in (None, _PLAN_UNKNOWN) else _plan
-
     from datetime import datetime
 
     project_id = job_id
@@ -4341,30 +4371,6 @@ async def save_project(job_id: str, request: Request, body: SaveProjectBody = Sa
     base.mkdir(parents=True, exist_ok=True)
 
     now = datetime.utcnow().isoformat()
-
-    # Project cap. Counted only for NEW projects — re-saving one you already
-    # have must never be blocked, or a user at their limit could no longer
-    # save changes to existing work.
-    _limit = PROJECT_LIMITS.get(_plan_key)
-    if _limit is not None and not (base / "project.json").exists():
-        _owned = 0
-        for _e in _projects_base_dir().iterdir():
-            if not _e.is_dir():
-                continue
-            try:
-                with open(_e / "project.json", "r", encoding="utf-8") as _f:
-                    if _json.load(_f).get("user_id") == caller:
-                        _owned += 1
-            except Exception:
-                continue
-        if _owned >= _limit:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"You have {_owned} of {_limit} projects. Delete one, or "
-                    f"upgrade for more."
-                ),
-            )
 
     # Preserve created_at if project already exists
     existing_created_at = now
@@ -4383,13 +4389,8 @@ async def save_project(job_id: str, request: Request, body: SaveProjectBody = Sa
         # Ownership. Without this the projects list had nothing to filter on,
         # so /projects returned every project on disk to every caller.
         "user_id": getattr(job, "user_id", None) or None,
-        # Retention. Absent/None means permanent (Professional). Recomputed on
-        # every save, so editing a project resets its clock — work you are
-        # actively touching shouldn't quietly expire.
-        "expires_at": (
-            (datetime.utcnow() + timedelta(days=PROJECT_RETENTION_DAYS[_plan_key])).isoformat()
-            if _plan_key in PROJECT_RETENTION_DAYS else None
-        ),
+        # Permanent for everyone — there is one tier of product now.
+        "expires_at": None,
         "title": body.title or getattr(job, "video_filename", None) or job_id,
         "video_filename": getattr(job, "video_filename", None),
         "source_language": getattr(job, "source_language", None),
@@ -5779,64 +5780,10 @@ def _save_custom_voices(voices: list) -> None:
         _json.dump(voices, f, indent=2, ensure_ascii=False)
 
 
-# Max length of an UPLOADED video per plan, in seconds. Professional is absent
-# from the map, meaning unlimited. Mirrors UPLOAD_DURATION_LIMITS in the
-# frontend's lib/plan-features.ts — the client checks this too, for a fast
-# rejection; this is the copy that actually enforces it.
-# Monthly dubbing allowance in MINUTES, pooled across every video in the period.
-# Mirrors PLAN_MINUTES in the frontend's lib/plan-features.ts — keep in step.
-PLAN_MINUTES = {
-    "basic":         60,
-    "premium":      120,
-    # 589 min (~9.8h) is a deliberate professional allowance, not a round
-    # number: at the measured ~4.5c/min GPU+TTS it costs ~$26.51 against a
-    # $149 plan, so a subscriber who maxes it every month still leaves ~82%
-    # gross margin.
-    "professional": 589,
-}
-
-# A single file may not exceed the whole monthly pool, so one upload can't
-# swallow the billing period. Derived so the two can't drift apart.
-UPLOAD_DURATION_LIMITS = {k: v * 60 for k, v in PLAN_MINUTES.items()}
-
-# How many saved projects a plan may keep. Professional is absent, meaning
-# unlimited. Mirrors PROJECT_LIMITS in the frontend's lib/plan-features.ts.
-PROJECT_LIMITS = {
-    "basic":   3,
-    "premium": 10,
-}
-
-# How long a saved project survives, in days. Professional is absent, meaning
-# permanent. Mirrors PROJECT_RETENTION_DAYS in lib/plan-features.ts.
-PROJECT_RETENTION_DAYS = {
-    "basic":   30,
-    "premium": 90,
-}
-
-# Returned when the plan lookup itself fails, as distinct from "no subscription".
-_PLAN_UNKNOWN = "__lookup_failed__"
-
-
-def _plan_for_user(user_id: str) -> Optional[str]:
-    """The caller's active plan, None if they have no subscription, or
-    _PLAN_UNKNOWN if the lookup failed.
-
-    The three cases are kept apart deliberately: no subscription should be
-    treated as the most restrictive plan, but a Supabase blip should NOT
-    suddenly cap a paying customer's upload — see the caller.
-    """
-    from app.services.supabase_client import supabase_writer
-    try:
-        res = supabase_writer.table("subscriptions") \
-            .select("plan_type") \
-            .eq("user_id", user_id) \
-            .in_("status", ["active", "trialing"]) \
-            .limit(1) \
-            .execute()
-        return res.data[0]["plan_type"] if res.data else None
-    except Exception as e:
-        logger.warning(f"[PLAN] lookup failed for {user_id}: {e}")
-        return _PLAN_UNKNOWN
+# Flat technical safeguard, not monetization: a single video may not exceed
+# two hours. Enforced in the upload handler after ffprobe — the old per-plan
+# UPLOAD_DURATION_LIMITS map was defined here but never actually enforced.
+MAX_VIDEO_DURATION_SECONDS = 2 * 60 * 60  # 120 min
 
 
 def _probe_video_duration(path: str) -> Optional[float]:
@@ -5858,26 +5805,6 @@ def _probe_video_duration(path: str) -> Optional[float]:
         return None
 
 
-def _require_plan(request: Request, allowed: tuple, feature: str) -> str:
-    """Enforce plan entitlement server-side — mirrors the auth pattern in /ask-ai
-    so a gated feature can't be reached by hitting the API directly. Raises 403 if
-    the caller's active subscription plan isn't in `allowed`."""
-    auth_header = request.headers.get("Authorization", "")
-    token = auth_header.removeprefix("Bearer ").strip()
-    user_id = verify_jwt(token)
-    from app.services.supabase_client import supabase_writer
-    sub_result = supabase_writer.table("subscriptions") \
-        .select("plan_type") \
-        .eq("user_id", user_id) \
-        .in_("status", ["active", "trialing"]) \
-        .limit(1) \
-        .execute()
-    plan_type = sub_result.data[0]["plan_type"] if sub_result.data else None
-    if plan_type not in allowed:
-        raise HTTPException(status_code=403, detail=f"{feature} requires a Professional plan")
-    return user_id
-
-
 class CustomVoiceRequest(BaseModel):
     provider: str  # "fish-audio" | "elevenlabs"
     voice_id: str
@@ -5891,7 +5818,6 @@ async def list_custom_voices():
 
 @router.post("/voices/custom", dependencies=[Depends(_dep_auth)])
 async def add_custom_voice(body: CustomVoiceRequest, request: Request):
-    _require_plan(request, ("professional",), "Custom Voices")
     provider = (body.provider or "").lower().strip()
     voice_id = (body.voice_id or "").strip()
     if provider not in ("fish-audio", "elevenlabs"):
@@ -6002,7 +5928,6 @@ async def clone_voice(
     clip of the voice. The cloned model lives on the account we generate with, so
     it works everywhere immediately (assign, generate, export).
     """
-    _require_plan(request, ("professional",), "Custom Voices")
     if not fish_audio_tts.enabled:
         raise HTTPException(status_code=503, detail="Voice cloning is not available right now")
 
@@ -6698,11 +6623,87 @@ async def emotion_analyze_segment(job_id: str, body: SegmentAnalyzeRequest):
     }
 
 
+async def _billable_seconds_for_job(job_id: str) -> int:
+    """Seconds the Make Movie render of this job is billed at: ceil of the
+    source video duration. Prefers the probed value stored at upload; falls
+    back to ffprobe on the file, then to the transcript's duration."""
+    from app.services import quota_service
+    job = await job_manager.get_job(job_id)
+    dur = float(getattr(job, "video_duration", 0) or 0) if job else 0.0
+    if dur <= 0 and job and getattr(job, "video_path", None) and os.path.exists(job.video_path):
+        dur = float(await asyncio.to_thread(_probe_video_duration, job.video_path) or 0)
+    if dur <= 0 and job and job.transcript and job.transcript.duration:
+        dur = float(job.transcript.duration)
+    return quota_service.seconds_for(dur)
+
+
+async def _meter_render(job_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    """The ONLY billing gate in the product: debit the Make Movie render.
+
+    Returns the debit split (None when this job was already paid for —
+    re-renders are free) or raises HTTPException:
+      402  included minutes + wallet cannot cover it; detail carries the
+           shortfall so the UI can open the deposit flow pre-filled
+      503  ledger unreachable — fail CLOSED, never render for free
+    Debits BEFORE the render so two clicks racing cannot both pass; the
+    caller refunds via _unmeter_render if the render then fails.
+    """
+    from app.services import quota_service
+    job = await job_manager.get_job(job_id)
+    if job and getattr(job, "billed_seconds", None):
+        logger.info(f"Job {job_id}: re-render, already billed {job.billed_seconds}s — free")
+        return None
+    need = await _billable_seconds_for_job(job_id)
+    if need <= 0:
+        logger.warning(f"Job {job_id}: could not determine duration — rendering unmetered")
+        return None
+    try:
+        split = await asyncio.to_thread(quota_service.deduct_quota, user_id, need, job_id)
+    except quota_service.QuotaExceeded as e:
+        bal = await asyncio.to_thread(quota_service.get_balance, user_id)
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "quota_exceeded",
+                "message": (
+                    f"This render needs {need / 60:.1f} min. You have "
+                    f"{bal['total_remaining_seconds'] / 60:.1f} min available — "
+                    f"add at least ${max(e.shortfall_cents, quota_service.MIN_DEPOSIT_CENTS) / 100:.2f} to continue."
+                ),
+                "needed_seconds": need,
+                "shortfall_seconds": e.shortfall_seconds,
+                "shortfall_cents": e.shortfall_cents,
+                "min_deposit_cents": quota_service.MIN_DEPOSIT_CENTS,
+                "balance": bal,
+            },
+        )
+    except quota_service.QuotaUnavailable as e:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "billing_unavailable",
+                    "message": "Billing is temporarily unavailable. Please try again in a moment."},
+        ) from e
+    await job_manager.set_billed_seconds(job_id, need)
+    return split
+
+
+async def _unmeter_render(job_id: str, user_id: str) -> None:
+    """Render failed after the debit: give the seconds back and clear the
+    paid stamp so the next attempt is metered normally."""
+    from app.services import quota_service
+    await asyncio.to_thread(quota_service.refund_quota, user_id, job_id)
+    await job_manager.set_billed_seconds(job_id, None)
+
+
 @router.post("/dub/remix/{job_id}", dependencies=[Depends(_dep_job_access)])
 async def remix_dub(job_id: str, request: Request):
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.removeprefix("Bearer ").strip()
     user_id = verify_jwt(token)
+
+    # Make Movie is the one metered action. 402 / 503 raised here stop the
+    # render before any work — see _meter_render.
+    _charge = await _meter_render(job_id, user_id)
 
     # Sync committed segment manifest from Supabase to disk
     # before remix pipeline reads segments.json
@@ -6724,9 +6725,20 @@ async def remix_dub(job_id: str, request: Request):
     try:
         result = await dubbing_service.remix_dub(job_id)
     except FileNotFoundError as e:
+        if _charge:
+            await _unmeter_render(job_id, user_id)
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
+        if _charge:
+            await _unmeter_render(job_id, user_id)
         raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        if _charge:
+            await _unmeter_render(job_id, user_id)
+        raise
+
+    if isinstance(result, dict) and _charge:
+        result["billing"] = _charge
 
     # The retention clock starts HERE — at render completion, not at upload and
     # not at save. Once the film exists, the customer has what they came for and
@@ -7782,23 +7794,51 @@ async def list_respeecher_voices(request: Request):
     no generation balance. Cached in the service after the first fetch.
     Returns [] when no API key is configured, so the panel degrades to an empty
     state instead of erroring.
-
-    Professional only, matching the engine itself.
     """
-    _require_plan(request, ("professional",), "Respeecher")
     voices = await respeecher_tts.get_voices()
     return {"voices": voices, "enabled": respeecher_tts.enabled}
+
+@router.get("/respeecher/voice-preview/{voice_id:path}", dependencies=[Depends(_dep_auth)])
+async def respeecher_voice_preview(voice_id: str):
+    """Serve a short generated sample for one Respeecher voice.
+
+    The catalogue carries no preview field, so the only way to hear a voice is
+    to render it — and a render is metered. This generates ONE take of a fixed
+    line the first time a voice is auditioned, caches the mp3 on disk, and
+    serves the cached file on every later request, so auditioning the same
+    voice again costs nothing.
+    """
+    if not respeecher_tts.enabled:
+        raise HTTPException(status_code=503, detail="Respeecher is not configured")
+
+    preview_dir = Path("data/respeecher_previews")
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = hashlib.sha256(voice_id.encode("utf-8")).hexdigest()
+    preview_path = preview_dir / f"{safe_name}.mp3"
+
+    if preview_path.exists() and preview_path.stat().st_size > 0:
+        return FileResponse(str(preview_path), media_type="audio/mpeg")
+
+    preview_text = "A short audition of this voice for your dub."
+    try:
+        result = await respeecher_tts.text_to_speech(
+            text=preview_text,
+            voice_id=voice_id,
+            output_path=str(preview_path),
+            takes=1,            # a preview is ONE take — not a three-take race
+            keep_takes=False,
+        )
+    except Exception as e:
+        logger.error(f"[RESPEECHER] preview failed for voice {voice_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Preview generation failed: {e}")
+
+    if not result or not preview_path.exists():
+        raise HTTPException(status_code=502, detail="Respeecher returned no audio")
+    return FileResponse(str(preview_path), media_type="audio/mpeg")
 
 
 @router.post("/segment/regenerate/{job_id}/{index}", dependencies=[Depends(_dep_job_access)])
 async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest, request: Request):
-    # Respeecher is Professional-only: each generate races three takes, so every
-    # use is three billable vendor requests. Gated on the REQUESTED engine, not
-    # on the segment's stored one — a Premium user must still be able to
-    # regenerate a segment that was previously rendered on Respeecher, which
-    # falls through to Fish.
-    if (body.engine or "").lower() == "respeecher":
-        _require_plan(request, ("professional",), "Respeecher")
     try:
         voice_id = body.voice_id
         speed = body.speed
@@ -7917,11 +7957,7 @@ async def perform_segment(
     source of truth, the way text is for the TTS engines. Without that, any
     later re-render — a speed tweak, a bulk pass — would have nothing to
     convert and would silently fall back to a different engine.
-
-    Gated to Professional, matching Custom Voices: each call spends ElevenLabs
-    credits, so it can't be reachable by hitting the API directly either.
     """
-    _require_plan(request, ("professional",), "Voice Changer")
 
     dubbed_dir = os.path.join(settings.DUBBED_DIR, job_id)
     segments_path = os.path.join(dubbed_dir, "segments.json")
@@ -7997,12 +8033,7 @@ async def elevenlabs_sts_preview(
 
     Deliberately stateless: no job, no segment, nothing written to
     segments.json — this is the audition, and /segment/perform is the commit.
-
-    Gated like perform: a preview spends the same ElevenLabs credits as the
-    real thing, so an ungated audition endpoint would be a free hole through
-    a paid feature.
     """
-    _require_plan(request, ("professional",), "Voice Changer")
 
     audio = await file.read()
     if not audio:
@@ -8237,26 +8268,14 @@ def _check_ask_ai_rate_limit(user_id: str) -> None:
 async def ask_ai(body: AskAIRequest, request: Request):
     """Ask Claude to improve a dubbed segment based on a user prompt.
 
-    Premium/professional only (matches FEATURE_MATRIX.askAI in the frontend's
-    plan-features.ts) — mirrors the auth pattern used by every other endpoint
-    in this file (see /emotional-library, /ei/curves).
+    Authenticated users only — the rate limit below is the throttle now that
+    every feature ships in the single studio.
     """
     import httpx, re as _re
 
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.removeprefix("Bearer ").strip()
     user_id = verify_jwt(token)
-
-    from app.services.supabase_client import supabase_writer
-    sub_result = supabase_writer.table("subscriptions") \
-        .select("plan_type") \
-        .eq("user_id", user_id) \
-        .in_("status", ["active", "trialing"]) \
-        .limit(1) \
-        .execute()
-    plan_type = sub_result.data[0]["plan_type"] if sub_result.data else None
-    if plan_type not in ("premium", "professional"):
-        raise HTTPException(status_code=403, detail="Ask AI requires a Premium or Professional plan")
 
     _check_ask_ai_rate_limit(user_id)
 
@@ -8759,6 +8778,63 @@ async def get_global_rulebook(request: Request):
     user_id = verify_jwt(token)
     from app.services.rulebook import load_global_rules
     return {"rules": load_global_rules(user_id)}
+
+
+# ---------------------------------------------------------------------------
+# Quota / wallet — the Make Movie meter. See app/services/quota_service.py.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/quota/balance", dependencies=[Depends(_dep_auth)])
+async def quota_balance(request: Request):
+    """Included minutes remaining this month + wallet balance, for the
+    balance widget. Never 5xx: a ledger read failure returns
+    available=false so the UI can say so."""
+    from app.services import quota_service
+    user_id = _caller(request)
+    return await asyncio.to_thread(quota_service.get_balance, user_id)
+
+
+@router.get("/quota/estimate/{job_id}", dependencies=[Depends(_dep_job_access)])
+async def quota_estimate(job_id: str, request: Request):
+    """What Make Movie on this job will cost, before the user commits.
+    already_billed=true means the render is free (re-render)."""
+    from app.services import quota_service
+    user_id = _caller(request)
+    job = await job_manager.get_job(job_id)
+    if job and getattr(job, "billed_seconds", None):
+        bal = await asyncio.to_thread(quota_service.get_balance, user_id)
+        return {
+            "already_billed": True, "billed_seconds": job.billed_seconds,
+            "ok": True, "needed_seconds": 0, "from_included_seconds": 0,
+            "from_credit_seconds": 0, "from_credit_cents": 0,
+            "shortfall_seconds": 0, "shortfall_cents": 0, "balance": bal,
+        }
+    need = await _billable_seconds_for_job(job_id)
+    est = await asyncio.to_thread(quota_service.check_quota, user_id, need)
+    return {"already_billed": False, **est}
+
+
+class QuotaCreditRequest(BaseModel):
+    user_id: str
+    amount_cents: int
+    stripe_payment_id: Optional[str] = None
+
+
+@router.post("/internal/quota/credit", dependencies=[Depends(_dep_internal)])
+async def quota_credit(body: QuotaCreditRequest):
+    """Server-to-server: the Stripe webhook (Next.js) calls this after
+    checkout.session.completed for a wallet deposit. Idempotent on
+    stripe_payment_id. Non-2xx makes Stripe retry, which is what we want."""
+    from app.services import quota_service
+    try:
+        return await asyncio.to_thread(
+            quota_service.add_credits, body.user_id, body.amount_cents, body.stripe_payment_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except quota_service.QuotaUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/jobs/{job_id}/scene-summary", dependencies=[Depends(_dep_job_access)])

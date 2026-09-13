@@ -115,6 +115,9 @@ async def _load_jobs_from_db() -> None:
                     # record of what it was charged, and update_job_status
                     # skips the refund entirely.
                     minutes_charged=row.get("minutes_charged"),
+                    # Same for the Make Movie charge: forgotten, a re-render
+                    # after restart bills the customer a second time.
+                    billed_seconds=row.get("billed_seconds"),
                     created_at=_parse_dt(row.get("created_at")) or datetime.now(),
                     updated_at=_parse_dt(row.get("updated_at")) or datetime.now(),
                     completed_at=_parse_dt(row.get("completed_at")),

@@ -1,8 +1,50 @@
 import { NextResponse } from "next/server"
-import { stripe } from "@/lib/stripe"
+import { getStripe } from "@/lib/stripe"
 import { createServiceClient } from "@/lib/supabase/server"
 import type Stripe from "stripe"
 import type { PlanType, SubscriptionStatus } from "@/lib/supabase/types"
+
+// One paid tier. Every subscription checkout is "pro"; tier resolution on the
+// backend reads subscriptions.status (active/trialing => pro, else free).
+const PRO_PLAN: PlanType = "pro"
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+
+// Server-to-server: hand the completed wallet deposit to the backend, which
+// runs quota_add_credits. Idempotent on stripe_payment_id — Stripe may
+// redeliver this webhook. A non-2xx throws so Stripe retries; the backend
+// returns already_applied on the retry instead of double-crediting.
+async function creditWallet(userId: string, amountCents: number, paymentId: string) {
+  const res = await fetch(`${API_BASE}/internal/quota/credit`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Internal-Secret": process.env.INTERNAL_API_SECRET || "",
+    },
+    body: JSON.stringify({
+      user_id: userId,
+      amount_cents: amountCents,
+      stripe_payment_id: paymentId,
+    }),
+  })
+  if (!res.ok) {
+    throw new Error(`quota credit failed: HTTP ${res.status} ${await res.text()}`)
+  }
+  return res.json()
+}
+
+function subPeriod(subscription: Stripe.Subscription) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const item = subscription.items?.data?.[0] as any
+  return {
+    current_period_start: item?.current_period_start
+      ? new Date(item.current_period_start * 1000).toISOString()
+      : new Date().toISOString(),
+    current_period_end: item?.current_period_end
+      ? new Date(item.current_period_end * 1000).toISOString()
+      : new Date().toISOString(),
+  }
+}
 
 export async function POST(request: Request) {
   const body = await request.text()
@@ -13,9 +55,8 @@ export async function POST(request: Request) {
   }
 
   let event: Stripe.Event
-
   try {
-    event = stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET!)
+    event = getStripe().webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET!)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Webhook signature verification failed"
     console.error("Webhook signature error:", message)
@@ -31,76 +72,51 @@ export async function POST(request: Request) {
         const userId = session.metadata?.user_id
 
         if (!userId) {
-          console.error("No user_id in checkout session metadata")
+          console.error("[STRIPE] No user_id in checkout session metadata")
           break
         }
 
-        // Handle bonus minutes one-time purchase
-        if (session.metadata?.type === "bonus_minutes") {
-          const minutes = parseInt(session.metadata.minutes || "0", 10)
-          if (minutes > 0) {
-            // Upsert bonus_minutes balance (add to existing)
-            const { data: existing } = await supabase
-              .from("bonus_minutes")
-              .select("balance")
-              .eq("user_id", userId)
-              .single()
+        // Wallet deposit — one-time payment, any amount >= $10.
+        if (session.mode === "payment" || session.metadata?.type === "wallet_credit") {
+          const paymentId =
+            (typeof session.payment_intent === "string"
+              ? session.payment_intent
+              : session.payment_intent?.id) ?? session.id
+          const amountCents = session.amount_total ?? 0
+          const result = await creditWallet(userId, amountCents, paymentId)
 
-            const newBalance = (existing?.balance || 0) + minutes
+          await supabase.from("payments").insert({
+            user_id: userId,
+            stripe_payment_id: paymentId,
+            amount: amountCents,
+            currency: session.currency || "usd",
+            status: "succeeded",
+          })
 
-            await supabase.from("bonus_minutes").upsert(
-              {
-                user_id: userId,
-                balance: newBalance,
-                updated_at: new Date().toISOString(),
-              },
-              { onConflict: "user_id" }
-            )
-
-            // Record in ledger for audit trail
-            await supabase.from("bonus_minutes_ledger").insert({
-              user_id: userId,
-              amount: minutes,
-              source: `${minutes}_minute_pack`,
-              stripe_payment_id: session.payment_intent as string,
-            })
-
-            // Record payment
-            await supabase.from("payments").insert({
-              user_id: userId,
-              stripe_payment_id: session.payment_intent as string,
-              amount: session.amount_total || 0,
-              currency: session.currency || "usd",
-              status: "succeeded",
-            })
-
-            console.log(`[STRIPE] Bonus minutes purchased: user=${userId} minutes=${minutes} new_balance=${newBalance}`)
-          }
+          console.log(
+            `[STRIPE] Wallet credited: user=${userId} cents=${amountCents} ` +
+              `seconds=${result.credited_seconds} already_applied=${result.already_applied}`
+          )
           break
         }
 
-        // Handle subscription checkout
-        const planType = (session.metadata?.plan_type || "basic") as PlanType
+        // Pro subscription checkout.
         const subscriptionId = session.subscription as string
-        const subscription = await stripe.subscriptions.retrieve(subscriptionId) as unknown as Stripe.Subscription
+        const subscription = (await getStripe().subscriptions.retrieve(
+          subscriptionId
+        )) as unknown as Stripe.Subscription
 
         const subRow = {
           user_id: userId,
           stripe_customer_id: session.customer as string,
           stripe_subscription_id: subscriptionId,
-          plan_type: planType,
+          plan_type: PRO_PLAN,
           status: "active" as SubscriptionStatus,
-          current_period_start: subscription.items?.data?.[0]?.current_period_start
-            ? new Date(subscription.items.data[0].current_period_start * 1000).toISOString()
-            : new Date().toISOString(),
-          current_period_end: subscription.items?.data?.[0]?.current_period_end
-            ? new Date(subscription.items.data[0].current_period_end * 1000).toISOString()
-            : new Date().toISOString(),
+          ...subPeriod(subscription),
           cancel_at_period_end: subscription.cancel_at_period_end ?? false,
           updated_at: new Date().toISOString(),
         }
 
-        // Check if subscription already exists for this user
         const { data: existing } = await supabase
           .from("subscriptions")
           .select("id")
@@ -108,55 +124,24 @@ export async function POST(request: Request) {
           .limit(1)
           .maybeSingle()
 
-        if (existing) {
-          const { error: updateError } = await supabase
-            .from("subscriptions")
-            .update(subRow)
-            .eq("user_id", userId)
-          if (updateError) {
-            console.error(`[STRIPE] Subscription update FAILED:`, updateError)
-          } else {
-            console.log(`[STRIPE] Subscription updated for user=${userId}`)
-          }
-        } else {
-          const { error: insertError } = await supabase
-            .from("subscriptions")
-            .insert(subRow)
-          if (insertError) {
-            console.error(`[STRIPE] Subscription insert FAILED:`, insertError)
-          } else {
-            console.log(`[STRIPE] Subscription inserted for user=${userId}`)
-          }
+        const { error: subError } = existing
+          ? await supabase.from("subscriptions").update(subRow).eq("user_id", userId)
+          : await supabase.from("subscriptions").insert(subRow)
+
+        if (subError) {
+          console.error("[STRIPE] Subscription upsert FAILED:", subError)
+          throw subError
         }
 
-        // Initialize usage record for current month
-        const month = new Date().toISOString().slice(0, 7) + "-01"
-        const { data: existingUsage } = await supabase
-          .from("usage")
-          .select("id")
-          .eq("user_id", userId)
-          .eq("month", month)
-          .maybeSingle()
-        if (!existingUsage) {
-          const { error: usageError } = await supabase
-            .from("usage")
-            .insert({ user_id: userId, month, minutes_used: 0 })
-          if (usageError) {
-            console.error(`[STRIPE] Usage insert FAILED:`, usageError)
-          }
-        }
-
-        console.log(`[STRIPE] Subscription created: user=${userId} plan=${planType}`)
+        console.log(`[STRIPE] Pro subscription active: user=${userId} sub=${subscriptionId}`)
         break
       }
 
       case "customer.subscription.updated": {
         const subscription = event.data.object as Stripe.Subscription
         const userId = subscription.metadata?.user_id
-
         if (!userId) break
 
-        const planType = (subscription.metadata?.plan_type || "basic") as PlanType
         let status: SubscriptionStatus = "active"
         if (subscription.status === "canceled") status = "canceled"
         else if (subscription.status === "past_due") status = "past_due"
@@ -165,14 +150,9 @@ export async function POST(request: Request) {
         await supabase
           .from("subscriptions")
           .update({
-            plan_type: planType,
+            plan_type: PRO_PLAN,
             status,
-            current_period_start: subscription.items?.data?.[0]?.current_period_start
-              ? new Date(subscription.items.data[0].current_period_start * 1000).toISOString()
-              : new Date().toISOString(),
-            current_period_end: subscription.items?.data?.[0]?.current_period_end
-              ? new Date(subscription.items.data[0].current_period_end * 1000).toISOString()
-              : new Date().toISOString(),
+            ...subPeriod(subscription),
             cancel_at_period_end: subscription.cancel_at_period_end ?? false,
             updated_at: new Date().toISOString(),
           })
@@ -193,10 +173,13 @@ export async function POST(request: Request) {
           })
           .eq("stripe_subscription_id", subscription.id)
 
-        console.log(`[STRIPE] Subscription canceled: ${subscription.id}`)
+        console.log(`[STRIPE] Subscription canceled: ${subscription.id} -> free tier`)
         break
       }
 
+      // Renewal paid: restore/confirm pro. Monthly included seconds reset
+      // lazily via quota_touch on the next render — no explicit reset needed.
+      case "invoice.paid":
       case "invoice.payment_succeeded": {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const invoice = event.data.object as any
@@ -210,9 +193,18 @@ export async function POST(request: Request) {
           .single()
 
         if (sub) {
-          const piId = typeof invoice.payment_intent === "string"
-            ? invoice.payment_intent
-            : invoice.payment_intent?.id ?? null
+          await supabase
+            .from("subscriptions")
+            .update({
+              status: "active" as SubscriptionStatus,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("stripe_customer_id", customerId)
+
+          const piId =
+            typeof invoice.payment_intent === "string"
+              ? invoice.payment_intent
+              : invoice.payment_intent?.id ?? null
           await supabase.from("payments").insert({
             user_id: sub.user_id,
             stripe_payment_id: piId,
@@ -221,10 +213,13 @@ export async function POST(request: Request) {
             status: "succeeded",
             invoice_url: invoice.hosted_invoice_url ?? null,
           })
+          console.log(`[STRIPE] Invoice paid: user=${sub.user_id} -> pro active`)
         }
         break
       }
 
+      // Payment failed: past_due drops tier_for() to free. The wallet is in
+      // user_quota, untouched — credits are preserved by doing nothing.
       case "invoice.payment_failed": {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const invoice = event.data.object as any
@@ -246,9 +241,10 @@ export async function POST(request: Request) {
             })
             .eq("stripe_customer_id", customerId)
 
-          const piId = typeof invoice.payment_intent === "string"
-            ? invoice.payment_intent
-            : invoice.payment_intent?.id ?? null
+          const piId =
+            typeof invoice.payment_intent === "string"
+              ? invoice.payment_intent
+              : invoice.payment_intent?.id ?? null
           await supabase.from("payments").insert({
             user_id: sub.user_id,
             stripe_payment_id: piId,
@@ -257,6 +253,7 @@ export async function POST(request: Request) {
             status: "failed",
             invoice_url: invoice.hosted_invoice_url ?? null,
           })
+          console.log(`[STRIPE] Invoice failed: user=${sub.user_id} -> free (wallet preserved)`)
         }
         break
       }
