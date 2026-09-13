@@ -71,14 +71,32 @@ are remembered across sessions (saved in the browser):
 ## Voice engines — Fish Audio and Respeecher
 
 DubMaster can render a segment with either of two voice engines, chosen per
-segment. The **Respeecher** tab shows which one a segment last used as a small
-chip in its header (`fish-audio` or `respeecher`).
+segment. The **Respeecher** tab's header has a two-way toggle —
+**Respeecher | Fish Audio** — that shows which engine the selected segment
+last used and switches it. Clicking the half a segment is already on is a
+no-op (it does not spend a render).
 
-- **To use Respeecher:** open the Respeecher tab, pick a voice, press Generate.
-- **To go back to Fish Audio:** press the **Fish Audio** button next to the
-  Respeecher tab's title. It re-renders the segment with the voice that
-  speaker is mapped to.
+- **To use Respeecher:** open the Respeecher tab, pick a voice in the list,
+  press **Generate**. DubMaster races three takes and commits the one that
+  best fits the slot. Generate applies to the selected segment only —
+  assigning a voice to every segment of a speaker at once is the Voice
+  Library's job (Fish voices).
+- **To go back to Fish Audio:** press the **Fish Audio** half of the toggle.
+  It re-renders the segment with the voice that speaker is mapped to.
 - **Dropping a Fish voice** onto a segment also moves it to Fish Audio.
+
+### Auditioning voices in the Respeecher tab
+
+- **Each Respeecher voice row has a small play button** next to its name. The
+  first audition of a voice generates a short sample — one metered render,
+  since the engine ships no sample library. The sample is cached from then
+  on, so every later play of that voice is instant and costs nothing.
+  Clicking the row selects the voice; clicking the play icon only previews.
+- **The amber play button** next to the engine toggle previews the voice the
+  **Fish Audio** half would use — the selected speaker's mapped voice — so
+  you can hear it before spending a re-render. It works for catalog voices,
+  cloned voices, and the built-in presets (Male 1 etc., resolved to their
+  real voice automatically).
 
 Some segments always render on Fish Audio regardless: **child speakers**
 (Respeecher has no child voice), and any segment whose voice isn't in
@@ -95,8 +113,14 @@ do **not** reach a Respeecher render. On Respeecher your levers are:
 
 - **Punctuation and phrasing.** A comma buys a beat; a full stop buys more.
   This is the main way to shape a Respeecher read.
-- **The voice you cast.** Each Respeecher voice ships its own tuning.
-- **The sampling controls** in the Respeecher tab.
+- **The voice you cast.** Each Respeecher voice ships its own tuning — picking
+  a voice loads that voice's own defaults into the controls.
+- **The sampling controls** in the Respeecher tab — sliders for Temperature,
+  Top P, Min P, Repetition, Presence and Frequency, plus a Top K number
+  input. **Temperature is the main dial worth moving**; the penalties suppress
+  artifacts rather than shape performance, so leave them at the voice's
+  defaults unless you hear a specific defect. A slider takes effect on the
+  next Generate — moving it does not re-render by itself.
 
 Respeecher also has no speed or pitch parameter. The speed chip still works —
 DubMaster time-stretches the finished audio instead.
@@ -106,7 +130,14 @@ DubMaster time-stretches the finished audio instead.
 Respeecher's read length varies noticeably between generations of the same
 line. DubMaster generates three takes and keeps the one that best fits the
 segment's slot — the longest that still fits, since that's closest to natural
-pacing. The other two stay listed as `alt1` and `alt2` so you can hear them.
+pacing. The other two stay listed below Generate as auditionable alternates.
+
+- **Re-roll** races three fresh takes and harvests a new seed — use it to
+  escape a read you don't want.
+- **Lock** (next to the seed field) pins the seed so later regenerations
+  reproduce that exact take. A seed reproduces only under the same voice and
+  sampling settings — moving a slider while locked gives a different read
+  than the pinned take.
 
 If even the best take overruns the slot by more than can be corrected cleanly,
 DubMaster tells you rather than squashing the audio to fit.
@@ -459,9 +490,10 @@ than disappearing entirely.
 ## Voice Library
 
 A panel for browsing available AI voices (search, filter by gender/tag, favorites).
-The panel shows voice names on the left — each with a play button to audition it,
-and a badge naming any speaker the voice is already assigned to — and the selected
-voice's description, tags and controls on the right.
+The panel shows voice names on the left — each with a play button to audition it
+plus a **Stop** button that halts the playing sample — and a badge naming any
+speaker the voice is already assigned to — and the selected voice's description,
+tags and controls on the right.
 Selecting a voice shows a Preview button and an "Assign to…" control to assign it to
 a speaker. Assigning a voice to a speaker applies it to ALL of that speaker's segments
 consistently (locked segments are skipped), so the whole character switches voices in
@@ -504,6 +536,48 @@ automatically; it does not stop you deleting it deliberately.
 Shows an overall quality score plus individual metrics: timing, speed, loudness,
 silences, lip_sync, and emotion_preservation. These reflect how well the dubbed audio
 matches the original in pacing and delivery.
+
+## Scene tab — plain-English scene context
+
+The **Scene** tab explains what is happening on screen, so a director who does
+not speak the source language can judge whether a translation serves the scene.
+Two artifacts:
+
+- **AI Notes** — a whole-video feed of timestamped beats. Each `[MM:SS]` chip
+  seeks the playhead and selects the segment under it.
+- **Chapters** — titled summary cards whose prose carries clickable
+  `[MM:SS–MM:SS]` links back into the timeline.
+
+Preset summary modes — Director's Notes, Summary, Core Points, Chapter Summary,
+Study Notes — change the shape of the notes. Selecting a segment also shows that
+segment's own scene summary at the top of the panel: the beat it belongs to,
+what the line is doing, and the stakes.
+
+## Rulebook — the director's accumulated decisions
+
+The **Rulebook** tab stores corrections as typed rules that steer translation
+and delivery. Rules are scoped: a rule captured on this job applies to this
+job; **promoting** a rule makes it global so it steers every future job too.
+Job scope is the staging area; global is the institutional memory — this is
+how corrections made today improve tomorrow's dubs.
+
+Rule classes: **name mapping** (force an English rendering of a source
+name/term), **glossary term**, **speaker persona** (pin a character profile to
+a speaker), **register/stance** (scene-style directives, e.g. dismissal
+language in confrontations), **translation fix** (force an exact target line
+for a recurring source line), and **voice/delivery** defaults per speaker.
+
+Rules are captured via **Add to Rulebook** actions around the editor. Each row
+in the panel can be edited, toggled on/off, promoted to global, or deleted.
+
+## Speakers tab
+
+The **Speakers** tab lists every speaker diarization found, with the voice each
+is mapped to. Per speaker you can set character **traits** — curated preset
+words (calm, authoritative, gruff…) plus custom entries, which fold into the
+delivery direction on Fish renders — adjust **pitch**, and bulk **regenerate**
+all of that speaker's segments in one action, with a confirmation step and
+progress.
 
 ## Plan tiers
 
@@ -687,10 +761,11 @@ Each cloned voice can be:
   it immediately as a staged take so it can be heard before committing.
 - **Deleted** — permanently, with a confirmation. A deleted clone cannot be recovered.
 
-**The uploaded clip is not stored by DubMaster.** It is sent straight to the cloning
-service and discarded, so keep your own copy of the audio if you may want to re-clone it
-later. This is also why cloned voices have no preview button — there is no stored sample
-to play. To hear one, assign it to a segment and generate.
+**The uploaded clip is not kept by DubMaster** for voices cloned before the sample
+store existed — it went straight to the cloning service and was discarded. Voices
+cloned since then DO keep their source clip, which is what the Voice Library's
+preview button plays for them. An older clone with no stored clip has no preview
+to play; assign it to a segment and generate to hear it.
 
 Cloned voices do not appear in the main Voice Library grid; they are only in Test Clips.
 This is separate from the automatic cloning of the original video's speakers, and separate

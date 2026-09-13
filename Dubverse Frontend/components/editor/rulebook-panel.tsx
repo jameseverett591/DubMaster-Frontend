@@ -7,6 +7,7 @@ import {
   type Rule,
   type RuleClass,
   type EffectiveRules,
+  CJK_LANGUAGE_SCOPE,
 } from '@/lib/api-client'
 import { useT } from '@/lib/use-t'
 import {
@@ -61,6 +62,7 @@ function RuleRow({
   }
 
   const speaker = rule.conditions?.speaker
+  const langScoped = (rule.conditions?.languages?.length ?? 0) > 0
 
   return (
     <div className="px-3 py-2 border-b border-slate-800/60 last:border-b-0">
@@ -90,6 +92,12 @@ function RuleRow({
             {rule.inferred && (
               <span className="text-[9px] px-1.5 py-px rounded-full bg-sky-500/15 text-sky-400 border border-sky-500/30 font-mono">
                 suggested
+              </span>
+            )}
+            {langScoped && (
+              <span className="text-[9px] px-1.5 py-px rounded-full bg-red-500/15 text-red-400 border border-red-500/30 font-mono"
+                    title="Only applies to Cantonese/Mandarin source jobs">
+                粵/國
               </span>
             )}
             {speaker && (
@@ -218,6 +226,9 @@ export function RulebookPanel() {
     const out = new Map<RuleClass, Rule[]>()
     for (const r of rules) {
       if (classFilter !== 'all' && r.class !== classFilter) continue
+      // Language-scoped rules render in their own Cantonese/Mandarin
+      // section above — don't double-list them under their class.
+      if ((r.conditions?.languages?.length ?? 0) > 0) continue
       const list = out.get(r.class) ?? []
       list.push(r)
       out.set(r.class, list)
@@ -316,6 +327,29 @@ export function RulebookPanel() {
             </p>
           </div>
         )}
+        {/* Cantonese / Mandarin section — rules scoped to CJK source jobs.
+            They never fire on other languages. */}
+        {(() => {
+          const cjk = rules.filter(r =>
+            (r.conditions?.languages?.length ?? 0) > 0 &&
+            (classFilter === 'all' || r.class === classFilter))
+          if (!cjk.length) return null
+          return (
+            <div>
+              <div className="px-3 py-1.5 bg-red-500/5 border-b border-slate-800 sticky top-0">
+                <span className="text-[9px] font-mono uppercase tracking-widest text-red-400">
+                  Cantonese / Mandarin ({cjk.length})
+                </span>
+                <span className="text-[9px] text-slate-600 ml-2">
+                  only applies to yue/zh source jobs
+                </span>
+              </div>
+              {cjk.map(r => (
+                <RuleRow key={r.id} rule={r} jobId={jobId!} onChanged={refresh} />
+              ))}
+            </div>
+          )
+        })()}
         {CLASS_ORDER.map(cls => {
           const list = grouped.get(cls)
           if (!list?.length) return null
@@ -365,6 +399,7 @@ export function AddRuleForm({
   const [speaker, setSpeaker] = useState(initialSpeaker)
   const [notes, setNotes] = useState('')
   const [global, setGlobal] = useState(false)
+  const [cjkOnly, setCjkOnly] = useState(false)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -384,7 +419,10 @@ export function AddRuleForm({
         target: target.trim(),
         notes: notes.trim(),
         scope: global ? 'global' : 'job',
-        conditions: speaker.trim() ? { speaker: speaker.trim() } : {},
+        conditions: {
+          ...(speaker.trim() ? { speaker: speaker.trim() } : {}),
+          ...(cjkOnly ? { languages: [...CJK_LANGUAGE_SCOPE] } : {}),
+        },
       })
       onDone()
     } catch (e) {
@@ -453,6 +491,14 @@ export function AddRuleForm({
         >
           <Globe className="w-3 h-3" />
           {global ? 'Apply globally' : 'This job only'}
+        </button>
+        <button
+          type="button"
+          onClick={() => setCjkOnly(v => !v)}
+          className={`flex items-center gap-1 text-[10px] transition-colors ${cjkOnly ? 'text-red-400' : 'text-slate-500 hover:text-slate-300'}`}
+          title="Only fire this rule on Cantonese/Mandarin source jobs"
+        >
+          {cjkOnly ? '粵/國 only' : 'All languages'}
         </button>
         <div className="flex-1" />
         <button

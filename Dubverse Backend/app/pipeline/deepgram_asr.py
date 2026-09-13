@@ -39,6 +39,103 @@ _LANG_MAP = {
     "zh-tw": "zh-TW",
 }
 
+# Deepgram's documented ceiling on keyterm entries per request.
+KEYTERM_MAX = 100
+
+# Per-genre keyterm lists, scoped to Cantonese/Mandarin sources. Selectable
+# per job via DEEPGRAM_KEYTERM_GENRE.
+#
+# CRITICAL: boost the CORRECT forms, never the mishearings. A keyterm is the
+# model's preferred output — boosting 金山爪 makes the error permanent;
+# boosting 金山找 overrides it.
+#
+# PHRASES beat single words. Isolated 雙手 / 失望 / 佛山 were all in this list
+# when a run still dropped 雙手 from 再不行我讓他雙手 and heard 打不死我 for
+# 佛山太讓我失望 — a lone noun gives the decoder nothing to anchor to. The
+# short phrases below are the actual spoken collocations from the scenes
+# where those words were lost.
+KEYTERM_GENRES: Dict[str, Dict[str, List[str]]] = {
+    # Period martial-arts cinema — Ip Man universe + generic wuxia
+    # vocabulary. Confirmed against the Ip Man / Master Shin clip:
+    # 佛山 (Foshan) itself was being missed, 詠春 mangled to 永春.
+    "martial_arts": {
+        "yue": [
+            # People / names — correct forms
+            "葉問", "葉太", "葉太太", "金山找", "金師父", "陳師父",
+            "廖師傅", "文哥", "全哥", "王叔", "阿正", "三姑", "根哥",
+            # Places
+            "佛山", "武館",
+            # Martial-arts vocabulary
+            "武術", "武術之鄉", "詠春", "詠春拳", "功夫", "切磋",
+            "比武", "挑戰", "勝負", "單手", "雙手",
+            # Common misheard verbs / particles
+            "行開", "收聲", "閉嘴", "出去", "離開", "走開", "讓開",
+            "別走開", "打爛",
+            # Nouns that get truncated
+            "女人", "男人", "師父", "師傅", "徒弟", "老婆",
+            # Common phrases
+            "不怕", "怕了", "怕老婆", "尊重",
+            "失望", "厲害", "久聞",
+            # Spoken collocations — where the single words above were lost
+            "讓他雙手", "讓他單手", "打死他", "要是怕他輸",
+            "太讓我失望", "佛山太讓我失望", "練拳的", "沒有一個打得", "居然沒有打得",
+            "開武館", "找個好地方", "請你離開", "別打爛我的東西",
+        ],
+        "zh": [
+            "叶问", "叶太太", "金山找", "金师父", "陈师父",
+            "廖师傅", "文哥", "全哥", "王叔", "阿正", "三姑", "根哥",
+            "佛山", "武馆",
+            "武术", "武术之乡", "咏春", "咏春拳", "功夫", "切磋",
+            "比武", "挑战", "胜负", "单手", "双手",
+            "行开", "收声", "闭嘴", "出去", "离开", "走开", "让开",
+            "别走开", "打烂",
+            "女人", "男人", "师父", "师傅", "徒弟", "老婆",
+            "不怕", "怕老婆", "尊重", "失望", "厉害", "久闻",
+            "让他双手", "让他单手", "打死他", "要是怕他输",
+            "太让我失望", "佛山太让我失望", "练拳的", "没有一个打得", "居然没有打得",
+            "开武馆", "找个好地方", "请你离开", "别打烂我的东西",
+        ],
+    },
+}
+
+
+def build_keyterms(
+    language: str,
+    extra: Optional[List[str]] = None,
+    genre: Optional[str] = None,
+) -> List[str]:
+    """The keyterm list for one Deepgram request.
+
+    Precedence: DEEPGRAM_KEYTERMS_YUE / _ZH env (full override) > genre list.
+    `extra` terms are placed FIRST — they are the job's own vocabulary (the
+    director's Rulebook name/glossary sources), and the list is capped at
+    KEYTERM_MAX, so the terms most specific to this film must not be the
+    ones that fall off the end. De-duplicated, order preserved.
+
+    Called on the GPU worker at request time, and on the backend to build
+    the list it forwards to the worker (the backend has the Rulebook; the
+    worker does not).
+    """
+    is_yue = language == "zh-HK"
+    env = os.getenv("DEEPGRAM_KEYTERMS_YUE" if is_yue else "DEEPGRAM_KEYTERMS_ZH", "").strip()
+    if env:
+        base = [t.strip() for t in env.split(",") if t.strip()]
+    else:
+        g = (genre or os.getenv("DEEPGRAM_KEYTERM_GENRE", "martial_arts")).strip() or "martial_arts"
+        base = KEYTERM_GENRES.get(g, KEYTERM_GENRES["martial_arts"])["yue" if is_yue else "zh"]
+
+    seen: set = set()
+    out: List[str] = []
+    for t in list(extra or []) + list(base):
+        t = (t or "").strip()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    if len(out) > KEYTERM_MAX:
+        logger.info(f"[DEEPGRAM] keyterm list truncated {len(out)} → {KEYTERM_MAX}")
+        out = out[:KEYTERM_MAX]
+    return out
+
 
 def _map_language(source_language: Optional[str]) -> str:
     """Map internal language code to Deepgram's language code."""
@@ -225,38 +322,19 @@ def transcribe_with_deepgram(
     # martial-arts film dialogue. Without boosting, 行開 ("walk away")
     # gets misheard as 推搪祖師, 收聲 ("shut up") as 走開, and 女人
     # ("woman") gets truncated out of 創我 ("created by...").
+    #
+    # CRITICAL: boost the CORRECT forms, never the mishearings. A keyterm
+    # is the model's preferred output — boosting 金山爪 makes the error
+    # permanent; boosting 金山找 overrides it.
+    #
     # Repeat the keyterm param once per term — Deepgram's API requires
     # this rather than a comma-separated list.
-    _DEFAULT_KEYTERMS_YUE = [
-        # Address terms / names
-        "葉問", "葉太太", "金山爪", "金師父", "文哥", "全哥", "王叔",
-        # Martial arts terms
-        "武館", "武術", "永春拳", "詠春", "切磋", "打", "功夫",
-        # Common misheard verbs/particles
-        "行開", "收聲", "閉嘴", "出去", "離開", "走開",
-        "別推搪", "別行開",
-        # Common nouns that get truncated
-        "女人", "男人", "師父", "徒弟", "師傅",
-        # Common phrases
-        "不怕", "怕了", "怕老婆", "尊重",
-        "失望", "弱", "厲害",
-    ]
-    _DEFAULT_KEYTERMS_ZH = [
-        "叶问", "叶太太", "金山爪", "金师父", "文哥", "全哥", "王叔",
-        "武馆", "武术", "咏春", "切磋", "功夫",
-        "走开", "收声", "闭嘴", "出去", "离开",
-        "女人", "男人", "师父", "徒弟",
-        "不怕", "怕老婆", "尊重", "失望", "厉害",
-    ]
+    #
+    # Per-genre lists live at module level (KEYTERM_GENRES) so the backend
+    # can build the same list, add the job's Rulebook terms, and forward it
+    # to this worker as DEEPGRAM_KEYTERMS_* — see build_keyterms().
     _is_yue = language == "zh-HK"
-    _keyterm_env = os.getenv(
-        "DEEPGRAM_KEYTERMS_YUE" if _is_yue else "DEEPGRAM_KEYTERMS_ZH", ""
-    ).strip()
-    if _keyterm_env:
-        # Allow override via env (comma-separated)
-        _keyterms = [t.strip() for t in _keyterm_env.split(",") if t.strip()]
-    else:
-        _keyterms = _DEFAULT_KEYTERMS_YUE if _is_yue else _DEFAULT_KEYTERMS_ZH
+    _keyterms = build_keyterms(language)
 
     if _keyterms:
         # Convert dict params to list of tuples so keyterm can repeat.
