@@ -751,14 +751,14 @@ export default function LandingPage() {
                       {typeof row.dm === "boolean" ? (
                         row.dm ? <Check className="h-5 w-5 text-[#10B981] mx-auto drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]" /> : <X className="h-5 w-5 text-[#EF4444] mx-auto drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]" />
                       ) : (
-                        <span className="text-[#C084FC] font-semibold">{row.dm}</span>
+                        <span className="text-[#22D3EE] font-semibold">{row.dm}</span>
                       )}
                     </td>
                     <td className="py-4 px-6 text-center">
                       {typeof row.dv === "boolean" ? (
                         row.dv ? <Check className="h-5 w-5 text-[#10B981] mx-auto" /> : <X className="h-5 w-5 text-[#EF4444] mx-auto drop-shadow-[0_0_5px_rgba(239,68,68,0.3)]" />
                       ) : (
-                        <span className="text-[#64748B]">{row.dv}</span>
+                        <span className="text-[#C084FC] font-semibold">{row.dv}</span>
                       )}
                     </td>
                     <td className="py-4 px-6 text-center">
