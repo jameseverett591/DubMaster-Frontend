@@ -57,7 +57,7 @@ import {
   type JobStatus,
 } from "@/lib/api-client"
 import { useEditorStore } from "@/lib/editor-store"
-import { usePlan } from "@/lib/use-plan"
+
 import { useT } from '@/lib/use-t'
 
 interface DubbingWorkspaceProps {
@@ -172,7 +172,6 @@ function buildDetectedVoices(
 
 export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
   const t = useT()
-  const { hasFeature } = usePlan()
   const [targetLanguage, setTargetLanguage] = useState("en")
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
@@ -895,8 +894,8 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
           </div>
         </div>
 
-        {/* Sidebar Panel — editor feature (Premium+) */}
-        {hasFeature('editor') && <div className="w-80 shrink-0 border-l border-border/50 bg-card/50 backdrop-blur-md flex flex-col min-h-0">
+        {/* Sidebar Panel */}
+        <div className="w-80 shrink-0 border-l border-border/50 bg-card/50 backdrop-blur-md flex flex-col min-h-0">
           <Tabs value={activeTab} onValueChange={setActiveTab} className="flex h-full flex-col min-h-0">
             <div className="mx-3 mt-3 shrink-0 space-y-1">
               <TabsList className="grid w-full grid-cols-4">
@@ -1080,17 +1079,11 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                     </div>
                   )}
 
-                  {/* Subscription CTA */}
-                  <div className="rounded-lg bg-muted/50 p-3 text-center">
-                    <p className="text-[10px] text-muted-foreground">
-                      {t('Studio Editor is available on')} <span className="text-amber-400 font-medium">{t('Professional')}</span> and <span className="text-amber-400 font-medium">{t('Enterprise')}</span> plans.
-                    </p>
-                  </div>
                 </div>
               </ScrollArea>
             </TabsContent>
           </Tabs>
-        </div>}
+        </div>
       </div>
     </div>
   )

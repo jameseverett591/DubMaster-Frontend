@@ -20,18 +20,15 @@ function SuccessContent() {
   const t = useT()
   const searchParams = useSearchParams()
   const sessionId = searchParams.get("session_id")
-  const isBonus = searchParams.get("bonus") === "true"
+  const isWallet = searchParams.get("wallet") === "true"
   const [plan, setPlan] = useState<string | null>(null)
 
   useEffect(() => {
     if (!sessionId) return
 
-    if (isBonus) {
-      // Bonus minutes: just display, no subscription to activate
-      fetch(`/api/checkout-session?session_id=${sessionId}`)
-        .then((r) => r.json())
-        .then((data) => setPlan(data.plan_type))
-        .catch(() => {})
+    if (isWallet) {
+      // Wallet top-up: the webhook already credited the balance — nothing
+      // client-side to activate.
       return
     }
 
@@ -64,14 +61,14 @@ function SuccessContent() {
             <Check className="h-8 w-8 text-white" />
           </div>
           <CardTitle className="text-3xl text-white">
-            {isBonus ? t('Minutes Added!') : t('Welcome to DubMaster!')}
+            {isWallet ? t('Credit Added!') : t('Welcome to DubMaster!')}
           </CardTitle>
         </CardHeader>
 
         <CardContent className="space-y-6 pb-12">
-          {isBonus ? (
+          {isWallet ? (
             <p className="text-[#94A3B8] text-lg">
-              {t('Your bonus minutes have been added to your account. They never expire and carry over month-to-month.')}
+              {t('Your wallet credit is ready to use on renders. It never expires.')}
             </p>
           ) : (
             <p className="text-[#94A3B8] text-lg">
@@ -84,7 +81,7 @@ function SuccessContent() {
           <div className="bg-[#0F172A] rounded-xl p-6 border border-[#334155] space-y-3">
             <div className="flex items-center gap-3 text-[#E2E8F0]">
               <Sparkles className="h-5 w-5 text-[#A855F7]" />
-              <span>{isBonus ? t('Your bonus minutes are ready to use') : t('Upload your first video and start dubbing')}</span>
+              <span>{isWallet ? t('Credit is spent only when you render') : t('Upload your first video and start dubbing')}</span>
             </div>
             <div className="flex items-center gap-3 text-[#E2E8F0]">
               <Mic2 className="h-5 w-5 text-[#22D3EE]" />

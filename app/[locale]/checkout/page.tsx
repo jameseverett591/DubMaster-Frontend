@@ -25,11 +25,12 @@ function CheckoutContent() {
 
   useEffect(() => {
     const createCheckoutSession = async () => {
-      const plan = searchParams.get("plan")
+      // One paid tier exists now; any plan param — legacy or absent — is Pro.
+      const plan = "pro"
       const interval = searchParams.get("interval")
 
-      if (!plan || !interval) {
-        setError("Missing plan or interval parameter")
+      if (!interval) {
+        setError("Missing interval parameter")
         return
       }
 

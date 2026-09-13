@@ -12,7 +12,7 @@ import { Upload, FileVideo, X, CheckCircle2, AlertCircle, Languages, Users, Mic,
 import type { VideoSource } from "@/components/dashboard"
 import { apiClient, isTerminalStatus, JobNotFoundError, type JobStatusValue } from "@/lib/api-client"
 import PipelineMonitor from "@/components/pipeline-monitor"
-import { BasicVideoPanel } from "@/components/basic-video-panel"
+
 import { VideoRecorder } from "@/components/video-recorder"
 import { usePlan } from "@/lib/use-plan"
 import { formatDurationLimit, MAX_UPLOAD_BYTES, MAX_UPLOAD_GB } from "@/lib/plan-features"
@@ -70,9 +70,6 @@ type PersistedFile = {
 
 interface VideoUploadProps {
   onVideoSelect: (video: VideoSource) => void
-  quotaExceeded?: boolean
-  remainingMinutes?: number
-  onBuyMore?: () => void
 }
 
 type UploadedFile = {
@@ -89,9 +86,6 @@ type UploadedFile = {
 
 export function VideoUpload({
   onVideoSelect,
-  quotaExceeded = false,
-  remainingMinutes = 0,
-  onBuyMore
 }: VideoUploadProps) {
   const tUi = useT()
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
@@ -117,7 +111,7 @@ export function VideoUpload({
   )
   const t = useTranslations('upload')
   const ts = useTranslations('studio')
-  const { hasFeature, recordingLimit, uploadDurationLimit } = usePlan()
+  const { recordingLimit, uploadDurationLimit } = usePlan()
   const [uploadError, setUploadError] = useState<string | null>(null)
   const resetEditor = useEditorStore((s) => s.resetEditor)
 
@@ -133,12 +127,9 @@ export function VideoUpload({
   const recordingChunksRef = useRef<Blob[]>([])
   const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const remainingSeconds = (remainingMinutes ?? 0) * 60
-  const effectiveCap = Math.min(
-    recordingLimit !== undefined ? recordingLimit : Infinity,
-    remainingSeconds > 0 ? remainingSeconds : Infinity,
-  )
-  const capIsFinite = Number.isFinite(effectiveCap)
+  // Flat 120-minute ceiling for everyone — recording is input, not render,
+  // so quota no longer factors into it.
+  const effectiveCap = recordingLimit
   const fmtTime = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 
   const stopCameraStream = useCallback(() => {
@@ -155,7 +146,7 @@ export function VideoUpload({
   }, [])
 
   const handleStartRecording = useCallback(async () => {
-    if (capIsFinite && effectiveCap <= 0) return
+    if (effectiveCap <= 0) return
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
       cameraStreamRef.current = stream
@@ -181,7 +172,7 @@ export function VideoUpload({
     } catch (err) {
       console.error('[Record] camera access failed', err)
     }
-  }, [capIsFinite, effectiveCap, stopCameraStream])
+  }, [effectiveCap, stopCameraStream])
 
   // Attach stream to <video> element once 'active' state renders it
   useEffect(() => {
@@ -190,12 +181,12 @@ export function VideoUpload({
     }
   }, [recordingState])
 
-  // Auto-stop when elapsed hits plan cap
+  // Auto-stop when elapsed hits the cap
   useEffect(() => {
-    if (recordingState === 'active' && capIsFinite && recordingElapsed >= effectiveCap) {
+    if (recordingState === 'active' && recordingElapsed >= effectiveCap) {
       handleStopRecording()
     }
-  }, [recordingElapsed, recordingState, capIsFinite, effectiveCap, handleStopRecording])
+  }, [recordingElapsed, recordingState, effectiveCap, handleStopRecording])
 
   // Turn off camera light on unmount / navigation away
   useEffect(() => () => stopCameraStream(), [stopCameraStream])
@@ -285,14 +276,9 @@ export function VideoUpload({
     })
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
-    // Block upload if quota exceeded
-    if (quotaExceeded) {
-      return
-    }
-
-    // Per-plan length cap, checked BEFORE the transfer starts. Without this a
-    // three-hour file uploaded in full and only then hit a limit.
-    if (Number.isFinite(uploadDurationLimit)) {
+    // Flat 120-min length cap, checked BEFORE the transfer starts — without
+    // this a three-hour file uploaded in full and only then got rejected.
+    {
       const tooLong: string[] = []
       const okFiles: File[] = []
       for (const f of acceptedFiles) {
@@ -306,7 +292,7 @@ export function VideoUpload({
       }
       if (tooLong.length) {
         setUploadError(
-          `Too long for your plan (max ${formatDurationLimit(uploadDurationLimit)}): ${tooLong.join(', ')}`
+          `Videos are limited to ${formatDurationLimit(uploadDurationLimit)}: ${tooLong.join(', ')}`
         )
       } else {
         setUploadError(null)
@@ -332,7 +318,7 @@ export function VideoUpload({
     newFiles.forEach((uploadedFile) => {
       startUpload(uploadedFile.id, uploadedFile.file, langForBatch, targetForBatch, speakersForBatch)
     })
-  }, [quotaExceeded, uploadDurationLimit])
+  }, [uploadDurationLimit])
 
   const handleUseRecording = useCallback(() => {
     if (recordedFile) onDrop([recordedFile])
@@ -555,7 +541,6 @@ export function VideoUpload({
     // uploaded, and only rejected once 5GB had streamed in — after the wait.
     // Keep these two numbers in step.
     maxSize: MAX_UPLOAD_BYTES,
-    disabled: quotaExceeded,
     // Without this, react-dropzone discards an oversized or wrong-type file
     // silently: nothing appears, no error, no upload. A customer dragging in a
     // 7GB film sees the app do literally nothing and concludes it is broken.
@@ -575,21 +560,14 @@ export function VideoUpload({
     },
   })
 
-  // Premium+: show PipelineMonitor while actively processing
   const activeProcessingFile = uploadedFiles.find((f) => f.status === "processing" && f.jobId)
-  // Basic: show BasicVideoPanel for the most recently uploaded file that has a jobId.
-  // Using .findLast so a fresh upload always takes over from stale restored files.
-  const basicPanelFile = !hasFeature('pipelineMonitor')
-    ? (uploadedFiles.findLast((f) => f.jobId) ?? null)
-    : null
 
-  const showRightPanel = recordingState !== 'idle' || (hasFeature('pipelineMonitor') ? !!activeProcessingFile : !!basicPanelFile)
-  const [isReviewingTranscript, setIsReviewingTranscript] = useState(false)
+  const showRightPanel = recordingState !== 'idle' || !!activeProcessingFile
 
   return (
     <div className="space-y-6">
       {/* Top section: Upload Area + right panel side by side (single column when reviewing) */}
-      <div className={`grid gap-6 transition-all duration-500 ${showRightPanel && !isReviewingTranscript ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"}`}>
+      <div className={`grid gap-6 transition-all duration-500 ${showRightPanel ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"}`}>
       {/* Main Upload Area - Compact */}
       <div>
         <div className="text-center mb-4">
@@ -597,11 +575,8 @@ export function VideoUpload({
           <p className="text-[#94A3B8] text-sm">
             {ts('uploadSubtitle')}
           </p>
-          {/* Stated separately from the translated subtitle because the cap is
-              per plan — Basic 1h, Premium 2h, Professional unlimited — and a
-              single localised string can't say all three. */}
           <p className="text-[#64748B] text-xs mt-0.5">
-            Your plan: videos up to {formatDurationLimit(uploadDurationLimit).toLowerCase()}
+            Videos up to {formatDurationLimit(uploadDurationLimit).toLowerCase()}
           </p>
         </div>
 
@@ -672,8 +647,8 @@ export function VideoUpload({
           <button
             type="button"
             onClick={handleStartRecording}
-            disabled={recordingState !== 'idle' || (capIsFinite && effectiveCap <= 0)}
-            title={capIsFinite ? `Max ${fmtTime(effectiveCap)}` : 'Record video'}
+            disabled={recordingState !== 'idle'}
+            title={`Max ${fmtTime(effectiveCap)}`}
             className="flex items-center gap-2 h-9 px-3 rounded-md border border-red-500/50 bg-red-600/10 text-sm text-red-400 hover:border-red-500 hover:bg-red-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Mic className="h-3.5 w-3.5" />
@@ -684,52 +659,12 @@ export function VideoUpload({
         <div
           {...getRootProps()}
           className={`relative flex flex-col items-center justify-center rounded-xl border-3 border-dashed p-10 transition-all duration-300 ${
-            quotaExceeded
-              ? "border-red-500/40 bg-red-500/5 cursor-not-allowed opacity-60"
-              : isDragActive
+            isDragActive
               ? "border-[#22D3EE] bg-[#22D3EE]/10 shadow-[0_0_40px_rgba(34,211,238,0.4)] cursor-pointer"
               : "border-[#A855F7]/40 hover:border-[#A855F7] hover:bg-[#A855F7]/5 hover:shadow-[0_0_30px_rgba(168,85,247,0.3)] cursor-pointer"
           }`}
         >
-          <input {...getInputProps()} disabled={quotaExceeded} />
-
-          {/* Quota Exceeded Overlay */}
-          {quotaExceeded && (
-            <div className="absolute inset-0 flex items-center justify-center bg-[#020817]/80 backdrop-blur-sm rounded-xl z-10">
-              <div className="text-center px-6">
-                <div className="mb-4">
-                  <AlertCircle className="h-12 w-12 text-red-400 mx-auto" />
-                </div>
-                <h3 className="text-xl font-bold text-white mb-2">{t('quotaExceeded')}</h3>
-                <p className="text-[#94A3B8] text-sm mb-4">
-                  {t('quotaExceededMessage')}
-                </p>
-                <div className="flex gap-3 justify-center">
-                  {onBuyMore && (
-                    <Button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onBuyMore()
-                      }}
-                      className="bg-gradient-to-r from-[#A855F7] to-[#22D3EE] text-white"
-                    >
-                      {t('buyBonusMinutes')}
-                    </Button>
-                  )}
-                  <Button
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      window.location.href = "/subscribe?upgrade=true"
-                    }}
-                    variant="outline"
-                    className="border-[#A855F7]/30 text-[#C084FC] hover:bg-[#A855F7]/10"
-                  >
-                    {t('upgradePlan')}
-                  </Button>
-                </div>
-              </div>
-            </div>
-          )}
+          <input {...getInputProps()} />
 
           {/* Center icon with glow - Smaller */}
           <div className="relative mb-4">
@@ -783,7 +718,7 @@ export function VideoUpload({
                 </div>
                 <span className="font-mono text-xs text-red-400">
                   {fmtTime(recordingElapsed)}
-                  {capIsFinite && <span className="text-slate-500"> / {fmtTime(effectiveCap)}</span>}
+                  <span className="text-slate-500"> / {fmtTime(effectiveCap)}</span>
                 </span>
               </div>
               <video
@@ -844,9 +779,7 @@ export function VideoUpload({
           )}
 
           {recordingState === 'idle' && (
-            hasFeature('pipelineMonitor')
-              ? <PipelineMonitor jobId={activeProcessingFile!.jobId!} />
-              : <BasicVideoPanel jobId={basicPanelFile!.jobId!} onStale={() => removeFile(basicPanelFile!.id)} onReviewingChange={setIsReviewingTranscript} />
+            <PipelineMonitor jobId={activeProcessingFile!.jobId!} />
           )}
 
         </div>
@@ -926,16 +859,13 @@ export function VideoUpload({
                           <CheckCircle2 className="h-4 w-4 text-[#22D3EE]" />
                           <span className="text-[#22D3EE] font-semibold">{t('readyForDubbing')}</span>
                         </div>
-                        {/* Basic users dub from the right panel — no navigation needed */}
-                        {hasFeature('pipelineMonitor') && (
-                          <Button
-                            size="sm"
-                            onClick={() => handleStartDubbing(uploadedFile)}
-                            className="bg-gradient-to-r from-[#A855F7] to-[#22D3EE] hover:opacity-90 shadow-[0_0_20px_rgba(168,85,247,0.4)]"
-                          >
-                            {t('startDubbing')} →
-                          </Button>
-                        )}
+                        <Button
+                          size="sm"
+                          onClick={() => handleStartDubbing(uploadedFile)}
+                          className="bg-gradient-to-r from-[#A855F7] to-[#22D3EE] hover:opacity-90 shadow-[0_0_20px_rgba(168,85,247,0.4)]"
+                        >
+                          {t('startDubbing')} →
+                        </Button>
                       </div>
                     )}
 

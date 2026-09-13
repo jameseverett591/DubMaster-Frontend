@@ -16,17 +16,15 @@ import {
 } from "lucide-react"
 import Link from "next/link"
 import type { Database } from "@/lib/supabase/types"
-import { PLAN_MINUTES, PLAN_MINUTES_DEFAULT, type PlanType } from "@/lib/plan-features"
+import { useUsage } from "@/hooks/use-usage"
 import { useT } from '@/lib/use-t'
 
 type Profile = Database["public"]["Tables"]["profiles"]["Row"]
 type Subscription = Database["public"]["Tables"]["subscriptions"]["Row"]
-type Usage = Database["public"]["Tables"]["usage"]["Row"]
 
 const PLAN_COLORS: Record<string, string> = {
-  basic: "#22D3EE",
-  premium: "#A855F7",
-  professional: "#FDB022",
+  free: "#22D3EE",
+  pro: "#A855F7",
 }
 
 
@@ -34,7 +32,7 @@ export default function ProfilePage() {
   const t = useT()
   const [profile, setProfile]           = useState<Profile | null>(null)
   const [subscription, setSubscription] = useState<Subscription | null>(null)
-  const [usage, setUsage]               = useState<Usage | null>(null)
+  const quota = useUsage()
   const [email, setEmail]               = useState("")
   const [memberSince, setMemberSince]   = useState("")
 
@@ -82,10 +80,9 @@ export default function ProfilePage() {
     setPhone(meta.phone || "")
     setAddress(meta.address || "")
 
-    const [{ data: profileData }, { data: subData }, { data: usageData }] = await Promise.all([
+    const [{ data: profileData }, { data: subData }] = await Promise.all([
       supabase.from("profiles").select("*").eq("id", user.id).single(),
       supabase.from("subscriptions").select("*").eq("user_id", user.id).in("status", ["active", "trialing"]).limit(1).single(),
-      supabase.from("usage").select("*").eq("user_id", user.id).order("month", { ascending: false }).limit(1).single(),
     ])
 
     if (profileData) {
@@ -94,7 +91,6 @@ export default function ProfilePage() {
       setAvatarUrl(profileData.avatar_url || null)
     }
     if (subData) setSubscription(subData as Subscription)
-    if (usageData) setUsage(usageData as Usage)
 
     setLoading(false)
   }
@@ -161,10 +157,10 @@ export default function ProfilePage() {
     )
   }
 
-  const planType   = subscription?.plan_type || "basic"
+  const planType   = subscription ? "pro" : "free"
   const planColor  = PLAN_COLORS[planType] || "#22D3EE"
-  const planLimit  = PLAN_MINUTES[planType as PlanType] ?? PLAN_MINUTES_DEFAULT
-  const minutesUsed = usage?.minutes_used || 0
+  const planLimit  = quota.planLimit
+  const minutesUsed = quota.minutesUsed
   const usagePct   = planLimit > 0 ? Math.min((minutesUsed / planLimit) * 100, 100) : 0
 
   const initials = fullName
@@ -369,24 +365,20 @@ export default function ProfilePage() {
             <Clock className="h-4 w-4 text-[#22D3EE]" />{t("This Month's Usage")}
           </h2>
 
-          {planLimit > 0 ? (
-            <div className="space-y-2">
-              <div className="flex justify-between text-sm">
-                <span className="text-[#94A3B8]">{t('Minutes dubbed')}</span>
-                <span className="text-white font-medium">{minutesUsed} / {planLimit} min</span>
-              </div>
-              <Progress value={usagePct} className="h-2" />
-              {usagePct >= 80 && (
-                <p className="text-yellow-400 text-xs">
-                  {usagePct >= 100 ? t('Limit reached — upgrade for more.') : t('Approaching your monthly limit.')}
-                </p>
-              )}
+          <div className="space-y-2">
+            <div className="flex justify-between text-sm">
+              <span className="text-[#94A3B8]">{t('Render minutes used')}</span>
+              <span className="text-white font-medium">{minutesUsed} / {planLimit} min</span>
             </div>
-          ) : (
-            <p className="text-[#10B981] text-sm font-medium">{t('Unlimited usage on Professional plan')}</p>
-          )}
+            <Progress value={usagePct} className="h-2" />
+            {usagePct >= 80 && (
+              <p className="text-yellow-400 text-xs">
+                {usagePct >= 100 ? t('Limit reached — upgrade for more.') : t('Approaching your monthly limit.')}
+              </p>
+            )}
+          </div>
 
-          {planType !== "professional" && (
+          {planType !== "pro" && (
             <Button asChild size="sm" className="bg-gradient-to-r from-[#A855F7] to-[#7C3AED] text-white">
               <Link href="/subscribe?upgrade=true">
                 <Crown className="h-3.5 w-3.5 mr-1.5" />{t('Upgrade Plan')}

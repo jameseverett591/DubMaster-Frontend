@@ -1195,7 +1195,7 @@ export function DubVerseEditor({
   const importedSegments = useEditorStore((state) => state.importedSegments)
   const importedSegmentsJobId = useEditorStore((state) => state.importedSegmentsJobId)
   const setImportedSegmentsRaw = useEditorStore((state) => state.setImportedSegments)
-  const { hasFeature, recordingLimit, isPremium, isProfessional } = usePlan()
+  const { isPro, recordingLimit } = usePlan()
   const usage = useUsage()
   // Wrap the store setter so every write to importedSegments also stamps the
   // owning jobId directly via Zustand's static setState — always available,
@@ -1615,6 +1615,15 @@ export function DubVerseEditor({
   // Briefly surface an "Updated <time>" note under the Re-analyze button after a
   // successful re-analyze, then fade it out.
   const [showReanalyzedNote, setShowReanalyzedNote] = useState(false)
+  // Transient "couldn't fix that" message in the QC panel. The Fix buttons used
+  // to fail silently — a dead click is worse than an honest message.
+  const [qcFixNote, setQcFixNote] = useState<string | null>(null)
+  const qcFixNoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const noteQcFix = useCallback((msg: string) => {
+    if (qcFixNoteTimerRef.current) clearTimeout(qcFixNoteTimerRef.current)
+    setQcFixNote(msg)
+    qcFixNoteTimerRef.current = setTimeout(() => setQcFixNote(null), 5000)
+  }, [])
   const [dragReorder, setDragReorder] = useState<{
     fromIndex: number
     toIndex: number | null
@@ -3004,23 +3013,35 @@ export function DubVerseEditor({
       const _st = useEditorStore.getState()
       const _persisted = _st.speakerVoiceMapJobId === jobId ? _st.speakerVoiceMap : {}
 
+      // Server-side voice_mapping (persisted into segments.json on every PATCH)
+      // is the durable record of cast decisions. It MUST rank above _derived:
+      // after an assignment but before a re-render, _derived still holds the OLD
+      // rendered voice — treating rendered audio as truth wiped the assignment
+      // on every reload, which is exactly the "auto-assigned didn't persist"
+      // report. _persisted (localStorage) still wins: it may carry an assignment
+      // whose PATCH failed, which is otherwise unrecoverable.
+      const _server = initialVoiceMapping ?? {}
+
       // Provenance drives the strip colour: green = the user chose it, purple =
-      // the dub did. Everything resolved here except a persisted entry is 'auto'.
+      // the dub did. A server entry that differs from the rendered voice is a
+      // user reassignment; one that matches was an auto pick PATCHed along with
+      // it, so it keeps 'auto'.
       const _markAuto = (m: Record<string, string>) =>
         Object.fromEntries(Object.keys(m).map(k => [k, 'auto' as const]))
+      const _serverSource = Object.fromEntries(
+        Object.entries(_server).map(([k, v]) => [k, _derived[k] === v ? 'auto' as const : 'user' as const])
+      )
 
-      if (Object.keys(_persisted).length > 0) {
-        setSpeakerVoiceMap({ ..._derived, ..._persisted })
+      if (Object.keys(_persisted).length > 0 || Object.keys(_server).length > 0) {
+        setSpeakerVoiceMap({ ..._derived, ..._server, ..._persisted })
         setSpeakerVoiceSource({
           ..._markAuto(_derived),
+          ..._serverSource,
           ...Object.fromEntries(Object.keys(_persisted).map(k => [k, 'user' as const])),
         })
       } else if (Object.keys(_derived).length > 0) {
         setSpeakerVoiceMap(_derived)
         setSpeakerVoiceSource(_markAuto(_derived))
-      } else if (initialVoiceMapping && Object.keys(initialVoiceMapping).length > 0) {
-        setSpeakerVoiceMap(initialVoiceMapping)
-        setSpeakerVoiceSource(_markAuto(initialVoiceMapping))
       } else {
         const genders = speakerGenders ?? {}
         const voicesByGender: Record<string, string[]> = {
@@ -4861,8 +4882,21 @@ export function DubVerseEditor({
       }
       updateSegment(activeIndex, {
         audio_url,
+        committed_audio_url: audio_url,
         status: 'edited',
         was_truncated: false,
+        // The setImportedSegments block below carries these too — but it no-ops
+        // when importedSegments is null, and then displaySegments falls back to
+        // `segments`, which would keep the OLD engine and committed audio. The
+        // engine switch then rendered fine server-side while the UI kept showing
+        // (and playing) the previous engine's take.
+        engine: response.segment.engine ?? undefined,
+        respeecher_takes: response.segment.respeecher_takes ?? undefined,
+        respeecher_take_seeds: response.segment.respeecher_take_seeds ?? undefined,
+        respeecher_fits: response.segment.respeecher_fits ?? undefined,
+        respeecher_duration: response.segment.respeecher_duration ?? undefined,
+        respeecher_seed: response.segment.respeecher_seed ?? null,
+        respeecher_sampling_params: response.segment.respeecher_sampling_params ?? null,
       })
       const audioDur = response.segment.audio_duration
       // COMMITTED TIMING, NOT RAW. start_time/end_time are the ORIGINAL transcript
@@ -5257,6 +5291,58 @@ export function DubVerseEditor({
     return Promise.resolve()
   }, [jobId, stageEdit])
   commitOrStageRef.current = commitOrStage
+
+  // Close a QC silence-gap finding the way an NLE ripple-delete would: the next
+  // segment — and everything after it — slides earlier until the gap is gone.
+  // Speeding audio can't fix dead air between segments; only moving it can.
+  // The ripple stops at the first LOCKED segment: moving one would break the
+  // lock, and sliding past it would overlap it. Returns false when nothing
+  // could move so the caller can surface an honest "can't fix" note.
+  const closeSilenceGap = useCallback((finding: QCFinding): boolean => {
+    const segs = displaySegmentsRef.current
+    const gapStart = finding.timestamp_start
+    // First segment starting after the gap begins. Small epsilon — analysis
+    // timestamps drift ~50ms off segment bounds.
+    const nextIdx = segs.findIndex(s => effStart(s) > gapStart + 0.01)
+    if (nextIdx < 0) return false
+    const shift = effStart(segs[nextIdx]) - gapStart
+    if (shift < 0.03) return false   // nothing meaningful to close
+
+    const moved: Array<{ i: number; start: number; end: number }> = []
+    for (let i = nextIdx; i < segs.length; i++) {
+      if (segs[i].status === 'locked') break
+      moved.push({ i, start: effStart(segs[i]) - shift, end: effEnd(segs[i]) - shift })
+    }
+    if (!moved.length) return false  // the next segment itself is locked
+
+    for (const m of moved) {
+      const s = segs[m.i]
+      updateSegment(m.i, { start_time: m.start, end_time: m.end })
+      commitSegmentChanges(m.i, { committed_start_time: m.start, committed_end_time: m.end })
+      commitOrStageRef.current!(s.transcript_index ?? m.i, {
+        committed_start_time: m.start,
+        committed_end_time: m.end,
+      }).catch(err => console.warn('[QC-FIX] timing persist failed', err))
+    }
+    setImportedSegments(prev => {
+      const base = prev ?? displaySegmentsRef.current
+      const byIdx = new Map(moved.map(m => [m.i, m]))
+      return base.map((seg, i) => {
+        const m = byIdx.get(i)
+        return m ? { ...seg, start_time: m.start, end_time: m.end, committed_start_time: m.start, committed_end_time: m.end } : seg
+      })
+    })
+    // Re-stitch so Preview plays the closed-up timeline, not the pre-move one.
+    const stitched = segs.map((seg, i) => {
+      const m = moved.find(mm => mm.i === i)
+      return m ? { ...seg, start_time: m.start, end_time: m.end, committed_start_time: m.start, committed_end_time: m.end } : seg
+    })
+    requestStitchWith(stitched, (() => {
+      if (!audioContextRef.current) audioContextRef.current = new AudioContext()
+      return audioContextRef.current
+    })())
+    return true
+  }, [updateSegment, commitSegmentChanges, setImportedSegments, requestStitchWith])
   displaySegmentsRef.current = displaySegments
 
   /** Shared transport play/pause — the timeline control and the audio player
@@ -6427,14 +6513,25 @@ export function DubVerseEditor({
         </div>
       )}
       {/* Header */}
-      <header className="relative flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-neutral-900">
+      {/* overflow-x-auto: the header's controls are wider than the viewport at
+          narrow/zoomed widths, and without a scroll container here the row
+          pushed the WHOLE PAGE wider — the nav was cropped off the left and the
+          only way to reach Save/Upgrade was the page's own bottom scrollbar.
+          Now the header slides inside itself. */}
+      <header className="relative flex items-center justify-between gap-4 px-4 py-2 border-b border-neutral-800 bg-neutral-900 overflow-x-auto
+        [scrollbar-width:thin] [scrollbar-color:rgba(45,212,191,0.45)_transparent]
+        [&::-webkit-scrollbar]:h-0.5
+        [&::-webkit-scrollbar-track]:bg-transparent
+        [&::-webkit-scrollbar-thumb]:bg-teal-400/45
+        [&::-webkit-scrollbar-thumb]:rounded-full
+        [&::-webkit-scrollbar-thumb:hover]:bg-teal-300">
         {/* Offset right of true centre: Make Movie now sits at the end of the
             nav and reaches into the middle of the header, which this used to
             overlap. */}
         <span className="absolute left-1/2 -translate-x-1/2 ml-40 text-xs font-mono text-amber-400 select-all">
           {jobId}
         </span>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 shrink-0">
           {/* Logo */}
           <Link href="/studio" className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
@@ -6442,16 +6539,19 @@ export function DubVerseEditor({
             </div>
             <div className="flex flex-col leading-tight">
               <span className="font-bold text-lg text-white">DubMaster</span>
-              {(isProfessional || isPremium) && (
+              {isPro && (
                 <span className="text-xs font-semibold uppercase tracking-wide text-cyan-400">
-                  {isProfessional ? t('Professional') : t('Premium')}
+                  {t('Pro')}
                 </span>
               )}
             </div>
           </Link>
           
           {/* Nav */}
-          <nav className="hidden md:flex items-center gap-1 ml-4">
+          {/* Always rendered — was `hidden md:flex`, which dropped the whole
+              nav below the md breakpoint. The header scrolls horizontally now,
+              so hiding it is unnecessary. */}
+          <nav className="flex items-center gap-1 ml-4">
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/dashboard')}>{t('Dashboard')}</Button>
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/studio?tab=projects')}>{t('My Projects')}</Button>
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/collaborate')}>{t('Collaborate')}</Button>
@@ -6503,9 +6603,7 @@ export function DubVerseEditor({
 
             {/* Make Movie lives up here, well away from the transport controls:
                 it kicks off a full render, and sitting beside play/stop invited
-                mis-clicks on a button you don't want fired by accident.
-                Professional only — hidden for Premium. */}
-            {isProfessional && (
+                mis-clicks on a button you don't want fired by accident. */}
             <Button
               className={cn(
                 "ml-6 h-8 px-5 rounded-full text-xs font-bold tracking-widest uppercase",
@@ -6565,12 +6663,11 @@ export function DubVerseEditor({
                 : rebuildStatus === 'complete' ? 'MOVIE READY'
                 : 'MAKE MOVIE'}
             </Button>
-            )}
 
           </nav>
         </div>
         
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 shrink-0">
           <Button
             variant="ghost"
             size="sm"
@@ -6607,8 +6704,8 @@ export function DubVerseEditor({
       </header>
       
       {/* Sub-header with project info */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-neutral-900/90">
-        <div className="flex items-center gap-3">
+      <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-neutral-800 bg-neutral-900/90">
+        <div className="flex items-center gap-3 shrink-0">
           <Link href="/studio">
             <Button variant="ghost" size="sm" className="h-8 text-slate-400">
               <ArrowLeft className="h-4 w-4" />
@@ -6617,7 +6714,15 @@ export function DubVerseEditor({
           <h1 className="text-sm font-medium truncate max-w-[300px]">{title}</h1>
         </div>
 
-        <div className="flex items-center gap-3">
+        {/* overflow-x-auto: at narrow widths the buttons (Record/Save/Upgrade)
+            ran off the right edge unreachable — the cluster slides instead. */}
+        <div className="flex items-center gap-3 overflow-x-auto min-w-0 pb-0.5 [&>*]:shrink-0
+          [scrollbar-width:thin] [scrollbar-color:rgba(45,212,191,0.45)_transparent]
+          [&::-webkit-scrollbar]:h-0.5
+          [&::-webkit-scrollbar-track]:bg-transparent
+          [&::-webkit-scrollbar-thumb]:bg-teal-400/45
+          [&::-webkit-scrollbar-thumb]:rounded-full
+          [&::-webkit-scrollbar-thumb:hover]:bg-teal-300">
           {/* Remaining monthly minutes, from the same source as the dashboard.
               The old "pts" half of this badge was dropped: there is no points
               concept anywhere in the product, so it could only ever show a
@@ -6824,7 +6929,7 @@ export function DubVerseEditor({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48 bg-slate-900 border-slate-700">
-              {hasFeature('reviewQueue') && (() => {
+              {(() => {
                 const unreviewedCount = displaySegments.filter(s => s.flags?.length && s.flag_status === 'unreviewed').length
                 return (
                   <DropdownMenuItem
@@ -6991,20 +7096,14 @@ export function DubVerseEditor({
             <Sparkles className="h-4 w-4 mr-1" />
             {t('Upgrade')}
           </Button>
-          {/* Hidden for Professional: Make Movie already rebuilds AND exports,
-              opening this same modal when it finishes, so a separate Download
-              would be a second door to the same place. Premium has no Make
-              Movie, so this is its only route to the file. */}
-          {!isProfessional && (
-            <Button
-              size="sm"
-              className="h-8 bg-amber-500 hover:bg-amber-600 text-black font-medium"
-              onClick={() => setShowExportModal(true)}
-            >
-              <Download className="h-4 w-4 mr-1" />
-              {t('Download')}
-            </Button>
-          )}
+          <Button
+            size="sm"
+            className="h-8 bg-amber-500 hover:bg-amber-600 text-black font-medium"
+            onClick={() => setShowExportModal(true)}
+          >
+            <Download className="h-4 w-4 mr-1" />
+            {t('Download')}
+          </Button>
           <Link href="/profile">
             <Button variant="ghost" size="sm" className="h-8" title={t('Profile')}>
               <User className="h-4 w-4" />
@@ -7203,21 +7302,32 @@ export function DubVerseEditor({
               <span className="text-[10px] font-mono text-slate-400 tabular-nums w-11 text-right shrink-0">
                 {formatTime(srcTime)}
               </span>
-              <Slider
-                value={[srcTime]}
-                max={Math.max(videoDuration, 0.1)}
-                step={0.1}
-                onValueChange={([v]) => {
-                  // Transcript-player seek: moves THIS player's indicator and
-                  // the vocals element — never the video/timeline playhead.
-                  setSrcTime(v)
+              {/* No draggable slider here — scroll (trackpad swipe or mouse
+                  wheel) scrubs left/right instead. deltaX wins when present (a
+                  real horizontal swipe), otherwise deltaY (a plain vertical
+                  wheel) so a normal mouse can scrub too. The thin fill is just
+                  a position readout, not a control — it isn't clickable or
+                  draggable. */}
+              <div
+                className="flex-1 h-1 rounded-full bg-neutral-800 relative cursor-ew-resize select-none"
+                title={t('Scroll to seek')}
+                onWheel={(e) => {
+                  e.preventDefault()
+                  const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+                  const dur = Math.max(videoDuration, 0.1)
+                  const next = Math.min(Math.max(srcTime + delta * 0.02, 0), dur)
+                  setSrcTime(next)
                   setSrcArmed(true)
                   if (srcAudioRef.current) {
-                    srcAudioRef.current.currentTime = timelineToSourceTime(v, scenesRef.current) ?? v
+                    srcAudioRef.current.currentTime = timelineToSourceTime(next, scenesRef.current) ?? next
                   }
                 }}
-                className="flex-1"
-              />
+              >
+                <div
+                  className="absolute inset-y-0 left-0 rounded-full bg-teal-400 shadow-[0_0_6px_rgba(45,212,191,0.9),0_0_14px_rgba(45,212,191,0.6)]"
+                  style={{ width: `${Math.min(100, (srcTime / Math.max(videoDuration, 0.1)) * 100)}%` }}
+                />
+              </div>
               <span className="text-[10px] font-mono text-slate-500 tabular-nums w-11 shrink-0">
                 {formatTime(videoDuration)}
               </span>
@@ -8135,13 +8245,11 @@ export function DubVerseEditor({
             <Button
               variant="ghost"
               size="sm"
-              className={cn("h-8 text-xs", hasFeature('customVoices') ? "text-slate-400 hover:text-amber-300" : "text-slate-500 hover:text-violet-300")}
-              title={hasFeature('customVoices') ? undefined : 'Custom Voices is a Professional feature — upgrade to add your own voice'}
-              onClick={() => hasFeature('customVoices') ? setCustomVoicesOpen(true) : router.push('/subscribe')}
+              className="h-8 text-xs text-slate-400 hover:text-amber-300"
+              onClick={() => setCustomVoicesOpen(true)}
             >
               <Sparkles className="h-4 w-4 mr-1" />
               Custom Voices
-              {!hasFeature('customVoices') && <Lock className="h-3 w-3 ml-1" />}
             </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -8403,19 +8511,33 @@ export function DubVerseEditor({
           className="flex flex-col border-l border-neutral-800 bg-neutral-900/50 relative"
           style={{ width: previewWidth }}
         >
-          {/* Resize handle */}
+          {/* Resize handle — w-2 gives the cursor a real grip target while the
+              visible line stays a hairline. */}
           <div
-            className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group select-none touch-none"
+            className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize bg-amber-500/50 transition-colors z-20 group select-none touch-none"
             onPointerDown={handlePreviewResizeStart}
           >
             <div className={cn(
-              "absolute inset-y-0 left-0 w-0.5 bg-amber-500/30 group-hover:bg-amber-500",
+              "absolute inset-y-0 left-0 w-0.5 bg-amber-500",
               isResizingPreview && "bg-amber-500"
             )} />
           </div>
           {/* Right panel tabs: Result / Quality / Studio */}
-          <div className="flex items-center justify-between gap-1 px-2 py-1.5 border-b border-slate-800 bg-neutral-900">
-            <div className="flex items-center gap-1">
+          <div className="flex items-center justify-between gap-1 px-2 pt-1.5 border-b border-slate-800 bg-neutral-900">
+            {/* overflow-x-auto: the tab set is wider than the panel at narrow
+                viewer widths — Test Clips etc. were unreachable. No visible
+                scrollbar — the vertical mouse wheel (or trackpad) drives the
+                horizontal scroll directly instead, so there's nothing to see
+                or grab, just roll to slide the tabs. */}
+            <div
+              className="flex items-center gap-1 overflow-x-auto min-w-0
+              [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+              onWheel={(e) => {
+                if (e.deltaY === 0) return
+                e.preventDefault()
+                e.currentTarget.scrollLeft += e.deltaY
+              }}
+            >
               {([
                 { id: 'result',     label: 'Video' },
                 { id: 'quality',    label: 'Quality' },
@@ -8435,7 +8557,7 @@ export function DubVerseEditor({
                 { id: 'library',    label: 'Voice Library' },
                 { id: 'testclips',  label: 'Test Clips',   feature: 'customVoices' },
                 { id: 'ei-library', label: 'E.I. Library', feature: 'emotionalIntelligence' },
-              ] as const).filter((tab) => !('feature' in tab) || hasFeature(tab.feature as any)).map((tab) => (
+              ] as const).map((tab) => (
                 <button
                   type="button"
                   key={tab.id}
@@ -8447,7 +8569,7 @@ export function DubVerseEditor({
                     setRightPanelTab(tab.id)
                   }}
                   className={cn(
-                    'text-xs px-3 py-1 rounded-md transition-colors',
+                    'shrink-0 whitespace-nowrap text-xs px-3 py-1 rounded-md transition-colors',
                     rightPanelTab === tab.id
                       ? 'bg-slate-700 text-white'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
@@ -8461,7 +8583,7 @@ export function DubVerseEditor({
               ))}
             </div>
             {rightPanelTab === 'result' && (
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1 shrink-0">
                 <Button
                   variant="ghost"
                   size="sm"
@@ -8689,7 +8811,7 @@ export function DubVerseEditor({
           )}
 
           {/* Velma tab */}
-          {rightPanelTab === 'velma' && hasFeature('velmaPanel') && (
+          {rightPanelTab === 'velma' && (
             <div className="flex-1 min-h-0 overflow-y-auto bg-neutral-950">
               <VelmaPanel
                 segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
@@ -8848,7 +8970,7 @@ export function DubVerseEditor({
           )}
 
           {/* Studio tab — placeholder */}
-          {rightPanelTab === 'studio' && hasFeature('studioCollaboration') && (
+          {rightPanelTab === 'studio' && (
             <div className="flex-1 min-h-0 flex items-center justify-center text-slate-500 text-sm bg-neutral-950">
               {t('Studio coming soon')}
             </div>
@@ -8856,7 +8978,7 @@ export function DubVerseEditor({
 
           {/* Scene tab */}
           {rightPanelTab === 'scene' && (
-            <div className="flex-1 min-h-0 overflow-y-auto bg-neutral-950">
+            <div className="flex-1 min-h-0 overflow-y-auto bg-emerald-500/5">
               <SceneSummaryPanel />
             </div>
           )}
@@ -9255,7 +9377,7 @@ export function DubVerseEditor({
           )}
 
           {/* EI Library panel */}
-          {rightPanelTab === 'ei-library' && hasFeature('emotionalIntelligence') && (() => {
+          {rightPanelTab === 'ei-library' && (() => {
             const filtered = savedCurves.filter(c =>
               !curveSearchQuery ||
               c.name.toLowerCase().includes(curveSearchQuery.toLowerCase()) ||
@@ -9925,11 +10047,11 @@ export function DubVerseEditor({
       >
         {/* Resize handle at top */}
         <div
-          className="absolute top-0 left-0 right-0 h-1.5 cursor-ns-resize hover:bg-amber-500/50 transition-colors z-20 group select-none touch-none"
+          className="absolute top-0 left-0 right-0 h-1.5 cursor-ns-resize bg-amber-500/50 transition-colors z-20 group select-none touch-none"
           onPointerDown={handleTimelineResizeStart}
         >
           <div className={cn(
-            "absolute inset-x-0 top-0 h-0.5 bg-amber-500/30 group-hover:bg-amber-500",
+            "absolute inset-x-0 top-0 h-0.5 bg-amber-500",
             isResizingTimeline && "bg-amber-500"
           )} />
         </div>
@@ -10107,7 +10229,7 @@ export function DubVerseEditor({
               { id: 'chord',      icon: '🎼', label: 'Chord',      feature: 'emotionalCurveEditor' },
               { id: 'advanced',   icon: '🎛', label: 'Advanced',   feature: 'emotionalCurveEditor' },
               { id: 'characters', icon: '🎭', label: 'Characters', feature: 'characterProfiles' },
-            ] as const).filter(tab => hasFeature(tab.feature as any)).map(tab => (
+            ] as const).map(tab => (
               <button
                 key={tab.id}
                 type="button"
@@ -10227,11 +10349,11 @@ export function DubVerseEditor({
           <div ref={qcMonitorRef} className="shrink-0 border-r border-neutral-700 bg-neutral-950 flex flex-col overflow-hidden relative" style={{ width: qcMonitorWidth }}>
               {/* Resize handle - right edge */}
               <div
-                className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group select-none touch-none"
+                className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-amber-500/50 transition-colors z-20 group select-none touch-none"
                 onPointerDown={handleQcMonitorResizeStart}
               >
                 <div className={cn(
-                  "absolute inset-y-0 right-0 w-0.5 bg-amber-500/30 group-hover:bg-amber-500",
+                  "absolute inset-y-0 right-0 w-0.5 bg-amber-500",
                   isResizingQcMonitor && "bg-amber-500"
                 )} />
               </div>
@@ -10281,6 +10403,11 @@ export function DubVerseEditor({
                     <div className="space-y-1.5"><div className="h-2.5 w-[50%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[35%] rounded-full bg-slate-800/60 animate-pulse" /></div>
                   </div>
                 )}
+                {qcFixNote && (
+                  <p className="px-3 py-1.5 text-[10px] text-amber-300/90 border-b border-neutral-800">
+                    {qcFixNote}
+                  </p>
+                )}
                 <QCQualityPanel
                   report={qcReport}
                   segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
@@ -10307,15 +10434,40 @@ export function DubVerseEditor({
                     }
                   }}
                   onApplyFix={(finding) => {
-                    if (finding.segment_index < 0 || finding.segment_index >= displaySegments.length) return
-                    const seg = displaySegments[finding.segment_index]
-                    const retranscriptionText = finding.type === 'pronunciation'
-                      ? qcReport?.retranscription.items.find(
-                          item => Math.abs(item.start - finding.timestamp_start) < 1
-                        )?.text
-                      : undefined
-                    const fixResult = applyQCFix(finding, seg, { retranscriptionText })
-                    if (fixResult) updateSegment(finding.segment_index, fixResult.patch)
+                    // Silence gaps carry segment_index -1 — they sit BETWEEN
+                    // segments, so the per-segment fixers can't touch them.
+                    // Dead air is a timing problem, not an audio problem: the
+                    // fix is a ripple that pulls the next segment (and the rest
+                    // of the timeline after it) left until the gap is gone.
+                    const applied = finding.segment_index < 0
+                      ? closeSilenceGap(finding)
+                      : (() => {
+                          if (finding.segment_index >= displaySegments.length) return false
+                          const seg = displaySegments[finding.segment_index]
+                          const retranscriptionText = finding.type === 'pronunciation'
+                            ? qcReport?.retranscription.items.find(
+                                item => Math.abs(item.start - finding.timestamp_start) < 1
+                              )?.text
+                            : undefined
+                          const fixResult = applyQCFix(finding, seg, { retranscriptionText })
+                          if (!fixResult) return false
+                          updateSegment(finding.segment_index, fixResult.patch)
+                          return true
+                        })()
+                    if (applied) {
+                      // The fix landed — drop the finding so it stops asking
+                      // to be fixed. A later Re-analyze regenerates findings
+                      // from scratch anyway.
+                      setQcReport(prev => prev
+                        ? { ...prev, findings: prev.findings.filter(f => f.id !== finding.id) }
+                        : prev)
+                    } else {
+                      noteQcFix(
+                        finding.segment_index < 0
+                          ? 'Could not close this gap — the next segment is locked or missing.'
+                          : 'No safe auto-fix for this finding — it needs a manual edit.'
+                      )
+                    }
                   }}
                   onSelectSegment={(retranscriptionIndex) => {
                     setSelectedRetranscriptionIndex(retranscriptionIndex)
@@ -10346,11 +10498,11 @@ export function DubVerseEditor({
           <div ref={trackLabelRef} className="shrink-0 border-r border-neutral-700 bg-neutral-900/80 flex flex-col relative overflow-hidden" style={{ width: trackLabelWidth }}>
             {/* Resize handle - right edge */}
             <div
-              className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-amber-500/50 transition-colors z-20 group select-none touch-none"
+              className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-amber-500/50 transition-colors z-20 group select-none touch-none"
               onPointerDown={handleTrackLabelResizeStart}
             >
               <div className={cn(
-                "absolute inset-y-0 right-0 w-0.5 bg-amber-500/30 group-hover:bg-amber-500",
+                "absolute inset-y-0 right-0 w-0.5 bg-amber-500",
                 isResizingTrackLabel && "bg-amber-500"
               )} />
             </div>
@@ -10451,7 +10603,6 @@ export function DubVerseEditor({
               </div>
             </div>
             {/* Emotional curve track label */}
-            {hasFeature('emotionalCurveEditor') && (
             <div className="h-24 shrink-0 flex items-start px-2 pt-2 text-xs text-neutral-400 border-b border-neutral-700 bg-neutral-900/30">
               <div className="flex flex-col text-xs text-slate-300 select-none">
                 <span className="font-semibold mb-1">{t('Emotion')}</span>
@@ -10478,7 +10629,6 @@ export function DubVerseEditor({
                 </div>
               </div>
             </div>
-            )}
             {/* Filler + bottom ruler spacer */}
             <div className="flex-1 bg-neutral-900/50 border-b border-neutral-800" />
             <div className="h-5 shrink-0 bg-neutral-900 border-t border-neutral-700" />
@@ -12591,7 +12741,7 @@ export function DubVerseEditor({
               </div>
 
               {/* Emotional curve track */}
-              {hasFeature('emotionalCurveEditor') && <div className="h-24 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
+              <div className="h-24 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative overflow-hidden" data-timeline-track>
                 {displaySegments.map((segment, index) => {
                   if (!inActiveWindow(segment)) return null
                   const segWidth = (effEnd(segment) - effStart(segment)) * PIXELS_PER_SECOND
@@ -12649,7 +12799,7 @@ export function DubVerseEditor({
                     </div>
                   )
                 })}
-              </div>}
+              </div>
 
               {/* Filler — fills remaining height, shows grid + bottom ruler */}
               <div className="flex-1 relative bg-[#07090f] flex flex-col">

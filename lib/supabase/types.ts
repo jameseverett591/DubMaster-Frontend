@@ -1,4 +1,4 @@
-export type PlanType = "basic" | "premium" | "professional"
+export type PlanType = "basic" | "premium" | "professional" | "pro" | "free"
 export type SubscriptionStatus = "active" | "canceled" | "past_due" | "trialing"
 
 export interface Database {

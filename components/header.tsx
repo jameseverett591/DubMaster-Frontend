@@ -4,7 +4,7 @@ import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { useTranslations } from "next-intl"
 import { createClient } from "@/lib/supabase/client"
-import { usePlan } from "@/lib/use-plan"
+
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -38,16 +38,12 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
   const supabase = createClient()
   const t = useTranslations('nav')
   const tc = useTranslations('common')
-  const { hasFeature } = usePlan()
-
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
       if (!data.user) return
       setUserEmail(data.user.email ?? null)
     })
   }, [])
-
-  const canAccessEditor = hasFeature('editor')
 
   const userInitials = userEmail ? userEmail.slice(0, 2).toUpperCase() : "?"
 
@@ -110,23 +106,19 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
               {t('collaborate')}
             </button>
 
-            {hasFeature('voiceLibrary') && (
-              <button
-                onClick={() => setVoiceLibraryOpen(true)}
-                className="text-sm font-medium text-[#94A3B8] transition-colors hover:text-[#C084FC]"
-              >
-                {t('voiceLibrary')}
-              </button>
-            )}
-            {canAccessEditor && (
-              <Link
-                href="/editor"
-                className="text-sm font-medium flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#A855F7]/10 border border-[#A855F7]/30 text-[#C084FC] hover:bg-[#A855F7]/20 hover:border-[#A855F7]/60 transition-all duration-200"
-              >
-                <Clapperboard className="h-3.5 w-3.5" />
-                {t('editor')}
-              </Link>
-            )}
+            <button
+              onClick={() => setVoiceLibraryOpen(true)}
+              className="text-sm font-medium text-[#94A3B8] transition-colors hover:text-[#C084FC]"
+            >
+              {t('voiceLibrary')}
+            </button>
+            <Link
+              href="/editor"
+              className="text-sm font-medium flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#A855F7]/10 border border-[#A855F7]/30 text-[#C084FC] hover:bg-[#A855F7]/20 hover:border-[#A855F7]/60 transition-all duration-200"
+            >
+              <Clapperboard className="h-3.5 w-3.5" />
+              {t('editor')}
+            </Link>
 
           </nav>
 
@@ -202,26 +194,22 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
                 {t('collaborate')}
               </button>
 
-              {hasFeature('voiceLibrary') && (
-                <div className="border-t border-[#A855F7]/20 pt-4 mt-2">
-                  <button
-                    onClick={() => { setVoiceLibraryOpen(true); setMobileMenuOpen(false); }}
-                    className="text-sm font-medium text-[#94A3B8] text-left"
-                  >
-                    {t('voiceLibrary')}
-                  </button>
-                </div>
-              )}
-              {canAccessEditor && (
-                <Link
-                  href="/editor"
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="text-sm font-medium flex items-center gap-2 px-3 py-2 rounded-lg bg-[#A855F7]/10 border border-[#A855F7]/30 text-[#C084FC]"
+              <div className="border-t border-[#A855F7]/20 pt-4 mt-2">
+                <button
+                  onClick={() => { setVoiceLibraryOpen(true); setMobileMenuOpen(false); }}
+                  className="text-sm font-medium text-[#94A3B8] text-left"
                 >
+                  {t('voiceLibrary')}
+                </button>
+              </div>
+              <Link
+                href="/editor"
+                onClick={() => setMobileMenuOpen(false)}
+                className="text-sm font-medium flex items-center gap-2 px-3 py-2 rounded-lg bg-[#A855F7]/10 border border-[#A855F7]/30 text-[#C084FC]"
+              >
                   <Clapperboard className="h-4 w-4" />
                   {t('editor')}
-                </Link>
-              )}
+              </Link>
 
               <div className="border-t border-[#A855F7]/20 pt-4 mt-2">
                 <button
