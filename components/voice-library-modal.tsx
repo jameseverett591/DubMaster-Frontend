@@ -7,7 +7,7 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Mic2, Star, Search, Play, Check, Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Mic2, Star, Search, Play, Square, Check, Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
 import { apiClient, API_BASE_URL, type Voice } from '@/lib/api-client'
 import { useEditorStore } from '@/lib/editor-store'
 import { useT } from '@/lib/use-t'
@@ -309,10 +309,37 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
 
   // Preview audio
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const blobUrlRef = useRef<string | null>(null)
+  // Generation counter guards the async handlePreview against click races:
+  // each call bumps it; after every await we bail if a newer call started.
+  const previewGenRef = useRef(0)
   const [previewingId, setPreviewingId] = useState<string | null>(null)
+
+  const stopPreview = useCallback(() => {
+    previewGenRef.current += 1
+    const audio = audioRef.current
+    if (audio) {
+      // Detach handlers BEFORE pausing — a paused element can still fire
+      // onerror/onended, which would clear the NEW preview's indicator.
+      audio.onended = null
+      audio.onerror = null
+      audio.pause()
+      audioRef.current = null
+    }
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current)
+      blobUrlRef.current = null
+    }
+    setPreviewingId(null)
+  }, [])
+
   const handlePreview = useCallback(async (voiceId: string, previewUrl?: string) => {
-    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
-    if (previewingId === voiceId) { setPreviewingId(null); return }
+    const wasPlayingThis = previewingId === voiceId
+    stopPreview()
+    if (wasPlayingThis) return  // clicking the playing voice = toggle off
+    // Claim this call's generation AFTER stopPreview — the stop itself bumps
+    // the counter, so a gen captured before it is always already stale.
+    const gen = ++previewGenRef.current
 
     // Must go through apiClient.mediaUrl: /api/voice-preview requires auth, and
     // an <audio> element cannot send an Authorization header — the backend takes
@@ -325,16 +352,19 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     const src = previewUrl?.startsWith('http')
       ? previewUrl
       : await apiClient.mediaUrl(rawPath)
+    if (gen !== previewGenRef.current) return  // a newer preview won the race
 
     // Try direct playback first. If it fails (CORS, range request, or other),
     // fall back to fetching the audio and creating a blob URL to play.
     try {
       console.debug('[VoicePreview] attempting direct play', { voiceId, src })
       const audio = new Audio(src)
-      audio.onended = () => setPreviewingId(null)
+      // Handlers verify this element is still current before clearing state —
+      // a superseded audio's events must not wipe a newer preview's indicator.
+      audio.onended = () => { if (audioRef.current === audio) setPreviewingId(null) }
       audio.onerror = (ev) => {
         console.error('[VoicePreview] direct audio error', ev, src)
-        setPreviewingId(null)
+        if (audioRef.current === audio) setPreviewingId(null)
       }
       audioRef.current = audio
       setPreviewingId(voiceId)
@@ -343,6 +373,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     } catch (err) {
       console.warn('[VoicePreview] direct play failed, falling back to fetch', { voiceId, src, err })
     }
+    if (gen !== previewGenRef.current) return
 
     // Fallback: fetch the audio and play from a blob URL
     try {
@@ -351,18 +382,23 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
       const res = await fetch(src, { method: 'GET', headers: await apiClient.ensureAuthHeaders() })
       if (!res.ok) throw new Error(`Fetch failed: ${res.status}`)
       const buf = await res.arrayBuffer()
+      if (gen !== previewGenRef.current) return
       const blob = new Blob([buf], { type: res.headers.get('Content-Type') || 'audio/mpeg' })
       const blobUrl = URL.createObjectURL(blob)
+      blobUrlRef.current = blobUrl
       const audio = new Audio(blobUrl)
-      audio.onended = () => {
-        setPreviewingId(null)
-        // release blob URL after a short delay
+      const release = () => {
+        if (blobUrlRef.current === blobUrl) blobUrlRef.current = null
         setTimeout(() => URL.revokeObjectURL(blobUrl), 2000)
+      }
+      audio.onended = () => {
+        if (audioRef.current === audio) setPreviewingId(null)
+        release()
       }
       audio.onerror = (ev) => {
         console.error('[VoicePreview] blob audio error', ev, src)
-        setPreviewingId(null)
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 2000)
+        if (audioRef.current === audio) setPreviewingId(null)
+        release()
       }
       audioRef.current = audio
       setPreviewingId(voiceId)
@@ -370,21 +406,22 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
       return
     } catch (err) {
       console.error('[VoicePreview] fallback fetch/play failed', { voiceId, src, err })
-      setPreviewingId(null)
+      if (gen === previewGenRef.current) setPreviewingId(null)
     }
-  }, [previewingId])
+  }, [previewingId, stopPreview])
   // Stop preview when content unmounts (tab switch, modal close)
   useEffect(() => {
-    return () => {
-      if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
-    }
-  }, [])
+    return () => { stopPreview() }
+  }, [stopPreview])
 
   // Assign
   const [assignFeedback, setAssignFeedback] = useState<Record<string, string>>({})
   const handleAssign = useCallback(async (voiceId: string, speakerId: string) => {
     updateSpeakerVoice(speakerId, voiceId)
     pulseSpeaker(speakerId)
+    // onVoiceAssigned (wired by the editor) clears per-segment staged voice
+    // overrides for this speaker and re-renders the part — stagedVoices is
+    // component state there, not reachable from the store.
     onVoiceAssigned?.(speakerId, voiceId)
     const newMap = { ...speakerVoiceMap, [speakerId]: voiceId }
     if (jobId) {
@@ -615,6 +652,18 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
             <Play className={`h-3.5 w-3.5 mr-2 ${isPlaying ? 'text-amber-300' : ''}`} />
             {isPlaying ? 'Playing…' : 'Preview'}
           </Button>
+          <Button size="sm" variant="outline"
+            onClick={stopPreview}
+            disabled={!isPlaying}
+            aria-label="Stop preview"
+            title="Stop preview"
+            className={`border border-amber-500/30 text-amber-200 bg-slate-950/60 shrink-0 p-0 ${
+              isHero ? 'h-12 w-12' : 'h-8 w-8'
+            } ${isPlaying
+              ? 'hover:bg-red-500/20 hover:text-red-300'
+              : 'opacity-40 cursor-not-allowed'}`}>
+            <Square className="h-3.5 w-3.5 fill-current" />
+          </Button>
           {isJobAware && (
             assignedTo ? (
               <span className="text-[10px] text-emerald-400 font-medium flex items-center gap-1 px-2">
@@ -706,11 +755,15 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
             {pageVoices.map(v => {
               const isSel = selected?.voice_id === v.voice_id
               const assigned = voiceAssignments[v.voice_id] || []
+              const isPlayingRow = previewingId === v.voice_id
               return (
-                <button
+                <div
                   key={v.voice_id}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => setSelectedVoiceId(v.voice_id)}
-                  className={`w-full text-left px-2.5 py-2 rounded-lg border transition-colors ${
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSelectedVoiceId(v.voice_id) }}
+                  className={`w-full text-left px-2.5 py-2 rounded-lg border transition-colors cursor-pointer ${
                     isSel
                       ? 'bg-amber-500/10 border-amber-400/50'
                       : 'bg-[#08131D]/60 border-transparent hover:border-amber-500/25'
@@ -720,13 +773,13 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                     <span
                       role="button"
                       tabIndex={0}
-                      aria-label={`Preview ${v.name}`}
-                      onClick={(e) => { e.stopPropagation(); handlePreview(v.voice_id, v.preview_url) }}
-                      onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); handlePreview(v.voice_id, v.preview_url) } }}
+                      aria-label={isPlayingRow ? `Stop previewing ${v.name}` : `Preview ${v.name}`}
+                      onClick={(e) => { e.stopPropagation(); isPlayingRow ? stopPreview() : handlePreview(v.voice_id, v.preview_url) }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); isPlayingRow ? stopPreview() : handlePreview(v.voice_id, v.preview_url) } }}
                       className="shrink-0 text-amber-300 hover:text-amber-200"
                     >
-                      {previewingId === v.voice_id
-                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      {isPlayingRow
+                        ? <Square className="h-3.5 w-3.5 fill-current" />
                         : <Play className="h-3.5 w-3.5" />}
                     </span>
                     <span className="flex-1 min-w-0 truncate text-sm text-slate-200">{v.name}</span>
@@ -753,7 +806,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                       ))}
                     </div>
                   )}
-                </button>
+                </div>
               )
             })}
           </div>
@@ -806,6 +859,17 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                     onClick={() => handlePreview(selected.voice_id, selected.preview_url)}>
                     <Play className="h-3.5 w-3.5" />
                     {previewingId === selected.voice_id ? 'Playing…' : 'Preview'}
+                  </Button>
+                  <Button size="sm" variant="outline"
+                    onClick={stopPreview}
+                    disabled={previewingId !== selected.voice_id}
+                    aria-label="Stop preview"
+                    title="Stop preview"
+                    className={`h-8 w-8 p-0 border border-amber-500/30 text-amber-200 bg-slate-950/60 ${
+                      previewingId === selected.voice_id
+                        ? 'hover:bg-red-500/20 hover:text-red-300'
+                        : 'opacity-40 cursor-not-allowed'}`}>
+                    <Square className="h-3.5 w-3.5 fill-current" />
                   </Button>
                   {isJobAware && (
                     <select
@@ -882,14 +946,11 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                       ?? Object.values(pageCache).flat().find(v => v.voice_id === _raw)?.name
                       ?? '(voice set)')
                 : null
-              // Green = the user chose this voice. Purple = the dub auto-assigned
-              // it and it still wants review. Amber = nothing assigned.
-              //
-              // A preset key ("male-1") can ONLY come from the dub's gender
-              // defaults — assigning from the Library always yields a 32-char
-              // Fish id — so it is proof of auto-assignment regardless of what
-              // the provenance map says. That makes the colour correct even for
-              // jobs dubbed before provenance tracking existed.
+              // Green = a voice is in use (user-chosen OR auto-assigned).
+              // Amber = nothing assigned. Auto-assigned pills get a small
+              // purple dot so the "not yet reviewed" signal survives the
+              // green treatment — a scan for purple dots still shows which
+              // speakers the user hasn't deliberately cast.
               const source = !sp.current_voice_id
                 ? undefined
                 : _isPresetKey
@@ -897,9 +958,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                   : speakerVoiceSource[sp.speaker_id]
               const tone = !sp.current_voice_id
                 ? 'bg-amber-500/10 border-amber-500/40 text-amber-300 hover:bg-amber-500/20'
-                : source === 'user'
-                  ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/20'
-                  : 'bg-purple-500/10 border-purple-500/40 text-purple-300 hover:bg-purple-500/20'
+                : 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/20'
               return (
                 <button key={sp.speaker_id}
                   type="button"
@@ -931,6 +990,12 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                   <span className="font-medium">{sp.display_name}</span>
                   <span className="opacity-70 mx-1">›</span>
                   <span>{voiceName ?? 'not assigned'}</span>
+                  {sp.current_voice_id && source !== 'user' && (
+                    <span
+                      className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-purple-400 align-middle"
+                      title="Auto-assigned by the dub — not yet reviewed"
+                    />
+                  )}
                 </button>
               )
             })}

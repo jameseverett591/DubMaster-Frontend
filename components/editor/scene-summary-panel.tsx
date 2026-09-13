@@ -180,7 +180,7 @@ export function SceneSummaryPanel() {
 
         {/* Selected segment — its own scene summary card */}
         {segment && (
-          <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-3 shrink-0">
+          <div className="rounded-xl border border-blue-600/40 bg-neutral-900 p-3 shrink-0 shadow-[0_0_14px_rgba(65,105,225,0.35)]">
             <div className="flex items-center gap-2 mb-1.5">
               <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
                 {t('Selected line')} · {formatTime(segment.start_time)} · {segment.speaker_label ?? segment.speaker_id}
@@ -190,7 +190,7 @@ export function SceneSummaryPanel() {
             {!segLoading && summary?.status === 'ok' && (
               <>
                 {summary.scene_beat && (
-                  <p className="text-xs text-slate-300 leading-relaxed">{summary.scene_beat}</p>
+                  <p className="text-base text-slate-300 leading-relaxed">{summary.scene_beat}</p>
                 )}
                 {summary.line_function && (
                   <p className="text-xs mt-1.5">
@@ -225,8 +225,8 @@ export function SceneSummaryPanel() {
         )}
 
         {notes && notes.status !== 'ok' && (
-          <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-3">
-            <p className="text-[11px] text-slate-400 leading-relaxed">
+          <div className="rounded-xl border border-blue-600/40 bg-neutral-900 p-3 shadow-[0_0_14px_rgba(65,105,225,0.35)]">
+            <p className="text-sm text-slate-400 leading-relaxed">
               {notes.reason === 'no_api_key'
                 ? t('AI Notes are not configured for this environment.')
                 : t('AI Notes are unavailable for this job.')}
@@ -251,7 +251,7 @@ export function SceneSummaryPanel() {
                   >
                     {mmss(n.start)}
                   </button>
-                  <p className="text-[11px] text-slate-300 leading-relaxed">{n.text}</p>
+                  <p className="text-sm text-slate-300 leading-relaxed">{n.text}</p>
                 </div>
               ))}
             </div>
@@ -263,7 +263,7 @@ export function SceneSummaryPanel() {
                   {t('Chapter Summary')}
                 </span>
                 {(notes.chapters ?? []).map((c, i) => (
-                  <div key={i} className="rounded-xl border border-neutral-800 bg-neutral-900 p-3">
+                  <div key={i} className="rounded-xl border border-blue-600/40 bg-neutral-900 p-3 shadow-[0_0_14px_rgba(65,105,225,0.35)]">
                     <div className="flex items-center gap-2 mb-1">
                       <span className="text-xs font-semibold text-white flex-1">{c.title}</span>
                       {c.start !== null && (
@@ -276,7 +276,7 @@ export function SceneSummaryPanel() {
                         </button>
                       )}
                     </div>
-                    <p className="text-[11px] text-slate-300 leading-relaxed">
+                    <p className="text-sm text-slate-300 leading-relaxed">
                       <LinkedSummary text={c.summary} onSeek={seekTo} />
                     </p>
                   </div>
