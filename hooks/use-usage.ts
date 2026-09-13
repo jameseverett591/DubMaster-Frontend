@@ -45,7 +45,7 @@ export function useUsage(): UsageInfo {
         const { data: { session } } = await supabase.auth.getSession()
         if (!session) { if (!cancelled) setLoading(false); return }
 
-        const res = await fetch(`${API_BASE_URL}/quota/balance`, {
+        const res = await fetch(`${API_BASE_URL}/api/quota/balance`, {
           headers: { Authorization: `Bearer ${session.access_token}` },
         })
         if (!res.ok) throw new Error(`balance ${res.status}`)
