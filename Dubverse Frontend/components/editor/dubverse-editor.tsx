@@ -5829,6 +5829,19 @@ export function DubVerseEditor({
     parked: number; parkedSeconds: number
   }>(null)
 
+  // Optional AI lip-sync post-pass (Sync.Labs etc). Opt-in only — it's a paid
+  // generative pass that repaints mouths; honest UI means showing cost and
+  // failure modes BEFORE the user commits, not after.
+  const [lipsyncOptIn, setLipsyncOptIn] = useState(false)
+  const [lipsyncInfo, setLipsyncInfo] = useState<{
+    provider?: string; available: boolean; cost_per_second_usd?: number
+  } | null>(null)
+  useEffect(() => {
+    apiClient.getDubbingEngines()
+      .then(r => setLipsyncInfo(r.engines?.lipsync ?? null))
+      .catch(() => {})
+  }, [])
+
   const handleRebuildVideo = useCallback(async () => {
     setRebuildError(null)
     setIsRebuilding(true)
@@ -5839,7 +5852,7 @@ export function DubVerseEditor({
       setRebuildProgress(prev => Math.min(90, prev + (90 / 56)))
     }, 500)
     try {
-      const response = await apiClient.remixDub(jobId)
+      const response = await apiClient.remixDub(jobId, { lipsync: lipsyncOptIn })
       if (rebuildIntervalRef.current) clearInterval(rebuildIntervalRef.current)
       setRebuildProgress(100)
       const absUrl = apiClient.toAbsoluteUrl(response.dubbed_video_url)
@@ -5868,7 +5881,7 @@ export function DubVerseEditor({
     } finally {
       setIsRebuilding(false)
     }
-  }, [jobId, setPlaybackMode, setCurrentTime, isMuted, masterVolume, setRebuildStatus, clearAllDirty])
+  }, [jobId, setPlaybackMode, setCurrentTime, isMuted, masterVolume, setRebuildStatus, clearAllDirty, lipsyncOptIn])
 
   const handleRetranslate = useCallback(async () => {
     if (isRetranslating) return
@@ -6696,6 +6709,36 @@ export function DubVerseEditor({
                 : rebuildStatus === 'complete' ? 'MOVIE READY'
                 : 'MAKE MOVIE'}
             </Button>
+
+            {/* Optional AI lip-sync — opt-in only, shown only when the vendor
+                is configured. Cost is honest up front: billed per rendered
+                second whether the pass succeeds or not. */}
+            {lipsyncInfo?.available && (
+              <label
+                className="ml-3 flex items-center gap-1.5 cursor-pointer select-none"
+                title={t(
+                  `AI lip sync (${lipsyncInfo.provider === 'vozo' ? 'Vozo' : 'Sync.Labs'}): repaints the mouth region to match the dubbed audio. ` +
+                  'Works best on frontal, well-lit footage — may produce artifacts on fast action or angled shots. ' +
+                  'Billed on rendered duration, pass or fail.'
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked={lipsyncOptIn}
+                  onChange={(e) => setLipsyncOptIn(e.target.checked)}
+                  disabled={isRebuilding}
+                  className="h-3 w-3 accent-teal-400 cursor-pointer"
+                />
+                <span className="text-[11px] text-slate-400">
+                  {t('Lip sync')}
+                  {lipsyncInfo.cost_per_second_usd && videoDuration > 0 && (
+                    <span className="text-slate-500">
+                      {' '}~${(videoDuration * lipsyncInfo.cost_per_second_usd * 1.25).toFixed(2)}
+                    </span>
+                  )}
+                </span>
+              </label>
+            )}
 
           </nav>
         </div>

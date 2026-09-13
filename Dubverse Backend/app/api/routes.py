@@ -4699,6 +4699,7 @@ async def process_dubbing_pipeline(
     dubbing_style: str | None = None,
     localized_aliases: dict | None = None,
     access_token: str = "",
+    lipsync: bool = False,
 ):
     try:
         if source_lang != target_lang:
@@ -4742,7 +4743,9 @@ async def process_dubbing_pipeline(
                 segment_engines = None
                 dubbed_output_path = None
 
-            await _run_lipsync_postpass(job_id, dubbed_output_path, video_path, access_token)
+            # Lip-sync is opt-in — a paid generative pass, never the default.
+            if lipsync:
+                await _run_lipsync_postpass(job_id, dubbed_output_path, video_path, access_token)
 
             dubbed_url = f"/api/download/{job_id}/{target_lang}"
             await job_manager.update_job_dubbing_result(
@@ -5238,6 +5241,7 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
         dubbing_style=job.dubbing_style,
         localized_aliases=job.localized_aliases,
         access_token=_access_token,
+        lipsync=bool(getattr(request, "lipsync", False)),
     )
 
     return DubResponse(
@@ -5469,6 +5473,17 @@ async def get_dubbing_engines():
                 "features": ["auto_voice_matching", "auto_translation", "lip_sync"],
                 "requires_public_url": True,
                 "public_url_set": bool(settings.PUBLIC_BASE_URL),
+            },
+            "lipsync": {
+                "provider": settings.LIPSYNC_PROVIDER,
+                "available": (
+                    (settings.LIPSYNC_PROVIDER == "vozo" and vozo_service.lipsync_enabled)
+                    or (settings.LIPSYNC_PROVIDER == "synclabs" and lipsync_service.enabled)
+                ),
+                "description": "Optional AI lip-sync post-pass on the rendered video",
+                # Vendor rate for lipsync-2; UI shows estimate = seconds × rate.
+                "cost_per_second_usd": 0.05 if settings.LIPSYNC_PROVIDER == "synclabs" else 0.10,
+                "requires_public_url": True,
             },
         },
         "processing_mode": os.getenv("PROCESSING_MODE", "cpu"),
@@ -6815,9 +6830,13 @@ async def _unmeter_render(job_id: str, user_id: str) -> None:
 
 
 @router.post("/dub/remix/{job_id}", dependencies=[Depends(_dep_job_access)])
-async def remix_dub(job_id: str, request: Request):
+async def remix_dub(job_id: str, request: Request, lipsync: bool = False):
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.removeprefix("Bearer ").strip()
+    if not token:
+        # _caller() also accepts ?access_token= — media elements can't send
+        # headers, and this route may be invoked the same way.
+        token = request.query_params.get("access_token", "").strip()
     user_id = verify_jwt(token)
 
     # Make Movie is the one metered action. 402 / 503 raised here stop the
@@ -6859,7 +6878,8 @@ async def remix_dub(job_id: str, request: Request):
     # --- Lip sync post-pass on the remix output (optional, non-fatal) ---
     # Same vendor dispatch as the initial dub; Make Movie is the render path
     # the editor actually uses, so lip sync must live here, not only upstream.
-    if isinstance(result, dict) and result.get("status") == "ok":
+    # Opt-in only (?lipsync=true) — it's a paid generative pass, not a default.
+    if lipsync and isinstance(result, dict) and result.get("status") == "ok":
         try:
             _lang = str(result.get("dubbed_video_url") or "").rstrip("/").split("/")[-1]
             _out = os.path.join(settings.DUBBED_DIR, job_id, f"dubbed_{_lang}.mp4")

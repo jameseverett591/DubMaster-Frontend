@@ -1027,9 +1027,11 @@ class DubVerseAPIClient {
     engines: Record<string, {
       available: boolean
       description: string
-      features: string[]
+      features?: string[]
       requires_public_url?: boolean
       public_url_set?: boolean
+      provider?: string
+      cost_per_second_usd?: number
     }>
   }> {
     const response = await this._fetch(`${this.baseURL}/api/dubbing-engines`)
@@ -1704,8 +1706,9 @@ class DubVerseAPIClient {
     return response.json()
   }
 
-  async remixDub(jobId: string): Promise<RemixResponse> {
-    const response = await this._fetch(`${this.baseURL}/api/dub/remix/${jobId}`, {
+  async remixDub(jobId: string, opts?: { lipsync?: boolean }): Promise<RemixResponse> {
+    const qs = opts?.lipsync ? '?lipsync=true' : ''
+    const response = await this._fetch(`${this.baseURL}/api/dub/remix/${jobId}${qs}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
     })

@@ -182,6 +182,7 @@ class DubRequest(BaseModel):
     character_profiles: Optional[List[Dict]] = None  # [{name, traits, speech_style}]
     dubbing_style: Optional[str] = None  # "natural" (localized dub) or "literal" (word-for-word); routes default to persisted job value then "natural"
     localized_aliases: Optional[Dict[str, str]] = None  # e.g. {"Brother Gen": "Broker", "San Gu": "Auntie"}
+    lipsync: bool = False  # opt-in AI lip-sync post-pass (Sync.Labs/Vozo); billed per rendered second
 
 
 class AdaptVariant(BaseModel):
