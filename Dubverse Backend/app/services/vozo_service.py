@@ -89,7 +89,9 @@ class VozoService:
         if user_prompt:
             payload["user_prompt"] = user_prompt
 
-        logger.info(f"[VOZO] Job {job_id}: submitting dub, target={target_language}, url={video_url}")
+        # Strip credentials from the logged URL — the JWT in ?access_token=
+        # must not land in application logs.
+        logger.info(f"[VOZO] Job {job_id}: submitting dub, target={target_language}, url={video_url.split('?')[0]}")
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:

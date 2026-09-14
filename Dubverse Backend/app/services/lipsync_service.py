@@ -60,13 +60,17 @@ class LipSyncService:
         video_url = f"{self.public_base_url}/api/media/{job_id}/video{qs}"
         audio_url = f"{self.public_base_url}/api/media/{job_id}/audio/{audio_filename}{qs}"
 
-        logger.info(f"[LIPSYNC] Job {job_id}: videoUrl={video_url}")
-        logger.info(f"[LIPSYNC] Job {job_id}: audioUrl={audio_url}")
+        # Never log the credential-bearing URL — the JWT in ?access_token=
+        # would let anyone with log access impersonate the user until expiry.
+        logger.info(f"[LIPSYNC] Job {job_id}: videoUrl={video_url.split('?')[0]}{' (+token)' if access_token else ''}")
+        logger.info(f"[LIPSYNC] Job {job_id}: audioUrl={audio_url.split('?')[0]}{' (+token)' if access_token else ''}")
 
+        submitted = False
         try:
             sync_job_id = await self._create_job(video_url, audio_url)
             if not sync_job_id:
                 return {"status": "failed", "output_path": None, "vendor_attempted": False}
+            submitted = True
 
             logger.info(f"[LIPSYNC] Job {job_id}: Sync.Labs job created id={sync_job_id}")
 
@@ -86,7 +90,10 @@ class LipSyncService:
 
         except Exception as exc:
             logger.error(f"[LIPSYNC] Job {job_id}: unexpected error: {exc}")
-            return {"status": "failed", "output_path": None, "vendor_attempted": False}
+            # submitted stays True once the vendor accepted the job — an error
+            # during polling/download after submission still consumed the
+            # attempt, so the caller must not refund the charge.
+            return {"status": "failed", "output_path": None, "vendor_attempted": submitted}
 
     async def _create_job(self, video_url: str, audio_url: str) -> Optional[str]:
         headers = {
@@ -151,7 +158,11 @@ class LipSyncService:
                 )
                 continue
 
-            data = resp.json()
+            try:
+                data = resp.json()
+            except Exception as exc:
+                logger.warning(f"[LIPSYNC] Job {job_id}: poll {attempt} bad JSON: {exc}")
+                continue
             status = data.get("status", "UNKNOWN")
             logger.info(
                 f"[LIPSYNC] Job {job_id}: poll {attempt}/{MAX_POLL_ATTEMPTS} status={status}"

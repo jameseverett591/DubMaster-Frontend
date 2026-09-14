@@ -127,3 +127,17 @@ begin
 
     return query select net_incl, net_cred;
 end $$;
+
+
+-- 4. Close the default PUBLIC grant -----------------------------------------
+-- Postgres grants EXECUTE on new functions to PUBLIC by default, and a
+-- SECURITY DEFINER function that trusts caller-supplied user/tier/amount
+-- values is an open debit of anyone's wallet via the anon key. Revoke from
+-- PUBLIC/anon/authenticated on ALL quota RPCs — not just the two recreated
+-- here; quota_touch and quota_add_credits carried the same exposure from
+-- 20260912 — and leave only the service_role grant.
+revoke execute on function public.quota_deduct(uuid, text, integer, text, text) from public, anon, authenticated;
+revoke execute on function public.quota_refund(uuid, text)                          from public, anon, authenticated;
+revoke execute on function public.quota_touch(uuid, text)                           from public, anon, authenticated;
+revoke execute on function public.quota_add_credits(uuid, text, integer, text)      from public, anon, authenticated;
+revoke execute on function public.quota_included_seconds(text)                      from public, anon, authenticated;

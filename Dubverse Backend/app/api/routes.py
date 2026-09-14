@@ -4712,12 +4712,21 @@ async def _run_lipsync_postpass(
 
     # The one refund case: the vendor provably never ran the job.
     refunded = False
+    refund_error = None
     if charge_key and not attempted:
-        await asyncio.to_thread(quota_service.refund_quota, user_id, charge_key)
-        refunded = True
-        charge_seconds = 0
-        logger.info(f"Job {job_id}: lip-sync charge refunded — vendor rejected before processing")
-    elif charge_seconds:
+        _refund = await asyncio.to_thread(quota_service.refund_quota, user_id, charge_key)
+        if _refund.get("error"):
+            # The charge is still outstanding — say so, don't claim success.
+            refund_error = _refund["error"]
+            logger.error(
+                f"Job {job_id}: lip-sync refund FAILED ({refund_error}) — "
+                f"{charge_seconds}s still owed, ledger key {charge_key}"
+            )
+        else:
+            refunded = True
+            charge_seconds = 0
+            logger.info(f"Job {job_id}: lip-sync charge refunded — vendor rejected before processing")
+    if charge_seconds:
         _persist_job_metadata_field(job_id, "lipsync_charge_seconds", charge_seconds)
 
     # Metered by VIDEO duration, which is what lip-sync vendors bill on —
@@ -4738,13 +4747,16 @@ async def _run_lipsync_postpass(
         logger.info(f"Job {job_id}: lip sync applied successfully ({_lip_provider})")
     else:
         logger.warning(f"Job {job_id}: lip sync failed, keeping dubbed-only video")
-    return {
+    result = {
         "provider": _lip_provider,
         "applied": lipsync_ok,
         "charge_seconds": charge_seconds,
         "refunded": refunded,
         "vendor_attempted": attempted,
     }
+    if refund_error:
+        result["refund_pending"] = True
+    return result
 
 
 async def process_dubbing_pipeline(
@@ -6248,13 +6260,31 @@ async def analyze_lipsync_windows(job_id: str, request: Request):
     start = body.get("start")
     end = body.get("end")
     if start is not None and end is not None:
+        # The scorers allocate ~(end-start)*25 arrays — an unbounded or
+        # non-finite range is a memory-exhaustion vector. Require finite,
+        # non-negative, ordered values and clamp to the video's duration.
+        import math
+        try:
+            start_f, end_f = float(start), float(end)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="start/end must be numbers")
+        if not (math.isfinite(start_f) and math.isfinite(end_f)) or start_f < 0 or end_f <= start_f:
+            raise HTTPException(
+                status_code=422,
+                detail="start/end must be finite, non-negative and ordered",
+            )
+        _dur = await asyncio.to_thread(_probe_video_duration, video_path)
+        cap = _dur if _dur and _dur > 0 else float(MAX_VIDEO_DURATION_SECONDS)
+        end_f = min(end_f, cap)
+        if start_f >= end_f:
+            raise HTTPException(status_code=422, detail="start is beyond the video duration")
         visual = await asyncio.to_thread(
-            syncnet_service.score_lipsync_range, video_path, segments, float(start), float(end)
+            syncnet_service.score_lipsync_range, video_path, segments, start_f, end_f
         )
         audio = await asyncio.to_thread(
-            syncnet_service.score_lipsync_audio_range, video_path, segments, float(start), float(end)
+            syncnet_service.score_lipsync_audio_range, video_path, segments, start_f, end_f
         )
-        return {"status": "ok", "start": float(start), "end": float(end),
+        return {"status": "ok", "start": start_f, "end": end_f,
                 "visual": visual, "audio": audio}
 
     duration = await asyncio.to_thread(_probe_video_duration, video_path)
