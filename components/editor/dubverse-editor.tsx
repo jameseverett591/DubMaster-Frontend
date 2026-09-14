@@ -6730,44 +6730,6 @@ export function DubVerseEditor({
                 : 'MAKE MOVIE'}
             </Button>
 
-            {/* Optional AI lip-sync — opt-in only, shown only when the vendor
-                is configured AND the user can pay (Pro or wallet balance).
-                Cost is honest up front: charged on submission, refunded only
-                if the provider rejects before processing. */}
-            {lipsyncInfo?.available && !usage.loading && lipSyncEligible && (
-              <label
-                className="ml-3 flex items-center gap-1.5 cursor-pointer select-none"
-                title={t(
-                  'Charged when the lip sync job is submitted to the provider. ' +
-                  'The provider bills on attempt — not on output quality. ' +
-                  'May produce artifacts on fast action, rotation, or low-light footage. ' +
-                  'Not recommended for martial arts or high-motion content.'
-                )}
-              >
-                <input
-                  type="checkbox"
-                  checked={lipsyncOptIn}
-                  onChange={(e) => setLipsyncOptIn(e.target.checked)}
-                  disabled={isRebuilding || !lipSyncAffordable}
-                  className="h-3 w-3 accent-teal-400 cursor-pointer"
-                />
-                <span className="text-[11px] text-slate-400">
-                  {t('Lip sync')}
-                  {lipSyncRateUsd > 0 && videoDuration > 0 && (
-                    <span className="text-slate-500">
-                      {' '}~${lipSyncEstUsd.toFixed(2)} {t('(charged on submission)')}
-                    </span>
-                  )}
-                  {!lipSyncAffordable && (
-                    <span className="text-red-400"> {t('— insufficient credit')}</span>
-                  )}
-                  {lipSyncNote && (
-                    <span className="text-teal-400/80"> · {lipSyncNote}</span>
-                  )}
-                </span>
-              </label>
-            )}
-
           </nav>
         </div>
         
@@ -10242,6 +10204,43 @@ export function DubVerseEditor({
 
           {/* Playback controls — absolute center */}
           <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2">
+            {/* Optional AI lip-sync — opt-in only, shown only when the vendor
+                is configured AND the user can pay (Pro or wallet balance).
+                Cost is honest up front: charged on submission, refunded only
+                if the provider rejects before processing. */}
+            {lipsyncInfo?.available && !usage.loading && lipSyncEligible && (
+              <label
+                className="mr-1 flex items-center gap-1.5 cursor-pointer select-none whitespace-nowrap"
+                title={t(
+                  'Charged when the lip sync job is submitted to the provider. ' +
+                  'The provider bills on attempt — not on output quality. ' +
+                  'May produce artifacts on fast action, rotation, or low-light footage. ' +
+                  'Not recommended for martial arts or high-motion content.'
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked={lipsyncOptIn}
+                  onChange={(e) => setLipsyncOptIn(e.target.checked)}
+                  disabled={isRebuilding || !lipSyncAffordable}
+                  className="h-3 w-3 accent-teal-400 cursor-pointer"
+                />
+                <span className="text-[11px] text-slate-400">
+                  {t('Lip sync')}
+                  {lipSyncRateUsd > 0 && videoDuration > 0 && (
+                    <span className="text-slate-500">
+                      {' '}~${lipSyncEstUsd.toFixed(2)} {t('(charged on submission)')}
+                    </span>
+                  )}
+                  {!lipSyncAffordable && (
+                    <span className="text-red-400"> {t('— insufficient credit')}</span>
+                  )}
+                  {lipSyncNote && (
+                    <span className="text-teal-400/80"> · {lipSyncNote}</span>
+                  )}
+                </span>
+              </label>
+            )}
             <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => setCurrentTime(0)}>
               <SkipBack className="h-4 w-4" />
             </Button>
