@@ -40,6 +40,8 @@ LOW_BALANCE_SECONDS = 300       # UI warns under 5 min total
 TIER_FREE = "free"
 TIER_PRO = "pro"
 
+LIPSYNC_MARKUP = 1.25           # vendor cost + 25% platform fee
+
 
 class QuotaExceeded(Exception):
     """Included minutes and wallet together cannot cover the render."""
@@ -79,6 +81,18 @@ def cents_for_seconds(seconds: int) -> int:
 
 def included_seconds_for(tier: str) -> int:
     return PRO_INCLUDED_SECONDS if tier == TIER_PRO else FREE_INCLUDED_SECONDS
+
+
+def seconds_for_lipsync(duration_seconds: float, cost_per_second_usd: float) -> int:
+    """Wallet-equivalent seconds for a lip-sync pass.
+
+    The vendor bills in USD (duration x rate); the wallet holds seconds at
+    CENTS_PER_MINUTE, so the USD price (with platform markup) is converted to
+    its second-equivalent. Synclabs at $0.05/s lands at 1.5s billed per
+    video-second. Rounds UP — a charge must never under-bill.
+    """
+    cents = max(0.0, duration_seconds) * max(0.0, cost_per_second_usd) * LIPSYNC_MARKUP * 100.0
+    return int(math.ceil(cents * 60.0 / CENTS_PER_MINUTE))
 
 
 # --- Tier ----------------------------------------------------------------------
@@ -189,8 +203,10 @@ def check_quota(user_id: str, estimated_seconds: int) -> Dict[str, Any]:
     }
 
 
-def deduct_quota(user_id: str, actual_seconds: int, job_id: str) -> Dict[str, Any]:
-    """Atomically debit a render. Raises QuotaExceeded / QuotaUnavailable."""
+def deduct_quota(user_id: str, actual_seconds: int, job_id: str, kind: str = "render") -> Dict[str, Any]:
+    """Atomically debit a render or lip-sync pass. Raises QuotaExceeded /
+    QuotaUnavailable. `kind` lands on the ledger row ('render'|'lipsync') so
+    billing history is readable without parsing job_id."""
     if not user_id:
         raise QuotaUnavailable("no user_id to bill")
     need = int(actual_seconds or 0)
@@ -201,6 +217,7 @@ def deduct_quota(user_id: str, actual_seconds: int, job_id: str) -> Dict[str, An
         row = _first(_rpc("quota_deduct", {
             "p_user_id": user_id, "p_tier": tier,
             "p_seconds": need, "p_job_id": job_id,
+            "p_kind": kind,
         }))
     except Exception as e:
         msg = str(e)

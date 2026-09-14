@@ -199,13 +199,21 @@ class VozoService:
         audio_url: str,
         output_path: str,
         model: str = "standard_v1",
-    ) -> bool:
-        """Full lip-sync flow: submit, poll, download. Returns True on success."""
+    ) -> dict:
+        """Full lip-sync flow: submit, poll, download.
+
+        Returns {"status": "completed"|"failed", "output_path": str|None,
+        "vendor_attempted": bool}. vendor_attempted is the billing signal:
+        False only when Vozo never created the task — a created task is a
+        consumed attempt regardless of outcome.
+        """
+        _failed = {"status": "failed", "output_path": None, "vendor_attempted": False}
         task_id = await self.start_lipsync(video_url, audio_url, model)
         if not task_id:
-            return False
+            return _failed
 
         logger.info(f"[VOZO-LIPSYNC] Job {job_id}: task created id={task_id}")
+        _attempted = {"status": "failed", "output_path": None, "vendor_attempted": True}
 
         for attempt in range(1, MAX_POLL_ATTEMPTS + 1):
             await asyncio.sleep(POLL_INTERVAL_SEC)
@@ -216,14 +224,19 @@ class VozoService:
             if status in ("done", "completed"):
                 video_result_url = data.get("video_url")
                 if video_result_url:
-                    return await self.download_result(video_result_url, output_path)
-                return False
+                    ok = await self.download_result(video_result_url, output_path)
+                    return {
+                        "status": "completed" if ok else "failed",
+                        "output_path": output_path if ok else None,
+                        "vendor_attempted": True,
+                    }
+                return _attempted
             elif status == "failed":
                 logger.error(f"[VOZO-LIPSYNC] Job {job_id}: Vozo reported failure")
-                return False
+                return _attempted
 
         logger.error(f"[VOZO-LIPSYNC] Job {job_id}: timed out")
-        return False
+        return _attempted
 
 
 # Module-level singleton

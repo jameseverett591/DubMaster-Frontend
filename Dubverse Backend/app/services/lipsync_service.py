@@ -35,17 +35,23 @@ class LipSyncService:
         audio_path: str,
         output_path: str,
         access_token: str = "",
-    ) -> bool:
+    ) -> dict:
         """
         Send the original video + dubbed audio to Sync.Labs, wait for the
         lip-synced result, and write it to output_path.
 
-        Returns True on success, False on any failure (caller falls back to
-        the already-dubbed video without lip sync).
+        Returns a result dict: {"status": "completed"|"failed"|"skipped",
+        "output_path": str|None, "vendor_attempted": bool}.
+
+        vendor_attempted is the billing signal: False only when Sync.Labs
+        never ran the job (submit failed, or REJECTED before PROCESSING).
+        Once PROCESSING is observed — or any non-REJECTED terminal state —
+        the vendor consumed the attempt and the caller keeps the charge.
         """
+        _skipped = {"status": "skipped", "output_path": None, "vendor_attempted": False}
         if not self.enabled:
             logger.info("[LIPSYNC] Skipped: SYNCLABS_API_KEY or PUBLIC_BASE_URL not set")
-            return False
+            return _skipped
 
         audio_filename = Path(audio_path).name
         # Media routes require _dep_job_access; vendors can't send headers, so
@@ -60,20 +66,27 @@ class LipSyncService:
         try:
             sync_job_id = await self._create_job(video_url, audio_url)
             if not sync_job_id:
-                return False
+                return {"status": "failed", "output_path": None, "vendor_attempted": False}
 
             logger.info(f"[LIPSYNC] Job {job_id}: Sync.Labs job created id={sync_job_id}")
 
-            output_url = await self._poll_job(job_id, sync_job_id)
+            output_url, attempted = await self._poll_job(job_id, sync_job_id)
             if not output_url:
-                return False
+                return {"status": "failed", "output_path": None, "vendor_attempted": attempted}
 
             logger.info(f"[LIPSYNC] Job {job_id}: downloading lip-synced video")
-            return await self._download_result(output_url, output_path)
+            ok = await self._download_result(output_url, output_path)
+            return {
+                "status": "completed" if ok else "failed",
+                "output_path": output_path if ok else None,
+                # The render finished vendor-side; a failed download still
+                # consumed the attempt.
+                "vendor_attempted": True,
+            }
 
         except Exception as exc:
             logger.error(f"[LIPSYNC] Job {job_id}: unexpected error: {exc}")
-            return False
+            return {"status": "failed", "output_path": None, "vendor_attempted": False}
 
     async def _create_job(self, video_url: str, audio_url: str) -> Optional[str]:
         headers = {
@@ -111,9 +124,16 @@ class LipSyncService:
 
         return resp.json().get("id")
 
-    async def _poll_job(self, job_id: str, sync_job_id: str) -> Optional[str]:
+    async def _poll_job(self, job_id: str, sync_job_id: str) -> tuple:
+        """Poll until a terminal state. Returns (output_url, vendor_attempted).
+
+        vendor_attempted flips True the moment PROCESSING is observed and on
+        any terminal state except a first-seen REJECTED — a clean rejection
+        before processing is the one case the vendor never billed for.
+        """
         headers = {"x-api-key": self.api_key}
         url = f"{SYNCLABS_API_BASE}/v2/generate/{sync_job_id}"
+        attempted = False
 
         for attempt in range(1, MAX_POLL_ATTEMPTS + 1):
             await asyncio.sleep(POLL_INTERVAL_SEC)
@@ -137,19 +157,24 @@ class LipSyncService:
                 f"[LIPSYNC] Job {job_id}: poll {attempt}/{MAX_POLL_ATTEMPTS} status={status}"
             )
 
-            if status == "COMPLETED":
-                return data.get("outputUrl")
+            if status == "PROCESSING":
+                attempted = True
+            elif status == "COMPLETED":
+                return data.get("outputUrl"), True
             elif status in ("FAILED", "REJECTED"):
                 logger.error(
                     f"[LIPSYNC] Job {job_id}: Sync.Labs reported {status} — "
                     f"{data.get('errorCode')}: {data.get('error')}"
                 )
-                return None
+                return None, attempted or status == "FAILED"
 
         logger.error(
             f"[LIPSYNC] Job {job_id}: timed out after {MAX_POLL_ATTEMPTS * POLL_INTERVAL_SEC}s"
         )
-        return None
+        # Ambiguous: never saw PROCESSING but the job may be queued vendor-side.
+        # Treat as attempted — refunding on a poll timeout would give away a
+        # render the vendor may still complete.
+        return None, True
 
     async def _download_result(self, url: str, output_path: str) -> bool:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)

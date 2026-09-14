@@ -5836,17 +5836,29 @@ export function DubVerseEditor({
   const [lipsyncInfo, setLipsyncInfo] = useState<{
     provider?: string; available: boolean; cost_per_second_usd?: number
   } | null>(null)
+  const [lipSyncNote, setLipSyncNote] = useState<string | null>(null)
   useEffect(() => {
     apiClient.getDubbingEngines()
       .then(r => setLipsyncInfo(r.engines?.lipsync ?? null))
       .catch(() => {})
   }, [])
 
+  // A paid add-on: visible only to users who can pay — Pro (included minutes)
+  // or a topped-up wallet. Free users with no wallet never see the checkbox.
+  const lipSyncRateUsd = lipsyncInfo?.cost_per_second_usd ?? 0
+  const lipSyncEstUsd = videoDuration * lipSyncRateUsd * 1.25
+  // Wallet-equivalent seconds at the $2.50/min rate — same math as the
+  // backend's seconds_for_lipsync so the gate never disagrees with the charge.
+  const lipSyncEstSeconds = Math.ceil(videoDuration * lipSyncRateUsd * 1.25 * 60 / 2.5)
+  const lipSyncEligible = isPro || usage.walletSeconds > 0
+  const lipSyncAffordable = lipSyncEstSeconds <= Math.round(usage.minutesRemaining * 60)
+
   const handleRebuildVideo = useCallback(async () => {
     setRebuildError(null)
     setIsRebuilding(true)
     setRebuildStatus('processing')
     setRebuildProgress(0)
+    setLipSyncNote(null)
     if (rebuildIntervalRef.current) clearInterval(rebuildIntervalRef.current)
     rebuildIntervalRef.current = setInterval(() => {
       setRebuildProgress(prev => Math.min(90, prev + (90 / 56)))
@@ -5857,6 +5869,14 @@ export function DubVerseEditor({
       setRebuildProgress(100)
       const absUrl = apiClient.toAbsoluteUrl(response.dubbed_video_url)
       setActiveDubbedVideoUrl(absUrl)
+      const lip = (response as any).lipsync
+      if (lip?.refunded) {
+        setLipSyncNote('lip-sync charge refunded — provider rejected the job')
+      } else if (lip?.charge_seconds) {
+        setLipSyncNote(`lip sync billed ~$${(lip.charge_seconds * 2.5 / 60).toFixed(2)}`)
+      } else if (lip && lip.applied === false) {
+        setLipSyncNote('lip sync not applied — video kept as dubbed')
+      }
       setRebuildStatus('complete')
       clearAllDirty()
       setShowExportModal(true)
@@ -6711,30 +6731,38 @@ export function DubVerseEditor({
             </Button>
 
             {/* Optional AI lip-sync — opt-in only, shown only when the vendor
-                is configured. Cost is honest up front: billed per rendered
-                second whether the pass succeeds or not. */}
-            {lipsyncInfo?.available && (
+                is configured AND the user can pay (Pro or wallet balance).
+                Cost is honest up front: charged on submission, refunded only
+                if the provider rejects before processing. */}
+            {lipsyncInfo?.available && !usage.loading && lipSyncEligible && (
               <label
                 className="ml-3 flex items-center gap-1.5 cursor-pointer select-none"
                 title={t(
-                  `AI lip sync (${lipsyncInfo.provider === 'vozo' ? 'Vozo' : 'Sync.Labs'}): repaints the mouth region to match the dubbed audio. ` +
-                  'Works best on frontal, well-lit footage — may produce artifacts on fast action or angled shots. ' +
-                  'Billed on rendered duration, pass or fail.'
+                  'Charged when the lip sync job is submitted to the provider. ' +
+                  'The provider bills on attempt — not on output quality. ' +
+                  'May produce artifacts on fast action, rotation, or low-light footage. ' +
+                  'Not recommended for martial arts or high-motion content.'
                 )}
               >
                 <input
                   type="checkbox"
                   checked={lipsyncOptIn}
                   onChange={(e) => setLipsyncOptIn(e.target.checked)}
-                  disabled={isRebuilding}
+                  disabled={isRebuilding || !lipSyncAffordable}
                   className="h-3 w-3 accent-teal-400 cursor-pointer"
                 />
                 <span className="text-[11px] text-slate-400">
                   {t('Lip sync')}
-                  {lipsyncInfo.cost_per_second_usd && videoDuration > 0 && (
+                  {lipSyncRateUsd > 0 && videoDuration > 0 && (
                     <span className="text-slate-500">
-                      {' '}~${(videoDuration * lipsyncInfo.cost_per_second_usd * 1.25).toFixed(2)}
+                      {' '}~${lipSyncEstUsd.toFixed(2)} {t('(charged on submission)')}
                     </span>
+                  )}
+                  {!lipSyncAffordable && (
+                    <span className="text-red-400"> {t('— insufficient credit')}</span>
+                  )}
+                  {lipSyncNote && (
+                    <span className="text-teal-400/80"> · {lipSyncNote}</span>
                   )}
                 </span>
               </label>

@@ -4608,19 +4608,33 @@ async def process_vozo_pipeline(
         )
 
 
+# Vendor USD rates — mirrors the "lipsync" block in /api/dubbing-engines.
+_LIPSYNC_COST_PER_SECOND = {"synclabs": 0.05, "vozo": 0.10}
+
+
 async def _run_lipsync_postpass(
     job_id: str,
     dubbed_output_path: Optional[str],
     video_path: str,
     access_token: str = "",
-) -> Optional[bool]:
+    user_id: str = "",
+) -> Optional[dict]:
     """Vendor lip-sync post-pass shared by the initial dub and Make Movie remix.
 
     Provider comes from LIPSYNC_PROVIDER ("synclabs" | "vozo" | "none"). Both
     vendors pull the ORIGINAL video + the merged dubbed_audio.wav through the
     public media URLs — the JWT travels as ?access_token= because vendors can't
-    send headers (same pattern the <video> tag uses). Returns True/False when a
-    pass ran, None when skipped. Failure keeps the dubbed-only video.
+    send headers (same pattern the <video> tag uses). Returns a result dict
+    when a pass was attempted/gated, None when skipped. Failure keeps the
+    dubbed-only video.
+
+    Billing: the charge lands BEFORE the vendor call, against the rendered
+    duration at vendor rate + 25% markup, under a per-attempt ledger key
+    (<job>:lipsync:<nonce>) so refund_quota can reverse it without touching
+    the render charge. The debit is kept once the vendor consumes the attempt
+    (PROCESSING reached, or any non-rejected terminal state); it is refunded
+    only when the vendor provably never ran — submit failure or a clean
+    REJECTED before processing.
     """
     if not dubbed_output_path:
         return None
@@ -4637,6 +4651,37 @@ async def _run_lipsync_postpass(
         logger.warning(f"Job {job_id}: dubbed_audio.wav not found, skipping lip sync")
         return None
 
+    # --- Charge up front; refund below only if the vendor never ran it. ---
+    charge_seconds = 0
+    charge_key = None
+    if user_id:
+        _dur = await asyncio.to_thread(_probe_video_duration, dubbed_output_path)
+        if not _dur:
+            _lj = await job_manager.get_job(job_id)
+            _dur = float(getattr(_lj, "video_duration", 0) or 0)
+        charge_seconds = quota_service.seconds_for_lipsync(
+            _dur, _LIPSYNC_COST_PER_SECOND.get(_lip_provider, 0.0)
+        )
+        if charge_seconds > 0:
+            charge_key = f"{job_id}:lipsync:{uuid.uuid4().hex[:8]}"
+            try:
+                await asyncio.to_thread(
+                    quota_service.deduct_quota, user_id, charge_seconds,
+                    charge_key, "lipsync"
+                )
+            except quota_service.QuotaExceeded as e:
+                logger.info(
+                    f"Job {job_id}: lip sync skipped — insufficient credit "
+                    f"({charge_seconds}s needed, {e.shortfall_seconds}s short)"
+                )
+                return {"provider": _lip_provider, "applied": False,
+                        "skipped": "insufficient_credit", "charge_seconds": 0}
+            except quota_service.QuotaUnavailable:
+                # Fail closed, same rule as renders: no ledger, no paid pass.
+                logger.error(f"Job {job_id}: lip sync skipped — quota ledger unavailable")
+                return {"provider": _lip_provider, "applied": False,
+                        "skipped": "billing_unavailable", "charge_seconds": 0}
+
     await job_manager.update_job_status(
         job_id,
         JobStatus.LIP_SYNCING,
@@ -4648,20 +4693,32 @@ async def _run_lipsync_postpass(
     audio_url = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/media/{job_id}/audio/{os.path.basename(audio_path)}{_qs}"
 
     if _lip_provider == "vozo":
-        lipsync_ok = await vozo_service.lipsync_video(
+        lipres = await vozo_service.lipsync_video(
             job_id=job_id,
             video_url=video_url,
             audio_url=audio_url,
             output_path=dubbed_output_path,
         )
     else:
-        lipsync_ok = await lipsync_service.lipsync_video(
+        lipres = await lipsync_service.lipsync_video(
             job_id=job_id,
             video_path=video_path,      # original video for clean faces
             audio_path=audio_path,       # merged dubbed audio
             output_path=dubbed_output_path,  # overwrites dubbed video in-place
             access_token=access_token,
         )
+    lipsync_ok = bool(lipres.get("output_path"))
+    attempted = bool(lipres.get("vendor_attempted"))
+
+    # The one refund case: the vendor provably never ran the job.
+    refunded = False
+    if charge_key and not attempted:
+        await asyncio.to_thread(quota_service.refund_quota, user_id, charge_key)
+        refunded = True
+        charge_seconds = 0
+        logger.info(f"Job {job_id}: lip-sync charge refunded — vendor rejected before processing")
+    elif charge_seconds:
+        _persist_job_metadata_field(job_id, "lipsync_charge_seconds", charge_seconds)
 
     # Metered by VIDEO duration, which is what lip-sync vendors bill on —
     # unlike TTS, which bills speech. Recorded even on failure: a failed pass
@@ -4672,7 +4729,7 @@ async def _run_lipsync_postpass(
             os.path.join(settings.DUBBED_DIR, job_id),
             _lip_provider,
             video_seconds=float(getattr(_lj, "video_duration", 0) or 0),
-            succeeded=bool(lipsync_ok),
+            succeeded=lipsync_ok,
         )
     except Exception as _e:
         logger.warning(f"[LIPSYNC-USAGE] accounting skipped: {_e}")
@@ -4681,7 +4738,13 @@ async def _run_lipsync_postpass(
         logger.info(f"Job {job_id}: lip sync applied successfully ({_lip_provider})")
     else:
         logger.warning(f"Job {job_id}: lip sync failed, keeping dubbed-only video")
-    return bool(lipsync_ok)
+    return {
+        "provider": _lip_provider,
+        "applied": lipsync_ok,
+        "charge_seconds": charge_seconds,
+        "refunded": refunded,
+        "vendor_attempted": attempted,
+    }
 
 
 async def process_dubbing_pipeline(
@@ -4700,6 +4763,7 @@ async def process_dubbing_pipeline(
     localized_aliases: dict | None = None,
     access_token: str = "",
     lipsync: bool = False,
+    user_id: str = "",
 ):
     try:
         if source_lang != target_lang:
@@ -4745,7 +4809,9 @@ async def process_dubbing_pipeline(
 
             # Lip-sync is opt-in — a paid generative pass, never the default.
             if lipsync:
-                await _run_lipsync_postpass(job_id, dubbed_output_path, video_path, access_token)
+                await _run_lipsync_postpass(
+                    job_id, dubbed_output_path, video_path, access_token, user_id
+                )
 
             dubbed_url = f"/api/download/{job_id}/{target_lang}"
             await job_manager.update_job_dubbing_result(
@@ -5161,7 +5227,8 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
     Called after the user reviews the translation in the inline editor.
     The request.transcript contains the corrected translated text.
     """
-    await _require_job(request.job_id, _caller(http_request))
+    _uid = _caller(http_request)
+    await _require_job(request.job_id, _uid)
     job = await _get_or_rehydrate_job(request.job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -5242,6 +5309,7 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
         localized_aliases=job.localized_aliases,
         access_token=_access_token,
         lipsync=bool(getattr(request, "lipsync", False)),
+        user_id=_uid,
     )
 
     return DubResponse(
@@ -5482,7 +5550,7 @@ async def get_dubbing_engines():
                 ),
                 "description": "Optional AI lip-sync post-pass on the rendered video",
                 # Vendor rate for lipsync-2; UI shows estimate = seconds × rate.
-                "cost_per_second_usd": 0.05 if settings.LIPSYNC_PROVIDER == "synclabs" else 0.10,
+                "cost_per_second_usd": _LIPSYNC_COST_PER_SECOND.get(settings.LIPSYNC_PROVIDER, 0.10),
                 "requires_public_url": True,
             },
         },
@@ -6889,9 +6957,10 @@ async def remix_dub(job_id: str, request: Request, lipsync: bool = False):
                 _out if os.path.exists(_out) else None,
                 getattr(_job, "video_path", "") if _job else "",
                 token,
+                user_id,
             )
             if _lip is not None:
-                result["lipsync"] = {"provider": settings.LIPSYNC_PROVIDER, "applied": _lip}
+                result["lipsync"] = _lip
         except Exception as _le:
             logger.warning(f"Job {job_id}: lip sync post-pass skipped: {_le}")
 
