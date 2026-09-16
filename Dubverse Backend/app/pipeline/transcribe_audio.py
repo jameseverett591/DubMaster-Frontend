@@ -77,10 +77,19 @@ _HALLUCINATION_PHRASES = {
     "走呀 走呀",
     "走開",
     "打不死",
-    # Fansub/subtitle-staff credits Whisper hallucinates over music and
-    # silence — it learned these from fansubbed training video and emits
-    # them mid-scene ("中文字幕志愿者:…"). Both script variants are listed
-    # because matching runs on the raw text before any trad→simp conversion.
+}
+
+# Credit and sign-off markers, kept SEPARATE from the list above because they
+# are matched differently. Nothing here is ever dialogue, so containment is
+# safe and necessary: Whisper appends a volunteer's name to the credit
+# ("中文字幕志愿者:小明"), which a dominance test would let through. The list
+# above is matched on dominance instead, since several of its entries ARE
+# ordinary dialogue — "走開" is "go away" — and containment would delete a real
+# line that happened to include one.
+#
+# Both script variants are listed because matching runs on the raw text, before
+# any traditional-to-simplified conversion.
+_CREDIT_PHRASES = {
     "中文字幕",
     "字幕志愿者",
     "字幕志願者",
@@ -316,13 +325,32 @@ def _filter_hallucinations(
         # have a suspicious ASR signal, so a non-Whisper engine returning dialogue that
         # happens to contain one of these phrases is not dropped.
         _norm_text = text.lower().rstrip('!.，。,')
-        if (
-            _norm_text in _HALLUCINATION_PHRASES
-            or any(ph in _norm_text for ph in _HALLUCINATION_PHRASES)
-        ) and (_is_whisper or _suspicious):
+        # DOMINANCE, NOT MERE PRESENCE. A bare substring test discards the whole
+        # segment when a denied phrase appears anywhere in it, so real dialogue
+        # sharing a line with a hallucinated credit went with it. Several entries
+        # are also ordinary dialogue in their own right — "走開" is "go away" —
+        # so a containment test can delete a legitimate line outright.
+        #
+        # Reject only when the phrase IS the segment: an exact match, or enough
+        # of it that what remains is not a sentence. A hallucinated credit or
+        # sign-off occupies the whole segment, so this still catches every case
+        # the list was written for.
+        _matched_ph = next((ph for ph in _CREDIT_PHRASES if ph in _norm_text), None)
+        if _matched_ph is None:
+            if _norm_text in _HALLUCINATION_PHRASES:
+                _matched_ph = _norm_text
+            else:
+                for ph in _HALLUCINATION_PHRASES:
+                    if ph in _norm_text and (
+                        len(ph) >= 0.6 * len(_norm_text)
+                        or len(_norm_text) - len(ph) < 4
+                    ):
+                        _matched_ph = ph
+                        break
+        if _matched_ph is not None and (_is_whisper or _suspicious):
             logger.info(
                 f"[HALLUCINATION] Rejected known hallucination phrase: '{text}' "
-                f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
+                f"(matched {_matched_ph!r}) at {seg.get('start', '?')}-{seg.get('end', '?')}"
             )
             continue
 
