@@ -2210,6 +2210,18 @@ export function DubVerseEditor({
    *
    * Returns '' for an out-of-range index, which no collection will ever match.
    */
+  /** Segments the user has explicitly RELEASED for alteration in this session.
+   *
+   *  REGEN-ADAPT-FIT may paraphrase a line to fit its window, so it must only
+   *  ever run where the user asked for it. Deciding that from segment flags was
+   *  unsafe: authorship lived only in `isUserEdited`, which is client state the
+   *  backend never stored, so after a reload a line the user had typed looked
+   *  untouched and became eligible to be silently rewritten.
+   *
+   *  An explicit set cannot fail that way. A reload starts it empty, so the
+   *  default everywhere is verbatim, and the only way in is pressing Release —
+   *  which is exactly what the toggle was documented to mean. */
+  const releasedForFitRef = useRef<Set<string>>(new Set())
   const keyAt = useCallback((i: number | null | undefined): string => {
     if (i == null) return ''
     const s = displaySegments[i]
@@ -5053,11 +5065,11 @@ export function DubVerseEditor({
         live_segment_end: liveEnd,
         live_next_segment_start: liveNextStart,
         live_prev_segment_end: livePrevEnd,
-        // Commit is a toggle: a released (recommit) or never-touched line opts in
-        // to sync_fit on predicted overflow, so it can be shortened to its window
-        // instead of time-stretched into a fast take. Locked or user-authored
-        // text — typed now, or edited earlier — is always spoken verbatim.
-        allow_adapt_fit: !segment.text_locked && !segment.isUserEdited
+        // Opt-in only, and only from an explicit Release in this session. Text
+        // the user typed — now, or before a reload — is always spoken verbatim.
+        allow_adapt_fit: releasedForFitRef.current.has(keyAt(activeIndex))
+          && !segment.text_locked
+          && !segment.isUserEdited
           && !(textOverride && textOverride.trim())
           && !(activeIndex === selectedSegmentIndex && editingTextRef.current.trim()),
         // Engine-specific extras (Respeecher sampling_params / seed). Last so an
@@ -6244,6 +6256,8 @@ export function DubVerseEditor({
       setPreviewText(idx, text)
       setImportedSegments(prev => {
         const base = prev ?? displaySegments
+        // Typing revokes any earlier Release: these are now the user's words.
+        releasedForFitRef.current.delete(keyAt(idx))
         return base.map((seg, i) =>
           i === idx
             // Edit is provisional — text_locked stays false so Commit remains the
@@ -6312,6 +6326,12 @@ export function DubVerseEditor({
     undoStack.current.push({ kind: 'text', index, prevText: previousDisplayText })
     emotionAutoFiredRef.current.delete(index)
     setPreviewText(index, text)
+    // Pasting is authorship too — revoke any earlier Release on this line.
+    // Keyed off the ref, not keyAt: this callback does not depend on
+    // displaySegments, so a captured keyAt can be a render behind and would
+    // delete the wrong segment's grant.
+    const _pasted = displaySegmentsRef.current[index]
+    if (_pasted) releasedForFitRef.current.delete(getSegmentKey(_pasted))
     setImportedSegments(prev => {
       const base = prev ?? displaySegmentsRef.current
       return base.map((seg, i) => i === index
@@ -8531,6 +8551,9 @@ export function DubVerseEditor({
                           onClick={(e) => {
                             e.stopPropagation()
                             const ti = displaySegments[index]?.transcript_index ?? index
+                            // The one place adapt-fit is granted. Releasing is a
+                            // deliberate "you may reword this to fit".
+                            releasedForFitRef.current.add(keyAt(index))
                             commitOrStage(ti, { text_locked: false }).catch(err =>
                               console.warn('[RELEASE] persist failed', err)
                             )
