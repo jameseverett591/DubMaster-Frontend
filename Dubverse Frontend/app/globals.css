@@ -129,6 +129,25 @@
 .velma-theme .velma-card { background: #4C1D95; border: 1px solid #8B5CF6; }
 .velma-theme h3 { color: #C4B5FD; }
 
+/* Generate Dub call to action: teal outline with an expanding pulse ring.
+   Unlayered, so it wins over the button variant's border utilities. */
+@keyframes generate-dub-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(45, 212, 191, 0.6), 0 0 10px rgba(45, 212, 191, 0.25); }
+  50%      { box-shadow: 0 0 0 6px rgba(45, 212, 191, 0), 0 0 20px rgba(45, 212, 191, 0.5); }
+}
+
+.generate-dub-cta {
+  border: 1px solid #2dd4bf;
+  animation: generate-dub-pulse 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .generate-dub-cta {
+    animation: none;
+    box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.6);
+  }
+}
+
 @keyframes ask-ai-border-glow {
   0%   { border-color: #f59e0b; }
   33%  { border-color: #10b981; }
