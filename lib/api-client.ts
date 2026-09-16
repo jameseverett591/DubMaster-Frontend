@@ -1958,11 +1958,15 @@ class DubVerseAPIClient {
   }
 
   async updateVoiceMapping(jobId: string, voiceMapping: Record<string, string>): Promise<void> {
-    await this._fetch(`${this.baseURL}/api/jobs/${jobId}/voice-mapping`, {
+    const res = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/voice-mapping`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(voiceMapping),
     })
+    // This was a fire-and-forget swallow: a failed PATCH left voice_mapping
+    // null server-side while the UI looked assigned, and reloads rebuilt the
+    // map from whatever else was around — the "voices swapped on F5" bug.
+    if (!res.ok) throw new Error(`voice-mapping PATCH failed: ${res.status}`)
   }
 
   async getVoiceById(voiceId: string): Promise<{ voice_id: string; name: string; tags: string[] }> {

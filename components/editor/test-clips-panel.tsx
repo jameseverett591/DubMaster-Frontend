@@ -153,7 +153,8 @@ export function TestClipsPanel({
       pulseSpeaker(speakerId)
       onVoiceAssigned?.(speakerId, voiceId)
       if (jobId) {
-        try { await apiClient.updateVoiceMapping(jobId, { ...speakerVoiceMap, [speakerId]: voiceId }) } catch {}
+        try { await apiClient.updateVoiceMapping(jobId, { ...speakerVoiceMap, [speakerId]: voiceId }) }
+        catch (e) { console.warn('[ASSIGN] voice-mapping persist failed:', e) }
       }
       const sp = speakers.find(s => s.speaker_id === speakerId)
       flash(voiceId, `Assigned to ${sp?.display_name ?? speakerId}`)
@@ -187,7 +188,8 @@ export function TestClipsPanel({
       if (jobId) {
         const next = { ...speakerVoiceMap }
         speakerIds.forEach(sid => { next[sid] = voiceId })
-        try { await apiClient.updateVoiceMapping(jobId, next) } catch {}
+        try { await apiClient.updateVoiceMapping(jobId, next) }
+        catch (e) { console.warn('[ASSIGN] voice-mapping persist failed:', e) }
       }
       flash(voiceId, `Applied to ${speakerIds.length} speaker${speakerIds.length === 1 ? '' : 's'} in this window`)
     } finally {

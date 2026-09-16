@@ -167,7 +167,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             preview_text: seg.committed_adapted_text ?? null,
             isPreviewing: false,
             speaker_id: speakerId,
-            speaker_label: seg.speaker ?? 'Speaker 1',
+            // A user rename persists as speaker_label through the sync path;
+            // seg.speaker stays the canonical speaker-N id. Without preferring
+            // it, every rename reverted on reload.
+            speaker_label: seg.speaker_label ?? seg.speaker ?? 'Speaker 1',
             speaker_gender: gender,
             audio_url: seg.path ? `${seg.path}?ts=${cacheBustTs}` : undefined,
             committed_audio_url: seg.committed_audio_url ? `${seg.committed_audio_url}?ts=${cacheBustTs}` : undefined,
