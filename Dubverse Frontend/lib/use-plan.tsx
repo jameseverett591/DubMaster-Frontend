@@ -63,7 +63,7 @@ export function PlanProvider({ children }: { children: React.ReactNode }) {
       // The backend resolves tier from subscriptions (tier_for) and stamps it
       // on the quota row — one source of truth for "who is pro".
       try {
-        const res = await fetch(`${API_BASE_URL}/quota/balance`, {
+        const res = await fetch(`${API_BASE_URL}/api/quota/balance`, {
           headers: { Authorization: `Bearer ${session.access_token}` },
         })
         if (!res.ok) throw new Error(`balance ${res.status}`)

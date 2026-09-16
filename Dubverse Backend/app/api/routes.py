@@ -4608,6 +4608,157 @@ async def process_vozo_pipeline(
         )
 
 
+# Vendor USD rates — mirrors the "lipsync" block in /api/dubbing-engines.
+_LIPSYNC_COST_PER_SECOND = {"synclabs": 0.05, "vozo": 0.10}
+
+
+async def _run_lipsync_postpass(
+    job_id: str,
+    dubbed_output_path: Optional[str],
+    video_path: str,
+    access_token: str = "",
+    user_id: str = "",
+) -> Optional[dict]:
+    """Vendor lip-sync post-pass shared by the initial dub and Make Movie remix.
+
+    Provider comes from LIPSYNC_PROVIDER ("synclabs" | "vozo" | "none"). Both
+    vendors pull the ORIGINAL video + the merged dubbed_audio.wav through the
+    public media URLs — the JWT travels as ?access_token= because vendors can't
+    send headers (same pattern the <video> tag uses). Returns a result dict
+    when a pass was attempted/gated, None when skipped. Failure keeps the
+    dubbed-only video.
+
+    Billing: the charge lands BEFORE the vendor call, against the rendered
+    duration at vendor rate + 25% markup, under a per-attempt ledger key
+    (<job>:lipsync:<nonce>) so refund_quota can reverse it without touching
+    the render charge. The debit is kept once the vendor consumes the attempt
+    (PROCESSING reached, or any non-rejected terminal state); it is refunded
+    only when the vendor provably never ran — submit failure or a clean
+    REJECTED before processing.
+    """
+    if not dubbed_output_path:
+        return None
+    _lip_provider = (settings.LIPSYNC_PROVIDER or "none").lower()
+    _lip_active = (
+        (_lip_provider == "vozo" and vozo_service.lipsync_enabled)
+        or (_lip_provider == "synclabs" and lipsync_service.enabled)
+    )
+    if not _lip_active:
+        return None
+
+    audio_path = os.path.join(settings.DUBBED_DIR, job_id, "dubbed_audio.wav")
+    if not os.path.exists(audio_path):
+        logger.warning(f"Job {job_id}: dubbed_audio.wav not found, skipping lip sync")
+        return None
+
+    # --- Charge up front; refund below only if the vendor never ran it. ---
+    charge_seconds = 0
+    charge_key = None
+    if user_id:
+        _dur = await asyncio.to_thread(_probe_video_duration, dubbed_output_path)
+        if not _dur:
+            _lj = await job_manager.get_job(job_id)
+            _dur = float(getattr(_lj, "video_duration", 0) or 0)
+        charge_seconds = quota_service.seconds_for_lipsync(
+            _dur, _LIPSYNC_COST_PER_SECOND.get(_lip_provider, 0.0)
+        )
+        if charge_seconds > 0:
+            charge_key = f"{job_id}:lipsync:{uuid.uuid4().hex[:8]}"
+            try:
+                await asyncio.to_thread(
+                    quota_service.deduct_quota, user_id, charge_seconds,
+                    charge_key, "lipsync"
+                )
+            except quota_service.QuotaExceeded as e:
+                logger.info(
+                    f"Job {job_id}: lip sync skipped — insufficient credit "
+                    f"({charge_seconds}s needed, {e.shortfall_seconds}s short)"
+                )
+                return {"provider": _lip_provider, "applied": False,
+                        "skipped": "insufficient_credit", "charge_seconds": 0}
+            except quota_service.QuotaUnavailable:
+                # Fail closed, same rule as renders: no ledger, no paid pass.
+                logger.error(f"Job {job_id}: lip sync skipped — quota ledger unavailable")
+                return {"provider": _lip_provider, "applied": False,
+                        "skipped": "billing_unavailable", "charge_seconds": 0}
+
+    await job_manager.update_job_status(
+        job_id,
+        JobStatus.LIP_SYNCING,
+        progress=85,
+        current_stage=f"Syncing lips to dubbed audio ({_lip_provider})",
+    )
+    _qs = f"?access_token={access_token}" if access_token else ""
+    video_url = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/media/{job_id}/video{_qs}"
+    audio_url = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/media/{job_id}/audio/{os.path.basename(audio_path)}{_qs}"
+
+    if _lip_provider == "vozo":
+        lipres = await vozo_service.lipsync_video(
+            job_id=job_id,
+            video_url=video_url,
+            audio_url=audio_url,
+            output_path=dubbed_output_path,
+        )
+    else:
+        lipres = await lipsync_service.lipsync_video(
+            job_id=job_id,
+            video_path=video_path,      # original video for clean faces
+            audio_path=audio_path,       # merged dubbed audio
+            output_path=dubbed_output_path,  # overwrites dubbed video in-place
+            access_token=access_token,
+        )
+    lipsync_ok = bool(lipres.get("output_path"))
+    attempted = bool(lipres.get("vendor_attempted"))
+
+    # The one refund case: the vendor provably never ran the job.
+    refunded = False
+    refund_error = None
+    if charge_key and not attempted:
+        _refund = await asyncio.to_thread(quota_service.refund_quota, user_id, charge_key)
+        if _refund.get("error"):
+            # The charge is still outstanding — say so, don't claim success.
+            refund_error = _refund["error"]
+            logger.error(
+                f"Job {job_id}: lip-sync refund FAILED ({refund_error}) — "
+                f"{charge_seconds}s still owed, ledger key {charge_key}"
+            )
+        else:
+            refunded = True
+            charge_seconds = 0
+            logger.info(f"Job {job_id}: lip-sync charge refunded — vendor rejected before processing")
+    if charge_seconds:
+        _persist_job_metadata_field(job_id, "lipsync_charge_seconds", charge_seconds)
+
+    # Metered by VIDEO duration, which is what lip-sync vendors bill on —
+    # unlike TTS, which bills speech. Recorded even on failure: a failed pass
+    # still costs vendor time.
+    try:
+        _lj = await job_manager.get_job(job_id)
+        tts_usage.record_lipsync(
+            os.path.join(settings.DUBBED_DIR, job_id),
+            _lip_provider,
+            video_seconds=float(getattr(_lj, "video_duration", 0) or 0),
+            succeeded=lipsync_ok,
+        )
+    except Exception as _e:
+        logger.warning(f"[LIPSYNC-USAGE] accounting skipped: {_e}")
+
+    if lipsync_ok:
+        logger.info(f"Job {job_id}: lip sync applied successfully ({_lip_provider})")
+    else:
+        logger.warning(f"Job {job_id}: lip sync failed, keeping dubbed-only video")
+    result = {
+        "provider": _lip_provider,
+        "applied": lipsync_ok,
+        "charge_seconds": charge_seconds,
+        "refunded": refunded,
+        "vendor_attempted": attempted,
+    }
+    if refund_error:
+        result["refund_pending"] = True
+    return result
+
+
 async def process_dubbing_pipeline(
     job_id: str,
     video_path: str,
@@ -4622,6 +4773,9 @@ async def process_dubbing_pipeline(
     character_profiles: list | None = None,
     dubbing_style: str | None = None,
     localized_aliases: dict | None = None,
+    access_token: str = "",
+    lipsync: bool = False,
+    user_id: str = "",
 ):
     try:
         if source_lang != target_lang:
@@ -4665,42 +4819,11 @@ async def process_dubbing_pipeline(
                 segment_engines = None
                 dubbed_output_path = None
 
-            # --- Sync.Labs lip sync (optional, non-fatal) ---
-            if lipsync_service.enabled and dubbed_output_path:
-                await job_manager.update_job_status(
-                    job_id,
-                    JobStatus.LIP_SYNCING,
-                    progress=85,
-                    current_stage="Syncing lips to dubbed audio",
+            # Lip-sync is opt-in — a paid generative pass, never the default.
+            if lipsync:
+                await _run_lipsync_postpass(
+                    job_id, dubbed_output_path, video_path, access_token, user_id
                 )
-                audio_path = os.path.join(settings.DUBBED_DIR, job_id, "dubbed_audio.mp3")
-                if os.path.exists(audio_path):
-                    lipsync_ok = await lipsync_service.lipsync_video(
-                        job_id=job_id,
-                        video_path=video_path,       # original video for clean faces
-                        audio_path=audio_path,        # merged dubbed audio
-                        output_path=dubbed_output_path,  # overwrites dubbed video in-place
-                    )
-                    # Metered by VIDEO duration, which is what lip-sync vendors
-                    # bill on — unlike TTS, which bills speech. Recorded even
-                    # on failure: a failed pass still costs vendor time.
-                    try:
-                        _lj = await job_manager.get_job(job_id)
-                        tts_usage.record_lipsync(
-                            os.path.join(settings.DUBBED_DIR, job_id),
-                            "synclabs",
-                            video_seconds=float(getattr(_lj, "video_duration", 0) or 0),
-                            succeeded=bool(lipsync_ok),
-                        )
-                    except Exception as _e:
-                        logger.warning(f"[LIPSYNC-USAGE] accounting skipped: {_e}")
-
-                    if lipsync_ok:
-                        logger.info(f"Job {job_id}: lip sync applied successfully")
-                    else:
-                        logger.warning(f"Job {job_id}: lip sync failed, keeping dubbed-only video")
-                else:
-                    logger.warning(f"Job {job_id}: dubbed_audio.mp3 not found, skipping lip sync")
 
             dubbed_url = f"/api/download/{job_id}/{target_lang}"
             await job_manager.update_job_dubbing_result(
@@ -5116,7 +5239,8 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
     Called after the user reviews the translation in the inline editor.
     The request.transcript contains the corrected translated text.
     """
-    await _require_job(request.job_id, _caller(http_request))
+    _uid = _caller(http_request)
+    await _require_job(request.job_id, _uid)
     job = await _get_or_rehydrate_job(request.job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -5176,6 +5300,10 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
         current_stage="Generating dubbed audio with AI voices",
     )
 
+    _access_token = (
+        http_request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        or http_request.query_params.get("access_token", "").strip()
+    )
     background_tasks.add_task(
         process_dubbing_pipeline,
         job_id=request.job_id,
@@ -5191,6 +5319,9 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
         character_profiles=request.character_profiles or job.character_profiles,
         dubbing_style=job.dubbing_style,
         localized_aliases=job.localized_aliases,
+        access_token=_access_token,
+        lipsync=bool(getattr(request, "lipsync", False)),
+        user_id=_uid,
     )
 
     return DubResponse(
@@ -5422,6 +5553,17 @@ async def get_dubbing_engines():
                 "features": ["auto_voice_matching", "auto_translation", "lip_sync"],
                 "requires_public_url": True,
                 "public_url_set": bool(settings.PUBLIC_BASE_URL),
+            },
+            "lipsync": {
+                "provider": settings.LIPSYNC_PROVIDER,
+                "available": (
+                    (settings.LIPSYNC_PROVIDER == "vozo" and vozo_service.lipsync_enabled)
+                    or (settings.LIPSYNC_PROVIDER == "synclabs" and lipsync_service.enabled)
+                ),
+                "description": "Optional AI lip-sync post-pass on the rendered video",
+                # Vendor rate for lipsync-2; UI shows estimate = seconds × rate.
+                "cost_per_second_usd": _LIPSYNC_COST_PER_SECOND.get(settings.LIPSYNC_PROVIDER, 0.10),
+                "requires_public_url": True,
             },
         },
         "processing_mode": os.getenv("PROCESSING_MODE", "cpu"),
@@ -6080,6 +6222,96 @@ async def analyze_segment(job_id: str, segment_index: int):
     return result
 
 
+@router.post("/analyze-lipsync/{job_id}", dependencies=[Depends(_dep_job_access)])
+async def analyze_lipsync_windows(job_id: str, request: Request):
+    """Minute-by-minute lip-sync scoring across the timeline.
+
+    Segments are too short to score reliably — a 2s clip yields too few
+    samples for a stable correlation. So the QC monitor works in ~60s windows:
+    body {} scores every window up front (what's shown on entry); body
+    {"start": s, "end": e} re-scores one span — e.g. a fix that ran past a
+    minute boundary gets scored over its whole edited range, not clipped to
+    the segment.
+
+    The audio signal is built from each segment's CURRENT file at committed
+    times (not the rendered dub), so manual timing edits and regenerated takes
+    are what actually get measured."""
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+
+    with open(segments_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+
+    video_path = data.get("video_path")
+    if not video_path or not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Original source video not found for this job")
+
+    segments = data.get("segments", [])
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    from app.services import syncnet_service
+
+    start = body.get("start")
+    end = body.get("end")
+    if start is not None and end is not None:
+        # The scorers allocate ~(end-start)*25 arrays — an unbounded or
+        # non-finite range is a memory-exhaustion vector. Require finite,
+        # non-negative, ordered values and clamp to the video's duration.
+        import math
+        try:
+            start_f, end_f = float(start), float(end)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="start/end must be numbers")
+        if not (math.isfinite(start_f) and math.isfinite(end_f)) or start_f < 0 or end_f <= start_f:
+            raise HTTPException(
+                status_code=422,
+                detail="start/end must be finite, non-negative and ordered",
+            )
+        _dur = await asyncio.to_thread(_probe_video_duration, video_path)
+        cap = _dur if _dur and _dur > 0 else float(MAX_VIDEO_DURATION_SECONDS)
+        end_f = min(end_f, cap)
+        if start_f >= end_f:
+            raise HTTPException(status_code=422, detail="start is beyond the video duration")
+        visual = await asyncio.to_thread(
+            syncnet_service.score_lipsync_range, video_path, segments, start_f, end_f
+        )
+        audio = await asyncio.to_thread(
+            syncnet_service.score_lipsync_audio_range, video_path, segments, start_f, end_f
+        )
+        return {"status": "ok", "start": start_f, "end": end_f,
+                "visual": visual, "audio": audio}
+
+    duration = await asyncio.to_thread(_probe_video_duration, video_path)
+    if not duration:
+        # Fall back to the furthest committed segment end.
+        duration = max(
+            (float(s.get("committed_end_time") or s.get("end_time") or s.get("end") or 0) for s in segments),
+            default=0.0,
+        )
+    if duration <= 0:
+        raise HTTPException(status_code=422, detail="Could not determine video duration")
+
+    visual_windows = await asyncio.to_thread(
+        syncnet_service.score_lipsync_windows, video_path, segments, duration
+    )
+    audio_windows = await asyncio.to_thread(
+        syncnet_service.score_lipsync_audio_windows, video_path, segments, duration
+    )
+    # One row per window carries both signals: audio-vs-audio is the trusted
+    # timing metric; visual is supplementary where faces are readable.
+    merged = [
+        {"start": v["start"], "end": v["end"], "visual": v, "audio": a}
+        for v, a in zip(visual_windows, audio_windows)
+    ]
+    return {"status": "ok", "window_seconds": 60, "duration": round(duration, 1), "windows": merged}
+
+
 @router.get("/analysis/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
 async def get_analysis(job_id: str, language: str):
     """Get quality analysis results. 202 if running, 200 if complete, 404 if not triggered."""
@@ -6696,9 +6928,13 @@ async def _unmeter_render(job_id: str, user_id: str) -> None:
 
 
 @router.post("/dub/remix/{job_id}", dependencies=[Depends(_dep_job_access)])
-async def remix_dub(job_id: str, request: Request):
+async def remix_dub(job_id: str, request: Request, lipsync: bool = False):
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.removeprefix("Bearer ").strip()
+    if not token:
+        # _caller() also accepts ?access_token= — media elements can't send
+        # headers, and this route may be invoked the same way.
+        token = request.query_params.get("access_token", "").strip()
     user_id = verify_jwt(token)
 
     # Make Movie is the one metered action. 402 / 503 raised here stop the
@@ -6736,6 +6972,27 @@ async def remix_dub(job_id: str, request: Request):
         if _charge:
             await _unmeter_render(job_id, user_id)
         raise
+
+    # --- Lip sync post-pass on the remix output (optional, non-fatal) ---
+    # Same vendor dispatch as the initial dub; Make Movie is the render path
+    # the editor actually uses, so lip sync must live here, not only upstream.
+    # Opt-in only (?lipsync=true) — it's a paid generative pass, not a default.
+    if lipsync and isinstance(result, dict) and result.get("status") == "ok":
+        try:
+            _lang = str(result.get("dubbed_video_url") or "").rstrip("/").split("/")[-1]
+            _out = os.path.join(settings.DUBBED_DIR, job_id, f"dubbed_{_lang}.mp4")
+            _job = await job_manager.get_job(job_id)
+            _lip = await _run_lipsync_postpass(
+                job_id,
+                _out if os.path.exists(_out) else None,
+                getattr(_job, "video_path", "") if _job else "",
+                token,
+                user_id,
+            )
+            if _lip is not None:
+                result["lipsync"] = _lip
+        except Exception as _le:
+            logger.warning(f"Job {job_id}: lip sync post-pass skipped: {_le}")
 
     if isinstance(result, dict) and _charge:
         result["billing"] = _charge
@@ -7894,6 +8151,7 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest, r
             live_prev_segment_end=body.live_prev_segment_end,
             stage=body.stage,
             text=body.text,
+            allow_adapt_fit=body.allow_adapt_fit,
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

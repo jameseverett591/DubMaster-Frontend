@@ -346,6 +346,10 @@ export interface RegenerateSegmentRequest {
   // writes the file but does NOT commit it to segments.json/Supabase. The take
   // is promoted via commitSegmentTiming's staged_path when the chunk is saved.
   stage?: boolean
+  // Commit is a toggle: releasing a committed line (recommit) sends this, so
+  // REGEN-ADAPT-FIT may sync-fit the text to its window. Locked or
+  // user-authored text never sets it — verbatim is the default.
+  allow_adapt_fit?: boolean
 }
 
 export interface RegenerateSegmentResponse {
@@ -556,6 +560,28 @@ export interface QualityAnalysis {
   pronunciation?: PronunciationAssessment
   translation?: TranslationQuality
   summary: AnalysisSummary
+}
+
+export interface LipSyncWindowResult {
+  start: number
+  end: number
+  visual?: {
+    status: string
+    sync_score?: number
+    correlation?: number
+    offset_ms?: number
+    face_coverage?: number
+    severity?: string
+    reason?: string
+  }
+  audio?: {
+    status: string
+    score?: number
+    correlation?: number
+    offset_ms?: number
+    severity?: string
+    reason?: string
+  }
 }
 
 export type AnalysisStatus = 'idle' | 'running' | 'complete' | 'error'
@@ -1005,9 +1031,11 @@ class DubVerseAPIClient {
     engines: Record<string, {
       available: boolean
       description: string
-      features: string[]
+      features?: string[]
       requires_public_url?: boolean
       public_url_set?: boolean
+      provider?: string
+      cost_per_second_usd?: number
     }>
   }> {
     const response = await this._fetch(`${this.baseURL}/api/dubbing-engines`)
@@ -1682,8 +1710,9 @@ class DubVerseAPIClient {
     return response.json()
   }
 
-  async remixDub(jobId: string): Promise<RemixResponse> {
-    const response = await this._fetch(`${this.baseURL}/api/dub/remix/${jobId}`, {
+  async remixDub(jobId: string, opts?: { lipsync?: boolean }): Promise<RemixResponse> {
+    const qs = opts?.lipsync ? '?lipsync=true' : ''
+    const response = await this._fetch(`${this.baseURL}/api/dub/remix/${jobId}${qs}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
     })
@@ -1699,6 +1728,47 @@ class DubVerseAPIClient {
       throw new Error(detail || `Failed to rebuild video: ${response.statusText}`)
     }
     return response.json()
+  }
+
+  /** Per-segment lip-sync score — original-video mouth movement vs the
+   *  segment's CURRENT audio file + committed timing. Runs without a rebuild,
+   *  so it reflects manual timing edits and regenerated takes immediately.
+   *  NOTE: single segments are usually too short for a stable correlation —
+   *  prefer analyzeLipSync (minute windows / edited spans). */
+  async analyzeSegmentLipSync(
+    jobId: string,
+    segmentIndex: number,
+  ): Promise<{ status: string; sync_score?: number; correlation?: number; offset_ms?: number; face_coverage?: number; severity?: string; reason?: string }> {
+    const res = await this._fetch(`${this.baseURL}/api/analyze-segment/${jobId}/${segmentIndex}`, {
+      method: 'POST',
+      headers: this._authHeaders(),
+    })
+    if (!res.ok) throw new Error(await this._detail(res))
+    return res.json()
+  }
+
+  /** Minute-window lip-sync scoring. `range` omitted → every 60s window of
+   *  the timeline (the upfront pass); {start,end} → re-score one span, e.g.
+   *  an edit's full committed range snapped to the minute grid. The dubbed
+   *  signal is rebuilt from the segments' current audio + committed times —
+   *  manual lip-sync adjustments and regenerated takes are what get scored. */
+  async analyzeLipSync(
+    jobId: string,
+    range?: { start: number; end: number },
+  ): Promise<{
+    status: string
+    windows?: LipSyncWindowResult[]
+    start?: number; end?: number
+    sync_score?: number; correlation?: number; offset_ms?: number
+    face_coverage?: number; severity?: string; reason?: string
+  }> {
+    const res = await this._fetch(`${this.baseURL}/api/analyze-lipsync/${jobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify(range ?? {}),
+    })
+    if (!res.ok) throw new Error(await this._detail(res))
+    return res.json()
   }
 
   async commitSegmentTiming(
@@ -1888,11 +1958,15 @@ class DubVerseAPIClient {
   }
 
   async updateVoiceMapping(jobId: string, voiceMapping: Record<string, string>): Promise<void> {
-    await this._fetch(`${this.baseURL}/api/jobs/${jobId}/voice-mapping`, {
+    const res = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/voice-mapping`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(voiceMapping),
     })
+    // This was a fire-and-forget swallow: a failed PATCH left voice_mapping
+    // null server-side while the UI looked assigned, and reloads rebuilt the
+    // map from whatever else was around — the "voices swapped on F5" bug.
+    if (!res.ok) throw new Error(`voice-mapping PATCH failed: ${res.status}`)
   }
 
   async getVoiceById(voiceId: string): Promise<{ voice_id: string; name: string; tags: string[] }> {

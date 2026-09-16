@@ -1908,7 +1908,8 @@ class DubbingService:
                     trimmed_dur = await asyncio.to_thread(self._get_audio_duration, silence_trimmed_path)
                     orig_dur = await asyncio.to_thread(self._get_audio_duration, final_path)
                     silence_removed = orig_dur - trimmed_dur
-                    if silence_removed > 0.08:  # only swap if >80ms was trimmed
+                    if silence_removed > 0.02:  # keep trims down to ~20ms — residual
+                        # lead-ins under 80ms still show up in lip-sync
                         logger.info(f"[SILENCE-TRIM] seg {i}: removed {silence_removed:.3f}s leading silence")
                         final_path = silence_trimmed_path
 
@@ -2000,11 +2001,27 @@ class DubbingService:
                             f"(needed {_speed_applied:.2f}x — tail may be cut)"
                         )
 
+                # Borrowed room is for SIZING only — it told the fit loop how
+                # much space the line could use. PLACEMENT should move earlier
+                # only when the fitted audio actually needs the room: the old
+                # unconditional start_time - _borrow put every segment with a
+                # >50ms leading gap up to _MAX_BORROW early — the systematic
+                # lip-sync lead users kept dragging back by hand. Now: place at
+                # start_time unless the audio's tail would overflow the next
+                # segment's start, in which case sit just early enough to fit.
+                if next_start is not None:
+                    _final_start = max(
+                        _window_start,
+                        min(start_time, next_start - 0.05 - actual_duration),
+                    )
+                else:
+                    _final_start = start_time
+
                 overlap_with_prev = ""
                 if audio_segments:
                     prev_end = audio_segments[-1]["end"]
-                    if _placed_start < prev_end:
-                        overlap_with_prev = f" OVERLAP={prev_end - _placed_start:.3f}s with seg {len(audio_segments)-1}"
+                    if _final_start < prev_end:
+                        overlap_with_prev = f" OVERLAP={prev_end - _final_start:.3f}s with seg {len(audio_segments)-1}"
 
                 logger.info(
                     f"[TIMING] seg={i} speaker={speaker} "
@@ -2016,8 +2033,8 @@ class DubbingService:
                     f"slot={_fit_target:.3f}s "
                     f"tts_dur={actual_duration:.3f}s "
                     f"delta={actual_duration - _fit_target:+.3f}s "
-                    f"borrow={start_time - _placed_start:.3f}s "
-                    f"placed_at=[{_placed_start:.3f}-{_placed_start + actual_duration:.3f}]"
+                    f"borrow={start_time - _final_start:.3f}s "
+                    f"placed_at=[{_final_start:.3f}-{_final_start + actual_duration:.3f}]"
                     f"{overlap_with_prev}"
                 )
 
@@ -2061,8 +2078,8 @@ class DubbingService:
                     "path": final_path,
                     "audio_url": _audio_filename,
                     "committed_audio_url": _audio_filename,
-                    "start": _placed_start,
-                    "end": _placed_start + actual_duration,
+                    "start": _final_start,
+                    "end": _final_start + actual_duration,
                     "duration": actual_duration,
                     # The ORIGINAL transcript window, before any borrow or fit.
                     # timing_diagnostics used to write the placed position as
@@ -2631,16 +2648,28 @@ class DubbingService:
         if cur_i >= floor:
             return False
 
-        gain_db = min(floor - cur_i, tp_ceiling - cur_tp)
-        if gain_db <= 0.1:  # nothing meaningful left after the peak cap
+        # Boost to the floor unconditionally, then hard-limit peaks to the
+        # ceiling. The old min() gate let TP headroom veto the whole boost,
+        # which left peaky TTS quiet forever — measured on a real job: every
+        # fit-stretched segment sat at -25..-33 LUFS because their true peaks
+        # (up to +6 dBTP, already clipped) offered zero or negative headroom.
+        # alimiter only engages where the gain would overshoot the ceiling.
+        gain_db = floor - cur_i
+        if gain_db <= 0.1:
             return False
+
+        af = f"volume={gain_db:.2f}dB"
+        limited = cur_tp + gain_db > tp_ceiling
+        if limited:
+            lin_ceiling = 10.0 ** (tp_ceiling / 20.0)
+            af += f",alimiter=limit={lin_ceiling:.4f}:level=false"
 
         tmp = audio_path + ".gain.mp3"
         try:
             res = subprocess.run(
                 [
                     "ffmpeg", "-y", "-hide_banner", "-nostats", "-i", audio_path,
-                    "-filter:a", f"volume={gain_db:.2f}dB",
+                    "-filter:a", af,
                     "-c:a", "libmp3lame", "-b:a", "192k", tmp,
                 ],
                 capture_output=True, text=True,
@@ -2652,6 +2681,7 @@ class DubbingService:
             logger.info(
                 f"[GAIN] {os.path.basename(audio_path)}: {cur_i:.2f} LUFS "
                 f"(TP {cur_tp:.2f}) +{gain_db:.2f} dB -> ~{cur_i + gain_db:.2f} LUFS"
+                + (" [limited]" if limited else "")
             )
             return True
         except Exception as exc:
@@ -2968,11 +2998,12 @@ class DubbingService:
         input_path: str,
         output_path: str,
         silence_threshold_db: float = -40.0,
-        min_silence_duration: float = 0.1,
+        min_silence_duration: float = 0.02,
     ) -> bool:
         """Remove leading silence from a TTS audio file.
-        Fish Audio inline cloning often prepends 0.5-2s of silence before speech.
-        Only trims if >100ms of silence is detected so normal attack isn't clipped.
+        Fish Audio inline cloning often prepends silence before speech, and
+        residual lead-ins of 30-100ms are audible in lip-sync — hence 20ms,
+        not the old 100ms floor that let them through.
         """
         try:
             cmd = [
@@ -4107,6 +4138,7 @@ class DubbingService:
         live_prev_segment_end: Optional[float] = None,
         stage: bool = False,
         text: Optional[str] = None,
+        allow_adapt_fit: bool = False,
     ) -> Dict:
         output_dir = os.path.join(self.dubbed_dir, job_id)
         segments_path = os.path.join(output_dir, "segments.json")
@@ -4184,6 +4216,83 @@ class DubbingService:
         # so honor it: a non-empty override is what gets synthesized.
         if text and text.strip():
             use_text = text.strip()
+
+        # Fit-to-slot shortening — the regen counterpart of the pipeline's
+        # ADAPT-FIT step. Without it, a regen whose line overruns the window
+        # has exactly one lever: time-stretch to 1.5x (chipmunk) or hard-trim.
+        # When the committed line is predicted >15% over its window, ask the
+        # adaptation engine for this segment's sync_fit rewrite and take it if
+        # it is genuinely shorter. One haiku call, only on predicted overflow —
+        # cheaper than a re-render, far better than shipping a fast take.
+        #
+        # Two hard rules learned from real use:
+        #  - NEVER touch text the user explicitly typed (a `text` override) —
+        #    the variant is a paraphrase that drifts back toward the old line,
+        #    so the take "plays something close to what was already written".
+        #    The single exception is allow_adapt_fit: Commit is a toggle, and a
+        #    recommit RELEASES the text for alteration — the caller then opts in
+        #    to sync_fit on the next take so an over-long line can be shortened
+        #    to its window instead of time-stretched into a chipmunk take.
+        #  - NEVER touch a text_locked line regardless of path — bulk regen
+        #    sends no `text`, so without this guard a locked committed line
+        #    could still be paraphrased from below.
+        #  - Predict against the APPLIED speed: at use_speed=0.65 the take runs
+        #    ~50% longer than the natural estimate, and shortening to fit the
+        #    natural window still overflows into a 2x squash.
+        _explicit_text = bool(text and text.strip()) and not allow_adapt_fit
+        try:
+            _cs = seg.get("committed_start_time")
+            _ce = seg.get("committed_end_time")
+            _s0 = float(_cs) if _cs is not None else float(seg.get("start", 0) or 0)
+            _e0 = float(_ce) if _ce is not None else float(seg.get("end", 0) or 0)
+            if (
+                isinstance(live_segment_start, (int, float)) and math.isfinite(live_segment_start)
+                and isinstance(live_segment_end, (int, float)) and math.isfinite(live_segment_end)
+                and live_segment_start >= 0 and live_segment_end > live_segment_start
+            ):
+                _s0, _e0 = float(live_segment_start), float(live_segment_end)
+
+            def _eff_start_for(x: Dict) -> float:
+                v = x.get("committed_start_time")
+                return float(v) if v is not None else float(x.get("start", 0) or 0)
+
+            _nxt = min(
+                (_eff_start_for(s) for s in segments if _eff_start_for(s) > _e0 + 0.01),
+                default=None,
+            )
+            _window = (_nxt - _s0) if _nxt is not None else (_e0 - _s0)
+            _pred = (
+                natural_duration(use_text, use_voice_id) / max(use_speed, 0.01)
+                if use_text.strip() else 0.0
+            )
+            if _window > 0.2 and not _explicit_text and not seg.get("text_locked") and _pred > _window * 1.15:
+                from app.services.adaptation_engine import adapt_batch
+                _adapted = await adapt_batch(
+                    segments=[{
+                        "segment_id": seg.get("segment_id", str(segment_index)),
+                        "source_text": seg.get("source_text", ""),
+                        "target_text": use_text,
+                        "source_language": data.get("source_language", "zh"),
+                        "target_language": data.get("target_language", "en"),
+                        "source_duration": max(0.3, _window),
+                        "speaker_id": seg.get("speaker", "speaker-1"),
+                        "speaker_gender": seg.get("speaker_gender", "male"),
+                    }],
+                    target_language=data.get("target_language", "en"),
+                    scene_context=None,
+                )
+                if _adapted:
+                    _sync = (_adapted[0].get_variant("sync_fit").text or "").strip()
+                    if _sync and natural_duration(_sync, use_voice_id) < _pred:
+                        logger.info(
+                            f"[REGEN-ADAPT-FIT] seg {segment_index}: predicted "
+                            f"{_pred:.1f}s vs {_window:.1f}s window — using sync_fit "
+                            f"~{natural_duration(_sync, use_voice_id):.1f}s: {_sync!r}"
+                        )
+                        use_text = _sync
+        except Exception as _fit_err:
+            # Never let the shortener kill a regen — stretch/trim still applies.
+            logger.warning(f"[REGEN-ADAPT-FIT] seg {segment_index} skipped: {_fit_err}")
 
         previous_text = seg.get("text", "")
         previous_path = seg.get("path", "")
@@ -4530,7 +4639,7 @@ class DubbingService:
                     await asyncio.to_thread(self._get_audio_duration, final_path)
                     - await asyncio.to_thread(self._get_audio_duration, trimmed_path)
                 )
-                if silence_removed > 0.08:
+                if silence_removed > 0.02:
                     final_path = trimmed_path
 
             actual_dur = await asyncio.to_thread(self._get_audio_duration, final_path)

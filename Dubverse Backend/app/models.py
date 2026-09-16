@@ -182,6 +182,7 @@ class DubRequest(BaseModel):
     character_profiles: Optional[List[Dict]] = None  # [{name, traits, speech_style}]
     dubbing_style: Optional[str] = None  # "natural" (localized dub) or "literal" (word-for-word); routes default to persisted job value then "natural"
     localized_aliases: Optional[Dict[str, str]] = None  # e.g. {"Brother Gen": "Broker", "San Gu": "Auntie"}
+    lipsync: bool = False  # opt-in AI lip-sync post-pass (Sync.Labs/Vozo); billed per rendered second
 
 
 class AdaptVariant(BaseModel):
@@ -280,3 +281,9 @@ class RegenerateRequest(BaseModel):
     # uncommitted text edit spoke the old line. Staged editing makes that flow
     # normal, so it is now honored.
     text: Optional[str] = None
+    # Commit is a toggle: a second Commit on a locked row releases the text for
+    # alteration. When released, the next Generate may run REGEN-ADAPT-FIT on the
+    # line (sync_fit paraphrase) so an over-long take can be shortened to its
+    # window instead of time-stretched. Locked or freshly-typed text never sends
+    # this — verbatim is the default.
+    allow_adapt_fit: Optional[bool] = None
