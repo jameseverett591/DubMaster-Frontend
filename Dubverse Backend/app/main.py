@@ -76,6 +76,13 @@ class _RedactTokensFilter(logging.Filter):
         return value
 
     def filter(self, record: logging.LogRecord) -> bool:
+        """Redact credentials from a record's message and arguments in place.
+
+        Runs before formatting, so both halves have to be cleaned: the message
+        template, and the arguments interpolated into it, which is where
+        uvicorn's access log carries the request path. Always returns True —
+        this filter exists to sanitise records, never to suppress them.
+        """
         record.msg = self._scrub(record.msg)
         if isinstance(record.args, (tuple, dict)):
             record.args = self._scrub(record.args)
