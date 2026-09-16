@@ -3610,8 +3610,15 @@ export function DubVerseEditor({
       const startTime = useEditorStore.getState().currentTime
       lastStartPosRef.current = startTime
       audioStartTimeRef.current = ctx.currentTime
+      // Per-run invalidation. rptCancelRef is shared across runs and the next
+      // play resets it to false, so on its own it cannot stop a callback left
+      // over from an earlier run — pause before the picture reports "playing",
+      // press play again, and the old listener or 400ms fallback would still
+      // fire and schedule a second copy of the audio, restarting it mid-word.
+      // The cleanup below flips this for its own run only.
+      let stale = false
       const doSchedule = () => {
-        if (rptCancelRef.current) return
+        if (rptCancelRef.current || stale) return
         // Kill any existing sources first so we never layer stitch playback.
         rptSourcesRef.current.forEach(s => { try { s.onended = null } catch {} try { s.stop() } catch {} try { s.disconnect() } catch {} })
         rptSourcesRef.current.clear()
@@ -3673,13 +3680,21 @@ export function DubVerseEditor({
         video.addEventListener('playing', onPlaying, { once: true })
         // If the element never reports playing (already running, or a source that
         // will not start), do not hang silently.
-        setTimeout(() => {
+        const fallback = setTimeout(() => {
           if (fired) return
           video.removeEventListener('playing', onPlaying)
           armed()
         }, 400)
+        return () => {
+          stale = true
+          video.removeEventListener('playing', onPlaying)
+          clearTimeout(fallback)
+        }
       } else {
         armed()
+        // armed() may still be waiting on resume(); retire that pending schedule
+        // if this run is superseded before it lands.
+        return () => { stale = true }
       }
     } else {
       stopAllRptAudio()
