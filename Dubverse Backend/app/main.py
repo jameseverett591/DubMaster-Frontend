@@ -48,16 +48,37 @@ class _RedactTokensFilter(logging.Filter):
     """
 
     _PATTERN = re.compile(r"((?:access|refresh)_token=)[^&\s\"']+", re.IGNORECASE)
+    # A token logged WITHOUT its name — logger.info("token %s", tok), or a
+    # structured field — carries no "access_token=" for the pattern above to
+    # anchor on. Supabase access tokens are JWTs, so match that shape directly:
+    # three base64url parts, the first two starting with "eyJ" ('{"' encoded).
+    _JWT = re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")
+    _TOKEN_KEYS = frozenset({"access_token", "refresh_token"})
 
     def _scrub(self, value):
-        return self._PATTERN.sub(r"\1REDACTED", value) if isinstance(value, str) else value
+        """Recursively clean strings, tuples, lists and dicts.
+
+        A dict is also checked by KEY: a structured field named access_token
+        has a bare token as its value, which neither pattern can recognise as
+        belonging to a credential by content alone.
+        """
+        if isinstance(value, str):
+            return self._JWT.sub("REDACTED", self._PATTERN.sub(r"\1REDACTED", value))
+        if isinstance(value, dict):
+            return {
+                k: "REDACTED" if str(k).lower() in self._TOKEN_KEYS else self._scrub(v)
+                for k, v in value.items()
+            }
+        if isinstance(value, tuple):
+            return tuple(self._scrub(v) for v in value)
+        if isinstance(value, list):
+            return [self._scrub(v) for v in value]
+        return value
 
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = self._scrub(record.msg)
-        if isinstance(record.args, tuple):
-            record.args = tuple(self._scrub(a) for a in record.args)
-        elif isinstance(record.args, dict):
-            record.args = {k: self._scrub(v) for k, v in record.args.items()}
+        if isinstance(record.args, (tuple, dict)):
+            record.args = self._scrub(record.args)
         return True  # never drop the record, only clean it
 
 
