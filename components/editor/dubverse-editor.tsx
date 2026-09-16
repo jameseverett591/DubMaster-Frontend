@@ -1686,9 +1686,10 @@ export function DubVerseEditor({
       // document BEFORE this window-level handler, so this guard prevents a
       // double-commit on a normal release.
       if (drag && dragUpListenerRef.current) {
-        const liveDelta = dragLiveDeltaRef.current
-        const newStart = Math.max(0, drag.originalStart + liveDelta)
-        const newEnd = Math.max(0, drag.originalEnd + liveDelta)
+        // Clamp the delta, not each end: stop at 0:00 with the length intact.
+        const liveDelta = Math.max(dragLiveDeltaRef.current, -drag.originalStart)
+        const newStart = drag.originalStart + liveDelta
+        const newEnd = drag.originalEnd + liveDelta
         updateSegment(drag.index, { start_time: newStart, end_time: newEnd })
         commitSegmentChanges(drag.index, {
           committed_start_time: newStart,
@@ -12373,8 +12374,15 @@ export function DubVerseEditor({
                         tl0?.querySelectorAll<HTMLElement>(`[data-drag-block="${index}"]`).forEach(el => dragEls.push(el))
                         dragLiveDeltaRef.current = 0
                         let lastDeltaTime = 0
+                        // Same two rules as the Dubbed track: a press is a click until
+                        // it travels a few pixels, and the delta is clamped so the block
+                        // stops at 0:00 with its length intact.
+                        let moved = false
+                        const clampDt = (dt: number) => Math.max(dt, -originalStart)
                         const onMouseMove = (ev: MouseEvent) => {
-                          const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
+                          if (!moved && Math.abs(ev.clientX - startX) < 4) return
+                          moved = true
+                          const deltaTime = clampDt((ev.clientX - startX) / PIXELS_PER_SECOND)
                           lastDeltaTime = deltaTime
                           dragLiveDeltaRef.current = deltaTime
                           const px = deltaTime * PIXELS_PER_SECOND
@@ -12383,9 +12391,19 @@ export function DubVerseEditor({
                         const onMouseUp = (ev: MouseEvent) => {
                           for (const el of dragEls) el.style.transform = ''
                           dragLiveDeltaRef.current = 0
+                          if (!moved) {
+                            setDraggingSegment(null)
+                            document.removeEventListener('mousemove', onMouseMove)
+                            document.removeEventListener('mouseup', onMouseUp)
+                            document.removeEventListener('pointercancel', onMouseUp)
+                            window.removeEventListener('blur', onMouseUp)
+                            dragMoveListenerRef.current = null
+                            dragUpListenerRef.current = null
+                            return
+                          }
                           // blur/pointercancel carry no clientX — fall back to the
                           // last live delta rather than committing NaN.
-                          const deltaTime = Number.isFinite(ev.clientX) ? (ev.clientX - startX) / PIXELS_PER_SECOND : lastDeltaTime
+                          const deltaTime = clampDt(Number.isFinite(ev.clientX) ? (ev.clientX - startX) / PIXELS_PER_SECOND : lastDeltaTime)
                           updateSegment(index, {
                             start_time: Math.max(0, originalStart + deltaTime),
                             end_time: Math.max(0, originalEnd + deltaTime),
@@ -12707,31 +12725,63 @@ export function DubVerseEditor({
                         tl1?.querySelectorAll<HTMLElement>(`[data-drag-block="${index}"]`).forEach(el => dragEls.push(el))
                         dragLiveDeltaRef.current = 0
                         let lastDeltaTime = 0
+                        // A press is a CLICK until the pointer travels a few pixels.
+                        // Without this, the jitter of an ordinary click to select or
+                        // play the block moved it, and every click wrote timing.
+                        const downX = e.clientX
+                        let moved = false
+                        // Never before 0:00, and never by changing the block's length:
+                        // clamp the DELTA, not start and end separately. Clamping each
+                        // end independently pinned start at 0 while end kept moving
+                        // left, so dragging the first segment past the origin silently
+                        // shortened it — and a shorter slot forced a faster take.
+                        const clampDt = (dt: number) => Math.max(dt, -originalStart)
                         const onMouseMove = (ev: MouseEvent) => {
-                          const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
+                          if (!moved && Math.abs(ev.clientX - downX) < 4) return
+                          moved = true
+                          const deltaTime = clampDt((ev.clientX - startX) / PIXELS_PER_SECOND)
                           lastDeltaTime = deltaTime
                           dragLiveDeltaRef.current = deltaTime
                           const px = deltaTime * PIXELS_PER_SECOND
                           for (const el of dragEls) el.style.transform = px ? `translateX(${px}px)` : ''
-                          // Auto-scroll when dragging near the right or left edge
+                          // Auto-scroll when dragging near the right or left edge.
+                          //
+                          // Compensate startX by how far the view ACTUALLY scrolled,
+                          // not by the requested step. At the left end the view is
+                          // already at scrollLeft 0 and cannot move, yet startX was
+                          // still shifted 12px per mousemove — so a block sitting in
+                          // the left 80px (the first segment always does) crept left
+                          // on its own with every tiny movement and slid under the
+                          // track label panel.
                           const timelineEl = timelineRef.current
                           if (timelineEl) {
                             const containerRect = timelineEl.getBoundingClientRect()
                             const edgeThreshold = 80 // px from edge to trigger scroll
                             const scrollSpeed = 12 // px per frame
+                            const before = timelineEl.scrollLeft
                             if (ev.clientX > containerRect.right - edgeThreshold) {
                               timelineEl.scrollLeft += scrollSpeed
-                              startX -= scrollSpeed
                             } else if (ev.clientX < containerRect.left + edgeThreshold) {
                               timelineEl.scrollLeft -= scrollSpeed
-                              startX += scrollSpeed
                             }
+                            startX -= timelineEl.scrollLeft - before
                           }
                         }
                         const onMouseUp = (ev: MouseEvent) => {
                           for (const el of dragEls) el.style.transform = ''
                           dragLiveDeltaRef.current = 0
-                          const deltaTime = Number.isFinite(ev.clientX) ? (ev.clientX - startX) / PIXELS_PER_SECOND : lastDeltaTime
+                          if (!moved) {
+                            // A click, not a drag: nothing moved, so write nothing.
+                            setDraggingSegment(null)
+                            document.removeEventListener('mousemove', onMouseMove)
+                            document.removeEventListener('mouseup', onMouseUp)
+                            document.removeEventListener('pointercancel', onMouseUp)
+                            window.removeEventListener('blur', onMouseUp)
+                            dragMoveListenerRef.current = null
+                            dragUpListenerRef.current = null
+                            return
+                          }
+                          const deltaTime = clampDt(Number.isFinite(ev.clientX) ? (ev.clientX - startX) / PIXELS_PER_SECOND : lastDeltaTime)
                           updateSegment(index, {
                             start_time: Math.max(0, originalStart + deltaTime),
                             end_time: Math.max(0, originalEnd + deltaTime),
