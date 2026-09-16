@@ -3029,10 +3029,13 @@ class DubbingService:
             )
             m_start = re.search(r"silence_start:\s*([\d.]+)", detect.stderr or "")
             m_end = re.search(r"silence_end:\s*([\d.]+)", detect.stderr or "")
-            # Only trim when the head actually IS silent — a file that starts
-            # with speech emits no silence_start near 0, and cutting it would
-            # eat the first phoneme.
-            if not m_start or not m_end or float(m_start.group(1)) > 0.05:
+            # Only trim when the head actually IS silent: the first silence run
+            # must begin at the very first sample. A 50ms allowance here was
+            # enough to misread a real opening — a plosive burst or short
+            # consonant of under 50ms followed by its closure gap — as leading
+            # silence, and the cut then landed after the burst and discarded the
+            # sound. A genuinely silent head is reported as starting at 0.
+            if not m_start or not m_end or float(m_start.group(1)) > 0.005:
                 return False
             onset = float(m_end.group(1))
             start = max(0.0, onset - pre_roll)
