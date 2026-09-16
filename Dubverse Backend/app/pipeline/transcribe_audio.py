@@ -335,19 +335,36 @@ def _filter_hallucinations(
         # of it that what remains is not a sentence. A hallucinated credit or
         # sign-off occupies the whole segment, so this still catches every case
         # the list was written for.
-        _matched_ph = next((ph for ph in _CREDIT_PHRASES if ph in _norm_text), None)
+        def _dominates(ph: str) -> bool:
+            """True when the phrase IS the segment, not merely inside it."""
+            # The remainder allowance is deliberately one character. In Chinese
+            # three characters is a whole word, so a looser limit swallowed real
+            # lines: "把中文字幕打开" ("turn on the Chinese subtitles") left a
+            # 3-character remainder and was treated as if the credit filled it.
+            return ph == _norm_text or (
+                ph in _norm_text
+                and (len(ph) >= 0.6 * len(_norm_text) or len(_norm_text) - len(ph) < 2)
+            )
+
+        # A phrase that fills its segment is a hallucination on the usual gate.
+        _matched_ph = next(
+            (ph for ph in (*_CREDIT_PHRASES, *_HALLUCINATION_PHRASES) if _dominates(ph)),
+            None,
+        )
+        _gate = _is_whisper or _suspicious
+
         if _matched_ph is None:
-            if _norm_text in _HALLUCINATION_PHRASES:
-                _matched_ph = _norm_text
-            else:
-                for ph in _HALLUCINATION_PHRASES:
-                    if ph in _norm_text and (
-                        len(ph) >= 0.6 * len(_norm_text)
-                        or len(_norm_text) - len(ph) < 4
-                    ):
-                        _matched_ph = ph
-                        break
-        if _matched_ph is not None and (_is_whisper or _suspicious):
+            # A credit phrase can also sit INSIDE a longer segment, because
+            # Whisper appends a volunteer's name ("中文字幕志愿者:小明"). But so
+            # can real speech: "把中文字幕打开" is "turn on the Chinese
+            # subtitles", and "感谢收看本期节目" is a genuine sign-off line.
+            # Containment alone cannot tell those apart, so require evidence the
+            # audio was silence or background — a hallucination has a poor
+            # logprob or a high no-speech probability, and real speech does not.
+            _matched_ph = next((ph for ph in _CREDIT_PHRASES if ph in _norm_text), None)
+            _gate = _suspicious
+
+        if _matched_ph is not None and _gate:
             logger.info(
                 f"[HALLUCINATION] Rejected known hallucination phrase: '{text}' "
                 f"(matched {_matched_ph!r}) at {seg.get('start', '?')}-{seg.get('end', '?')}"
