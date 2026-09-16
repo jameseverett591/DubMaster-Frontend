@@ -3620,9 +3620,22 @@ export function DubVerseEditor({
           rptGainRef.current.connect(ctx.destination)
         }
         rptGainRef.current!.gain.value = isMutedRPT ? 0 : rptVolume / 100
+        // Start the audio where the picture ACTUALLY is at this instant, and pin
+        // the drift corrector's reference to the same instant. startTime is read
+        // from the store, which updates only every 250ms, and the picture may
+        // have moved on by the time this runs. Any gap left here is what the
+        // corrector later "fixes" by jumping the audio forward, audibly cutting
+        // words — so the gap must not exist in the first place.
+        const _v = videoRef.current
+        const _livePos = _v && !_v.paused
+          ? (sourceToTimelineTime(_v.currentTime, scenesRef.current) ?? _v.currentTime)
+          : startTime
+        const _from = Math.max(startTime, _livePos)
+        lastStartPosRef.current = _from
+        audioStartTimeRef.current = ctx.currentTime
         registerRptSource(scheduleRPTPlayback(
           rptBufferRef.current!,
-          rptOffsetFor(startTime),
+          rptOffsetFor(_from),
           ctx,
           rptGainRef.current!,
           rptPlaybackRate
@@ -5658,7 +5671,28 @@ export function DubVerseEditor({
         rptCancelRef.current = false     // allow the stitch to (re)schedule
         const sourceFrom = timelineToSourceTime(_from, scenesRef.current) ?? _from
         videoRef.current.currentTime = sourceFrom
-        videoRef.current.play().catch(() => {})
+        // AUDIO ENGINE FIRST, PICTURE SECOND.
+        //
+        // The picture used to start here, before the AudioContext was resumed
+        // below. Resuming a cold context — always the case on the first play
+        // after load — takes a noticeable fraction of a second, and the picture
+        // ran on through it. The audio was then scheduled from the play point
+        // while the picture was already past it, the drift corrector saw the
+        // audio lagging, and jumped it forward to catch up — discarding
+        // everything in the gap. At 0:00 the gap is the opening words of the
+        // first line ("My name is"), which is why only that line lost them.
+        //
+        // resume() is still called inside the click, so the gesture requirement
+        // is met; play() follows once the engine is running, well within the
+        // browser's transient-activation window.
+        if (!audioContextRef.current) audioContextRef.current = new AudioContext()
+        const _ctx = audioContextRef.current
+        const _video = videoRef.current
+        if (_ctx.state === 'suspended') {
+          _ctx.resume().finally(() => { _video.play().catch(() => {}) })
+        } else {
+          _video.play().catch(() => {})
+        }
       }
     }
     // Create and resume AudioContext inside user gesture
