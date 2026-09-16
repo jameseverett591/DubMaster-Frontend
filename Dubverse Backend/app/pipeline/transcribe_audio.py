@@ -77,6 +77,26 @@ _HALLUCINATION_PHRASES = {
     "走呀 走呀",
     "走開",
     "打不死",
+    # Fansub/subtitle-staff credits Whisper hallucinates over music and
+    # silence — it learned these from fansubbed training video and emits
+    # them mid-scene ("中文字幕志愿者:…"). Both script variants are listed
+    # because matching runs on the raw text before any trad→simp conversion.
+    "中文字幕",
+    "字幕志愿者",
+    "字幕志願者",
+    "字幕組",
+    "字幕组",
+    "字幕製作",
+    "字幕制作",
+    "本字幕",
+    "聽譯",
+    "听译",
+    "請訂閱",
+    "请订阅",
+    "別忘了訂閱",
+    "别忘了订阅",
+    "感謝收看",
+    "感谢收看",
 }
 
 _WHISPER_MODELS: Dict[Tuple[str, str, str], Any] = {}
