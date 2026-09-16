@@ -1685,7 +1685,13 @@ export function DubVerseEditor({
       // already run. It nulls dragUpListenerRef synchronously and fires on the
       // document BEFORE this window-level handler, so this guard prevents a
       // double-commit on a normal release.
-      if (drag && dragUpListenerRef.current) {
+      // A zero live delta means the pointer never crossed the drag threshold —
+      // the track handlers only write it once it has — so the press was a
+      // click. This listener is registered first and runs before the track's
+      // own handler on a window blur, so without this check a click interrupted
+      // by focus loss committed timing and applied a timing flag outcome for a
+      // move that never happened.
+      if (drag && dragUpListenerRef.current && dragLiveDeltaRef.current !== 0) {
         // Clamp the delta, not each end: stop at 0:00 with the length intact.
         const liveDelta = Math.max(dragLiveDeltaRef.current, -drag.originalStart)
         const newStart = drag.originalStart + liveDelta
