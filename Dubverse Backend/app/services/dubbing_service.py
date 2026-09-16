@@ -2648,16 +2648,28 @@ class DubbingService:
         if cur_i >= floor:
             return False
 
-        gain_db = min(floor - cur_i, tp_ceiling - cur_tp)
-        if gain_db <= 0.1:  # nothing meaningful left after the peak cap
+        # Boost to the floor unconditionally, then hard-limit peaks to the
+        # ceiling. The old min() gate let TP headroom veto the whole boost,
+        # which left peaky TTS quiet forever — measured on a real job: every
+        # fit-stretched segment sat at -25..-33 LUFS because their true peaks
+        # (up to +6 dBTP, already clipped) offered zero or negative headroom.
+        # alimiter only engages where the gain would overshoot the ceiling.
+        gain_db = floor - cur_i
+        if gain_db <= 0.1:
             return False
+
+        af = f"volume={gain_db:.2f}dB"
+        limited = cur_tp + gain_db > tp_ceiling
+        if limited:
+            lin_ceiling = 10.0 ** (tp_ceiling / 20.0)
+            af += f",alimiter=limit={lin_ceiling:.4f}:level=false"
 
         tmp = audio_path + ".gain.mp3"
         try:
             res = subprocess.run(
                 [
                     "ffmpeg", "-y", "-hide_banner", "-nostats", "-i", audio_path,
-                    "-filter:a", f"volume={gain_db:.2f}dB",
+                    "-filter:a", af,
                     "-c:a", "libmp3lame", "-b:a", "192k", tmp,
                 ],
                 capture_output=True, text=True,
@@ -2669,6 +2681,7 @@ class DubbingService:
             logger.info(
                 f"[GAIN] {os.path.basename(audio_path)}: {cur_i:.2f} LUFS "
                 f"(TP {cur_tp:.2f}) +{gain_db:.2f} dB -> ~{cur_i + gain_db:.2f} LUFS"
+                + (" [limited]" if limited else "")
             )
             return True
         except Exception as exc:
