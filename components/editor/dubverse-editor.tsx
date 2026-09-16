@@ -2664,7 +2664,18 @@ export function DubVerseEditor({
    *  and restarts the stitch if it is still true — the "press Stop, it keeps
    *  playing" bug. Callers that move currentTime must do so AFTER this returns.
    */
+  /** Generation token for a transport play request.
+   *
+   *  Play resumes the AudioContext before starting the picture, so on a cold
+   *  context the actual video.play() is deferred until resume() settles. Any
+   *  stop that lands inside that window pauses a video that has not started yet,
+   *  and the deferred play() would then start it anyway — picture running with
+   *  no audio. isPlayingRef cannot guard this: it is still false during a new
+   *  play request. Every play takes a fresh token; every stop path bumps it; the
+   *  deferred play() only runs if its token is still current. */
+  const playRequestRef = useRef(0)
   const playbackStop = useCallback(() => {
+    playRequestRef.current++
     stopAllRptAudioRef.current()
     setIsPlaying(false)
     if (videoRef.current) videoRef.current.pause()
@@ -5659,12 +5670,16 @@ export function DubVerseEditor({
   const handlePlayToggle = useCallback(async (modeOverride?: 'original' | 'dubbed' | 'preview') => {
     const mode = modeOverride ?? playbackMode
     if (modeOverride && modeOverride !== playbackMode) setPlaybackMode(modeOverride)
+    // Set when this call starts playback, so the code after the resume() await
+    // can tell whether a stop retired the request while it was waiting.
+    let startRequest: number | null = null
     // Drive video play/pause synchronously BEFORE any await
     // so Chrome's autoplay policy isn't violated for audio
     if (videoRef.current) {
       if (isPlaying) {
         // Pause: stop the stitch source directly + sync the ref so the
         // seek/effect races can't leave audio running under a paused video.
+        playRequestRef.current++
         stopAllRptAudio()
         videoRef.current.pause()
         // Persist the playhead so UI that reads currentTime state sees the
@@ -5710,8 +5725,14 @@ export function DubVerseEditor({
         if (!audioContextRef.current) audioContextRef.current = new AudioContext()
         const _ctx = audioContextRef.current
         const _video = videoRef.current
+        const _request = ++playRequestRef.current
+        startRequest = _request
         if (_ctx.state === 'suspended') {
-          _ctx.resume().finally(() => { _video.play().catch(() => {}) })
+          _ctx.resume().finally(() => {
+            // A stop inside the resume window retired this request.
+            if (playRequestRef.current !== _request) return
+            _video.play().catch(() => {})
+          })
         } else {
           _video.play().catch(() => {})
         }
@@ -5725,6 +5746,10 @@ export function DubVerseEditor({
     if (audioContextRef.current.state === 'suspended') {
       await audioContextRef.current.resume()
     }
+    // Stopped while waiting on resume(): the picture was never started (see the
+    // token check above), so do not turn the transport on either — that would
+    // schedule preview audio under a paused picture.
+    if (startRequest !== null && playRequestRef.current !== startRequest) return
     audioStartTimeRef.current = audioContextRef.current?.currentTime ?? null
     // If in Preview and buffer not ready, stitch first
     if (mode === 'preview' && !isPlaying && !rptBufferRef.current) {
@@ -5757,6 +5782,8 @@ export function DubVerseEditor({
       handlePlayToggle('original')
       return
     }
+    // Either branch supersedes a transport play still waiting on resume().
+    playRequestRef.current++
     if (srcPlaying) {
       a.pause()
       videoRef.current?.pause()
