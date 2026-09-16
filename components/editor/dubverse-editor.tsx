@@ -3643,7 +3643,13 @@ export function DubVerseEditor({
       }
       const video = videoRef.current
       if (video && video.paused) {
+        // The fallback's guard used to compare a captured timestamp against a
+        // MOVING clock — ctx.currentTime is never equal 400ms later — so every
+        // play ran doSchedule twice: the line started, restarted mid-word 400ms
+        // in, then the drift corrector re-seated it again. One flag, one run.
+        let fired = false
         const onPlaying = () => {
+          fired = true
           // Re-pin to where the picture actually is now, not where it was when
           // Play was pressed.
           lastStartPosRef.current = useEditorStore.getState().currentTime
@@ -3654,7 +3660,7 @@ export function DubVerseEditor({
         // If the element never reports playing (already running, or a source that
         // will not start), do not hang silently.
         setTimeout(() => {
-          if (audioStartTimeRef.current === ctx.currentTime) return
+          if (fired) return
           video.removeEventListener('playing', onPlaying)
           armed()
         }, 400)
