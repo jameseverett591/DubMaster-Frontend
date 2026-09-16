@@ -731,10 +731,14 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
             onClick={handleStartDubbing}
             disabled={isAnalyzing || isDubbing}
             // Teal pulsing outline marks this as the next step: analysis is
-            // done, nothing is dubbing, and no dubbed video exists yet. It
-            // stops the moment a dub starts or a result is available.
+            // done, nothing is dubbing, and this job has never been dubbed.
+            // dubbingComplete is checked as well as the URL because a finished
+            // job can report complete with no dubbed_video_url — on that job the
+            // button pulsed forever, nagging about work already done.
             className={`gap-2 h-8 text-sm ${
-              !isAnalyzing && !isDubbing && !dubbedVideoUrl ? "generate-dub-cta" : ""
+              !isAnalyzing && !isDubbing && !dubbingComplete && !dubbedVideoUrl
+                ? "generate-dub-cta"
+                : ""
             }`}
             variant={dubbingComplete ? "outline" : "default"}
           >
