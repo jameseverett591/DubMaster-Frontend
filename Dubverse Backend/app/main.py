@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import asyncio
 import logging
 import os
+import re
 import sys
 
 # Load .env into os.environ before anything else so os.getenv() calls
@@ -30,6 +31,43 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+class _RedactTokensFilter(logging.Filter):
+    """Scrub credentials from log records before any handler writes them.
+
+    Media routes authenticate with ?access_token=<JWT>, because a <video> or
+    <audio> element — and an external lip-sync vendor — cannot send an
+    Authorization header. uvicorn's access log records the full path with its
+    query string, so every media request wrote the user's live Supabase JWT to
+    the log verbatim. Anyone with log access could replay it against every
+    protected route until it expired.
+
+    Redaction happens on the record rather than per call site, so it also
+    covers any future log line that happens to include such a URL.
+    """
+
+    _PATTERN = re.compile(r"((?:access|refresh)_token=)[^&\s\"']+", re.IGNORECASE)
+
+    def _scrub(self, value):
+        return self._PATTERN.sub(r"\1REDACTED", value) if isinstance(value, str) else value
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = self._scrub(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._scrub(a) for a in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {k: self._scrub(v) for k, v in record.args.items()}
+        return True  # never drop the record, only clean it
+
+
+_redact_tokens = _RedactTokensFilter()
+# uvicorn.access does not propagate to root, so it needs its own filter. The
+# root handlers get one too, for anything logged through the normal loggers.
+for _name in ("uvicorn.access", "uvicorn.error", "uvicorn"):
+    logging.getLogger(_name).addFilter(_redact_tokens)
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_redact_tokens)
 
 
 async def _load_jobs_from_db() -> None:
