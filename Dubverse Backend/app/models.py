@@ -281,3 +281,9 @@ class RegenerateRequest(BaseModel):
     # uncommitted text edit spoke the old line. Staged editing makes that flow
     # normal, so it is now honored.
     text: Optional[str] = None
+    # Commit is a toggle: a second Commit on a locked row releases the text for
+    # alteration. When released, the next Generate may run REGEN-ADAPT-FIT on the
+    # line (sync_fit paraphrase) so an over-long take can be shortened to its
+    # window instead of time-stretched. Locked or freshly-typed text never sends
+    # this — verbatim is the default.
+    allow_adapt_fit: Optional[bool] = None

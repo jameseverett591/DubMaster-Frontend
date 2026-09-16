@@ -4138,6 +4138,7 @@ class DubbingService:
         live_prev_segment_end: Optional[float] = None,
         stage: bool = False,
         text: Optional[str] = None,
+        allow_adapt_fit: bool = False,
     ) -> Dict:
         output_dir = os.path.join(self.dubbed_dir, job_id)
         segments_path = os.path.join(output_dir, "segments.json")
@@ -4215,6 +4216,83 @@ class DubbingService:
         # so honor it: a non-empty override is what gets synthesized.
         if text and text.strip():
             use_text = text.strip()
+
+        # Fit-to-slot shortening — the regen counterpart of the pipeline's
+        # ADAPT-FIT step. Without it, a regen whose line overruns the window
+        # has exactly one lever: time-stretch to 1.5x (chipmunk) or hard-trim.
+        # When the committed line is predicted >15% over its window, ask the
+        # adaptation engine for this segment's sync_fit rewrite and take it if
+        # it is genuinely shorter. One haiku call, only on predicted overflow —
+        # cheaper than a re-render, far better than shipping a fast take.
+        #
+        # Two hard rules learned from real use:
+        #  - NEVER touch text the user explicitly typed (a `text` override) —
+        #    the variant is a paraphrase that drifts back toward the old line,
+        #    so the take "plays something close to what was already written".
+        #    The single exception is allow_adapt_fit: Commit is a toggle, and a
+        #    recommit RELEASES the text for alteration — the caller then opts in
+        #    to sync_fit on the next take so an over-long line can be shortened
+        #    to its window instead of time-stretched into a chipmunk take.
+        #  - NEVER touch a text_locked line regardless of path — bulk regen
+        #    sends no `text`, so without this guard a locked committed line
+        #    could still be paraphrased from below.
+        #  - Predict against the APPLIED speed: at use_speed=0.65 the take runs
+        #    ~50% longer than the natural estimate, and shortening to fit the
+        #    natural window still overflows into a 2x squash.
+        _explicit_text = bool(text and text.strip()) and not allow_adapt_fit
+        try:
+            _cs = seg.get("committed_start_time")
+            _ce = seg.get("committed_end_time")
+            _s0 = float(_cs) if _cs is not None else float(seg.get("start", 0) or 0)
+            _e0 = float(_ce) if _ce is not None else float(seg.get("end", 0) or 0)
+            if (
+                isinstance(live_segment_start, (int, float)) and math.isfinite(live_segment_start)
+                and isinstance(live_segment_end, (int, float)) and math.isfinite(live_segment_end)
+                and live_segment_start >= 0 and live_segment_end > live_segment_start
+            ):
+                _s0, _e0 = float(live_segment_start), float(live_segment_end)
+
+            def _eff_start_for(x: Dict) -> float:
+                v = x.get("committed_start_time")
+                return float(v) if v is not None else float(x.get("start", 0) or 0)
+
+            _nxt = min(
+                (_eff_start_for(s) for s in segments if _eff_start_for(s) > _e0 + 0.01),
+                default=None,
+            )
+            _window = (_nxt - _s0) if _nxt is not None else (_e0 - _s0)
+            _pred = (
+                natural_duration(use_text, use_voice_id) / max(use_speed, 0.01)
+                if use_text.strip() else 0.0
+            )
+            if _window > 0.2 and not _explicit_text and not seg.get("text_locked") and _pred > _window * 1.15:
+                from app.services.adaptation_engine import adapt_batch
+                _adapted = await adapt_batch(
+                    segments=[{
+                        "segment_id": seg.get("segment_id", str(segment_index)),
+                        "source_text": seg.get("source_text", ""),
+                        "target_text": use_text,
+                        "source_language": data.get("source_language", "zh"),
+                        "target_language": data.get("target_language", "en"),
+                        "source_duration": max(0.3, _window),
+                        "speaker_id": seg.get("speaker", "speaker-1"),
+                        "speaker_gender": seg.get("speaker_gender", "male"),
+                    }],
+                    target_language=data.get("target_language", "en"),
+                    scene_context=None,
+                )
+                if _adapted:
+                    _sync = (_adapted[0].get_variant("sync_fit").text or "").strip()
+                    if _sync and natural_duration(_sync, use_voice_id) < _pred:
+                        logger.info(
+                            f"[REGEN-ADAPT-FIT] seg {segment_index}: predicted "
+                            f"{_pred:.1f}s vs {_window:.1f}s window — using sync_fit "
+                            f"~{natural_duration(_sync, use_voice_id):.1f}s: {_sync!r}"
+                        )
+                        use_text = _sync
+        except Exception as _fit_err:
+            # Never let the shortener kill a regen — stretch/trim still applies.
+            logger.warning(f"[REGEN-ADAPT-FIT] seg {segment_index} skipped: {_fit_err}")
 
         previous_text = seg.get("text", "")
         previous_path = seg.get("path", "")
