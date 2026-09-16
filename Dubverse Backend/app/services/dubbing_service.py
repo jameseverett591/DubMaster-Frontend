@@ -2997,23 +2997,51 @@ class DubbingService:
         self,
         input_path: str,
         output_path: str,
-        silence_threshold_db: float = -40.0,
-        min_silence_duration: float = 0.02,
+        silence_threshold_db: float = -50.0,
+        min_silence_duration: float = 0.03,
+        pre_roll: float = 0.04,
     ) -> bool:
-        """Remove leading silence from a TTS audio file.
+        """Remove leading silence from a TTS audio file, preserving the onset.
+
         Fish Audio inline cloning often prepends silence before speech, and
-        residual lead-ins of 30-100ms are audible in lip-sync — hence 20ms,
-        not the old 100ms floor that let them through.
+        residual lead-ins of 30-100ms are audible in lip-sync — hence the tight
+        floor. But the old silenceremove at -40dB cut at the -40dB CROSSING,
+        which sits inside the attack ramp of a soft first phoneme (a vowel or
+        nasal rises from ~-55dB over 30-80ms). The first word lost its attack
+        and sounded half-uttered on every segment.
+
+        Detect the onset at -50dB instead — low enough to catch the foot of
+        that ramp — then cut pre_roll ms BEFORE it, so the whole attack is
+        kept and the line still lands on time.
         """
         try:
+            # Locate the end of the leading silence run, if there is one.
+            detect = subprocess.run(
+                [
+                    "ffmpeg", "-i", input_path,
+                    "-af", (
+                        f"silencedetect=noise={silence_threshold_db}dB"
+                        f":d={min_silence_duration}"
+                    ),
+                    "-f", "null", "-",
+                ],
+                capture_output=True, text=True,
+            )
+            m_start = re.search(r"silence_start:\s*([\d.]+)", detect.stderr or "")
+            m_end = re.search(r"silence_end:\s*([\d.]+)", detect.stderr or "")
+            # Only trim when the head actually IS silent — a file that starts
+            # with speech emits no silence_start near 0, and cutting it would
+            # eat the first phoneme.
+            if not m_start or not m_end or float(m_start.group(1)) > 0.05:
+                return False
+            onset = float(m_end.group(1))
+            start = max(0.0, onset - pre_roll)
+            if start < 0.01:
+                return False  # nothing worth removing
             cmd = [
                 "ffmpeg", "-y",
+                "-ss", f"{start:.3f}",
                 "-i", input_path,
-                "-af", (
-                    f"silenceremove=start_periods=1"
-                    f":start_silence={min_silence_duration}"
-                    f":start_threshold={silence_threshold_db}dB"
-                ),
                 "-ar", "44100",
                 "-ac", "2",
                 output_path
@@ -3021,7 +3049,6 @@ class DubbingService:
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 return False
-            # Sanity: if output is empty or shorter than 0.1s, keep original
             if not os.path.exists(output_path):
                 return False
             return True
