@@ -346,6 +346,10 @@ export interface RegenerateSegmentRequest {
   // writes the file but does NOT commit it to segments.json/Supabase. The take
   // is promoted via commitSegmentTiming's staged_path when the chunk is saved.
   stage?: boolean
+  // Commit is a toggle: releasing a committed line (recommit) sends this, so
+  // REGEN-ADAPT-FIT may sync-fit the text to its window. Locked or
+  // user-authored text never sets it — verbatim is the default.
+  allow_adapt_fit?: boolean
 }
 
 export interface RegenerateSegmentResponse {
