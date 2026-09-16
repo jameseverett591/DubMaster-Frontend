@@ -782,7 +782,7 @@ const MID_RULER_H = 20     // h-5, between the parking bay and the picture
 // picture, where a cut is actually aligned to a timecode.
 const PLAYHEAD_TOP = SEEK_HEADER_H + LAYOVER_TRACK_H + MID_RULER_H
 
-const DEBUG_PLAYBACK = false
+const DEBUG_PLAYBACK = typeof window !== 'undefined' && window.localStorage.getItem('dm_debug_playback') === '1'
 
 /**
  * Timeline ruler ticks — one per second across the whole film.
@@ -1005,7 +1005,6 @@ export function DubVerseEditor({
   const timelineRef = useRef<HTMLDivElement>(null)
   const layoverTrackRef = useRef<HTMLDivElement>(null)
   const videoTrackRef = useRef<HTMLDivElement>(null)
-  const overviewBarRef = useRef<HTMLDivElement>(null)
   const overviewThumbRef = useRef<HTMLDivElement>(null)
   /** Stashed by the Source/Dubbed toggle before the src swap reloads the
    *  element — restored on loadedmetadata so A/B compare never loses your
@@ -2105,6 +2104,10 @@ export function DubVerseEditor({
   const [srcTime, setSrcTime] = useState(0)
   const [srcArmed, setSrcArmed] = useState(false) // has the transcript player been positioned/used
   const [srcRate, setSrcRate] = useState(1)
+  // Ref mirror for the RAF loop, which must read the current value inside a
+  // tick without re-subscribing on every play/pause.
+  const srcPlayingRef = useRef(srcPlaying)
+  srcPlayingRef.current = srcPlaying
 
   // Idle mirror: until the transcript player has been used, its indicator
   // tracks the main playhead. Once armed it owns its position.
@@ -2484,16 +2487,23 @@ export function DubVerseEditor({
   }, [displaySegments, selectSegment, syncSegmentsToBackend])
 
   const commitSpeakerRename = useCallback((speakerId: string, newLabel: string) => {
-    if (!newLabel.trim()) return
-    setImportedSegments(prev => {
-      const base = prev ?? displaySegments
-      return base.map(seg =>
-        seg.speaker_id === speakerId ? { ...seg, speaker_label: newLabel.trim() } : seg
-      )
-    })
+    const trimmed = newLabel.trim()
+    if (!trimmed) return
+    const base = importedSegments ?? displaySegments
+    const renamed = base.map(seg =>
+      seg.speaker_id === speakerId ? { ...seg, speaker_label: trimmed } : seg
+    )
+    setImportedSegments(renamed)
     setRenamingSpeakerId(null)
     setRenameValue('')
-  }, [displaySegments])
+    // Persist — this used to be store-only, so every rename reverted to
+    // "speaker-N" on reload (and a stale localStorage voice map could then bind
+    // the wrong name to the wrong speaker number). speaker_label is already in
+    // the sync whitelist; it just needs the call. Send `renamed` directly —
+    // displaySegmentsRef can lag a render behind setImportedSegments.
+    syncSegmentsToBackend(renamed as Segment[])
+      .catch(err => console.warn('[RENAME] speaker_label persist failed:', err))
+  }, [displaySegments, importedSegments, syncSegmentsToBackend])
 
 
   // Keyboard shortcuts — Shift+P: pair with next, C: split
@@ -3374,35 +3384,54 @@ export function DubVerseEditor({
   const lastExtractedUrlRef = useRef<string | null>(null)
   
   // Extract video thumbnails for timeline
-  const extractVideoThumbnails = useCallback(async (videoSrc: string) => {
+  const extractVideoThumbnails = useCallback(async (videoSrc: string, attempt = 0) => {
     // Don't re-extract for same URL unless thumbnails are missing (e.g. after hot reload)
     if (lastExtractedUrlRef.current === videoSrc && videoThumbnails.length > 0) return
     lastExtractedUrlRef.current = videoSrc
-    
+
     setIsExtractingThumbnails(true)
     setVideoThumbnails([])
-    
+
+    const finish = (thumbs: string[]) => {
+      if (thumbs.length > 0) {
+        setVideoThumbnails(thumbs)
+      } else if (attempt < 2) {
+        // A failed pass must not be terminal — clear the dedupe key so the
+        // retry (fresh token each attempt, so a rotated token self-heals) and
+        // any later trigger can run again instead of leaving the strip dark.
+        lastExtractedUrlRef.current = null
+        setTimeout(() => { extractVideoThumbnails(videoSrc, attempt + 1) }, 2000)
+      } else {
+        console.warn('[THUMB] extraction produced no frames — strip left empty')
+      }
+      setIsExtractingThumbnails(false)
+    }
+
     const thumbnails: string[] = []
-    
+
     // Create a temporary video element for extraction
     const tempVideo = document.createElement('video')
     tempVideo.crossOrigin = 'anonymous'
+    // Re-mint the token: the prop URL goes stale the moment Supabase rotates,
+    // and a 401 here used to leave the track dark forever with no retry.
+    const freshSrc = apiClient.refreshMediaUrl(videoSrc)
     // Distinct URL for the crossorigin thumbnail request so it gets its own cache
     // entry — otherwise it reuses the main player's cached no-cors response (which
     // lacks Access-Control-Allow-Origin) and fails CORS in a retry loop.
-    tempVideo.src = videoSrc + (videoSrc.includes('?') ? '&' : '?') + 'thumb=1'
+    tempVideo.src = freshSrc + (freshSrc.includes('?') ? '&' : '?') + 'thumb=1'
     tempVideo.muted = true
     tempVideo.preload = 'metadata'
-    
+
     // Wait for video to load metadata
     await new Promise<void>((resolve) => {
       tempVideo.onloadedmetadata = () => resolve()
       tempVideo.onerror = () => resolve()
     })
-    
+
     const duration = tempVideo.duration || videoDuration
     if (!duration || duration <= 0) {
-      setIsExtractingThumbnails(false)
+      tempVideo.remove()
+      finish(thumbnails)
       return
     }
     
@@ -3432,16 +3461,18 @@ export function DubVerseEditor({
           const dataUrl = canvas.toDataURL('image/jpeg', 0.5)
           thumbnails.push(dataUrl)
         }
-      } catch {
-        // Skip failed frames
+      } catch (e) {
+        // A tainted canvas throws on toDataURL (crossorigin response missing
+        // Access-Control-Allow-Origin) — it used to fail every frame in
+        // silence, which is how an empty strip went undiagnosed.
+        if (attempt === 0 && thumbnails.length === 0) {
+          console.warn('[THUMB] frame extraction failed (likely CORS taint):', e)
+        }
       }
     }
-    
-    if (thumbnails.length > 0) {
-      setVideoThumbnails(thumbnails)
-    }
-    setIsExtractingThumbnails(false)
+
     tempVideo.remove()
+    finish(thumbnails)
   }, [videoDuration, videoThumbnails.length])
 
   // Extract thumbnails when imported video URL changes
@@ -3740,6 +3771,10 @@ export function DubVerseEditor({
     // While genuinely advancing, the video IS the clock and seeking it here
     // would fight playback. Dragging is the exception.
     if (isPlaying && !isDraggingNeedleRef.current) return
+    // While the transcript player runs, the RAF loop's vocals-follower owns the
+    // element — seeking it toward a stale playhead state would drag the picture
+    // backwards off the audio it is actually tracking.
+    if (srcPlaying) return
     const target = timelineToSourceTime(currentTime, scenesRef.current) ?? currentTime
     if (!Number.isFinite(target)) return
     const seek = () => {
@@ -3756,15 +3791,19 @@ export function DubVerseEditor({
       return () => video.removeEventListener('loadedmetadata', seek)
     }
     seek()
-  }, [currentTime, isPlaying])
+  }, [currentTime, isPlaying, srcPlaying])
   
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
-    const trackMuted = playbackMode === 'preview' ? true : (playbackMode === 'dubbed' ? isMutedDubbed : isMutedOriginal)
-    const trackVol = playbackMode === 'preview' ? 0 : (playbackMode === 'dubbed' ? dubbedTextVolume : originalTextVolume)
+    // While the transcript player runs, the video element is picture-only —
+    // the vocals element owns the sound and the video's own track must not double it.
+    // muted (not just volume=0) is also what makes its gestureless play() legal.
+    video.muted = srcPlaying
+    const trackMuted = srcPlaying ? true : (playbackMode === 'preview' ? true : (playbackMode === 'dubbed' ? isMutedDubbed : isMutedOriginal))
+    const trackVol = srcPlaying ? 0 : (playbackMode === 'preview' ? 0 : (playbackMode === 'dubbed' ? dubbedTextVolume : originalTextVolume))
     video.volume = (isMuted || trackMuted) ? 0 : Math.max(0, Math.min(1, trackVol / 100))
-  }, [isMuted, isMutedOriginal, isMutedDubbed, originalTextVolume, dubbedTextVolume, playbackMode])
+  }, [isMuted, isMutedOriginal, isMutedDubbed, originalTextVolume, dubbedTextVolume, playbackMode, srcPlaying])
 
   useEffect(() => { setPendingDelete(null) }, [selectedSegmentIndex])
 
@@ -3777,7 +3816,7 @@ export function DubVerseEditor({
     if (videoRef.current) {
       // Chunk lens: playback stops at the window boundary — the user is
       // auditioning one window, not the whole film.
-      if (chunkModeRef.current && videoRef.current.currentTime >= chunkEndRef.current - 0.05) {
+      if (chunkModeRef.current && !srcPlayingRef.current && videoRef.current.currentTime >= chunkEndRef.current - 0.05) {
         playbackStop()
         setCurrentTime(chunkEndRef.current)
         return
@@ -3790,7 +3829,13 @@ export function DubVerseEditor({
       if (timelineRef.current) {
         const container = timelineRef.current
         const pps = 40 * zoomLevel
-        const playheadPx = videoRef.current.currentTime * pps
+        // Map through the scene table first. The needle is drawn at TIMELINE
+        // time, but video.currentTime is SOURCE time, and the two diverge as
+        // soon as scenes are reordered or trimmed. Scrolling to the unmapped
+        // value parked the view away from the needle, which reads as the
+        // picture and the needle disagreeing.
+        const st = videoRef.current.currentTime
+        const playheadPx = (sourceToTimelineTime(st, scenesRef.current) ?? st) * pps
         const visibleLeft = container.scrollLeft
         const visibleRight = container.scrollLeft + container.clientWidth
         // Keep the playhead in the middle third of the timeline viewport.
@@ -3826,6 +3871,14 @@ export function DubVerseEditor({
   /** Set when something seeks the video. The element does not arrive instantly,
    *  and correcting to a position it has not reached yet just fights the seek. */
   const seekSettleUntilRef = useRef(0)
+  /** Rate-limits the picture-to-vocals drift corrector while the transcript
+   *  player runs — a video seek is a decode hiccup, so it must not chatter. */
+  const rafLastVideoResyncRef = useRef(0)
+  /** One console warning per vocals-play episode when the picture's play() is
+   *  rejected — a rejected play is the difference between "picture follows" and
+   *  "picture lurches", so it must be diagnosable instead of silent. */
+  const srcFollowWarnedRef = useRef(false)
+  const srcFollowLogRef = useRef(0)
   useEffect(() => {
     let raf: number
     const loop = () => {
@@ -3841,6 +3894,64 @@ export function DubVerseEditor({
         return
       }
       rafLastTimeRef.current = now
+
+      // THE PICTURE FOLLOWS THE VOCALS CLOCK TOO.
+      //
+      // While the transcript player runs, the vocals element is the master —
+      // and lip-sync can only be judged if the picture moves with it. The video
+      // therefore PLAYS (muted — see the volume effect) at the vocals rate, and
+      // is re-seated only when it has drifted more than ~2 frames off the audio.
+      // The alternative — seeking a paused element on every timeupdate — is the
+      // freeze-and-lurch behavior this replaces: the playhead glides while the
+      // picture jumps to catch up.
+      if (srcPlayingRef.current) {
+        const a = srcAudioRef.current
+        if (a && DEBUG_PLAYBACK && now - srcFollowLogRef.current > 500) {
+          srcFollowLogRef.current = now
+          console.log('[SRC-FOLLOW]', {
+            vocalsT: a.currentTime.toFixed(3),
+            videoT: video.currentTime.toFixed(3),
+            drift: (video.currentTime - a.currentTime).toFixed(3),
+            videoPaused: video.paused,
+            videoRate: video.playbackRate,
+            audioRate: a.playbackRate,
+          })
+        }
+        if (a) {
+          if (video.paused) {
+            // play() outside a user gesture is only permitted on a muted
+            // element — volume=0 does NOT count. If the attempt is still
+            // pending or was rejected, do NOT seek on every tick: that is the
+            // freeze-and-lurch this whole block exists to remove. The seek is
+            // the 500ms-cadence fallback for a genuinely blocked play.
+            video.muted = true
+            video.playbackRate = a.playbackRate
+            video.play().catch((err) => {
+              if (!srcFollowWarnedRef.current) {
+                srcFollowWarnedRef.current = true
+                console.warn('[SRC-FOLLOW] video.play() rejected — picture cannot track the vocals:', err)
+              }
+            })
+            if (
+              Math.abs(video.currentTime - a.currentTime) > 0.12 &&
+              now - rafLastVideoResyncRef.current > 500
+            ) {
+              rafLastVideoResyncRef.current = now
+              video.currentTime = a.currentTime
+            }
+          } else {
+            // Picture is running — the warning latch resets for the next episode.
+            srcFollowWarnedRef.current = false
+            if (
+              Math.abs(video.currentTime - a.currentTime) > 0.12 &&
+              now - rafLastVideoResyncRef.current > 500
+            ) {
+              rafLastVideoResyncRef.current = now
+              video.currentTime = a.currentTime
+            }
+          }
+        }
+      }
 
       // Don't override the state when paused or dragging; otherwise the playhead snaps
       // back to the video element's stale time and causes the chunk to flicker.
@@ -3889,6 +4000,30 @@ export function DubVerseEditor({
       const vPos = video.currentTime
       const pictureAdvancing = !video.paused && vPos > rafLastVideoPosRef.current + 0.005
       rafLastVideoPosRef.current = vPos
+      // THE PICTURE FOLLOWS THE PLAYHEAD AT ALL TIMES — including transport
+      // stalls. While the transport runs, a frozen or buffering video used to
+      // leave the needle running on the audio clock and then snap the needle
+      // BACK to the stall point when the picture recovered — the visible
+      // "playhead jumps backwards / video out of sync" fault. Correct the other
+      // direction instead: seat the picture at the audio-clock position so it
+      // shows the frame the needle is already on.
+      if (
+        isPlayingRef.current &&
+        !srcPlayingRef.current &&
+        !pictureAdvancing &&
+        audioContextRef.current &&
+        audioStartTimeRef.current !== null &&
+        now - rafLastVideoResyncRef.current > 500
+      ) {
+        const audioT = lastStartPosRef.current + (audioContextRef.current.currentTime - audioStartTimeRef.current)
+        const target = timelineToSourceTime(audioT, scenesRef.current) ?? audioT
+        if (Math.abs(video.currentTime - target) > 0.15) {
+          rafLastVideoResyncRef.current = now
+          if (video.paused) video.play().catch(() => {})
+          video.currentTime = target
+          seekSettleUntilRef.current = now + 500
+        }
+      }
       if (
         isPlayingRef.current &&
         pictureAdvancing &&
@@ -4340,6 +4475,13 @@ export function DubVerseEditor({
     e.preventDefault()
     e.stopPropagation()
     isDraggingNeedleRef.current = true
+    // A scrub is an inspection, not playback. While the transport was running,
+    // the video's own clock overwrote every scrub-seek a frame later — the
+    // picture never tracked the needle and only jumped on release. Stop both
+    // clocks up front: each mousemove's seek then paints the frame under the
+    // needle, which is the only way to find the frame a mouth opens on.
+    if (isPlayingRef.current) playbackStop()
+    srcAudioRef.current?.pause()
     if (playheadRef.current) {
       playheadRef.current.style.transition = 'none'
     }
@@ -4353,6 +4495,73 @@ export function DubVerseEditor({
 
     const pps = 40 * zoomLevel
 
+    // SEEK STARVATION. A raw mousemove fires far faster than a video seek can
+    // decode, and writing currentTime aborts whatever seek is in flight. Under a
+    // continuous drag the picture therefore never painted — it only jumped once
+    // the writes stopped, which makes it impossible to find the frame where a
+    // mouth opens.
+    //
+    // A fixed ~12fps gate did not fix it, because it is open-loop: this file is
+    // long-GOP H.264, where one seek can take well over 80ms, so the next write
+    // still landed mid-seek and killed it. Drive it from the element instead.
+    // Only one seek is ever outstanding, and the next is issued when the last
+    // one actually finished, so the picture updates as fast as the decoder can
+    // go and cannot starve however fast the mouse moves.
+    let scrubSeeking = false
+    let pendingScrubTime: number | null = null
+    let scrubWatchdog: ReturnType<typeof setTimeout> | null = null
+
+    const pumpScrubSeek = () => {
+      const v = videoRef.current
+      if (!v || scrubSeeking || pendingScrubTime === null) return
+      const t = pendingScrubTime
+      pendingScrubTime = null
+      scrubSeeking = true
+      let released = false
+      const release = () => {
+        if (released) return
+        released = true
+        if (scrubWatchdog) { clearTimeout(scrubWatchdog); scrubWatchdog = null }
+        scrubSeeking = false
+        pumpScrubSeek()
+      }
+      // Wait for a frame to be PRESENTED, not merely for the seek to report
+      // done. 'seeked' fires before the new frame reaches the screen, so
+      // chaining off it issued the next seek during the paint and cancelled it —
+      // which is what made the motion stutter unevenly rather than flow.
+      // requestVideoFrameCallback fires on actual presentation, so each seek
+      // gets to finish being shown before the next one starts.
+      const rvfc = (v as HTMLVideoElement & {
+        requestVideoFrameCallback?: (cb: () => void) => number
+      }).requestVideoFrameCallback
+      if (typeof rvfc === 'function') {
+        rvfc.call(v, release)
+      } else {
+        v.addEventListener('seeked', release, { once: true })
+      }
+      // A stalled or buffering element may never fire 'seeked'. Without this the
+      // latch would stay closed and the picture would freeze for the rest of the
+      // drag — the very fault this replaces.
+      scrubWatchdog = setTimeout(() => {
+        v.removeEventListener('seeked', release)
+        release()
+      }, 400)
+      v.currentTime = timelineToSourceTime(t, scenesRef.current) ?? t
+    }
+
+    // Sub-frame deadband. Zoomed in, a few pixels of mouse movement is a
+    // fraction of one frame, and spending a decode on it shows the viewer the
+    // same picture twice while a real move waits behind it. Skipping those
+    // leaves the whole decode budget for positions that actually change the
+    // frame. The release seek below ignores this, so precision is not lost.
+    let lastSeekTarget = -1
+    const seekVideoTo = (t: number, force = false) => {
+      if (!force && Math.abs(t - lastSeekTarget) < 0.03) return
+      lastSeekTarget = t
+      pendingScrubTime = t
+      pumpScrubSeek()
+    }
+
     const updateTimeFromMouse = (clientX: number) => {
       const rect = timelineElement.getBoundingClientRect()
       const scrollLeft = timelineElement.scrollLeft
@@ -4362,9 +4571,10 @@ export function DubVerseEditor({
       // making the needle feel 3 seconds behind. DOM + video are updated here;
       // the store is written once on mouseup.
       currentTimeRef.current = newTime
-      if (videoRef.current) {
-        videoRef.current.currentTime = timelineToSourceTime(newTime, scenesRef.current) ?? newTime
-      }
+      // Always ask for the latest position. If a seek is already running this
+      // just replaces the target, so the element never queues stale frames and
+      // always lands on where the cursor actually is.
+      seekVideoTo(newTime)
       // Update the needle directly so it tracks the cursor exactly.
       if (playheadRef.current) {
         playheadRef.current.style.left = `${newTime * pps}px`
@@ -4393,6 +4603,12 @@ export function DubVerseEditor({
       document.removeEventListener('pointercancel', handleMouseUp)
       window.removeEventListener('blur', handleMouseUp)
       isDraggingNeedleRef.current = false
+      if (scrubWatchdog) { clearTimeout(scrubWatchdog); scrubWatchdog = null }
+      // Land the exact drop point. A seek may still have been in flight when the
+      // button came up, and the frame under the release position is the one the
+      // whole scrub was for. Clearing the latch first guarantees this one runs.
+      scrubSeeking = false
+      seekVideoTo(currentTimeRef.current, true)
       if (playheadRef.current) playheadRef.current.style.transition = ''
       setCurrentTime(currentTimeRef.current)
     }
@@ -4401,7 +4617,7 @@ export function DubVerseEditor({
     document.addEventListener('mouseup', handleMouseUp)
     document.addEventListener('pointercancel', handleMouseUp)
     window.addEventListener('blur', handleMouseUp)
-  }, [videoDuration, setCurrentTime, zoomLevel])
+  }, [videoDuration, setCurrentTime, zoomLevel, playbackStop])
   
   // Handle drag start for suggestions (English translations)
   const handleDragStart = useCallback((e: React.DragEvent, suggestion: Suggestion, segmentIndex: number) => {
@@ -4837,6 +5053,13 @@ export function DubVerseEditor({
         live_segment_end: liveEnd,
         live_next_segment_start: liveNextStart,
         live_prev_segment_end: livePrevEnd,
+        // Commit is a toggle: a released (recommit) or never-touched line opts in
+        // to sync_fit on predicted overflow, so it can be shortened to its window
+        // instead of time-stretched into a fast take. Locked or user-authored
+        // text — typed now, or edited earlier — is always spoken verbatim.
+        allow_adapt_fit: !segment.text_locked && !segment.isUserEdited
+          && !(textOverride && textOverride.trim())
+          && !(activeIndex === selectedSegmentIndex && editingTextRef.current.trim()),
         // Engine-specific extras (Respeecher sampling_params / seed). Last so an
         // explicit caller value wins over the defaults assembled above.
         ...(extraPayload ?? {}),
@@ -5462,6 +5685,7 @@ export function DubVerseEditor({
     }
     if (srcPlaying) {
       a.pause()
+      videoRef.current?.pause()
       return
     }
     // Mutually exclusive audio: the video transport keeps ITS playhead but its
@@ -5469,6 +5693,15 @@ export function DubVerseEditor({
     if (isPlaying) playbackStop()
     // Re-mint the token every play — the baked URL 401s once Supabase rotates.
     a.src = apiClient.refreshMediaUrl(apiClient.toAbsoluteUrl(`/api/media/${jobId}/separated/vocals`))
+    // Start the picture moving NOW rather than waiting for the RAF follower —
+    // a playhead with a frozen frame is exactly the "can't judge lip sync"
+    // state this pairing exists to prevent. Muted via the volume effect.
+    const v = videoRef.current
+    if (v) {
+      v.currentTime = timelineToSourceTime(srcTime, scenesRef.current) ?? srcTime
+      v.playbackRate = srcRate
+      v.play().catch(() => {})
+    }
     // Seek from THIS player's playhead (srcTime, timeline space → source space).
     a.currentTime = timelineToSourceTime(srcTime, scenesRef.current) ?? srcTime
     a.playbackRate = srcRate
@@ -6013,7 +6246,10 @@ export function DubVerseEditor({
         const base = prev ?? displaySegments
         return base.map((seg, i) =>
           i === idx
-            ? { ...seg, preview_text: text, committed_adapted_text: text, text_locked: true }
+            // Edit is provisional — text_locked stays false so Commit remains the
+            // single permanence gate. isUserEdited marks authorship: user words
+            // are always spoken verbatim and never sync-fit, committed or not.
+            ? { ...seg, preview_text: text, committed_adapted_text: text, text_locked: false, isUserEdited: true }
             : seg
         )
       })
@@ -6022,7 +6258,7 @@ export function DubVerseEditor({
       setEditingSegmentIndex(null)
       // Persist edited text to disk so regenerate_segment reads it from committed_adapted_text
       applyFlagOutcome(idx, 'text')
-      commitOrStage(displaySegments[idx]?.transcript_index ?? idx, { committed_adapted_text: text, text_locked: true }).catch(err =>
+      commitOrStage(displaySegments[idx]?.transcript_index ?? idx, { committed_adapted_text: text, text_locked: false }).catch(err =>
         console.warn('[saveEditing] failed to persist text to disk:', err)
       )
       // Auto-regen in PREVIEW only — 2 second debounce.
@@ -6079,13 +6315,13 @@ export function DubVerseEditor({
     setImportedSegments(prev => {
       const base = prev ?? displaySegmentsRef.current
       return base.map((seg, i) => i === index
-        ? { ...seg, preview_text: text, committed_adapted_text: text, text_locked: true }
+        ? { ...seg, preview_text: text, committed_adapted_text: text, text_locked: false, isUserEdited: true }
         : seg)
     })
 
     applyFlagOutcome(index, 'text')
     const ti = segs[index]?.transcript_index ?? index
-    commitOrStage(ti, { committed_adapted_text: text, text_locked: true }).catch(err =>
+    commitOrStage(ti, { committed_adapted_text: text, text_locked: false }).catch(err =>
       console.warn('[PASTE] failed to persist text:', err)
     )
     // Auto-regen in PREVIEW only — see saveEditing for why.
@@ -6104,6 +6340,7 @@ export function DubVerseEditor({
   // Drag-to-reorder refs to avoid stale closures in mousemove
   const dragReorderRef = useRef<{ fromIndex: number; toIndex: number | null; isDragging: boolean } | null>(null)
 
+  const rowDragRafPendingRef = useRef(false)
   const handleRowDragStart = useCallback((fromIndex: number) => {
     const state = { fromIndex, toIndex: null, isDragging: true }
     dragReorderRef.current = state
@@ -6120,7 +6357,17 @@ export function DubVerseEditor({
       const toIndex = parseInt(row.closest('[data-segment-row]')?.getAttribute('data-index') || '-1', 10)
       if (toIndex >= 0 && toIndex !== drag.toIndex) {
         dragReorderRef.current = { ...drag, toIndex }
-        setDragReorder(prev => prev ? { ...prev, toIndex } : null)
+        // One state write per animation frame at most — mousemove fires far
+        // faster, and every discrete-event setState here re-renders the whole
+        // editor synchronously, blocking the video element mid-playback.
+        if (!rowDragRafPendingRef.current) {
+          rowDragRafPendingRef.current = true
+          requestAnimationFrame(() => {
+            rowDragRafPendingRef.current = false
+            const t = dragReorderRef.current?.toIndex
+            if (t != null) setDragReorder(prev => prev ? { ...prev, toIndex: t } : null)
+          })
+        }
       }
     }
   }, [])
@@ -6642,31 +6889,9 @@ export function DubVerseEditor({
             {/* Segment counter now lives in the segment header row, where the
                 user is actually working — it collided with MAKE MOVIE here. */}
 
-            {/* Failed-save warning, immediately before MAKE MOVIE.
-                A save is commit-what-you-can, so a failed segment is NOT in the
-                render — the user has to know that before spending a full render
-                on an incomplete film. Named explicitly ("Segment 7") because
-                "some segments failed" gives them nothing to act on. */}
-            {Object.keys(failedSegments).length > 0 && (
-              <div className={cn(
-                "ml-6 flex items-center gap-2 rounded-md border px-3 py-1.5",
-                releasedForRender
-                  ? "border-amber-500/60 bg-amber-500/15"
-                  : "border-red-500/60 bg-red-500/15"
-              )}>
-                <AlertCircle className={cn("h-4 w-4 shrink-0", releasedForRender ? "text-amber-400" : "text-red-400")} />
-                <span className={cn("text-xs font-semibold", releasedForRender ? "text-amber-200" : "text-red-200")}>
-                  {Object.keys(failedSegments).length === 1
-                    ? `Segment ${Object.keys(failedSegments)[0]} FAILED`
-                    : `Segments ${Object.keys(failedSegments).join(', ')} FAILED`}
-                  {' — '}
-                  {releasedForRender
-                    ? 'RELEASED: this render will not contain them.'
-                    : `${Object.keys(failedSegments).length === 1 ? 'segment' : 'segments'} will be re-loaded at the end for re-editing.`}
-                </span>
-              </div>
-            )}
-
+            {/* Failed-save warning now lives beside the filename in the
+                sub-header — it collided with the job id and the lip-sync
+                checkbox in this row. */}
             {/* Make Movie lives up here, well away from the transport controls:
                 it kicks off a full render, and sitting beside play/stop invited
                 mis-clicks on a button you don't want fired by accident. */}
@@ -6730,6 +6955,46 @@ export function DubVerseEditor({
                 : 'MAKE MOVIE'}
             </Button>
 
+            {/* Optional AI lip-sync — opt-in only, shown only when the vendor
+                is configured AND the user can pay (Pro or wallet balance).
+                The job id is an absolutely-positioned span at the TOP of this
+                header — self-end drops the label to the row's bottom edge so
+                the two never share a baseline. shrink-0 + whitespace-nowrap
+                keep it from being squeezed horizontally either. */}
+            {lipsyncInfo?.available && !usage.loading && lipSyncEligible && (
+              <label
+                className="ml-3 flex shrink-0 self-end items-center gap-1.5 translate-y-2.5 cursor-pointer select-none whitespace-nowrap"
+                title={t(
+                  'Charged when the lip sync job is submitted to the provider. ' +
+                  'The provider bills on attempt — not on output quality. ' +
+                  'May produce artifacts on fast action, rotation, or low-light footage. ' +
+                  'Not recommended for martial arts or high-motion content.'
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked={lipsyncOptIn}
+                  onChange={(e) => setLipsyncOptIn(e.target.checked)}
+                  disabled={isRebuilding || !lipSyncAffordable}
+                  className="h-3 w-3 accent-teal-400 cursor-pointer"
+                />
+                <span className="text-[11px] text-white">
+                  {t('Lip sync')}
+                  {lipSyncRateUsd > 0 && videoDuration > 0 && (
+                    <span className="text-white">
+                      {' '}~${lipSyncEstUsd.toFixed(2)} {t('(charged on submission)')}
+                    </span>
+                  )}
+                  {!lipSyncAffordable && (
+                    <span className="text-red-400"> {t('— insufficient credit')}</span>
+                  )}
+                  {lipSyncNote && (
+                    <span className="text-teal-300"> · {lipSyncNote}</span>
+                  )}
+                </span>
+              </label>
+            )}
+
           </nav>
         </div>
         
@@ -6778,6 +7043,32 @@ export function DubVerseEditor({
             </Button>
           </Link>
           <h1 className="text-sm font-medium truncate max-w-[300px]">{title}</h1>
+
+          {/* Failed-save warning, beside the filename in the sub-header — it
+              used to sit in the top nav before MAKE MOVIE, where the job id
+              and the lip-sync checkbox made it unreadable. A save is
+              commit-what-you-can, so a failed segment is NOT in the render —
+              the user has to know that before spending a full render on an
+              incomplete film. */}
+          {Object.keys(failedSegments).length > 0 && (
+            <div className={cn(
+              "ml-2 flex items-center gap-2 rounded-md border px-3 py-1.5 shrink-0",
+              releasedForRender
+                ? "border-amber-500/60 bg-amber-500/15"
+                : "border-red-500/60 bg-red-500/15"
+            )}>
+              <AlertCircle className={cn("h-4 w-4 shrink-0", releasedForRender ? "text-amber-400" : "text-red-400")} />
+              <span className={cn("text-xs font-semibold whitespace-nowrap", releasedForRender ? "text-amber-200" : "text-red-200")}>
+                {Object.keys(failedSegments).length === 1
+                  ? `Segment ${Object.keys(failedSegments)[0]} FAILED`
+                  : `Segments ${Object.keys(failedSegments).join(', ')} FAILED`}
+                {' — '}
+                {releasedForRender
+                  ? 'RELEASED: this render will not contain them.'
+                  : `${Object.keys(failedSegments).length === 1 ? 'segment' : 'segments'} will be re-loaded at the end for re-editing.`}
+              </span>
+            </div>
+          )}
         </div>
 
         {/* overflow-x-auto: at narrow widths the buttons (Record/Save/Upgrade)
@@ -7343,8 +7634,20 @@ export function DubVerseEditor({
                 ref={srcAudioRef}
                 preload="auto"
                 onPlay={() => setSrcPlaying(true)}
-                onPause={() => setSrcPlaying(false)}
-                onEnded={() => setSrcPlaying(false)}
+                // Pause the picture with the vocals — they are one transport
+                // while srcPlaying, so neither may move without the other.
+                // Media events dispatch ASYNC: a pause() issued inside
+                // handlePlayToggle can land after that same toggle's video.play(),
+                // freezing the just-started transport. Only pause the picture
+                // when the transport genuinely isn't running.
+                onPause={() => {
+                  setSrcPlaying(false)
+                  if (!isPlayingRef.current) videoRef.current?.pause()
+                }}
+                onEnded={() => {
+                  setSrcPlaying(false)
+                  if (!isPlayingRef.current) videoRef.current?.pause()
+                }}
                 onError={() => setSrcFailed(true)}
                 onTimeUpdate={(e) => {
                   // The vocals element drives the TRANSCRIPT playhead (srcTime),
@@ -7403,6 +7706,9 @@ export function DubVerseEditor({
                   const r = parseFloat(v)
                   setSrcRate(r)
                   if (srcAudioRef.current) srcAudioRef.current.playbackRate = r
+                  // The picture runs at the same rate — a video left at 1.0 while
+                  // the vocals run at 1.5× drifts a third of a second per second.
+                  if (srcPlayingRef.current && videoRef.current) videoRef.current.playbackRate = r
                 }}
               >
                 <SelectTrigger className="h-6 w-16 bg-neutral-800 border-neutral-700 text-[10px] text-slate-300 shrink-0">
@@ -7736,9 +8042,39 @@ export function DubVerseEditor({
                     )}
                   </div>
                   
-                  {/* Source text */}
+                  {/* Source text — same karaoke sweep as the translation below,
+                      but blue. CJK lines have no whitespace to split words on,
+                      so they fall back to per-character tokens; the fill is
+                      already weighted by character count, so the sweep still
+                      tracks the audio at the right pace. */}
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-slate-400">{segment.source_text}</p>
+                    <p className="text-sm text-slate-400">
+                      {(() => {
+                        const text = segment.source_text as string
+                        if (!text) return null
+                        if (index !== nowPlayingIndex) return text
+                        const dur = Math.max(segment.end_time - segment.start_time, 0.01)
+                        const frac = Math.min(Math.max((transcriptClock - segment.start_time) / dur, 0), 1)
+                        const tokens = /\s/.test(text) ? text.split(/(\s+)/) : Array.from(text)
+                        const totalChars = tokens.reduce((n, w) => n + w.length, 0) || 1
+                        let acc = 0
+                        return tokens.map((w, wi) => {
+                          const wStart = acc / totalChars
+                          acc += w.length
+                          if (/^\s+$/.test(w)) return w
+                          const covering = frac >= wStart && frac < acc / totalChars
+                          return (
+                            <span
+                              key={wi}
+                              className={cn(
+                                'rounded-sm transition-colors',
+                                covering && 'bg-blue-400/50 text-blue-50 shadow-[0_0_6px_rgba(96,165,250,0.5)]',
+                              )}
+                            >{w}</span>
+                          )
+                        })
+                      })()}
+                    </p>
                   </div>
 
                   {/* Target text (editable) */}
@@ -7787,7 +8123,11 @@ export function DubVerseEditor({
                       </div>
                     ) : (
                       <>
-                        <div className="flex items-center gap-1.5 flex-wrap">
+                        {/* min-w-0 matters here: a nowrap flex child's min-content
+                            is the SUM of its items' min-content, so a long pill of
+                            word-spans forced the whole column past the panel edge
+                            and shoved Commit/Clear under the video. */}
+                        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
                         {/* Emotion tag chip — shows the exact tag that will be sent to TTS */}
                         {stagedEmotions[keyAt(index)] ? (() => {
                           // Compact a long custom emotion to a one-word pill; full text on hover.
@@ -8088,7 +8428,7 @@ export function DubVerseEditor({
                         ) : (
                           <div
                             className={cn(
-                              'text-sm cursor-pointer select-none inline-flex items-center gap-1 px-3 py-1 rounded-full border-2 text-white',
+                              'text-sm cursor-pointer select-none inline-flex items-center gap-1 px-3 py-1 rounded-full border-2 text-white min-w-0 max-w-full flex-wrap',
                               lockedSegments.has(keyAt(index))
                                 ? 'border-emerald-400 bg-emerald-500/20 shadow-[0_0_10px_rgba(34,197,94,0.4)]'
                                 // Violet = driven by a recording. Deliberately not
@@ -8178,8 +8518,35 @@ export function DubVerseEditor({
                         </div>
                       </>
                     )}
-                    {(isEditing || segment.isPreviewing || segment.status === 'edited') && (
+                    {(isEditing || segment.isPreviewing || segment.status === 'edited' || segment.text_locked) && (
                       <div className="flex items-center gap-1.5 pointer-events-auto cursor-pointer shrink-0 select-none">
+                      {segment.text_locked && !isEditing && !segment.isPreviewing ? (
+                        /* COMMITTED state — the take is permanent. Pressing again
+                           RELEASES the text for alteration: the lock drops, the
+                           line can be edited, and the next Generate may sync-fit
+                           it to its window. Commit toggles permanence on and off. */
+                        <button
+                          className="text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30 transition-colors pointer-events-auto cursor-pointer select-none"
+                          title={t('Committed — click to release the text for alteration')}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            const ti = displaySegments[index]?.transcript_index ?? index
+                            commitOrStage(ti, { text_locked: false }).catch(err =>
+                              console.warn('[RELEASE] persist failed', err)
+                            )
+                            setImportedSegments(prev => {
+                              const base = prev ?? displaySegments
+                              return base.map((seg, i) =>
+                                i === index
+                                  ? { ...seg, text_locked: false, isUserEdited: false }
+                                  : seg
+                              )
+                            })
+                          }}
+                        >
+                          {t('Release')}
+                        </button>
+                      ) : (
                         <button
                           className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors pointer-events-auto cursor-pointer select-none"
                           onClick={(e) => {
@@ -8245,6 +8612,7 @@ export function DubVerseEditor({
                         >
                           {t('Commit')}
                         </button>
+                      )}
                         <button
                           type="button"
                           className="text-[10px] px-2 py-0.5 rounded bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30 hover:text-red-300 transition-colors pointer-events-auto cursor-pointer select-none"
@@ -10204,43 +10572,6 @@ export function DubVerseEditor({
 
           {/* Playback controls — absolute center */}
           <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2">
-            {/* Optional AI lip-sync — opt-in only, shown only when the vendor
-                is configured AND the user can pay (Pro or wallet balance).
-                Cost is honest up front: charged on submission, refunded only
-                if the provider rejects before processing. */}
-            {lipsyncInfo?.available && !usage.loading && lipSyncEligible && (
-              <label
-                className="mr-1 flex items-center gap-1.5 cursor-pointer select-none whitespace-nowrap"
-                title={t(
-                  'Charged when the lip sync job is submitted to the provider. ' +
-                  'The provider bills on attempt — not on output quality. ' +
-                  'May produce artifacts on fast action, rotation, or low-light footage. ' +
-                  'Not recommended for martial arts or high-motion content.'
-                )}
-              >
-                <input
-                  type="checkbox"
-                  checked={lipsyncOptIn}
-                  onChange={(e) => setLipsyncOptIn(e.target.checked)}
-                  disabled={isRebuilding || !lipSyncAffordable}
-                  className="h-3 w-3 accent-teal-400 cursor-pointer"
-                />
-                <span className="text-[11px] text-slate-400">
-                  {t('Lip sync')}
-                  {lipSyncRateUsd > 0 && videoDuration > 0 && (
-                    <span className="text-slate-500">
-                      {' '}~${lipSyncEstUsd.toFixed(2)} {t('(charged on submission)')}
-                    </span>
-                  )}
-                  {!lipSyncAffordable && (
-                    <span className="text-red-400"> {t('— insufficient credit')}</span>
-                  )}
-                  {lipSyncNote && (
-                    <span className="text-teal-400/80"> · {lipSyncNote}</span>
-                  )}
-                </span>
-              </label>
-            )}
             <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => setCurrentTime(0)}>
               <SkipBack className="h-4 w-4" />
             </Button>
@@ -12930,7 +13261,12 @@ export function DubVerseEditor({
                   left: `${currentTime * PIXELS_PER_SECOND}px`,
                   // Head sits on the picture, below the parking bay.
                   top: PLAYHEAD_TOP,
-                  transition: 'left 0.08s linear',
+                  // NO TRANSITION ON `left`. The RAF loop writes this position
+                  // every 50ms from the video clock; easing each write made the
+                  // needle glide toward where the picture already was, so it
+                  // trailed by up to 80ms and never sat on the current frame.
+                  // Lip sync is judged by where the needle is against the mouth,
+                  // so an eased needle cannot be used to judge it at all.
                 }}
               >
                 {/* Wide invisible drag handle so the needle is easy to grab */}
@@ -12999,74 +13335,6 @@ export function DubVerseEditor({
             </div>
             </SegmentContextMenu>
           </div>
-        </div>
-        {/* Overview bar — full width, under the track labels as well as the tracks.
-            The container's own scrollbar only spans the track area and sits inside a
-            panel that scrolls vertically too, so it moves out from under the cursor.
-            This is fixed at the bottom and always the whole timeline: the thumb's
-            width is the fraction of the film on screen, so it narrows as you zoom in
-            and fills the bar when zoomed out. */}
-        <div
-          ref={overviewBarRef}
-          className="h-4 shrink-0 bg-neutral-950 border-t border-neutral-800 relative select-none"
-          onPointerDown={(e) => {
-            const bar = overviewBarRef.current
-            const tl = timelineRef.current
-            if (!bar || !tl) return
-            try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch {}
-            const rect = bar.getBoundingClientRect()
-            const maxScroll = Math.max(1, tl.scrollWidth - tl.clientWidth)
-            const thumbFrac = Math.min(1, tl.clientWidth / Math.max(1, tl.scrollWidth))
-            const usable = rect.width * (1 - thumbFrac)
-            // Centre the thumb on the press, then track the pointer, so grabbing
-            // anywhere on the bar jumps there rather than nudging by a fixed step.
-            const thumb = overviewThumbRef.current
-            panningRef.current = true
-            // Same rule as the timeline pan: everything needed was measured above,
-            // so move the thumb from the fraction we just computed rather than
-            // re-reading the DOM and forcing a layout on every pointermove.
-            const seek = (clientX: number) => {
-              const x = clientX - rect.left - (rect.width * thumbFrac) / 2
-              const frac = usable > 0 ? Math.min(1, Math.max(0, x / usable)) : 0
-              tl.scrollLeft = frac * maxScroll
-              if (thumb) thumb.style.left = `${frac * (1 - thumbFrac) * 100}%`
-            }
-            seek(e.clientX)
-            const onMove = (ev: PointerEvent) => {
-              if (ev.buttons === 0) { onUp(); return }
-              seek(ev.clientX)
-            }
-            function onUp() {
-              panningRef.current = false
-              document.removeEventListener('pointermove', onMove)
-              document.removeEventListener('pointerup', onUp)
-              document.removeEventListener('pointercancel', onUp)
-              window.removeEventListener('blur', onUp)
-            }
-            document.addEventListener('pointermove', onMove)
-            document.addEventListener('pointerup', onUp)
-            document.addEventListener('pointercancel', onUp)
-            window.addEventListener('blur', onUp)
-          }}
-        >
-          {(() => {
-            const tl = timelineRef.current
-            const total = tl ? Math.max(1, tl.scrollWidth) : 1
-            const view = tl ? tl.clientWidth : 1
-            const frac = Math.min(1, view / total)
-            const pos = total > view ? (tl!.scrollLeft / (total - view)) * (1 - frac) : 0
-            return (
-              <div
-                // The ref MUST be here: syncOverviewThumb writes this element's style
-                // directly on scroll and on pan, and without it that function returned
-                // early every time and the thumb never moved. The values below are the
-                // first paint only — React does not re-render on scroll by design.
-                ref={overviewThumbRef}
-                className="absolute top-0.5 bottom-0.5 rounded bg-amber-500/40 hover:bg-amber-500/60 transition-colors"
-                style={{ left: `${pos * 100}%`, width: `${frac * 100}%` }}
-              />
-            )
-          })()}
         </div>
         
         {/* Language indicators */}
