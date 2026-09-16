@@ -71,8 +71,12 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   }, [customVoicesVersion])
 
   const getSpeakerDisplayName = useCallback((speakerId: string, speakerLabel?: string) => {
+    // A user rename ("Ip Man") beats the numbered fallback — preferring digits
+    // meant the library always showed "Speaker N" and the user assigned blind,
+    // which is how voices landed on the wrong character.
+    if (speakerLabel && speakerLabel !== speakerId) return speakerLabel
     const digits = speakerId.match(/\d+/)?.[0]
-    return digits ? `Speaker ${digits}` : speakerLabel ?? speakerId
+    return digits ? `Speaker ${digits}` : speakerId
   }, [])
 
   // Page sizing differs by layout:
@@ -302,7 +306,8 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
       const next = Object.fromEntries(
         Object.entries({ ...speakerVoiceMap, [speakerId]: '' }).filter(([, v]) => !!v)
       )
-      try { await apiClient.updateVoiceMapping(jobId, next) } catch {}
+      try { await apiClient.updateVoiceMapping(jobId, next) }
+      catch (e) { console.warn('[ASSIGN] voice-mapping persist failed:', e) }
     }
     setAssignMenu(null)
   }, [jobId, speakerVoiceMap, updateSpeakerVoice])
@@ -425,7 +430,9 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     onVoiceAssigned?.(speakerId, voiceId)
     const newMap = { ...speakerVoiceMap, [speakerId]: voiceId }
     if (jobId) {
-      try { await apiClient.updateVoiceMapping(jobId, newMap) } catch {}
+      // Loud on failure — a swallowed PATCH is what let assignments vanish on reload.
+      try { await apiClient.updateVoiceMapping(jobId, newMap) }
+      catch (e) { console.warn('[ASSIGN] voice-mapping persist failed:', e) }
     }
     const sp = speakers.find(s => s.speaker_id === speakerId)
     const speakerName = getSpeakerDisplayName(speakerId, sp?.display_name)
