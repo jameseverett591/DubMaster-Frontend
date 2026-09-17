@@ -7390,6 +7390,51 @@ async def export_video(job_id: str, body: ExportRequest, request: Request):
                 f"dubbed file instead: {chosen}"
             )
     src = os.path.join(output_dir, chosen)
+
+    # REFUSE A STALE FILM. Nothing leaves without being reviewed, and what was
+    # reviewed is the film on disk. Editing after a rebuild and pressing Export
+    # would otherwise hand over the older render — the edits silently missing,
+    # with nothing on screen to say so.
+    #
+    # Judged on time, not on the rpt_dirty flags: a rebuild clears those in the
+    # editor's own state but nothing rewrites them in segments.json, so they
+    # outlive the render they refer to. committed_at is written whenever an edit
+    # is committed, so an edit stamped after the film was written means the film
+    # predates it. The tolerance absorbs ordinary clock drift between the
+    # browser that stamps the edit and this machine's filesystem.
+    _STALE_TOLERANCE_S = 5.0
+    try:
+        with open(os.path.join(output_dir, "segments.json"), "r", encoding="utf-8") as _sf:
+            _stamps = [
+                _s.get("committed_at")
+                for _s in (_json.load(_sf).get("segments") or [])
+                if _s.get("committed_at")
+            ]
+        if _stamps:
+            _newest = max(_stamps)
+            _edit_ts = datetime.fromisoformat(str(_newest).replace("Z", "+00:00")).timestamp()
+            _film_ts = os.path.getmtime(src)
+            if _edit_ts > _film_ts + _STALE_TOLERANCE_S:
+                _mins = (_edit_ts - _film_ts) / 60.0
+                logger.info(
+                    f"[EXPORT] job={job_id} refused: {chosen} written "
+                    f"{_mins:.0f} min before the newest edit ({_newest})"
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This film was rendered before your most recent edits, so it "
+                        "does not contain them. Press Make Movie to rebuild, review it, "
+                        "then export."
+                    ),
+                )
+    except HTTPException:
+        raise
+    except Exception as _stale_err:
+        # Never block an export over a bad timestamp or an unreadable file — the
+        # check is a guard, not a gate on the whole feature.
+        logger.warning(f"[EXPORT] job={job_id} staleness check skipped: {_stale_err}")
+
     logger.info(f"[EXPORT] job={job_id} source={chosen} (target language {_lang or 'unknown'})")
 
     res = body.resolution.lower().replace(" ", "")
