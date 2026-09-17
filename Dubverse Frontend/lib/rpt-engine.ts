@@ -42,6 +42,15 @@ export const CROSSFADE_MAX_SEC = 0.3
  *  — a blend beats a hard cut either way — but flagged red. */
 export const CROSSFADE_WARN_SEC = 1.0
 
+/** A time region where overlapping lines get the LAYERED (interruption) mix
+ *  instead of a crossfade: both voices hold full level through the overlap —
+ *  the interrupter's first syllable lands at full volume and the interrupted
+ *  line keeps playing underneath at the same level until its audio ends. */
+export interface CrosslayerRange {
+  start: number
+  end: number
+}
+
 /** One decoded segment, with where its audio ACTUALLY sits on the timeline. */
 interface Placed {
   index: number
@@ -75,9 +84,14 @@ interface Placed {
  * span two later ones would only crossfade with the first; that has not come up,
  * and handling it properly means an interval tree rather than a sort.
  */
+interface StitchFades {
+  fades: Map<number, { fadeIn: number; fadeOut: number }>
+}
+
 function computeFades(
   placed: Placed[],
-): Map<number, { fadeIn: number; fadeOut: number }> {
+  crosslayerRanges?: CrosslayerRange[],
+): StitchFades {
   const order = [...placed].sort((a, b) => a.start - b.start)
 
   const fades = new Map<number, { fadeIn: number; fadeOut: number }>()
@@ -110,10 +124,18 @@ function computeFades(
       b.audioEnd - b.start,
     )
     if (n <= 0) continue
+
+    // Interruption mix: inside a crosslayer range the overlap is a talk-over,
+    // not a join — both lines hold full level, no crossfade, no duck. Judged
+    // by the interrupter's entry point, so a range only has to cover where the
+    // interruption LANDS, not the whole overlap.
+    const inCrosslayer = (crosslayerRanges ?? []).some(r => b.start >= r.start - 1e-4 && b.start <= r.end + 1e-4)
+    if (inCrosslayer) continue
+
     get(a.index).fadeOut = Math.max(get(a.index).fadeOut, n)
     get(b.index).fadeIn = Math.max(get(b.index).fadeIn, n)
   }
-  return fades
+  return { fades }
 }
 // ─── Cache ───────────────────────────────────────────────────────────────────
 
@@ -199,7 +221,8 @@ async function fetchAndDecode(
 export async function stitchRPT(
   segments: Segment[],
   duration: number,
-  audioContext: AudioContext
+  audioContext: AudioContext,
+  crosslayerRanges?: CrosslayerRange[]
 ): Promise<RPTStitchResult | null> {
   if (!segments.length || duration <= 0) return null
 
@@ -254,7 +277,7 @@ export async function stitchRPT(
     })
   )
 
-  const fades = computeFades(placed)
+  const { fades } = computeFades(placed, crosslayerRanges)
 
   // PASS 2 — mix. Sequential because it is pure CPU work on a shared buffer;
   // parallelism would buy nothing and reintroduce ordering questions.
@@ -338,7 +361,8 @@ export async function stitchRPTWindow(
   segments: Segment[],
   windowStart: number,
   windowEnd: number,
-  audioContext: AudioContext
+  audioContext: AudioContext,
+  crosslayerRanges?: CrosslayerRange[]
 ): Promise<RPTStitchResult | null> {
   const duration = windowEnd - windowStart
   if (!segments.length || duration <= 0) return null
@@ -412,7 +436,7 @@ export async function stitchRPTWindow(
     })
   )
 
-  const fades = computeFades(placed)
+  const { fades } = computeFades(placed, crosslayerRanges)
 
   // PASS 2 — mix.
   for (const item of placed) {

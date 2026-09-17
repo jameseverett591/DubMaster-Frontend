@@ -7574,6 +7574,33 @@ async def update_scenes(job_id: str, body: Dict[str, Any] = Body(default={})):
     return {"status": "ok", "job_id": job_id, "scenes": scenes}
 
 
+@router.put("/crosslayer/{job_id}", dependencies=[Depends(_dep_job_access)])
+async def update_crosslayer_ranges(job_id: str, body: Dict[str, Any] = Body(default={})):
+    """Persist the cross-layer region list to segments.json.
+
+    Inside a cross-layer range an overlap is an intentional interruption: the
+    render mixdown holds BOTH lines at full level instead of crossfading them.
+    Mirrors the scene-boundary persistence route.
+    """
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+    ranges = body.get("crosslayer_ranges")
+    if not isinstance(ranges, list):
+        raise HTTPException(status_code=422, detail="crosslayer_ranges must be a list")
+    lock = await dubbing_service._get_segments_file_lock(job_id)
+    async with lock:
+
+        def _update_ranges() -> None:
+            with open(segments_path, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+            data["crosslayer_ranges"] = ranges
+            atomic_write_json(segments_path, data)
+
+        await asyncio.to_thread(_update_ranges)
+    return {"status": "ok", "job_id": job_id, "crosslayer_ranges": ranges}
+
+
 @router.post("/render/scene/{job_id}/{scene_id}", dependencies=[Depends(_dep_job_access)])
 async def render_scene_preview(job_id: str, scene_id: str, background_tasks: BackgroundTasks):
     """Render a single scene with dubbed audio and video fades applied.

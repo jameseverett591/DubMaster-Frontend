@@ -32,6 +32,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   const [segments, setSegments] = useState<Segment[]>([])
   const [snapshotSegments, setSnapshotSegments] = useState<Segment[]>([])
   const [scenes, setScenes] = useState<Scene[]>([])
+  const [crosslayerRanges, setCrosslayerRanges] = useState<{ start: number; end: number }[]>([])
   // Chunk-lens state and the deletion countdown both ride along on the segments
   // response. Without forwarding them the countdown card can never appear.
   const [chunkStatus, setChunkStatus] = useState<Record<string, string> | undefined>(undefined)
@@ -270,6 +271,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         })
         setSegments(editorSegments)
         setScenes((segmentsData?.scenes as Scene[] | undefined) || [])
+        setCrosslayerRanges(segmentsData?.crosslayer_ranges || [])
         setChunkStatus(segmentsData?.chunk_status)
         setRetention(segmentsData?.retention)
         setSnapshotSegments(mappedSnapshotSegments)
@@ -435,6 +437,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         videoDuration={editorProps.videoDuration}
         segments={segments}
         scenes={scenes}
+        crosslayerRanges={crosslayerRanges}
         snapshotSegments={snapshotSegments}
         chunkStatus={chunkStatus}
         retention={retention}
