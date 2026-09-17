@@ -7574,6 +7574,51 @@ async def update_scenes(job_id: str, body: Dict[str, Any] = Body(default={})):
     return {"status": "ok", "job_id": job_id, "scenes": scenes}
 
 
+@router.put("/crosslayer/{job_id}", dependencies=[Depends(_dep_job_access)])
+async def update_crosslayer_ranges(job_id: str, body: Dict[str, Any] = Body(default={})):
+    """Persist the cross-layer region list to segments.json.
+
+    Inside a cross-layer range an overlap is an intentional interruption: the
+    render mixdown holds BOTH lines at full level instead of crossfading them.
+    Mirrors the scene-boundary persistence route.
+    """
+    segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+    if not os.path.exists(segments_path):
+        raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
+    ranges = body.get("crosslayer_ranges")
+    if not isinstance(ranges, list):
+        raise HTTPException(status_code=422, detail="crosslayer_ranges must be a list")
+    # Validate every item. The render mixers read these floats directly, and a
+    # single malformed entry (a bare list, a null, a non-number) used to crash
+    # the scene preview outright and push Make Movie onto the fallback mixer,
+    # which ignores fades and cross-layer regions — a wrong export with no error.
+    # Stored normalised: floats, start < end, sorted.
+    import math as _math
+    clean = []
+    for i, r in enumerate(ranges):
+        if not isinstance(r, dict):
+            raise HTTPException(status_code=422, detail=f"crosslayer_ranges[{i}] must be an object with start and end")
+        try:
+            lo, hi = float(r.get("start")), float(r.get("end"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail=f"crosslayer_ranges[{i}] start/end must be numbers")
+        if not (_math.isfinite(lo) and _math.isfinite(hi)) or lo < 0 or hi <= lo:
+            raise HTTPException(status_code=422, detail=f"crosslayer_ranges[{i}] must be finite, non-negative, with end after start")
+        clean.append({"start": lo, "end": hi})
+    ranges = sorted(clean, key=lambda r: r["start"])
+    lock = await dubbing_service._get_segments_file_lock(job_id)
+    async with lock:
+
+        def _update_ranges() -> None:
+            with open(segments_path, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+            data["crosslayer_ranges"] = ranges
+            atomic_write_json(segments_path, data)
+
+        await asyncio.to_thread(_update_ranges)
+    return {"status": "ok", "job_id": job_id, "crosslayer_ranges": ranges}
+
+
 @router.post("/render/scene/{job_id}/{scene_id}", dependencies=[Depends(_dep_job_access)])
 async def render_scene_preview(job_id: str, scene_id: str, background_tasks: BackgroundTasks):
     """Render a single scene with dubbed audio and video fades applied.
@@ -7928,14 +7973,33 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest):
             #     until the next Generate Speech re-renders it.
             # Gated on rpt_dirty so untouched segments in the same payload (a full
             # sync sends every segment) keep their audio and any distinct adaptation.
+            #
+            # rpt_dirty alone is NOT enough: commitSegmentChanges sets it on every
+            # committed edit, including plain timing drags that leave the audio
+            # perfectly valid. Since a sync ships the whole array, stripping on
+            # rpt_dirty alone wiped the audio of every segment the user had merely
+            # MOVED the moment any unrelated structural edit synced. Structural
+            # edits are what actually invalidate audio, and they are recognizable:
+            # split/merge explicitly clear audio_url/committed_audio_url in the
+            # payload (JSON drops undefined keys), while a dragged segment still
+            # carries its URLs. Text changes also invalidate the rendered take.
             if incoming.get("rpt_dirty") is True:
                 new_text = incoming.get("target_text")
-                if new_text is not None:
-                    merged["text"] = new_text
-                    merged["committed_adapted_text"] = new_text
-                merged["path"] = None
-                merged["committed_audio_url"] = None
-                merged.pop("audio_url", None)
+                audio_cleared = (
+                    "audio_url" not in incoming and "committed_audio_url" not in incoming
+                )
+                text_changed = (
+                    new_text is not None
+                    and new_text != merged.get("committed_adapted_text")
+                    and new_text != merged.get("text")
+                )
+                if audio_cleared or text_changed:
+                    if new_text is not None:
+                        merged["text"] = new_text
+                        merged["committed_adapted_text"] = new_text
+                    merged["path"] = None
+                    merged["committed_audio_url"] = None
+                    merged.pop("audio_url", None)
             result.append(merged)
         else:
             max_ti += 1

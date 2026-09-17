@@ -468,19 +468,28 @@ in order: it **shortens** the wording (using the sync_fit adaptation variant), t
 
 Things you can do, most effective first:
 
-1. **Try a different voice.** Voices differ in how fast they speak — the same line
+1. **Split the segment in two.** If the original line packs two thoughts into one
+   breath — a name plus a statement, a greeting plus a question — split it at the
+   playhead or by word (right-click → Split). Each half gets its own slot and its
+   own Generate Speech render, so both can be spoken at natural pace. This is the
+   strongest fix when the line is fundamentally too long for its window.
+2. **Try a different voice.** Voices differ in how fast they speak — the same line
    can run noticeably longer in one voice than another. If a character consistently
    sounds hurried, assigning a faster-speaking voice from the Voice Library often
    fixes it on its own, with no text change. DubMaster learns each voice's actual
    speaking rate as it dubs and uses that rate when deciding how much to shorten,
    so this is a real lever rather than a workaround.
-2. **Shorten the text yourself** using the write-in on that segment. Fewer syllables
+3. **Shorten the text yourself** using the write-in on that segment. Fewer syllables
    is the only change that reduces speed without side effects — this is the most
    reliable fix for a specific line, such as an opening line where the original
    packs a name and a statement into a very short window.
-3. **Give the segment more room** by dragging its boundary on the timeline, if
+4. **Give the segment more room** by dragging its boundary on the timeline, if
    there is silence next to it. DubMaster already borrows nearby space
    automatically, so this helps only where genuine slack remains.
+
+If a segment suddenly sounds fast after edits, check that it isn't still holding a
+speeded-up take from before a split or re-render: a take fit to a shorter slot
+keeps its faster speed until you regenerate it into the new, longer slot.
 
 Some source lines are simply very dense — a few Cantonese syllables can carry more
 than English can say in the same time. In those cases a slight speed-up is normal

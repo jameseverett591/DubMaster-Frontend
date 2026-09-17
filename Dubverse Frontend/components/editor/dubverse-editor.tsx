@@ -86,7 +86,7 @@ import { HeatmapBar } from '@/components/timeline/HeatmapBar'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { ExportModal } from '@/components/editor/export-modal'
 import { ReviewQueuePanel } from '@/components/editor/review-queue-panel'
-import { stitchRPT, stitchRPTWindow, overlayStagedEdits, clearCache, scheduleRPTPlayback, effStart, effEnd, CROSSFADE_MAX_SEC, CROSSFADE_WARN_SEC } from '@/lib/rpt-engine'
+import { stitchRPT, stitchRPTWindow, overlayStagedEdits, clearCache, scheduleRPTPlayback, effStart, effEnd, CROSSFADE_MAX_SEC, CROSSFADE_WARN_SEC, type CrosslayerRange } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { createClient } from '@/lib/supabase/client'
 
@@ -441,6 +441,9 @@ interface DubVerseEditorProps {
   onShare?: () => void
   onGenerateSpeech?: () => void
   onTranslateAndDub?: () => void
+  /** Regions where overlapping lines get the layered (interruption) mix instead
+   *  of a crossfade — persisted in segments.json, toggled from the transport bar. */
+  crosslayerRanges?: CrosslayerRange[]
   // Chunk-lens editor: persisted per-chunk status from segments.json
   chunkStatus?: Record<string, string>
   /** Deletion countdown from segments.json, surfaced by the editor page. */
@@ -978,6 +981,7 @@ export function DubVerseEditor({
   videoDuration,
   segments: initialSegments,
   scenes: initialScenes,
+  crosslayerRanges: initialCrosslayerRanges,
   snapshotSegments,
   qcScore,
   qcFindings = [],
@@ -1685,10 +1689,17 @@ export function DubVerseEditor({
       // already run. It nulls dragUpListenerRef synchronously and fires on the
       // document BEFORE this window-level handler, so this guard prevents a
       // double-commit on a normal release.
-      if (drag && dragUpListenerRef.current) {
-        const liveDelta = dragLiveDeltaRef.current
-        const newStart = Math.max(0, drag.originalStart + liveDelta)
-        const newEnd = Math.max(0, drag.originalEnd + liveDelta)
+      // A zero live delta means the pointer never crossed the drag threshold —
+      // the track handlers only write it once it has — so the press was a
+      // click. This listener is registered first and runs before the track's
+      // own handler on a window blur, so without this check a click interrupted
+      // by focus loss committed timing and applied a timing flag outcome for a
+      // move that never happened.
+      if (drag && dragUpListenerRef.current && dragLiveDeltaRef.current !== 0) {
+        // Clamp the delta, not each end: stop at 0:00 with the length intact.
+        const liveDelta = Math.max(dragLiveDeltaRef.current, -drag.originalStart)
+        const newStart = drag.originalStart + liveDelta
+        const newEnd = drag.originalEnd + liveDelta
         updateSegment(drag.index, { start_time: newStart, end_time: newEnd })
         commitSegmentChanges(drag.index, {
           committed_start_time: newStart,
@@ -2630,6 +2641,20 @@ export function DubVerseEditor({
   const scenesRef = useRef(scenes)
   scenesRef.current = scenes
 
+  /** Regions where an overlap is an INTERRUPTION, not a join: both lines hold
+   *  full level through the overlap instead of crossfading. Persisted in
+   *  segments.json as crosslayer_ranges; toggled per chunk from the transport
+   *  bar. The ref is what the stitch functions read — state would capture a
+   *  stale list inside the debounced rebuild. */
+  const [crosslayerRanges, setCrosslayerRanges] = useState<CrosslayerRange[]>(initialCrosslayerRanges ?? [])
+  const crosslayerRangesRef = useRef(crosslayerRanges)
+  crosslayerRangesRef.current = crosslayerRanges
+  /** Sequence number for Cross Layers saves. Toggling twice quickly leaves two
+   *  requests in flight; if the OLDER one fails after the newer one succeeded,
+   *  its rollback would restore the older list and the editor would then play a
+   *  setting the export does not have. Only the latest toggle may roll back. */
+  const crosslayerSaveSeqRef = useRef(0)
+
   // Authoritative "silence everything now" — stops every registered stitch source,
   // syncs the refs so nothing reschedules. Callers handle the video element.
   const stopAllRptAudio = useCallback(() => {
@@ -2657,7 +2682,26 @@ export function DubVerseEditor({
    *  and restarts the stitch if it is still true — the "press Stop, it keeps
    *  playing" bug. Callers that move currentTime must do so AFTER this returns.
    */
+  /** Generation token for a transport play request.
+   *
+   *  Play resumes the AudioContext before starting the picture, so on a cold
+   *  context the actual video.play() is deferred until resume() settles. Any
+   *  stop that lands inside that window pauses a video that has not started yet,
+   *  and the deferred play() would then start it anyway — picture running with
+   *  no audio. isPlayingRef cannot guard this: it is still false during a new
+   *  play request. Every play takes a fresh token; every stop path bumps it; the
+   *  deferred play() only runs if its token is still current. */
+  const playRequestRef = useRef(0)
+  /** True while a play request is in flight but isPlaying hasn't flipped yet
+   *  (resume() or the stitch still pending). isPlaying alone can't mark this —
+   *  it's still false — so without it a second click meant to STOP enters the
+   *  start branch and issues another play. */
+  const playPendingRef = useRef(false)
   const playbackStop = useCallback(() => {
+    // Retire any play request still in flight — its deferred stitch/play must
+    // not land after this stop.
+    playRequestRef.current++
+    playPendingRef.current = false
     stopAllRptAudioRef.current()
     setIsPlaying(false)
     if (videoRef.current) videoRef.current.pause()
@@ -3609,8 +3653,15 @@ export function DubVerseEditor({
       const startTime = useEditorStore.getState().currentTime
       lastStartPosRef.current = startTime
       audioStartTimeRef.current = ctx.currentTime
+      // Per-run invalidation. rptCancelRef is shared across runs and the next
+      // play resets it to false, so on its own it cannot stop a callback left
+      // over from an earlier run — pause before the picture reports "playing",
+      // press play again, and the old listener or 400ms fallback would still
+      // fire and schedule a second copy of the audio, restarting it mid-word.
+      // The cleanup below flips this for its own run only.
+      let stale = false
       const doSchedule = () => {
-        if (rptCancelRef.current) return
+        if (rptCancelRef.current || stale) return
         // Kill any existing sources first so we never layer stitch playback.
         rptSourcesRef.current.forEach(s => { try { s.onended = null } catch {} try { s.stop() } catch {} try { s.disconnect() } catch {} })
         rptSourcesRef.current.clear()
@@ -3620,9 +3671,22 @@ export function DubVerseEditor({
           rptGainRef.current.connect(ctx.destination)
         }
         rptGainRef.current!.gain.value = isMutedRPT ? 0 : rptVolume / 100
+        // Start the audio where the picture ACTUALLY is at this instant, and pin
+        // the drift corrector's reference to the same instant. startTime is read
+        // from the store, which updates only every 250ms, and the picture may
+        // have moved on by the time this runs. Any gap left here is what the
+        // corrector later "fixes" by jumping the audio forward, audibly cutting
+        // words — so the gap must not exist in the first place.
+        const _v = videoRef.current
+        const _livePos = _v && !_v.paused
+          ? (sourceToTimelineTime(_v.currentTime, scenesRef.current) ?? _v.currentTime)
+          : startTime
+        const _from = Math.max(startTime, _livePos)
+        lastStartPosRef.current = _from
+        audioStartTimeRef.current = ctx.currentTime
         registerRptSource(scheduleRPTPlayback(
           rptBufferRef.current!,
-          rptOffsetFor(startTime),
+          rptOffsetFor(_from),
           ctx,
           rptGainRef.current!,
           rptPlaybackRate
@@ -3643,7 +3707,13 @@ export function DubVerseEditor({
       }
       const video = videoRef.current
       if (video && video.paused) {
+        // The fallback's guard used to compare a captured timestamp against a
+        // MOVING clock — ctx.currentTime is never equal 400ms later — so every
+        // play ran doSchedule twice: the line started, restarted mid-word 400ms
+        // in, then the drift corrector re-seated it again. One flag, one run.
+        let fired = false
         const onPlaying = () => {
+          fired = true
           // Re-pin to where the picture actually is now, not where it was when
           // Play was pressed.
           lastStartPosRef.current = useEditorStore.getState().currentTime
@@ -3653,13 +3723,21 @@ export function DubVerseEditor({
         video.addEventListener('playing', onPlaying, { once: true })
         // If the element never reports playing (already running, or a source that
         // will not start), do not hang silently.
-        setTimeout(() => {
-          if (audioStartTimeRef.current === ctx.currentTime) return
+        const fallback = setTimeout(() => {
+          if (fired) return
           video.removeEventListener('playing', onPlaying)
           armed()
         }, 400)
+        return () => {
+          stale = true
+          video.removeEventListener('playing', onPlaying)
+          clearTimeout(fallback)
+        }
       } else {
         armed()
+        // armed() may still be waiting on resume(); retire that pending schedule
+        // if this run is superseded before it lands.
+        return () => { stale = true }
       }
     } else {
       stopAllRptAudio()
@@ -4530,34 +4608,31 @@ export function DubVerseEditor({
       pendingScrubTime = null
       scrubSeeking = true
       let released = false
+      // Release on the element's own 'seeked' event, then wait two animation
+      // frames so the new frame is actually painted before the next seek can
+      // cancel it.
+      //
+      // requestVideoFrameCallback was tried here for the same purpose and broke
+      // scrubbing: it is not guaranteed to fire for a PAUSED element after a
+      // seek, so each seek sat waiting for the 400ms watchdog and the picture
+      // stopped following the needle. 'seeked' always fires when a seek lands,
+      // and rAF always fires on a visible tab, so this chain cannot stall.
+      const onSeeked = () => {
+        requestAnimationFrame(() => requestAnimationFrame(release))
+      }
       const release = () => {
         if (released) return
         released = true
+        v.removeEventListener('seeked', onSeeked)
         if (scrubWatchdog) { clearTimeout(scrubWatchdog); scrubWatchdog = null }
         scrubSeeking = false
         pumpScrubSeek()
       }
-      // Wait for a frame to be PRESENTED, not merely for the seek to report
-      // done. 'seeked' fires before the new frame reaches the screen, so
-      // chaining off it issued the next seek during the paint and cancelled it —
-      // which is what made the motion stutter unevenly rather than flow.
-      // requestVideoFrameCallback fires on actual presentation, so each seek
-      // gets to finish being shown before the next one starts.
-      const rvfc = (v as HTMLVideoElement & {
-        requestVideoFrameCallback?: (cb: () => void) => number
-      }).requestVideoFrameCallback
-      if (typeof rvfc === 'function') {
-        rvfc.call(v, release)
-      } else {
-        v.addEventListener('seeked', release, { once: true })
-      }
+      v.addEventListener('seeked', onSeeked, { once: true })
       // A stalled or buffering element may never fire 'seeked'. Without this the
       // latch would stay closed and the picture would freeze for the rest of the
-      // drag — the very fault this replaces.
-      scrubWatchdog = setTimeout(() => {
-        v.removeEventListener('seeked', release)
-        release()
-      }, 400)
+      // drag.
+      scrubWatchdog = setTimeout(release, 400)
       v.currentTime = timelineToSourceTime(t, scenesRef.current) ?? t
     }
 
@@ -5501,9 +5576,9 @@ export function DubVerseEditor({
       committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
     }))
     if (chunkModeRef.current) {
-      return stitchRPTWindow(overlaid, chunkStartRef.current, chunkEndRef.current, ctx)
+      return stitchRPTWindow(overlaid, chunkStartRef.current, chunkEndRef.current, ctx, crosslayerRangesRef.current)
     }
-    return stitchRPT(overlaid, videoDurationRef.current, ctx)
+    return stitchRPT(overlaid, videoDurationRef.current, ctx, crosslayerRangesRef.current)
     // jobId is needed to rebuild media URLs above. It is stable for the life of the
     // editor, but leaving it out of the deps would be a stale closure waiting to
     // happen if the editor ever switches job in place.
@@ -5618,12 +5693,21 @@ export function DubVerseEditor({
   const handlePlayToggle = useCallback(async (modeOverride?: 'original' | 'dubbed' | 'preview') => {
     const mode = modeOverride ?? playbackMode
     if (modeOverride && modeOverride !== playbackMode) setPlaybackMode(modeOverride)
+    // Set when this call starts playback, so the code after the resume() await
+    // can tell whether a stop retired the request while it was waiting.
+    let startRequest: number | null = null
     // Drive video play/pause synchronously BEFORE any await
     // so Chrome's autoplay policy isn't violated for audio
     if (videoRef.current) {
-      if (isPlaying) {
+      if (isPlaying || playPendingRef.current) {
+        // Pause — also covers a click that lands while a play is still pending:
+        // isPlaying is still false then, but the user meant STOP.
         // Pause: stop the stitch source directly + sync the ref so the
         // seek/effect races can't leave audio running under a paused video.
+        // Bumping the token retires any in-flight request so its deferred
+        // play() or stitch never lands.
+        playRequestRef.current++
+        playPendingRef.current = false
         stopAllRptAudio()
         videoRef.current.pause()
         // Persist the playhead so UI that reads currentTime state sees the
@@ -5652,7 +5736,35 @@ export function DubVerseEditor({
         rptCancelRef.current = false     // allow the stitch to (re)schedule
         const sourceFrom = timelineToSourceTime(_from, scenesRef.current) ?? _from
         videoRef.current.currentTime = sourceFrom
-        videoRef.current.play().catch(() => {})
+        // AUDIO ENGINE FIRST, PICTURE SECOND.
+        //
+        // The picture used to start here, before the AudioContext was resumed
+        // below. Resuming a cold context — always the case on the first play
+        // after load — takes a noticeable fraction of a second, and the picture
+        // ran on through it. The audio was then scheduled from the play point
+        // while the picture was already past it, the drift corrector saw the
+        // audio lagging, and jumped it forward to catch up — discarding
+        // everything in the gap. At 0:00 the gap is the opening words of the
+        // first line ("My name is"), which is why only that line lost them.
+        //
+        // resume() is still called inside the click, so the gesture requirement
+        // is met; play() follows once the engine is running, well within the
+        // browser's transient-activation window.
+        if (!audioContextRef.current) audioContextRef.current = new AudioContext()
+        const _ctx = audioContextRef.current
+        const _video = videoRef.current
+        const _request = ++playRequestRef.current
+        startRequest = _request
+        playPendingRef.current = true
+        if (_ctx.state === 'suspended') {
+          _ctx.resume().finally(() => {
+            // A stop inside the resume window retired this request.
+            if (playRequestRef.current !== _request) return
+            _video.play().catch(() => {})
+          })
+        } else {
+          _video.play().catch(() => {})
+        }
       }
     }
     // Create and resume AudioContext inside user gesture
@@ -5663,9 +5775,16 @@ export function DubVerseEditor({
     if (audioContextRef.current.state === 'suspended') {
       await audioContextRef.current.resume()
     }
+    // Stopped while waiting on resume(): the picture was never started (see the
+    // token check above), so do not turn the transport on either — that would
+    // schedule preview audio under a paused picture.
+    if (startRequest !== null && playRequestRef.current !== startRequest) return
     audioStartTimeRef.current = audioContextRef.current?.currentTime ?? null
     // If in Preview and buffer not ready, stitch first
-    if (mode === 'preview' && !isPlaying && !rptBufferRef.current) {
+    // startRequest is null on a stop click — including one that cancelled a
+    // pending play, where isPlaying is still false — so it must never enter the
+    // stitch-then-play path.
+    if (mode === 'preview' && startRequest !== null && !isPlaying && !rptBufferRef.current) {
       lastStartPosRef.current = currentTime
       const ctx = audioContextRef.current
       const resolved = displaySegmentsRef.current.map(seg => ({
@@ -5674,13 +5793,19 @@ export function DubVerseEditor({
         committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
       }))
       stitchWith(resolved, ctx).then(result => {
-        if (result) {
+        playPendingRef.current = false
+        // A stop retired this request while the stitch was running — don't
+        // flip isPlaying or schedule audio behind a paused picture.
+        if (result && playRequestRef.current === startRequest) {
           rptBufferRef.current = result.buffer
           setIsPlaying(true)
         }
       })
     } else {
-      setIsPlaying(!isPlaying)
+      playPendingRef.current = false
+      // Explicit, not a toggle: play requests start, stops stop. !isPlaying
+      // would wrongly flip playback ON for a click that cancelled a pending play.
+      setIsPlaying(startRequest !== null)
     }
   }, [isPlaying, currentTime, playbackMode, jobId, stitchWith, setIsPlaying, setCurrentTime, stopAllRptAudio, setPlaybackMode])
 
@@ -5695,6 +5820,9 @@ export function DubVerseEditor({
       handlePlayToggle('original')
       return
     }
+    // Either branch supersedes a transport play still waiting on resume().
+    playRequestRef.current++
+    playPendingRef.current = false
     if (srcPlaying) {
       a.pause()
       videoRef.current?.pause()
@@ -8222,20 +8350,37 @@ export function DubVerseEditor({
                         {overlapById.has(index) && overlapById.get(index)! > CROSSFADE_MAX_SEC && (() => {
                           const _by = overlapById.get(index)!
                           const _bad = _by > CROSSFADE_WARN_SEC
+                          // Inside a crosslayer range this overlap is an
+                          // INTERRUPTION, not a join: the interruption lands at
+                          // the later segment's start, which is what the mix
+                          // rule tests. Same check the stitcher runs.
+                          const _seg = displaySegments[index]
+                          const _s = effStart(_seg), _e = effEnd(_seg)
+                          let _pt = -1
+                          for (const o of displaySegments) {
+                            if (o === _seg) continue
+                            const os = effStart(o), oe = effEnd(o)
+                            if (os < _e - 0.001 && _s < oe - 0.001) _pt = Math.max(_pt, Math.max(_s, os))
+                          }
+                          const _layered = _pt >= 0 && crosslayerRanges.some(r => _pt >= r.start - 1e-4 && _pt <= r.end + 1e-4)
                           return (
                             <span
                               className={cn(
                                 'inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full border',
-                                _bad
-                                  ? 'border-red-500/50 bg-red-500/15 text-red-300'
-                                  : 'border-slate-600 bg-slate-700/40 text-slate-300',
+                                _layered
+                                  ? 'border-violet-500/50 bg-violet-500/15 text-violet-300'
+                                  : _bad
+                                    ? 'border-red-500/50 bg-red-500/15 text-red-300'
+                                    : 'border-slate-600 bg-slate-700/40 text-slate-300',
                               )}
-                              title={_bad
-                                ? `Overlaps a neighbour by ${_by.toFixed(2)}s — long enough that two lines are talking over each other. Still crossfaded, but worth shortening.`
-                                : `Crossfaded with its neighbour over ${_by.toFixed(2)}s.`}
+                              title={_layered
+                                ? `Interruption — both lines play together at full level for ${_by.toFixed(2)}s, no crossfade.`
+                                : _bad
+                                  ? `Overlaps a neighbour by ${_by.toFixed(2)}s — long enough that two lines are talking over each other. Still crossfaded, but worth shortening.`
+                                  : `Crossfaded with its neighbour over ${_by.toFixed(2)}s.`}
                             >
-                              {_bad && <AlertCircle className="h-2.5 w-2.5" />}
-                              {_bad ? `overlaps ${_by.toFixed(2)}s` : `crossfade ${_by.toFixed(2)}s`}
+                              {_bad && !_layered && <AlertCircle className="h-2.5 w-2.5" />}
+                              {_layered ? `interrupts ${_by.toFixed(2)}s` : _bad ? `overlaps ${_by.toFixed(2)}s` : `crossfade ${_by.toFixed(2)}s`}
                             </span>
                           )
                         })()}
@@ -10645,6 +10790,73 @@ export function DubVerseEditor({
               <span>✂️</span> {t('Scene')}
             </Button>
 
+            {/* Cross-layer switch — inside an enabled region, overlapping lines
+                play as an INTERRUPTION (both lines at full level through the
+                overlap) instead of a crossfade. Scoped to the
+                active chunk so talk-over sections can be turned on where a scene
+                needs them and left off everywhere else. */}
+            {(() => {
+              const lo = chunkMode && activeChunk !== null ? chunkStart : 0
+              const hi = chunkMode && activeChunk !== null ? chunkEnd : videoDuration
+              const covered = crosslayerRanges.some(r => r.start < hi - 0.01 && r.end > lo + 0.01)
+              return (
+                <button
+                  type="button"
+                  onClick={() => {
+                    // OFF removes any range INTERSECTING this chunk (boundaries
+                    // snap to segment ends and can drift after edits — requiring
+                    // exact coverage would leave a stale range behind).
+                    const next = covered
+                      ? crosslayerRanges.filter(r => r.end <= lo + 0.01 || r.start >= hi - 0.01)
+                      : [...crosslayerRanges, { start: lo, end: hi }]
+                    const previous = crosslayerRanges
+                    const seq = ++crosslayerSaveSeqRef.current
+                    // Write the ref immediately rather than waiting for the
+                    // re-render, so the rebuild below can never read the old list.
+                    crosslayerRangesRef.current = next
+                    setCrosslayerRanges(next)
+                    // The running buffer was stitched with the old mix rule —
+                    // rebuild it so toggling is audible immediately.
+                    const ctx = audioContextRef.current ?? new AudioContext()
+                    audioContextRef.current = ctx
+                    requestStitchWith(displaySegmentsRef.current, ctx)
+                    apiClient.updateCrosslayerRanges(jobId, next).catch(err => {
+                      // Not saved: put the switch and the preview back, or the
+                      // editor would play talk-over the render will not produce.
+                      // Superseded by a later toggle — that one owns the state now.
+                      if (crosslayerSaveSeqRef.current !== seq) {
+                        console.warn('[CROSSLAYER] stale save failed; a newer toggle owns the state', err)
+                        return
+                      }
+                      console.warn('[CROSSLAYER] persist failed — reverting toggle', err)
+                      crosslayerRangesRef.current = previous
+                      setCrosslayerRanges(previous)
+                      requestStitchWith(displaySegmentsRef.current, ctx)
+                    })
+                  }}
+                  title={covered
+                    ? t('Cross Layers ON for this section — overlapping lines play together at full level. Click to turn off.')
+                    : t('Cross Layers OFF — overlapping lines are crossfaded. Turn on for sections where one speaker talks over another.')}
+                  className={cn(
+                    'h-7 px-2 rounded text-[11px] font-medium transition-colors whitespace-nowrap flex items-center gap-1.5',
+                    covered ? 'text-slate-200' : 'text-slate-500 hover:text-slate-300',
+                  )}
+                >
+                  {t('Cross Layers')}
+                  <span
+                    className={cn(
+                      'px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wide border transition-colors',
+                      covered
+                        ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/50'
+                        : 'bg-slate-800 text-slate-500 border-slate-600',
+                    )}
+                  >
+                    {covered ? t('ON') : t('OFF')}
+                  </span>
+                </button>
+              )
+            })()}
+
           </div>
 
           {/* Zoom + panel tab toggles — grouped on the right */}
@@ -12333,8 +12545,15 @@ export function DubVerseEditor({
                         tl0?.querySelectorAll<HTMLElement>(`[data-drag-block="${index}"]`).forEach(el => dragEls.push(el))
                         dragLiveDeltaRef.current = 0
                         let lastDeltaTime = 0
+                        // Same two rules as the Dubbed track: a press is a click until
+                        // it travels a few pixels, and the delta is clamped so the block
+                        // stops at 0:00 with its length intact.
+                        let moved = false
+                        const clampDt = (dt: number) => Math.max(dt, -originalStart)
                         const onMouseMove = (ev: MouseEvent) => {
-                          const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
+                          if (!moved && Math.abs(ev.clientX - startX) < 4) return
+                          moved = true
+                          const deltaTime = clampDt((ev.clientX - startX) / PIXELS_PER_SECOND)
                           lastDeltaTime = deltaTime
                           dragLiveDeltaRef.current = deltaTime
                           const px = deltaTime * PIXELS_PER_SECOND
@@ -12343,9 +12562,19 @@ export function DubVerseEditor({
                         const onMouseUp = (ev: MouseEvent) => {
                           for (const el of dragEls) el.style.transform = ''
                           dragLiveDeltaRef.current = 0
+                          if (!moved) {
+                            setDraggingSegment(null)
+                            document.removeEventListener('mousemove', onMouseMove)
+                            document.removeEventListener('mouseup', onMouseUp)
+                            document.removeEventListener('pointercancel', onMouseUp)
+                            window.removeEventListener('blur', onMouseUp)
+                            dragMoveListenerRef.current = null
+                            dragUpListenerRef.current = null
+                            return
+                          }
                           // blur/pointercancel carry no clientX — fall back to the
                           // last live delta rather than committing NaN.
-                          const deltaTime = Number.isFinite(ev.clientX) ? (ev.clientX - startX) / PIXELS_PER_SECOND : lastDeltaTime
+                          const deltaTime = clampDt(Number.isFinite(ev.clientX) ? (ev.clientX - startX) / PIXELS_PER_SECOND : lastDeltaTime)
                           updateSegment(index, {
                             start_time: Math.max(0, originalStart + deltaTime),
                             end_time: Math.max(0, originalEnd + deltaTime),
@@ -12667,31 +12896,63 @@ export function DubVerseEditor({
                         tl1?.querySelectorAll<HTMLElement>(`[data-drag-block="${index}"]`).forEach(el => dragEls.push(el))
                         dragLiveDeltaRef.current = 0
                         let lastDeltaTime = 0
+                        // A press is a CLICK until the pointer travels a few pixels.
+                        // Without this, the jitter of an ordinary click to select or
+                        // play the block moved it, and every click wrote timing.
+                        const downX = e.clientX
+                        let moved = false
+                        // Never before 0:00, and never by changing the block's length:
+                        // clamp the DELTA, not start and end separately. Clamping each
+                        // end independently pinned start at 0 while end kept moving
+                        // left, so dragging the first segment past the origin silently
+                        // shortened it — and a shorter slot forced a faster take.
+                        const clampDt = (dt: number) => Math.max(dt, -originalStart)
                         const onMouseMove = (ev: MouseEvent) => {
-                          const deltaTime = (ev.clientX - startX) / PIXELS_PER_SECOND
+                          if (!moved && Math.abs(ev.clientX - downX) < 4) return
+                          moved = true
+                          const deltaTime = clampDt((ev.clientX - startX) / PIXELS_PER_SECOND)
                           lastDeltaTime = deltaTime
                           dragLiveDeltaRef.current = deltaTime
                           const px = deltaTime * PIXELS_PER_SECOND
                           for (const el of dragEls) el.style.transform = px ? `translateX(${px}px)` : ''
-                          // Auto-scroll when dragging near the right or left edge
+                          // Auto-scroll when dragging near the right or left edge.
+                          //
+                          // Compensate startX by how far the view ACTUALLY scrolled,
+                          // not by the requested step. At the left end the view is
+                          // already at scrollLeft 0 and cannot move, yet startX was
+                          // still shifted 12px per mousemove — so a block sitting in
+                          // the left 80px (the first segment always does) crept left
+                          // on its own with every tiny movement and slid under the
+                          // track label panel.
                           const timelineEl = timelineRef.current
                           if (timelineEl) {
                             const containerRect = timelineEl.getBoundingClientRect()
                             const edgeThreshold = 80 // px from edge to trigger scroll
                             const scrollSpeed = 12 // px per frame
+                            const before = timelineEl.scrollLeft
                             if (ev.clientX > containerRect.right - edgeThreshold) {
                               timelineEl.scrollLeft += scrollSpeed
-                              startX -= scrollSpeed
                             } else if (ev.clientX < containerRect.left + edgeThreshold) {
                               timelineEl.scrollLeft -= scrollSpeed
-                              startX += scrollSpeed
                             }
+                            startX -= timelineEl.scrollLeft - before
                           }
                         }
                         const onMouseUp = (ev: MouseEvent) => {
                           for (const el of dragEls) el.style.transform = ''
                           dragLiveDeltaRef.current = 0
-                          const deltaTime = Number.isFinite(ev.clientX) ? (ev.clientX - startX) / PIXELS_PER_SECOND : lastDeltaTime
+                          if (!moved) {
+                            // A click, not a drag: nothing moved, so write nothing.
+                            setDraggingSegment(null)
+                            document.removeEventListener('mousemove', onMouseMove)
+                            document.removeEventListener('mouseup', onMouseUp)
+                            document.removeEventListener('pointercancel', onMouseUp)
+                            window.removeEventListener('blur', onMouseUp)
+                            dragMoveListenerRef.current = null
+                            dragUpListenerRef.current = null
+                            return
+                          }
+                          const deltaTime = clampDt(Number.isFinite(ev.clientX) ? (ev.clientX - startX) / PIXELS_PER_SECOND : lastDeltaTime)
                           updateSegment(index, {
                             start_time: Math.max(0, originalStart + deltaTime),
                             end_time: Math.max(0, originalEnd + deltaTime),
