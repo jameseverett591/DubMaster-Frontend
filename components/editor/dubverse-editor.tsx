@@ -86,7 +86,7 @@ import { HeatmapBar } from '@/components/timeline/HeatmapBar'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { ExportModal } from '@/components/editor/export-modal'
 import { ReviewQueuePanel } from '@/components/editor/review-queue-panel'
-import { stitchRPT, stitchRPTWindow, overlayStagedEdits, clearCache, scheduleRPTPlayback, effStart, effEnd, CROSSFADE_MAX_SEC, CROSSFADE_WARN_SEC } from '@/lib/rpt-engine'
+import { stitchRPT, stitchRPTWindow, overlayStagedEdits, clearCache, scheduleRPTPlayback, effStart, effEnd, CROSSFADE_MAX_SEC, CROSSFADE_WARN_SEC, type CrosslayerRange } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { createClient } from '@/lib/supabase/client'
 
@@ -441,6 +441,9 @@ interface DubVerseEditorProps {
   onShare?: () => void
   onGenerateSpeech?: () => void
   onTranslateAndDub?: () => void
+  /** Regions where overlapping lines get the layered (interruption) mix instead
+   *  of a crossfade — persisted in segments.json, toggled from the transport bar. */
+  crosslayerRanges?: CrosslayerRange[]
   // Chunk-lens editor: persisted per-chunk status from segments.json
   chunkStatus?: Record<string, string>
   /** Deletion countdown from segments.json, surfaced by the editor page. */
@@ -978,6 +981,7 @@ export function DubVerseEditor({
   videoDuration,
   segments: initialSegments,
   scenes: initialScenes,
+  crosslayerRanges: initialCrosslayerRanges,
   snapshotSegments,
   qcScore,
   qcFindings = [],
@@ -2636,6 +2640,15 @@ export function DubVerseEditor({
   const rptCancelRef = useRef<boolean>(false)
   const scenesRef = useRef(scenes)
   scenesRef.current = scenes
+
+  /** Regions where an overlap is an INTERRUPTION, not a join: both lines hold
+   *  full level through the overlap instead of crossfading. Persisted in
+   *  segments.json as crosslayer_ranges; toggled per chunk from the transport
+   *  bar. The ref is what the stitch functions read — state would capture a
+   *  stale list inside the debounced rebuild. */
+  const [crosslayerRanges, setCrosslayerRanges] = useState<CrosslayerRange[]>(initialCrosslayerRanges ?? [])
+  const crosslayerRangesRef = useRef(crosslayerRanges)
+  crosslayerRangesRef.current = crosslayerRanges
 
   // Authoritative "silence everything now" — stops every registered stitch source,
   // syncs the refs so nothing reschedules. Callers handle the video element.
@@ -5553,9 +5566,9 @@ export function DubVerseEditor({
       committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
     }))
     if (chunkModeRef.current) {
-      return stitchRPTWindow(overlaid, chunkStartRef.current, chunkEndRef.current, ctx)
+      return stitchRPTWindow(overlaid, chunkStartRef.current, chunkEndRef.current, ctx, crosslayerRangesRef.current)
     }
-    return stitchRPT(overlaid, videoDurationRef.current, ctx)
+    return stitchRPT(overlaid, videoDurationRef.current, ctx, crosslayerRangesRef.current)
     // jobId is needed to rebuild media URLs above. It is stable for the life of the
     // editor, but leaving it out of the deps would be a stale closure waiting to
     // happen if the editor ever switches job in place.
@@ -8311,20 +8324,37 @@ export function DubVerseEditor({
                         {overlapById.has(index) && overlapById.get(index)! > CROSSFADE_MAX_SEC && (() => {
                           const _by = overlapById.get(index)!
                           const _bad = _by > CROSSFADE_WARN_SEC
+                          // Inside a crosslayer range this overlap is an
+                          // INTERRUPTION, not a join: the interruption lands at
+                          // the later segment's start, which is what the mix
+                          // rule tests. Same check the stitcher runs.
+                          const _seg = displaySegments[index]
+                          const _s = effStart(_seg), _e = effEnd(_seg)
+                          let _pt = -1
+                          for (const o of displaySegments) {
+                            if (o === _seg) continue
+                            const os = effStart(o), oe = effEnd(o)
+                            if (os < _e - 0.001 && _s < oe - 0.001) _pt = Math.max(_pt, Math.max(_s, os))
+                          }
+                          const _layered = _pt >= 0 && crosslayerRanges.some(r => _pt >= r.start - 1e-4 && _pt <= r.end + 1e-4)
                           return (
                             <span
                               className={cn(
                                 'inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full border',
-                                _bad
-                                  ? 'border-red-500/50 bg-red-500/15 text-red-300'
-                                  : 'border-slate-600 bg-slate-700/40 text-slate-300',
+                                _layered
+                                  ? 'border-violet-500/50 bg-violet-500/15 text-violet-300'
+                                  : _bad
+                                    ? 'border-red-500/50 bg-red-500/15 text-red-300'
+                                    : 'border-slate-600 bg-slate-700/40 text-slate-300',
                               )}
-                              title={_bad
-                                ? `Overlaps a neighbour by ${_by.toFixed(2)}s — long enough that two lines are talking over each other. Still crossfaded, but worth shortening.`
-                                : `Crossfaded with its neighbour over ${_by.toFixed(2)}s.`}
+                              title={_layered
+                                ? `Interruption — both lines play together at full level for ${_by.toFixed(2)}s, no crossfade.`
+                                : _bad
+                                  ? `Overlaps a neighbour by ${_by.toFixed(2)}s — long enough that two lines are talking over each other. Still crossfaded, but worth shortening.`
+                                  : `Crossfaded with its neighbour over ${_by.toFixed(2)}s.`}
                             >
-                              {_bad && <AlertCircle className="h-2.5 w-2.5" />}
-                              {_bad ? `overlaps ${_by.toFixed(2)}s` : `crossfade ${_by.toFixed(2)}s`}
+                              {_bad && !_layered && <AlertCircle className="h-2.5 w-2.5" />}
+                              {_layered ? `interrupts ${_by.toFixed(2)}s` : _bad ? `overlaps ${_by.toFixed(2)}s` : `crossfade ${_by.toFixed(2)}s`}
                             </span>
                           )
                         })()}
@@ -10733,6 +10763,57 @@ export function DubVerseEditor({
             >
               <span>✂️</span> {t('Scene')}
             </Button>
+
+            {/* Cross-layer switch — inside an enabled region, overlapping lines
+                play as an INTERRUPTION (both lines at full level through the
+                overlap) instead of a crossfade. Scoped to the
+                active chunk so talk-over sections can be turned on where a scene
+                needs them and left off everywhere else. */}
+            {(() => {
+              const lo = chunkMode && activeChunk !== null ? chunkStart : 0
+              const hi = chunkMode && activeChunk !== null ? chunkEnd : videoDuration
+              const covered = crosslayerRanges.some(r => r.start < hi - 0.01 && r.end > lo + 0.01)
+              return (
+                <button
+                  type="button"
+                  onClick={() => {
+                    // OFF removes any range INTERSECTING this chunk (boundaries
+                    // snap to segment ends and can drift after edits — requiring
+                    // exact coverage would leave a stale range behind).
+                    const next = covered
+                      ? crosslayerRanges.filter(r => r.end <= lo + 0.01 || r.start >= hi - 0.01)
+                      : [...crosslayerRanges, { start: lo, end: hi }]
+                    setCrosslayerRanges(next)
+                    apiClient.updateCrosslayerRanges(jobId, next)
+                      .catch(err => console.warn('[CROSSLAYER] persist failed', err))
+                    // The running buffer was stitched with the old mix rule —
+                    // rebuild it so toggling is audible immediately.
+                    const ctx = audioContextRef.current ?? new AudioContext()
+                    audioContextRef.current = ctx
+                    requestStitchWith(displaySegmentsRef.current, ctx)
+                  }}
+                  title={covered
+                    ? t('Cross Layers ON for this section — overlapping lines play together at full level. Click to turn off.')
+                    : t('Cross Layers OFF — overlapping lines are crossfaded. Turn on for sections where one speaker talks over another.')}
+                  className={cn(
+                    'h-7 px-2 rounded text-[11px] font-medium transition-colors whitespace-nowrap flex items-center gap-1.5',
+                    covered ? 'text-slate-200' : 'text-slate-500 hover:text-slate-300',
+                  )}
+                >
+                  {t('Cross Layers')}
+                  <span
+                    className={cn(
+                      'px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wide border transition-colors',
+                      covered
+                        ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/50'
+                        : 'bg-slate-800 text-slate-500 border-slate-600',
+                    )}
+                  >
+                    {covered ? t('ON') : t('OFF')}
+                  </span>
+                </button>
+              )
+            })()}
 
           </div>
 

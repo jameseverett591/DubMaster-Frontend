@@ -1825,6 +1825,18 @@ class DubVerseAPIClient {
     return res.json()
   }
 
+  /** Regions where overlapping lines are mixed as interruptions (both voices at
+   *  full level) instead of crossfaded. The editor's Cross Layers toggle writes these. */
+  async updateCrosslayerRanges(jobId: string, ranges: { start: number; end: number }[]): Promise<{ crosslayer_ranges: { start: number; end: number }[] }> {
+    const res = await this._fetch(`${this.baseURL}/api/crosslayer/${jobId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ crosslayer_ranges: ranges }),
+    })
+    if (!res.ok) throw new Error(await this._detail(res))
+    return res.json()
+  }
+
   async renderScenePreview(jobId: string, sceneId: string): Promise<{ url: string; job_id: string; scene_id: string }> {
     const res = await this._fetch(`${this.baseURL}/api/render/scene/${jobId}/${sceneId}`, {
       method: 'POST',
