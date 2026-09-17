@@ -4603,34 +4603,31 @@ export function DubVerseEditor({
       pendingScrubTime = null
       scrubSeeking = true
       let released = false
+      // Release on the element's own 'seeked' event, then wait two animation
+      // frames so the new frame is actually painted before the next seek can
+      // cancel it.
+      //
+      // requestVideoFrameCallback was tried here for the same purpose and broke
+      // scrubbing: it is not guaranteed to fire for a PAUSED element after a
+      // seek, so each seek sat waiting for the 400ms watchdog and the picture
+      // stopped following the needle. 'seeked' always fires when a seek lands,
+      // and rAF always fires on a visible tab, so this chain cannot stall.
+      const onSeeked = () => {
+        requestAnimationFrame(() => requestAnimationFrame(release))
+      }
       const release = () => {
         if (released) return
         released = true
+        v.removeEventListener('seeked', onSeeked)
         if (scrubWatchdog) { clearTimeout(scrubWatchdog); scrubWatchdog = null }
         scrubSeeking = false
         pumpScrubSeek()
       }
-      // Wait for a frame to be PRESENTED, not merely for the seek to report
-      // done. 'seeked' fires before the new frame reaches the screen, so
-      // chaining off it issued the next seek during the paint and cancelled it —
-      // which is what made the motion stutter unevenly rather than flow.
-      // requestVideoFrameCallback fires on actual presentation, so each seek
-      // gets to finish being shown before the next one starts.
-      const rvfc = (v as HTMLVideoElement & {
-        requestVideoFrameCallback?: (cb: () => void) => number
-      }).requestVideoFrameCallback
-      if (typeof rvfc === 'function') {
-        rvfc.call(v, release)
-      } else {
-        v.addEventListener('seeked', release, { once: true })
-      }
+      v.addEventListener('seeked', onSeeked, { once: true })
       // A stalled or buffering element may never fire 'seeked'. Without this the
       // latch would stay closed and the picture would freeze for the rest of the
-      // drag — the very fault this replaces.
-      scrubWatchdog = setTimeout(() => {
-        v.removeEventListener('seeked', release)
-        release()
-      }, 400)
+      // drag.
+      scrubWatchdog = setTimeout(release, 400)
       v.currentTime = timelineToSourceTime(t, scenesRef.current) ?? t
     }
 
