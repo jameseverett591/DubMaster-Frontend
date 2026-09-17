@@ -2649,6 +2649,11 @@ export function DubVerseEditor({
   const [crosslayerRanges, setCrosslayerRanges] = useState<CrosslayerRange[]>(initialCrosslayerRanges ?? [])
   const crosslayerRangesRef = useRef(crosslayerRanges)
   crosslayerRangesRef.current = crosslayerRanges
+  /** Sequence number for Cross Layers saves. Toggling twice quickly leaves two
+   *  requests in flight; if the OLDER one fails after the newer one succeeded,
+   *  its rollback would restore the older list and the editor would then play a
+   *  setting the export does not have. Only the latest toggle may roll back. */
+  const crosslayerSaveSeqRef = useRef(0)
 
   // Authoritative "silence everything now" — stops every registered stitch source,
   // syncs the refs so nothing reschedules. Callers handle the video element.
@@ -10805,6 +10810,7 @@ export function DubVerseEditor({
                       ? crosslayerRanges.filter(r => r.end <= lo + 0.01 || r.start >= hi - 0.01)
                       : [...crosslayerRanges, { start: lo, end: hi }]
                     const previous = crosslayerRanges
+                    const seq = ++crosslayerSaveSeqRef.current
                     // Write the ref immediately rather than waiting for the
                     // re-render, so the rebuild below can never read the old list.
                     crosslayerRangesRef.current = next
@@ -10817,6 +10823,11 @@ export function DubVerseEditor({
                     apiClient.updateCrosslayerRanges(jobId, next).catch(err => {
                       // Not saved: put the switch and the preview back, or the
                       // editor would play talk-over the render will not produce.
+                      // Superseded by a later toggle — that one owns the state now.
+                      if (crosslayerSaveSeqRef.current !== seq) {
+                        console.warn('[CROSSLAYER] stale save failed; a newer toggle owns the state', err)
+                        return
+                      }
                       console.warn('[CROSSLAYER] persist failed — reverting toggle', err)
                       crosslayerRangesRef.current = previous
                       setCrosslayerRanges(previous)

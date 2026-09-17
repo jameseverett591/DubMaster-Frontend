@@ -3190,7 +3190,10 @@ class DubbingService:
         for _r in (crosslayer_ranges or []):
             try:
                 _lo, _hi = float(_r.get("start")), float(_r.get("end"))
-                if math.isfinite(_lo) and math.isfinite(_hi) and _hi > _lo:
+                # Same bounds the route enforces. A legacy or hand-edited
+                # {"start": -1, "end": 60} would otherwise suppress fades for
+                # every line starting before 60s.
+                if math.isfinite(_lo) and math.isfinite(_hi) and _lo >= 0 and _hi > _lo:
                     _cl_ranges.append((_lo, _hi))
                     continue
             except (AttributeError, TypeError, ValueError):
