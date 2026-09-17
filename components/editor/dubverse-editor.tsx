@@ -2655,6 +2655,14 @@ export function DubVerseEditor({
    *  setting the export does not have. Only the latest toggle may roll back. */
   const crosslayerSaveSeqRef = useRef(0)
 
+  /** Edits committed since the last rebuild. The film on disk predates them, so
+   *  exporting now would hand over a render missing this work. The rebuild
+   *  clears these, so this is empty again the moment the film is current. */
+  const unrenderedEdits = useMemo(
+    () => displaySegments.filter(seg => seg.rpt_dirty).length,
+    [displaySegments],
+  )
+
   // Authoritative "silence everything now" — stops every registered stitch source,
   // syncs the refs so nothing reschedules. Callers handle the video element.
   const stopAllRptAudio = useCallback(() => {
@@ -7600,7 +7608,12 @@ export function DubVerseEditor({
             size="sm"
             className="h-8 bg-amber-500 hover:bg-amber-600 text-black font-medium"
             onClick={() => setShowExportModal(true)}
-            title={t('Export: choose resolution and format, then save to your downloads')}
+            disabled={isRebuilding || unrenderedEdits > 0}
+            title={unrenderedEdits > 0
+              ? t('{count} edit(s) are not in the rendered film yet — press Make Movie, review it, then export', { count: unrenderedEdits })
+              : isRebuilding
+                ? t('Rebuilding — export once it finishes and you have reviewed it')
+                : t('Export: choose resolution and format, then save to your downloads')}
           >
             <Upload className="h-4 w-4 mr-1" />
             {t('Export')}
