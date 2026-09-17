@@ -7422,30 +7422,42 @@ async def export_video(job_id: str, body: ExportRequest, request: Request):
         # this stamp existed. It cannot be relied on alone: the editor writes it
         # into its own store but no route persists it, so after a reload there is
         # nothing to compare.
-        _stamps = [s for s in [_seg_data.get("last_edit_at")] if s]
-        _stamps += [
+        _film_ts = os.path.getmtime(src)
+        # Two signals, two tolerances. last_edit_at comes from this machine's
+        # clock, the same one that timestamps the film, so ANY edit after the
+        # render counts — a five-second grace there would pass off a film that
+        # genuinely lacks the work. committed_at comes from the browser, so it
+        # keeps the tolerance to absorb clock drift between machines.
+        _server_stamp = _seg_data.get("last_edit_at")
+        _client_stamps = [
             _s.get("committed_at")
             for _s in (_seg_data.get("segments") or [])
             if _s.get("committed_at")
         ]
-        if _stamps:
-            _newest = max(_stamps)
+        _newest, _edit_ts, _stale = None, None, False
+        if _server_stamp:
+            _newest = _server_stamp
             _edit_ts = datetime.fromisoformat(str(_newest).replace("Z", "+00:00")).timestamp()
-            _film_ts = os.path.getmtime(src)
-            if _edit_ts > _film_ts + _STALE_TOLERANCE_S:
-                _mins = (_edit_ts - _film_ts) / 60.0
-                logger.info(
-                    f"[EXPORT] job={job_id} refused: {chosen} written "
-                    f"{_mins:.0f} min before the newest edit ({_newest})"
-                )
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "This film was rendered before your most recent edits, so it "
-                        "does not contain them. Press Make Movie to rebuild, review it, "
-                        "then export."
-                    ),
-                )
+            _stale = _edit_ts > _film_ts
+        if not _stale and _client_stamps:
+            _client_newest = max(_client_stamps)
+            _client_ts = datetime.fromisoformat(str(_client_newest).replace("Z", "+00:00")).timestamp()
+            if _client_ts > _film_ts + _STALE_TOLERANCE_S:
+                _newest, _edit_ts, _stale = _client_newest, _client_ts, True
+        if _stale:
+            _mins = (_edit_ts - _film_ts) / 60.0
+            logger.info(
+                f"[EXPORT] job={job_id} refused: {chosen} written "
+                f"{_mins:.0f} min before the newest edit ({_newest})"
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This film was rendered before your most recent edits, so it "
+                    "does not contain them. Press Make Movie to rebuild, review it, "
+                    "then export."
+                ),
+            )
     except HTTPException:
         raise
     except Exception as _stale_err:
@@ -7664,6 +7676,8 @@ async def update_scenes(job_id: str, body: Dict[str, Any] = Body(default={})):
         def _update_scenes() -> None:
             with open(segments_path, "r", encoding="utf-8") as f:
                 data = _json.load(f)
+            if data.get("scenes") == scenes:
+                return  # identical save — the rendered film is still current
             data["scenes"] = scenes
             stamp_job_edited(data)  # film is now out of date — see export staleness guard
             atomic_write_json(segments_path, data)
@@ -7710,6 +7724,8 @@ async def update_crosslayer_ranges(job_id: str, body: Dict[str, Any] = Body(defa
         def _update_ranges() -> None:
             with open(segments_path, "r", encoding="utf-8") as f:
                 data = _json.load(f)
+            if data.get("crosslayer_ranges") == ranges:
+                return  # identical save — the rendered film is still current
             data["crosslayer_ranges"] = ranges
             stamp_job_edited(data)  # film is now out of date — see export staleness guard
             atomic_write_json(segments_path, data)

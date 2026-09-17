@@ -2657,6 +2657,10 @@ export function DubVerseEditor({
   /** When the running rebuild began reading the job, so edits made during it
    *  can be told apart from edits the film already contains. */
   const rebuildStartedAtRef = useRef(0)
+  /** Scenes and cross-layer regions as they stood when the running rebuild was
+   *  requested — what it actually renders. Promoted to renderedSnapshot on
+   *  success. */
+  const pendingSnapshotRef = useRef<{ scenes: string; ranges: string } | null>(null)
 
   /** What the last rebuild actually rendered: the scene list and cross-layer
    *  regions as they stood when it finished.
@@ -6253,6 +6257,14 @@ export function DubVerseEditor({
     // Anything committed after this moment is not in the film this rebuild
     // produces, however fast the render is.
     rebuildStartedAtRef.current = Date.now()
+    // Capture scenes and regions as the remix will read them — NOW, at request
+    // time. Reading them when the rebuild finishes would treat an edit made
+    // while it ran as though the film contained it. Taken here, such an edit
+    // differs from the snapshot and correctly holds Export shut.
+    pendingSnapshotRef.current = {
+      scenes: JSON.stringify(useEditorStore.getState().scenes),
+      ranges: JSON.stringify(crosslayerRangesRef.current),
+    }
     setRebuildError(null)
     setIsRebuilding(true)
     setRebuildStatus('processing')
@@ -6291,10 +6303,7 @@ export function DubVerseEditor({
           return base.map(seg => keys.has(getSegmentKey(seg)) ? { ...seg, rpt_dirty: true } : seg)
         })
       }
-      setRenderedSnapshot({
-        scenes: JSON.stringify(useEditorStore.getState().scenes),
-        ranges: JSON.stringify(crosslayerRangesRef.current),
-      })
+      setRenderedSnapshot(pendingSnapshotRef.current)
       // NO export dialog here. Every stage of a dub has to be checked by eye and
       // by ear before it leaves the building, so a rebuild ends in the editor
       // with the finished film loaded for review. Export is a separate, deliberate

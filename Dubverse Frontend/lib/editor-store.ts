@@ -384,9 +384,19 @@ export const useEditorStore = create<EditorState>(
       i === index ? { ...seg, rpt_dirty: true } : seg
     ),
   })),
-  clearAllDirty: () => set((state) => ({
-    segments: state.segments.map((seg) => ({ ...seg, rpt_dirty: false })),
-  })),
+  // BOTH arrays. displaySegments prefers importedSegments whenever it is
+  // seeded, so clearing only `segments` left the flags the editor actually reads
+  // untouched — after a rebuild the export gate would stay shut for good.
+  clearAllDirty: () => set((state) => {
+    const clear = (list: Segment[]): Segment[] => list.map((seg) => ({ ...seg, rpt_dirty: false }))
+    return {
+      segments: clear(state.segments),
+      // Only when seeded: displaySegments prefers importedSegments, so leaving
+      // it untouched kept the flags the editor actually reads and held the
+      // export gate shut after a successful rebuild.
+      ...(state.importedSegments ? { importedSegments: clear(state.importedSegments) } : {}),
+    }
+  }),
 
   // Scene actions
   setScenes: (scenes) => set({ scenes }),

@@ -178,6 +178,11 @@ def stamp_job_edited(data) -> None:
     Nothing clears it: the comparison is by time, so the next render simply
     writes a newer film and the job reads as current again.
     """
+    # A legacy segments.json is a bare LIST of segments with nowhere to put a
+    # document field. Stamping one raised TypeError and lost the write, so skip
+    # it: those jobs fall back to the committed_at comparison in the guard.
+    if not isinstance(data, dict):
+        return
     data["last_edit_at"] = datetime.utcnow().isoformat() + "Z"
 
 
