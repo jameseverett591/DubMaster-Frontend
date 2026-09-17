@@ -165,6 +165,22 @@ MEANING_DIVERGENCE_THRESHOLD = 0.7
 ACCOMPANIMENT_MAX_DURATION_S = 600
 
 
+def stamp_job_edited(data) -> None:
+    """Record, on the server's clock, that this job changed in a way the film
+    does not yet contain.
+
+    Export compares this against the rendered film's timestamp to refuse a stale
+    export. It has to be stamped here rather than trusted from the browser: the
+    editor stamps committed_at in its own store, but no route persists it, so a
+    reload or a direct call would find nothing and let a stale film through. A
+    server stamp also removes any dependence on the client's clock.
+
+    Nothing clears it: the comparison is by time, so the next render simply
+    writes a newer film and the job reads as current again.
+    """
+    data["last_edit_at"] = datetime.utcnow().isoformat() + "Z"
+
+
 def atomic_write_json(path: str, data, indent: int = 2) -> None:
     """Write JSON so a reader can never see a half-written file.
 
@@ -5101,6 +5117,7 @@ class DubbingService:
 
         if not stage:
             data["regenerated_at"] = datetime.utcnow().isoformat() + "Z"
+            stamp_job_edited(data)  # a new take means the rendered film is out of date
             atomic_write_json(segments_path, data)
 
             try:

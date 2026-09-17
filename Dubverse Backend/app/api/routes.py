@@ -45,7 +45,7 @@ from app.pipeline.diarize_audio import diarize_audio
 from app.pipeline.transcribe_audio import transcribe_audio
 from app.pipeline.velma_diarize import velma_diarize
 from app.pipeline.classify_speakers import classify_speakers
-from app.services.dubbing_service import dubbing_service, atomic_write_json
+from app.services.dubbing_service import dubbing_service, atomic_write_json, stamp_job_edited
 from app.services.lipsync_service import lipsync_service
 from app.services.transcription_service import transcription_service
 from app.services.elevenlabs_tts import elevenlabs_tts
@@ -5211,6 +5211,7 @@ async def translate_only(request: DubRequest, http_request: Request):
             for seg in transcript_dicts
         ],
     }
+    stamp_job_edited(payload)  # film is now out of date — see export staleness guard
     atomic_write_json(segments_path, payload)
 
     await job_manager.update_job_status(
@@ -6506,6 +6507,7 @@ async def rediarize_with_velma(job_id: str, request: Request):
         write_data = segments_doc
     else:
         write_data = disk_segs
+    stamp_job_edited(write_data)  # film is now out of date — see export staleness guard
     atomic_write_json(segments_path, write_data)
 
     # Update in-memory job transcript segments too
@@ -7364,7 +7366,12 @@ async def export_video(job_id: str, body: ExportRequest, request: Request):
     _lang = None
     try:
         _job = await _get_or_rehydrate_job(job_id)
-        _lang = normalize_language_code(getattr(_job, "target_language", None) or "") if _job else None
+        # Guard the raw value: normalize_language_code("") returns "en", so an
+        # unset target_language on a rehydrated job would silently become English
+        # and skip the segments.json fallback below — picking a stale dubbed_en.mp4
+        # on a job actually rendered in another language.
+        _raw_lang = getattr(_job, "target_language", None) if _job else None
+        _lang = normalize_language_code(_raw_lang) if _raw_lang else None
     except Exception:
         _lang = None
     if not _lang:
@@ -7405,11 +7412,22 @@ async def export_video(job_id: str, body: ExportRequest, request: Request):
     _STALE_TOLERANCE_S = 5.0
     try:
         with open(os.path.join(output_dir, "segments.json"), "r", encoding="utf-8") as _sf:
-            _stamps = [
-                _s.get("committed_at")
-                for _s in (_json.load(_sf).get("segments") or [])
-                if _s.get("committed_at")
-            ]
+            _seg_data = _json.load(_sf)
+        # last_edit_at is stamped server-side by every route that changes what the
+        # next film will contain: segment commits, syncs, resets, regenerated
+        # takes, performances, scene edits, cross-layer regions, re-diarize and
+        # re-translate. It is the authoritative signal.
+        #
+        # committed_at is kept only as a secondary source for jobs edited before
+        # this stamp existed. It cannot be relied on alone: the editor writes it
+        # into its own store but no route persists it, so after a reload there is
+        # nothing to compare.
+        _stamps = [s for s in [_seg_data.get("last_edit_at")] if s]
+        _stamps += [
+            _s.get("committed_at")
+            for _s in (_seg_data.get("segments") or [])
+            if _s.get("committed_at")
+        ]
         if _stamps:
             _newest = max(_stamps)
             _edit_ts = datetime.fromisoformat(str(_newest).replace("Z", "+00:00")).timestamp()
@@ -7647,6 +7665,7 @@ async def update_scenes(job_id: str, body: Dict[str, Any] = Body(default={})):
             with open(segments_path, "r", encoding="utf-8") as f:
                 data = _json.load(f)
             data["scenes"] = scenes
+            stamp_job_edited(data)  # film is now out of date — see export staleness guard
             atomic_write_json(segments_path, data)
 
         await asyncio.to_thread(_update_scenes)
@@ -7692,6 +7711,7 @@ async def update_crosslayer_ranges(job_id: str, body: Dict[str, Any] = Body(defa
             with open(segments_path, "r", encoding="utf-8") as f:
                 data = _json.load(f)
             data["crosslayer_ranges"] = ranges
+            stamp_job_edited(data)  # film is now out of date — see export staleness guard
             atomic_write_json(segments_path, data)
 
         await asyncio.to_thread(_update_ranges)
@@ -7887,6 +7907,7 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         seg["translation_flagged"] = False
         seg["flag_reason"] = None
     data["segments"] = segs
+    stamp_job_edited(data)  # film is now out of date — see export staleness guard
     atomic_write_json(segments_path, data)
     return {"status": "ok", "job_id": job_id, "index": index, "translation_flagged": seg.get("translation_flagged", False)}
 
@@ -8118,6 +8139,7 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest):
     data["segments"] = result
     data["synced_at"] = _dt.utcnow().isoformat() + "Z"
 
+    stamp_job_edited(data)  # film is now out of date — see export staleness guard
     atomic_write_json(segments_path, data)
 
     from app.services.segment_validation import validate_segments
@@ -8172,6 +8194,7 @@ async def reset_segment(job_id: str, index: int):
     ):
         seg.pop(key, None)
     data["segments"] = segs
+    stamp_job_edited(data)  # film is now out of date — see export staleness guard
     atomic_write_json(segments_path, data)
     try:
         supabase_writer.table("segments").update({
@@ -8411,6 +8434,7 @@ async def perform_segment(
                "respeecher_fits", "respeecher_duration"):
         seg.pop(_k, None)
 
+    stamp_job_edited(data)  # film is now out of date — see export staleness guard
     atomic_write_json(segments_path, data)
 
     logger.info(
