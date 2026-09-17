@@ -731,12 +731,15 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
             onClick={handleStartDubbing}
             disabled={isAnalyzing || isDubbing}
             // Teal pulsing outline marks this as the next step: analysis is
-            // done, nothing is dubbing, and this job has never been dubbed.
-            // dubbingComplete is checked as well as the URL because a finished
-            // job can report complete with no dubbed_video_url — on that job the
-            // button pulsed forever, nagging about work already done.
+            // done, nothing is dubbing, and this job has no dubbed video yet.
+            //
+            // Do NOT gate on dubbingComplete. It is set as soon as the job's
+            // status reads "completed", which happens when the ANALYSIS pipeline
+            // finishes — exactly the moment this button becomes the next step.
+            // Gating on it switched the pulse off permanently. The existence of
+            // a dubbed video is the real "already dubbed" signal.
             className={`gap-2 h-8 text-sm ${
-              !isAnalyzing && !isDubbing && !dubbingComplete && !dubbedVideoUrl
+              !isAnalyzing && !isDubbing && !dubbedVideoUrl
                 ? "generate-dub-cta"
                 : ""
             }`}
