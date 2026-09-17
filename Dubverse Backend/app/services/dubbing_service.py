@@ -2163,11 +2163,23 @@ class DubbingService:
                 f"[STAGE] fit/trim (sequential): {_stage_t['fit'] - _stage_t['tts']:.1f}s"
             )
 
+            # Cross-layer regions are editor intent saved on segments.json —
+            # absent on a first dub (file not written yet), present on re-renders.
+            _cl_path = os.path.join(output_dir, "segments.json")
+            _cl_ranges: List[Dict] = []
+            try:
+                if os.path.exists(_cl_path):
+                    with open(_cl_path, "r", encoding="utf-8") as _clf:
+                        _cl_ranges = json.load(_clf).get("crosslayer_ranges") or []
+            except Exception:
+                pass
+
             success = await asyncio.to_thread(
                 self._merge_audio_segments,
                 audio_segments,
                 merged_audio,
                 video_duration,
+                _cl_ranges,
             )
             _stage_t["merge"] = time.monotonic()
             logger.info(
@@ -2997,54 +3009,23 @@ class DubbingService:
         self,
         input_path: str,
         output_path: str,
-        silence_threshold_db: float = -50.0,
-        min_silence_duration: float = 0.03,
-        pre_roll: float = 0.04,
+        silence_threshold_db: float = -40.0,
+        min_silence_duration: float = 0.02,
     ) -> bool:
-        """Remove leading silence from a TTS audio file, preserving the onset.
-
+        """Remove leading silence from a TTS audio file.
         Fish Audio inline cloning often prepends silence before speech, and
-        residual lead-ins of 30-100ms are audible in lip-sync — hence the tight
-        floor. But the old silenceremove at -40dB cut at the -40dB CROSSING,
-        which sits inside the attack ramp of a soft first phoneme (a vowel or
-        nasal rises from ~-55dB over 30-80ms). The first word lost its attack
-        and sounded half-uttered on every segment.
-
-        Detect the onset at -50dB instead — low enough to catch the foot of
-        that ramp — then cut pre_roll ms BEFORE it, so the whole attack is
-        kept and the line still lands on time.
+        residual lead-ins of 30-100ms are audible in lip-sync — hence 20ms,
+        not the old 100ms floor that let them through.
         """
         try:
-            # Locate the end of the leading silence run, if there is one.
-            detect = subprocess.run(
-                [
-                    "ffmpeg", "-i", input_path,
-                    "-af", (
-                        f"silencedetect=noise={silence_threshold_db}dB"
-                        f":d={min_silence_duration}"
-                    ),
-                    "-f", "null", "-",
-                ],
-                capture_output=True, text=True,
-            )
-            m_start = re.search(r"silence_start:\s*([\d.]+)", detect.stderr or "")
-            m_end = re.search(r"silence_end:\s*([\d.]+)", detect.stderr or "")
-            # Only trim when the head actually IS silent: the first silence run
-            # must begin at the very first sample. A 50ms allowance here was
-            # enough to misread a real opening — a plosive burst or short
-            # consonant of under 50ms followed by its closure gap — as leading
-            # silence, and the cut then landed after the burst and discarded the
-            # sound. A genuinely silent head is reported as starting at 0.
-            if not m_start or not m_end or float(m_start.group(1)) > 0.005:
-                return False
-            onset = float(m_end.group(1))
-            start = max(0.0, onset - pre_roll)
-            if start < 0.01:
-                return False  # nothing worth removing
             cmd = [
                 "ffmpeg", "-y",
-                "-ss", f"{start:.3f}",
                 "-i", input_path,
+                "-af", (
+                    f"silenceremove=start_periods=1"
+                    f":start_silence={min_silence_duration}"
+                    f":start_threshold={silence_threshold_db}dB"
+                ),
                 "-ar", "44100",
                 "-ac", "2",
                 output_path
@@ -3052,6 +3033,7 @@ class DubbingService:
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 return False
+            # Sanity: if output is empty or shorter than 0.1s, keep original
             if not os.path.exists(output_path):
                 return False
             return True
@@ -3090,6 +3072,7 @@ class DubbingService:
         segments: List[Dict],
         output_path: str,
         total_duration: float,
+        crosslayer_ranges: Optional[List[Dict]] = None,
     ) -> bool:
         """Linear-time mixdown: decode each segment to PCM and sum it into a
         preallocated buffer at its placed offset, then one loudnorm pass.
@@ -3164,12 +3147,25 @@ class DubbingService:
             _extents.append((_i, _st, _st + (_en - _off) / sr))
         _extents.sort(key=lambda e: e[1])
 
+        # Cross-layer regions: inside one, an overlap is an intentional
+        # interruption, not a join — BOTH lines hold full level through the
+        # overlap, so neither side gets an auto-fade. Mirrors computeFades in
+        # lib/rpt-engine.ts so the export sounds like the preview the user
+        # approved.
+        _cl_ranges = [
+            (float(r.get("start", 0)), float(r.get("end", 0)))
+            for r in (crosslayer_ranges or [])
+        ]
+
         _auto_fade: Dict[int, List[float]] = {}
         for _k in range(len(_extents) - 1):
             _ai, _a_start, _a_end = _extents[_k]
             _bi, _b_start, _b_end = _extents[_k + 1]
             _overlap = _a_end - _b_start
             if _overlap <= 0.001:
+                continue
+            # Judged by where the interruption LANDS, same as the frontend.
+            if any(lo - 0.0001 <= _b_start <= hi + 0.0001 for lo, hi in _cl_ranges):
                 continue
             # Both sides of one overlap must use the SAME length, or the curves stop
             # being complementary and their sum dips or peaks in the middle. Capped
@@ -3258,12 +3254,13 @@ class DubbingService:
         segments: List[Dict],
         output_path: str,
         total_duration: float,
+        crosslayer_ranges: Optional[List[Dict]] = None,
     ) -> bool:
         # Fast path first: linear-time numpy mixdown. The ffmpeg amix graph
         # below is superlinear in input count — 840 segments took ~40 minutes
         # on a 105-minute film. The mixdown is linear in total audio size.
         try:
-            if self._merge_audio_segments_mixdown(segments, output_path, total_duration):
+            if self._merge_audio_segments_mixdown(segments, output_path, total_duration, crosslayer_ranges):
                 return True
             logger.warning("[MERGE] numpy mixdown unavailable/failed — falling back to ffmpeg amix")
         except Exception as e:
@@ -3293,6 +3290,11 @@ class DubbingService:
             # apad whole_dur is in samples, not seconds (FFmpeg docs).
             sample_rate = 44100
             pad_samples = max(1, int(float(total_duration) * sample_rate))
+
+            # Cross-layer regions — inside one, an overlap is an intentional
+            # talk-over: both lines hold full level, so this path needs no
+            # special handling at all (it only ever applied manual fades).
+            # The parameter is accepted for signature parity with the mixdown.
 
             # Delay each segment to its correct position.
             # normalize=0 means amix sums without dividing — correct here because
@@ -3798,7 +3800,7 @@ class DubbingService:
 
         total_duration = max(end, max((s.get("end") or 0 for s in merge_segments), default=0))
         mixed_audio = output_path + ".audio.wav"
-        if not self._merge_audio_segments_mixdown(merge_segments, mixed_audio, total_duration):
+        if not self._merge_audio_segments_mixdown(merge_segments, mixed_audio, total_duration, data.get("crosslayer_ranges") or []):
             raise RuntimeError("Audio mix failed for scene preview")
 
         # Video fades are measured from the start of the scene cut.
@@ -3892,6 +3894,17 @@ class DubbingService:
         }
         if scenes is not None:
             payload["scenes"] = scenes
+        # Cross-layer regions survive a re-render the same way scenes do — they
+        # are editor intent, not pipeline output. Read from the file we're
+        # about to replace; the caller holds the job lock so this is atomic.
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    _existing_ranges = json.load(f).get("crosslayer_ranges")
+                if _existing_ranges is not None:
+                    payload["crosslayer_ranges"] = _existing_ranges
+        except Exception:
+            pass
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
         shutil.copy2(path, snapshot_path)
@@ -4168,7 +4181,6 @@ class DubbingService:
         live_prev_segment_end: Optional[float] = None,
         stage: bool = False,
         text: Optional[str] = None,
-        allow_adapt_fit: bool = False,
     ) -> Dict:
         output_dir = os.path.join(self.dubbed_dir, job_id)
         segments_path = os.path.join(output_dir, "segments.json")
@@ -4259,17 +4271,10 @@ class DubbingService:
         #  - NEVER touch text the user explicitly typed (a `text` override) —
         #    the variant is a paraphrase that drifts back toward the old line,
         #    so the take "plays something close to what was already written".
-        #    The single exception is allow_adapt_fit: Commit is a toggle, and a
-        #    recommit RELEASES the text for alteration — the caller then opts in
-        #    to sync_fit on the next take so an over-long line can be shortened
-        #    to its window instead of time-stretched into a chipmunk take.
-        #  - NEVER touch a text_locked line regardless of path — bulk regen
-        #    sends no `text`, so without this guard a locked committed line
-        #    could still be paraphrased from below.
         #  - Predict against the APPLIED speed: at use_speed=0.65 the take runs
         #    ~50% longer than the natural estimate, and shortening to fit the
         #    natural window still overflows into a 2x squash.
-        _explicit_text = bool(text and text.strip()) and not allow_adapt_fit
+        _explicit_text = bool(text and text.strip())
         try:
             _cs = seg.get("committed_start_time")
             _ce = seg.get("committed_end_time")
@@ -4295,7 +4300,7 @@ class DubbingService:
                 natural_duration(use_text, use_voice_id) / max(use_speed, 0.01)
                 if use_text.strip() else 0.0
             )
-            if _window > 0.2 and not _explicit_text and not seg.get("text_locked") and _pred > _window * 1.15:
+            if _window > 0.2 and not _explicit_text and _pred > _window * 1.15:
                 from app.services.adaptation_engine import adapt_batch
                 _adapted = await adapt_batch(
                     segments=[{
@@ -5118,7 +5123,8 @@ class DubbingService:
 
         merged_audio = os.path.join(output_dir, "dubbed_audio.wav")
         ok = await asyncio.to_thread(
-            self._merge_audio_segments, merge_segments, merged_audio, video_duration
+            self._merge_audio_segments, merge_segments, merged_audio, video_duration,
+            data.get("crosslayer_ranges") or [],
         )
         if not ok:
             raise RuntimeError(f"Remix failed: could not merge {len(merge_segments)} segments for job {job_id}")

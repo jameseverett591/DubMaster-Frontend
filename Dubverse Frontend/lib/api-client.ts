@@ -346,10 +346,6 @@ export interface RegenerateSegmentRequest {
   // writes the file but does NOT commit it to segments.json/Supabase. The take
   // is promoted via commitSegmentTiming's staged_path when the chunk is saved.
   stage?: boolean
-  // Commit is a toggle: releasing a committed line (recommit) sends this, so
-  // REGEN-ADAPT-FIT may sync-fit the text to its window. Locked or
-  // user-authored text never sets it — verbatim is the default.
-  allow_adapt_fit?: boolean
 }
 
 export interface RegenerateSegmentResponse {
@@ -1820,6 +1816,18 @@ class DubVerseAPIClient {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify({ scenes }),
+    })
+    if (!res.ok) throw new Error(await this._detail(res))
+    return res.json()
+  }
+
+  /** Regions where overlapping lines are mixed as interruptions (duck) instead
+   *  of crossfaded — the editor's cross-layer switch writes these. */
+  async updateCrosslayerRanges(jobId: string, ranges: { start: number; end: number }[]): Promise<{ crosslayer_ranges: { start: number; end: number }[] }> {
+    const res = await this._fetch(`${this.baseURL}/api/crosslayer/${jobId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ crosslayer_ranges: ranges }),
     })
     if (!res.ok) throw new Error(await this._detail(res))
     return res.json()
