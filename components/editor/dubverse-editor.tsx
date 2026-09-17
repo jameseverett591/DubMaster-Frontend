@@ -10804,14 +10804,24 @@ export function DubVerseEditor({
                     const next = covered
                       ? crosslayerRanges.filter(r => r.end <= lo + 0.01 || r.start >= hi - 0.01)
                       : [...crosslayerRanges, { start: lo, end: hi }]
+                    const previous = crosslayerRanges
+                    // Write the ref immediately rather than waiting for the
+                    // re-render, so the rebuild below can never read the old list.
+                    crosslayerRangesRef.current = next
                     setCrosslayerRanges(next)
-                    apiClient.updateCrosslayerRanges(jobId, next)
-                      .catch(err => console.warn('[CROSSLAYER] persist failed', err))
                     // The running buffer was stitched with the old mix rule —
                     // rebuild it so toggling is audible immediately.
                     const ctx = audioContextRef.current ?? new AudioContext()
                     audioContextRef.current = ctx
                     requestStitchWith(displaySegmentsRef.current, ctx)
+                    apiClient.updateCrosslayerRanges(jobId, next).catch(err => {
+                      // Not saved: put the switch and the preview back, or the
+                      // editor would play talk-over the render will not produce.
+                      console.warn('[CROSSLAYER] persist failed — reverting toggle', err)
+                      crosslayerRangesRef.current = previous
+                      setCrosslayerRanges(previous)
+                      requestStitchWith(displaySegmentsRef.current, ctx)
+                    })
                   }}
                   title={covered
                     ? t('Cross Layers ON for this section — overlapping lines play together at full level. Click to turn off.')
