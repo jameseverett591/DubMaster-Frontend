@@ -2687,8 +2687,16 @@ export function DubVerseEditor({
    *  play request. Every play takes a fresh token; every stop path bumps it; the
    *  deferred play() only runs if its token is still current. */
   const playRequestRef = useRef(0)
+  /** True while a play request is in flight but isPlaying hasn't flipped yet
+   *  (resume() or the stitch still pending). isPlaying alone can't mark this —
+   *  it's still false — so without it a second click meant to STOP enters the
+   *  start branch and issues another play. */
+  const playPendingRef = useRef(false)
   const playbackStop = useCallback(() => {
+    // Retire any play request still in flight — its deferred stitch/play must
+    // not land after this stop.
     playRequestRef.current++
+    playPendingRef.current = false
     stopAllRptAudioRef.current()
     setIsPlaying(false)
     if (videoRef.current) videoRef.current.pause()
@@ -5689,10 +5697,15 @@ export function DubVerseEditor({
     // Drive video play/pause synchronously BEFORE any await
     // so Chrome's autoplay policy isn't violated for audio
     if (videoRef.current) {
-      if (isPlaying) {
+      if (isPlaying || playPendingRef.current) {
+        // Pause — also covers a click that lands while a play is still pending:
+        // isPlaying is still false then, but the user meant STOP.
         // Pause: stop the stitch source directly + sync the ref so the
         // seek/effect races can't leave audio running under a paused video.
+        // Bumping the token retires any in-flight request so its deferred
+        // play() or stitch never lands.
         playRequestRef.current++
+        playPendingRef.current = false
         stopAllRptAudio()
         videoRef.current.pause()
         // Persist the playhead so UI that reads currentTime state sees the
@@ -5740,6 +5753,7 @@ export function DubVerseEditor({
         const _video = videoRef.current
         const _request = ++playRequestRef.current
         startRequest = _request
+        playPendingRef.current = true
         if (_ctx.state === 'suspended') {
           _ctx.resume().finally(() => {
             // A stop inside the resume window retired this request.
@@ -5765,7 +5779,10 @@ export function DubVerseEditor({
     if (startRequest !== null && playRequestRef.current !== startRequest) return
     audioStartTimeRef.current = audioContextRef.current?.currentTime ?? null
     // If in Preview and buffer not ready, stitch first
-    if (mode === 'preview' && !isPlaying && !rptBufferRef.current) {
+    // startRequest is null on a stop click — including one that cancelled a
+    // pending play, where isPlaying is still false — so it must never enter the
+    // stitch-then-play path.
+    if (mode === 'preview' && startRequest !== null && !isPlaying && !rptBufferRef.current) {
       lastStartPosRef.current = currentTime
       const ctx = audioContextRef.current
       const resolved = displaySegmentsRef.current.map(seg => ({
@@ -5774,13 +5791,19 @@ export function DubVerseEditor({
         committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
       }))
       stitchWith(resolved, ctx).then(result => {
-        if (result) {
+        playPendingRef.current = false
+        // A stop retired this request while the stitch was running — don't
+        // flip isPlaying or schedule audio behind a paused picture.
+        if (result && playRequestRef.current === startRequest) {
           rptBufferRef.current = result.buffer
           setIsPlaying(true)
         }
       })
     } else {
-      setIsPlaying(!isPlaying)
+      playPendingRef.current = false
+      // Explicit, not a toggle: play requests start, stops stop. !isPlaying
+      // would wrongly flip playback ON for a click that cancelled a pending play.
+      setIsPlaying(startRequest !== null)
     }
   }, [isPlaying, currentTime, playbackMode, jobId, stitchWith, setIsPlaying, setCurrentTime, stopAllRptAudio, setPlaybackMode])
 
@@ -5797,6 +5820,7 @@ export function DubVerseEditor({
     }
     // Either branch supersedes a transport play still waiting on resume().
     playRequestRef.current++
+    playPendingRef.current = false
     if (srcPlaying) {
       a.pause()
       videoRef.current?.pause()
