@@ -7955,14 +7955,33 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest):
             #     until the next Generate Speech re-renders it.
             # Gated on rpt_dirty so untouched segments in the same payload (a full
             # sync sends every segment) keep their audio and any distinct adaptation.
+            #
+            # rpt_dirty alone is NOT enough: commitSegmentChanges sets it on every
+            # committed edit, including plain timing drags that leave the audio
+            # perfectly valid. Since a sync ships the whole array, stripping on
+            # rpt_dirty alone wiped the audio of every segment the user had merely
+            # MOVED the moment any unrelated structural edit synced. Structural
+            # edits are what actually invalidate audio, and they are recognizable:
+            # split/merge explicitly clear audio_url/committed_audio_url in the
+            # payload (JSON drops undefined keys), while a dragged segment still
+            # carries its URLs. Text changes also invalidate the rendered take.
             if incoming.get("rpt_dirty") is True:
                 new_text = incoming.get("target_text")
-                if new_text is not None:
-                    merged["text"] = new_text
-                    merged["committed_adapted_text"] = new_text
-                merged["path"] = None
-                merged["committed_audio_url"] = None
-                merged.pop("audio_url", None)
+                audio_cleared = (
+                    "audio_url" not in incoming and "committed_audio_url" not in incoming
+                )
+                text_changed = (
+                    new_text is not None
+                    and new_text != merged.get("committed_adapted_text")
+                    and new_text != merged.get("text")
+                )
+                if audio_cleared or text_changed:
+                    if new_text is not None:
+                        merged["text"] = new_text
+                        merged["committed_adapted_text"] = new_text
+                    merged["path"] = None
+                    merged["committed_audio_url"] = None
+                    merged.pop("audio_url", None)
             result.append(merged)
         else:
             max_ti += 1
