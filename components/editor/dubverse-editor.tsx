@@ -2654,14 +2654,29 @@ export function DubVerseEditor({
    *  its rollback would restore the older list and the editor would then play a
    *  setting the export does not have. Only the latest toggle may roll back. */
   const crosslayerSaveSeqRef = useRef(0)
+  /** When the running rebuild began reading the job, so edits made during it
+   *  can be told apart from edits the film already contains. */
+  const rebuildStartedAtRef = useRef(0)
 
-  /** Edits committed since the last rebuild. The film on disk predates them, so
-   *  exporting now would hand over a render missing this work. The rebuild
-   *  clears these, so this is empty again the moment the film is current. */
-  const unrenderedEdits = useMemo(
-    () => displaySegments.filter(seg => seg.rpt_dirty).length,
-    [displaySegments],
-  )
+  /** What the last rebuild actually rendered: the scene list and cross-layer
+   *  regions as they stood when it finished.
+   *
+   *  Segment edits announce themselves through rpt_dirty, but scene work does
+   *  not — moving, parking, restoring, splitting or refading a scene changes the
+   *  next film without touching a segment, and so does a cross-layer region.
+   *  Comparing against this snapshot catches all of them without having to find
+   *  and flag every call site. Null until a rebuild happens in this session. */
+  const [renderedSnapshot, setRenderedSnapshot] = useState<{ scenes: string; ranges: string } | null>(null)
+
+  /** Work the rendered film does not contain. Any of it makes Export unsafe. */
+  const unrenderedEdits = useMemo(() => {
+    const dirtySegments = displaySegments.filter(seg => seg.rpt_dirty).length
+    const sceneOrRangeChanged = renderedSnapshot !== null && (
+      JSON.stringify(scenes) !== renderedSnapshot.scenes ||
+      JSON.stringify(crosslayerRanges) !== renderedSnapshot.ranges
+    )
+    return { segments: dirtySegments, sceneOrRange: sceneOrRangeChanged, any: dirtySegments > 0 || sceneOrRangeChanged }
+  }, [displaySegments, scenes, crosslayerRanges, renderedSnapshot])
 
   // Authoritative "silence everything now" — stops every registered stitch source,
   // syncs the refs so nothing reschedules. Callers handle the video element.
@@ -6235,6 +6250,9 @@ export function DubVerseEditor({
   const lipSyncAffordable = lipSyncEstSeconds <= Math.round(usage.minutesRemaining * 60)
 
   const handleRebuildVideo = useCallback(async () => {
+    // Anything committed after this moment is not in the film this rebuild
+    // produces, however fast the render is.
+    rebuildStartedAtRef.current = Date.now()
     setRebuildError(null)
     setIsRebuilding(true)
     setRebuildStatus('processing')
@@ -6259,7 +6277,24 @@ export function DubVerseEditor({
         setLipSyncNote('lip sync not applied — video kept as dubbed')
       }
       setRebuildStatus('complete')
+      // Keep any edit made WHILE the rebuild ran. The remix read segments.json
+      // when it started, so work committed after that is not in the finished
+      // film; clearing every flag would tell the user it was.
       clearAllDirty()
+      const committedDuringRebuild = displaySegmentsRef.current
+        .filter(seg => seg.committed_at && Date.parse(seg.committed_at) > rebuildStartedAtRef.current)
+        .map(seg => getSegmentKey(seg))
+      if (committedDuringRebuild.length > 0) {
+        const keys = new Set(committedDuringRebuild)
+        setImportedSegments(prev => {
+          const base = prev ?? displaySegmentsRef.current
+          return base.map(seg => keys.has(getSegmentKey(seg)) ? { ...seg, rpt_dirty: true } : seg)
+        })
+      }
+      setRenderedSnapshot({
+        scenes: JSON.stringify(useEditorStore.getState().scenes),
+        ranges: JSON.stringify(crosslayerRangesRef.current),
+      })
       // NO export dialog here. Every stage of a dub has to be checked by eye and
       // by ear before it leaves the building, so a rebuild ends in the editor
       // with the finished film loaded for review. Export is a separate, deliberate
@@ -7608,9 +7643,11 @@ export function DubVerseEditor({
             size="sm"
             className="h-8 bg-amber-500 hover:bg-amber-600 text-black font-medium"
             onClick={() => setShowExportModal(true)}
-            disabled={isRebuilding || unrenderedEdits > 0}
-            title={unrenderedEdits > 0
-              ? t('{count} edit(s) are not in the rendered film yet — press Make Movie, review it, then export', { count: unrenderedEdits })
+            disabled={isRebuilding || unrenderedEdits.any}
+            title={unrenderedEdits.any
+              ? (unrenderedEdits.segments > 0
+                  ? t('{count} edit(s) are not in the rendered film yet — press Make Movie, review it, then export', { count: unrenderedEdits.segments })
+                  : t('Scene or cross-layer changes are not in the rendered film yet — press Make Movie, review it, then export'))
               : isRebuilding
                 ? t('Rebuilding — export once it finishes and you have reviewed it')
                 : t('Export: choose resolution and format, then save to your downloads')}
