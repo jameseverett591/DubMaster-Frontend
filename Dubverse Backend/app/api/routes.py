@@ -7356,7 +7356,41 @@ async def export_video(job_id: str, body: ExportRequest, request: Request):
     if not candidates:
         raise HTTPException(status_code=404, detail="No dubbed video found")
 
-    src = os.path.join(output_dir, candidates[0])
+    # EXPORT WHAT WAS REVIEWED. The rebuild writes dubbed_<language>.mp4, and a
+    # lip-sync pass overwrites that same file, so naming it explicitly is what
+    # guarantees the export is the film the editor just played. os.listdir order
+    # is arbitrary, so taking candidates[0] on a job dubbed into more than one
+    # language could hand back a different language than the one on screen.
+    _lang = None
+    try:
+        _job = await _get_or_rehydrate_job(job_id)
+        _lang = normalize_language_code(getattr(_job, "target_language", None) or "") if _job else None
+    except Exception:
+        _lang = None
+    if not _lang:
+        # segments.json records the language the dub was rendered in.
+        try:
+            with open(os.path.join(output_dir, "segments.json"), "r", encoding="utf-8") as _sf:
+                _lang = normalize_language_code(_json.load(_sf).get("language") or "")
+        except Exception:
+            _lang = None
+    preferred = f"dubbed_{_lang}.mp4" if _lang else None
+    if preferred and preferred in candidates:
+        chosen = preferred
+    else:
+        # Newest first, so a stale file from an earlier language cannot win.
+        chosen = sorted(
+            candidates,
+            key=lambda f: os.path.getmtime(os.path.join(output_dir, f)),
+            reverse=True,
+        )[0]
+        if preferred:
+            logger.warning(
+                f"[EXPORT] job={job_id} {preferred} missing — exporting most recent "
+                f"dubbed file instead: {chosen}"
+            )
+    src = os.path.join(output_dir, chosen)
+    logger.info(f"[EXPORT] job={job_id} source={chosen} (target language {_lang or 'unknown'})")
 
     res = body.resolution.lower().replace(" ", "")
     if res not in RESOLUTION_MAP:

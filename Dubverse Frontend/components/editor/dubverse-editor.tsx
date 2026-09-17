@@ -6252,7 +6252,10 @@ export function DubVerseEditor({
       }
       setRebuildStatus('complete')
       clearAllDirty()
-      setShowExportModal(true)
+      // NO export dialog here. Every stage of a dub has to be checked by eye and
+      // by ear before it leaves the building, so a rebuild ends in the editor
+      // with the finished film loaded for review. Export is a separate, deliberate
+      // press once the review passes.
       setTimeout(() => setRebuildStatus('idle'), 5000)
       if (videoRef.current) {
         videoRef.current.volume = isMuted ? 0 : masterVolume / 100
@@ -6958,7 +6961,7 @@ export function DubVerseEditor({
           {rebuildStatus === 'error' && <X className="h-5 w-5" />}
           <span>
             {rebuildStatus === 'processing' && 'REBUILD IN PROGRESS'}
-            {rebuildStatus === 'complete' && 'REBUILD COMPLETE — DUBBED VIDEO UPDATED'}
+            {rebuildStatus === 'complete' && 'REBUILD COMPLETE — READY FOR REVIEW'}
             {rebuildStatus === 'error' && (rebuildError?.toUpperCase() || 'REBUILD FAILED — PLEASE TRY AGAIN')}
           </span>
           {rebuildStatus !== 'processing' && (
@@ -7595,19 +7598,12 @@ export function DubVerseEditor({
           </Button>
           <Button
             size="sm"
-            className="h-8 bg-violet-600 hover:bg-violet-700 text-white font-medium"
-            onClick={() => router.push('/subscribe')}
-          >
-            <Sparkles className="h-4 w-4 mr-1" />
-            {t('Upgrade')}
-          </Button>
-          <Button
-            size="sm"
             className="h-8 bg-amber-500 hover:bg-amber-600 text-black font-medium"
             onClick={() => setShowExportModal(true)}
+            title={t('Export: choose resolution and format, then save to your downloads')}
           >
-            <Download className="h-4 w-4 mr-1" />
-            {t('Download')}
+            <Upload className="h-4 w-4 mr-1" />
+            {t('Export')}
           </Button>
           <Link href="/profile">
             <Button variant="ghost" size="sm" className="h-8" title={t('Profile')}>
