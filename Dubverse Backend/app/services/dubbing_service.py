@@ -3182,10 +3182,20 @@ class DubbingService:
         # overlap, so neither side gets an auto-fade. Mirrors computeFades in
         # lib/rpt-engine.ts so the export sounds like the preview the user
         # approved.
-        _cl_ranges = [
-            (float(r.get("start", 0)), float(r.get("end", 0)))
-            for r in (crosslayer_ranges or [])
-        ]
+        # Parsed defensively: segments.json can predate endpoint validation or be
+        # hand-edited, and one bad entry must not crash the mix — that would fail
+        # the scene preview and silently push Make Movie onto the fallback mixer,
+        # which ignores fades and regions. Invalid entries are skipped and logged.
+        _cl_ranges = []
+        for _r in (crosslayer_ranges or []):
+            try:
+                _lo, _hi = float(_r.get("start")), float(_r.get("end"))
+                if math.isfinite(_lo) and math.isfinite(_hi) and _hi > _lo:
+                    _cl_ranges.append((_lo, _hi))
+                    continue
+            except (AttributeError, TypeError, ValueError):
+                pass
+            logger.warning(f"[MIX] ignoring malformed crosslayer range: {_r!r}")
 
         _auto_fade: Dict[int, List[float]] = {}
         for _k in range(len(_extents) - 1):

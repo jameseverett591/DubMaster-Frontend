@@ -7588,6 +7588,24 @@ async def update_crosslayer_ranges(job_id: str, body: Dict[str, Any] = Body(defa
     ranges = body.get("crosslayer_ranges")
     if not isinstance(ranges, list):
         raise HTTPException(status_code=422, detail="crosslayer_ranges must be a list")
+    # Validate every item. The render mixers read these floats directly, and a
+    # single malformed entry (a bare list, a null, a non-number) used to crash
+    # the scene preview outright and push Make Movie onto the fallback mixer,
+    # which ignores fades and cross-layer regions — a wrong export with no error.
+    # Stored normalised: floats, start < end, sorted.
+    import math as _math
+    clean = []
+    for i, r in enumerate(ranges):
+        if not isinstance(r, dict):
+            raise HTTPException(status_code=422, detail=f"crosslayer_ranges[{i}] must be an object with start and end")
+        try:
+            lo, hi = float(r.get("start")), float(r.get("end"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail=f"crosslayer_ranges[{i}] start/end must be numbers")
+        if not (_math.isfinite(lo) and _math.isfinite(hi)) or lo < 0 or hi <= lo:
+            raise HTTPException(status_code=422, detail=f"crosslayer_ranges[{i}] must be finite, non-negative, with end after start")
+        clean.append({"start": lo, "end": hi})
+    ranges = sorted(clean, key=lambda r: r["start"])
     lock = await dubbing_service._get_segments_file_lock(job_id)
     async with lock:
 
