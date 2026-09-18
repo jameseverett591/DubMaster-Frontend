@@ -66,7 +66,7 @@ import { useEditorStore, type SidebarTab, CHUNK_SECONDS } from '@/lib/editor-sto
 import type { Segment, Scene, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType, StagedEdit, PlaybackMode } from '@/lib/editor-types'
 import { normalizeScenes } from '@/lib/editor-types'
 import { DEFAULT_NUANCES, NUANCE_MARKER_META, newSegmentId, newSceneId, getSegmentKey, defaultScenes, computeVideoFadeOpacity, timelineToSourceTime, sourceToTimelineTime } from '@/lib/editor-types'
-import { formatTime, getSpeakerColor } from '@/lib/editor-types'
+import { formatTime, getSpeakerColor, getSpeakerColorByNumber, getSpeakerHexByNumber } from '@/lib/editor-types'
 import { applyQCFix } from '@/lib/qc-fixes'
 import { VideoRecorder } from '@/components/video-recorder'
 import { QCQualityPanel } from '@/components/editor/qc-quality-panel'
@@ -784,6 +784,16 @@ const MID_RULER_H = 20     // h-5, between the parking bay and the picture
 // The overhead ruler is gone: the scale that matters sits directly above the
 // picture, where a cut is actually aligned to a timecode.
 const PLAYHEAD_TOP = SEEK_HEADER_H + LAYOVER_TRACK_H + MID_RULER_H
+
+/** How far the picture may drift from the audio before rate correction starts.
+ *  Below this the picture is left alone at its base rate. */
+const VIDEO_SYNC_DEADBAND_S = 0.05
+/** Past this, rate correction would take too long and a seek is the lesser
+ *  evil — a scrub, a stall that lost seconds, or a fresh start. */
+const VIDEO_SEEK_DRIFT_S = 1.0
+/** Maximum speed trim, as a fraction. 2% is beyond noticing by eye or ear and
+ *  still closes a fifth of a second of drift in a few seconds. */
+const VIDEO_RATE_TRIM = 0.02
 
 const DEBUG_PLAYBACK = typeof window !== 'undefined' && window.localStorage.getItem('dm_debug_playback') === '1'
 
@@ -2032,6 +2042,39 @@ export function DubVerseEditor({
   const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null)
   const [regeneratingSegmentIndex, setRegeneratingSegmentIndex] = useState<number | null>(null)
   const [confirmingSegmentIndex, setConfirmingSegmentIndex] = useState<number | null>(null)
+  // Generation celebration: trace light around the block, then three pulses.
+  // Keyed by SEGMENT KEY, not index — a split or delete elsewhere in the film
+  // renumbers indices, and the wrong block would light up mid-animation.
+  const GEN_TRACE_MS = 1100 // one full lap of the outline
+  const GEN_PULSE_MS = 1350 // three pulses at 450ms
+  const [genFx, setGenFx] = useState<Record<string, 'trace' | 'pulse'>>({})
+  const genFxTimersRef = useRef<Record<string, number[]>>({})
+  const celebrateGeneration = useCallback((segKey: string) => {
+    if (!segKey) return
+    // Re-generating the same line restarts the sequence rather than stacking
+    // two sets of timers that would clear each other's state.
+    ;(genFxTimersRef.current[segKey] || []).forEach(id => clearTimeout(id))
+    setGenFx(prev => ({ ...prev, [segKey]: 'trace' }))
+    const toPulse = window.setTimeout(
+      () => setGenFx(prev => (prev[segKey] ? { ...prev, [segKey]: 'pulse' } : prev)),
+      GEN_TRACE_MS
+    )
+    const toDone = window.setTimeout(() => {
+      setGenFx(prev => {
+        if (!prev[segKey]) return prev
+        const next = { ...prev }
+        delete next[segKey]
+        return next
+      })
+      delete genFxTimersRef.current[segKey]
+    }, GEN_TRACE_MS + GEN_PULSE_MS)
+    genFxTimersRef.current[segKey] = [toPulse, toDone]
+  }, [])
+  useEffect(() => () => {
+    // Unmounting mid-animation would otherwise leave timers calling setState.
+    Object.values(genFxTimersRef.current).forEach(ids => ids.forEach(id => clearTimeout(id)))
+    genFxTimersRef.current = {}
+  }, [])
   const [queuedSegmentIndex, setQueuedSegmentIndex] = useState<number | null>(null)
   const [speakerRegenQueue, setSpeakerRegenQueue] = useState<Set<number>>(new Set())
   // Synchronous in-flight guard — avoids the stale-closure race that React state
@@ -2823,7 +2866,13 @@ export function DubVerseEditor({
     playPendingRef.current = false
     stopAllRptAudioRef.current()
     setIsPlaying(false)
-    if (videoRef.current) videoRef.current.pause()
+    if (videoRef.current) {
+      videoRef.current.pause()
+      // Hand the picture back at its true speed: rate correction trims it by up
+      // to 2% while playing, and that must not linger into a scrub or the next
+      // play.
+      videoRef.current.playbackRate = rptPlaybackRateRef.current
+    }
   }, [setIsPlaying])
 
   /** Drop the stitched preview so the next play rebuilds it.
@@ -3621,6 +3670,16 @@ export function DubVerseEditor({
     
     for (let time = 0; time < duration; time += frameInterval) {
       try {
+        // WAIT WHILE THE TRANSPORT IS RUNNING. Each grab is a seek, and on
+        // long-GOP source (8.33s between keyframes here) a seek makes the
+        // decoder walk from the previous keyframe. Doing that in a loop beside
+        // playback starves the player of the very decoder it needs — measured
+        // at 94 extractor requests against 6 from the player in 30 seconds,
+        // with the picture freezing for seconds at a time. The strip is never
+        // urgent; playback is.
+        while (isPlayingRef.current || srcPlayingRef.current) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 500))
+        }
         tempVideo.currentTime = time
         await new Promise<void>((resolve) => {
           const onSeeked = () => {
@@ -4009,8 +4068,14 @@ export function DubVerseEditor({
     const video = videoRef.current
     if (!video) return
     // While genuinely advancing, the video IS the clock and seeking it here
-    // would fight playback. Dragging is the exception.
-    if (isPlaying && !isDraggingNeedleRef.current) return
+    // would fight playback. Dragging is also out — the drag's own pump owns
+    // the element's clock for the whole gesture. The old guard let exactly one
+    // stale seek through: grabbing the needle stops the transport, this effect
+    // refires on the isPlaying/srcPlaying flip, and it seats the picture at
+    // `currentTime` — STATE, which trails the element by up to a quarter
+    // second and is often simply 0. That write lands AFTER the drag's own
+    // seek, so a bare touch parked the picture on frame 0.
+    if (isPlaying || isDraggingNeedleRef.current) return
     // While the transcript player runs, the RAF loop's vocals-follower owns the
     // element — seeking it toward a stale playhead state would drag the picture
     // backwards off the audio it is actually tracking.
@@ -4125,6 +4190,36 @@ export function DubVerseEditor({
    *  walk and starts over, so the element never paints: the freeze-and-lurch
    *  this latch exists to prevent. */
   const videoSeekInFlightRef = useRef(false)
+
+  /** Pull the picture onto an audio clock WITHOUT seeking.
+   *
+   *  A seek is the wrong tool during playback on long-GOP video. This source has
+   *  a keyframe every 8.33s, so seeking to a mid-GOP point makes the decoder
+   *  walk every frame from the previous keyframe — measured at ~5s of frozen
+   *  picture while the audio, a separate buffer, plays straight through it. The
+   *  old corrector seeked on 0.12-0.15s of drift, so it paid seconds to fix
+   *  fractions of a second, and a stalled picture kept re-triggering it.
+   *
+   *  Nudging playbackRate instead never interrupts the decoder. A 2% difference
+   *  closes 0.15s of drift in about 7 seconds and is inaudible and invisible.
+   *  Seeking is kept only for gross desync, where waiting would be worse.
+   *
+   *  Returns true when it wants a seek — the caller owns that, because the two
+   *  call sites latch and log differently. */
+  const rateAlignPicture = useCallback((video: HTMLVideoElement, targetTime: number, baseRate: number): boolean => {
+    const drift = targetTime - video.currentTime
+    const size = Math.abs(drift)
+    if (size > VIDEO_SEEK_DRIFT_S) return true            // too far gone to catch up by rate
+    if (size < VIDEO_SYNC_DEADBAND_S) {                   // close enough: stop correcting
+      if (video.playbackRate !== baseRate) video.playbackRate = baseRate
+      return false
+    }
+    // Proportional, clamped. Ahead of the audio -> slow down, behind -> speed up.
+    const correction = Math.max(-VIDEO_RATE_TRIM, Math.min(VIDEO_RATE_TRIM, drift * 0.5))
+    const next = baseRate * (1 + correction)
+    if (Math.abs(video.playbackRate - next) > 0.001) video.playbackRate = next
+    return false
+  }, [])
   useEffect(() => {
     let raf: number
     const loop = () => {
@@ -4178,13 +4273,11 @@ export function DubVerseEditor({
                 console.warn('[SRC-FOLLOW] video.play() rejected — picture cannot track the vocals:', err)
               }
             })
-            if (
-              Math.abs(video.currentTime - a.currentTime) > 0.12 &&
-              now - rafLastVideoResyncRef.current > 500 &&
-              // Same latch as the preview resync below — re-seeking mid-seek
-              // aborts the GOP decode walk and freezes the picture.
-              !videoSeekInFlightRef.current
-            ) {
+            // Rate, not seek — see rateAlignPicture. Only gross desync earns a
+            // seek, and never while one is already in flight.
+            if (rateAlignPicture(video, a.currentTime, a.playbackRate)
+                && now - rafLastVideoResyncRef.current > 500
+                && !videoSeekInFlightRef.current) {
               rafLastVideoResyncRef.current = now
               video.currentTime = a.currentTime
               videoSeekInFlightRef.current = true
@@ -4192,11 +4285,9 @@ export function DubVerseEditor({
           } else {
             // Picture is running — the warning latch resets for the next episode.
             srcFollowWarnedRef.current = false
-            if (
-              Math.abs(video.currentTime - a.currentTime) > 0.12 &&
-              now - rafLastVideoResyncRef.current > 500 &&
-              !videoSeekInFlightRef.current
-            ) {
+            if (rateAlignPicture(video, a.currentTime, a.playbackRate)
+                && now - rafLastVideoResyncRef.current > 500
+                && !videoSeekInFlightRef.current) {
               rafLastVideoResyncRef.current = now
               video.currentTime = a.currentTime
               videoSeekInFlightRef.current = true
@@ -4274,9 +4365,13 @@ export function DubVerseEditor({
       ) {
         const audioT = lastStartPosRef.current + (audioContextRef.current.currentTime - audioStartTimeRef.current)
         const target = timelineToSourceTime(audioT, scenesRef.current) ?? audioT
-        if (Math.abs(video.currentTime - target) > 0.15) {
+        if (video.paused) video.play().catch(() => {})
+        // A stalled picture is usually mid-decode, not lost. Seeking into it
+        // restarts the walk from the keyframe and turns a hiccup into seconds of
+        // frozen frame — the fault this replaces. Correct by rate, and only seek
+        // when the picture is so far behind that waiting is worse.
+        if (rateAlignPicture(video, target, rptPlaybackRateRef.current)) {
           rafLastVideoResyncRef.current = now
-          if (video.paused) video.play().catch(() => {})
           video.currentTime = target
           videoSeekInFlightRef.current = true
           seekSettleUntilRef.current = now + 500
@@ -5791,6 +5886,19 @@ export function DubVerseEditor({
   // are overlaid so Preview always plays what the user is actually working on.
   // Callers pass their own segment array when they need a just-edited value
   // inlined ahead of the store update; the overlay still applies on top.
+  // Lanes muted by speaker. Held as ids because a lane IS a speaker here — a
+  // rename or a renumber must not silently unmute someone.
+  const [mutedSpeakers, setMutedSpeakers] = useState<Set<string>>(new Set())
+  const mutedSpeakersRef = useRef(mutedSpeakers)
+  mutedSpeakersRef.current = mutedSpeakers
+  const toggleSpeakerMute = useCallback((speakerId: string) => {
+    setMutedSpeakers(prev => {
+      const next = new Set(prev)
+      if (next.has(speakerId)) next.delete(speakerId); else next.add(speakerId)
+      return next
+    })
+  }, [])
+
   const stitchWith = useCallback((segs: Segment[], ctx: AudioContext) => {
     // Resolve tokens HERE, after the staged overlay. A staged take's URL is minted
     // when the take is rendered and then persisted in stagedEdits, so once Supabase
@@ -5802,10 +5910,16 @@ export function DubVerseEditor({
       audio_url: apiClient.refreshAudioUrl(jobId, seg.audio_url),
       committed_audio_url: apiClient.refreshAudioUrl(jobId, seg.committed_audio_url),
     }))
+    // Muted lanes drop out of the mix here rather than at each call site: this
+    // is the one funnel every stitch passes through, so a muted speaker cannot
+    // survive in the preview by some path that forgot to filter.
+    const audible = mutedSpeakersRef.current.size
+      ? overlaid.filter(seg => !mutedSpeakersRef.current.has(seg.speaker_id || 'speaker-1'))
+      : overlaid
     if (chunkModeRef.current) {
-      return stitchRPTWindow(overlaid, chunkStartRef.current, chunkEndRef.current, ctx, crosslayerRangesRef.current)
+      return stitchRPTWindow(audible, chunkStartRef.current, chunkEndRef.current, ctx, crosslayerRangesRef.current)
     }
-    return stitchRPT(overlaid, videoDurationRef.current, ctx, crosslayerRangesRef.current)
+    return stitchRPT(audible, videoDurationRef.current, ctx, crosslayerRangesRef.current)
     // jobId is needed to rebuild media URLs above. It is stable for the life of the
     // editor, but leaving it out of the deps would be a stale closure waiting to
     // happen if the editor ever switches job in place.
@@ -5824,6 +5938,17 @@ export function DubVerseEditor({
   // Bridge for the Delete-key handler, which runs in a keydown effect declared
   // long before this callback exists.
   requestStitchWithRef.current = requestStitchWith
+
+  // Muting a lane changes the mix, and the mix is a cached buffer — without
+  // this the preview keeps playing the voice you just silenced until some
+  // other edit happens to rebuild it.
+  const mutedSpeakersKey = Array.from(mutedSpeakers).sort().join('|')
+  useEffect(() => {
+    if (!audioContextRef.current) return
+    requestStitchWith(displaySegmentsRef.current, audioContextRef.current)
+    // Keyed on the SET's contents, not its identity: a new Set with the same
+    // members must not queue another stitch.
+  }, [mutedSpeakersKey, requestStitchWith])
 
   // Schedule offset for the RPT buffer: windowed buffers are local-timebase,
   // so an absolute playhead of 5:00 into window 2's buffer is offset 0 — not
@@ -6984,6 +7109,400 @@ export function DubVerseEditor({
     // but runs into it must still render in the later window.
     return start < chunkEnd && end > chunkStart
   }, [chunkMode, activeChunk, chunkStart, chunkEnd, segStartOf])
+
+  // ── Segment lanes ────────────────────────────────────────────────────────
+  // Cantonese→English is the worst case for a single-row audio track: the
+  // source is dense, the English unpacks into more syllables, and slowing a
+  // fast line to fit stretches it further — so every segment bleeds into its
+  // neighbours and one row becomes an unreadable wall of overlap. The audio is
+  // fine (the mixdown handles overlap deliberately); this is a display fix.
+  //
+  // The Dubbed track is therefore not one row but a stack: ONE LANE PER TEXT
+  // ROW, in the same order and the same speaker colours as the list above, so
+  // the timeline reads exactly like the script. Three lines for speaker 1 means
+  // three speaker-1 lanes, in order. Only rows inside the active chunk get a
+  // lane, so walking to the next chunk re-derives the stack.
+  const SEG_LANE_H = 80 // the Dubbed track's own height (h-20), unchanged
+  const laneRows = useMemo(() => {
+    const rows: number[] = []
+    const rowOf = new Map<number, number>()
+    displaySegments.forEach((s, idx) => {
+      if (!inActiveWindow(s)) return
+      rowOf.set(idx, rows.length)
+      rows.push(idx)
+    })
+    return { rows, rowOf }
+  }, [displaySegments, inActiveWindow])
+  // Never collapse to nothing: with no rows in the window the track still has
+  // to carry the Dubbed label, its mute and its volume slider.
+  const dubLanesPx = Math.max(1, laneRows.rows.length) * SEG_LANE_H
+
+  // ── Clip mixing controls (fades + clip gain) ─────────────────────────────
+  // The fade ramps, the cyan clip-gain line and their drag handles, rendered
+  // identically on the speaker lanes and on the Preview Audio track. Extracted
+  // rather than copied: both surfaces edit the SAME segment fields and both
+  // trigger the same stitch, so two copies of this logic could only ever drift
+  // apart — a fade set in a lane has to be the fade the gold block below shows.
+  //
+  // gripInset nudges the two fade grips inward. On the Preview Audio track the
+  // block's left and right edges are speed handles, but in a speaker lane they
+  // are TIMING handles — the thing you reach for constantly — so there the
+  // grips step aside rather than sitting on the corner you are aiming at.
+  const renderClipMixControls = (
+    seg: Segment,
+    i: number,
+    startT: number,
+    endT: number,
+    gripInset = 0,
+  ) => (
+    <>
+      {/* The fade RAMPS, drawn permanently.
+          Only the drag handles existed before, and they were hidden
+          until hover — so setting a fade and moving the mouse away
+          left no trace of it at all, which reads as the fade having
+          snapped back. The shaded triangle is the attenuated part of
+          the segment: it is what you can actually hear. */}
+      {(seg.fade_in ?? 0) > 0 && (
+        <div
+          className="absolute top-0 bottom-0 left-0 pointer-events-none z-10"
+          style={{
+            width: (seg.fade_in ?? 0) * PIXELS_PER_SECOND,
+            background: 'rgba(16,185,129,0.45)',
+            // Above the ramp line: level rises 0 -> full across the
+            // region, so the missing part is the top-left triangle.
+            clipPath: 'polygon(0 0, 100% 0, 0 100%)',
+          }}
+        />
+      )}
+      {(seg.fade_out ?? 0) > 0 && (
+        <div
+          className="absolute top-0 bottom-0 right-0 pointer-events-none z-10"
+          style={{
+            width: (seg.fade_out ?? 0) * PIXELS_PER_SECOND,
+            background: 'rgba(16,185,129,0.45)',
+            // Mirrored: level falls full -> 0, so the missing part is
+            // the top-right triangle.
+            clipPath: 'polygon(0 0, 100% 0, 100% 100%)',
+          }}
+        />
+      )}
+
+      {/* Clip-gain level line. Unity = the line sits on the block's
+          top edge; lower = pulled down. Always drawn when set —
+          like the fade ramps, a lowered level must stay visible or
+          it reads as forgotten. */}
+      <div
+        data-volume-line
+        className={cn(
+          "absolute left-0 right-0 h-0.5 pointer-events-none z-10 bg-cyan-300/80 shadow-[0_0_4px_rgba(103,232,249,0.8)]",
+          (seg.volume ?? 1) >= 0.999 && "opacity-0"
+        )}
+        style={{ top: `${(1 - (seg.volume ?? 1)) * 100}%` }}
+      />
+
+      {/* Fade handles — only on Preview Audio track. Hidden in
+          dense mode: the bars are too thin to grab anyway, and
+          the ramps/level line above still show what is set. */}
+      {!layoutLocked && (
+        <>
+          {/* Fade in — ramp and grip are SIBLINGS, not nested.
+              Nested, the grip's position was tied to the ramp's box and the ramp
+              needed a minimum width to keep the grip reachable — which painted a
+              wedge on every block that had no fade. Separately positioned, the ramp
+              can be zero-width (drawing nothing) while the grip still sits exactly
+              on the block corner. */}
+          <div
+            data-fade-ramp="in"
+            className="absolute top-0 left-0 h-full pointer-events-none z-10 bg-cyan-400/45"
+            style={{
+              width: Math.min((seg.fade_in ?? 0) * PIXELS_PER_SECOND, (endT - startT) * PIXELS_PER_SECOND / 2),
+              clipPath: 'polygon(0 0, 100% 0, 0 100%)',
+            }}
+          />
+          <div
+            data-fade-handle="in"
+            // The block's own drag guard tests for [data-resize-handle]. Without
+            // it here, stopping the POINTERdown changed nothing: the browser
+            // still fires mousedown after it, that bubbles to the block, and the
+            // segment slides sideways the moment you touch the fade.
+            data-resize-handle={true}
+            className={cn("absolute top-0 w-5 h-5 pointer-events-auto z-40 opacity-0 group-hover:opacity-100 transition-opacity", (seg.fade_in ?? 0) > 0 && "animate-pulse")}
+            title={`Fade in ${(seg.fade_in ?? 0).toFixed(2)}s`}
+            style={{
+              left: Math.min((seg.fade_in ?? 0) * PIXELS_PER_SECOND, (endT - startT) * PIXELS_PER_SECOND / 2) + gripInset,
+              willChange: 'transform',
+            }}
+            // The block below also handles click-to-seek. Without this the playhead
+            // jumped to wherever the drag ended, every single time.
+            onClick={(e) => { e.preventDefault(); e.stopPropagation() }}
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation() }}
+            onPointerDown={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch {}
+              const grip = e.currentTarget as HTMLElement
+              const ramp = grip.parentElement?.querySelector('[data-fade-ramp="in"]') as HTMLElement | null
+              const startX = e.clientX
+              const initialFade = seg.fade_in ?? 0
+              const maxFade = (endT - startT) / 2
+              let latest = initialFade
+              // Drive the DOM directly while dragging. This used to call
+              // setImportedSegments on every pointermove, which rebuilt an 818-entry
+              // array and re-rendered the whole editor per mouse event — the handle
+              // arrived where the cursor had been half a second earlier. State is
+              // written once, on release.
+              const onPointerMove = (ev: PointerEvent) => {
+                const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
+                latest = Math.min(Math.max(0, initialFade + delta), maxFade)
+                const px = latest * PIXELS_PER_SECOND
+                if (ramp) ramp.style.width = `${px}px`
+                grip.style.left = `${px + gripInset}px`
+              }
+              const onPointerUp = () => {
+                document.removeEventListener('pointermove', onPointerMove)
+                document.removeEventListener('pointerup', onPointerUp)
+                document.removeEventListener('pointercancel', onPointerUp)
+                window.removeEventListener('blur', onPointerUp)
+                const finalFade = latest
+                updateSegment(i, { fade_in: finalFade })
+                commitSegmentChanges(i, { fade_in: finalFade })
+                commitOrStage(seg.transcript_index ?? i, { fade_in: finalFade }).catch(err => console.warn('[FADE]', err))
+                setImportedSegments(prev => {
+                  const base = prev ?? displaySegmentsRef.current
+                  return base.map((s, idx) => idx === i ? { ...s, fade_in: finalFade } : s)
+                })
+                if (audioContextRef.current) {
+                  const stitchSegs = displaySegmentsRef.current.map((s, idx) => idx === i ? { ...s, fade_in: finalFade } : s)
+                  requestStitchWith(stitchSegs, audioContextRef.current)
+                }
+              }
+              document.addEventListener('pointermove', onPointerMove)
+              document.addEventListener('pointerup', onPointerUp)
+              document.addEventListener('pointercancel', onPointerUp)
+              window.addEventListener('blur', onPointerUp)
+            }}
+          >
+            {/* The triangle is only the LOOK. It carries the clip-path, which
+                also clips the hit area — worn by the grip itself it left a
+                12px sliver to aim at. pointer-events-none keeps the full
+                20px square grabbable. */}
+            <div
+              className="w-full h-full pointer-events-none"
+              style={{
+                background: 'linear-gradient(135deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
+                clipPath: 'polygon(0 0, 100% 0, 0 100%)',
+                boxShadow: '0 0 8px rgba(0,245,212,0.9)',
+              }}
+            />
+          </div>
+          {/* Fade out — ramp and grip are SIBLINGS, not nested.
+              Nested, the grip's position was tied to the ramp's box and the ramp
+              needed a minimum width to keep the grip reachable — which painted a
+              wedge on every block that had no fade. Separately positioned, the ramp
+              can be zero-width (drawing nothing) while the grip still sits exactly
+              on the block corner. */}
+          <div
+            data-fade-ramp="out"
+            className="absolute top-0 right-0 h-full pointer-events-none z-10 bg-cyan-400/45"
+            style={{
+              width: Math.min((seg.fade_out ?? 0) * PIXELS_PER_SECOND, (endT - startT) * PIXELS_PER_SECOND / 2),
+              clipPath: 'polygon(100% 0, 100% 100%, 0 0)',
+            }}
+          />
+          <div
+            data-fade-handle="out"
+            data-resize-handle={true}
+            className={cn("absolute top-0 w-5 h-5 pointer-events-auto z-40 opacity-0 group-hover:opacity-100 transition-opacity", (seg.fade_out ?? 0) > 0 && "animate-pulse")}
+            title={`Fade out ${(seg.fade_out ?? 0).toFixed(2)}s`}
+            style={{
+              right: Math.min((seg.fade_out ?? 0) * PIXELS_PER_SECOND, (endT - startT) * PIXELS_PER_SECOND / 2) + gripInset,
+              willChange: 'transform',
+            }}
+            // The block below also handles click-to-seek. Without this the playhead
+            // jumped to wherever the drag ended, every single time.
+            onClick={(e) => { e.preventDefault(); e.stopPropagation() }}
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation() }}
+            onPointerDown={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch {}
+              const grip = e.currentTarget as HTMLElement
+              const ramp = grip.parentElement?.querySelector('[data-fade-ramp="out"]') as HTMLElement | null
+              const startX = e.clientX
+              const initialFade = seg.fade_out ?? 0
+              const maxFade = (endT - startT) / 2
+              let latest = initialFade
+              // Drive the DOM directly while dragging. This used to call
+              // setImportedSegments on every pointermove, which rebuilt an 818-entry
+              // array and re-rendered the whole editor per mouse event — the handle
+              // arrived where the cursor had been half a second earlier. State is
+              // written once, on release.
+              const onPointerMove = (ev: PointerEvent) => {
+                // Inverted: fade-out grows as the grip is pulled LEFT, back into the
+            // block, mirroring fade-in growing rightward.
+            const delta = (startX - ev.clientX) / PIXELS_PER_SECOND
+                latest = Math.min(Math.max(0, initialFade + delta), maxFade)
+                const px = latest * PIXELS_PER_SECOND
+                if (ramp) ramp.style.width = `${px}px`
+                grip.style.right = `${px + gripInset}px`
+              }
+              const onPointerUp = () => {
+                document.removeEventListener('pointermove', onPointerMove)
+                document.removeEventListener('pointerup', onPointerUp)
+                document.removeEventListener('pointercancel', onPointerUp)
+                window.removeEventListener('blur', onPointerUp)
+                const finalFade = latest
+                updateSegment(i, { fade_out: finalFade })
+                commitSegmentChanges(i, { fade_out: finalFade })
+                commitOrStage(seg.transcript_index ?? i, { fade_out: finalFade }).catch(err => console.warn('[FADE]', err))
+                setImportedSegments(prev => {
+                  const base = prev ?? displaySegmentsRef.current
+                  return base.map((s, idx) => idx === i ? { ...s, fade_out: finalFade } : s)
+                })
+                if (audioContextRef.current) {
+                  const stitchSegs = displaySegmentsRef.current.map((s, idx) => idx === i ? { ...s, fade_out: finalFade } : s)
+                  requestStitchWith(stitchSegs, audioContextRef.current)
+                }
+              }
+              document.addEventListener('pointermove', onPointerMove)
+              document.addEventListener('pointerup', onPointerUp)
+              document.addEventListener('pointercancel', onPointerUp)
+              window.addEventListener('blur', onPointerUp)
+            }}
+          >
+            <div
+              className="w-full h-full pointer-events-none"
+              style={{
+                background: 'linear-gradient(225deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
+                clipPath: 'polygon(100% 0, 100% 100%, 0 0)',
+                boxShadow: '0 0 8px rgba(0,245,212,0.9)',
+              }}
+            />
+          </div>
+          {/* Clip gain — grab the block's TOP EDGE and pull it down
+              to lower the level, DAW-style. The grip hugs the top
+              on hover; the cyan line (drawn above) is the level
+              itself and becomes visible once set. Same DOM-during-
+              drag / state-on-release rule as the fade handles. */}
+          <div
+            data-volume-handle
+            data-resize-handle={true}
+            // h-2 was an 8px strip: you had to land the cursor inside it before
+            // the block's own drag took the press instead. 16px, and the pill is
+            // centred in it so the target and the thing you aim at agree.
+            className="absolute top-0 left-2 right-2 h-4 cursor-ns-resize z-30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+            title={`Level ${Math.round((seg.volume ?? 1) * 100)}% — pull the top edge down to lower`}
+            onClick={(e) => { e.preventDefault(); e.stopPropagation() }}
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation() }}
+            onPointerDown={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch {}
+              const grip = e.currentTarget as HTMLElement
+              const block = grip.parentElement as HTMLElement | null
+              const blockH = block?.getBoundingClientRect().height || 40
+              const line = block?.querySelector('[data-volume-line]') as HTMLElement | null
+              const startY = e.clientY
+              const initialVolume = seg.volume ?? 1
+              let latest = initialVolume
+              const onPointerMove = (ev: PointerEvent) => {
+                // Full block height of travel = 0..1. Pulling the
+                // edge DOWN lowers the level; the line rides with
+                // the cursor exactly.
+                const dy = (ev.clientY - startY) / blockH
+                latest = Math.min(1, Math.max(0, initialVolume - dy))
+                if (line) {
+                  line.style.top = `${(1 - latest) * 100}%`
+                  line.style.opacity = latest < 0.999 ? '1' : '0'
+                }
+              }
+              const onPointerUp = () => {
+                document.removeEventListener('pointermove', onPointerMove)
+                document.removeEventListener('pointerup', onPointerUp)
+                document.removeEventListener('pointercancel', onPointerUp)
+                window.removeEventListener('blur', onPointerUp)
+                const finalVolume = latest
+                updateSegment(i, { volume: finalVolume })
+                commitSegmentChanges(i, { volume: finalVolume })
+                commitOrStage(seg.transcript_index ?? i, { volume: finalVolume }).catch(err => console.warn('[VOLUME]', err))
+                setImportedSegments(prev => {
+                  const base = prev ?? displaySegmentsRef.current
+                  return base.map((s, idx) => idx === i ? { ...s, volume: finalVolume } : s)
+                })
+                if (audioContextRef.current) {
+                  const stitchSegs = displaySegmentsRef.current.map((s, idx) => idx === i ? { ...s, volume: finalVolume } : s)
+                  requestStitchWith(stitchSegs, audioContextRef.current)
+                }
+              }
+              document.addEventListener('pointermove', onPointerMove)
+              document.addEventListener('pointerup', onPointerUp)
+              document.addEventListener('pointercancel', onPointerUp)
+              window.addEventListener('blur', onPointerUp)
+            }}
+          >
+            <div className="w-6 h-1 rounded-full bg-cyan-300/80" />
+          </div>
+        </>
+      )}
+    </>
+  )
+
+  // Generation-success feedback: a take landing fires the trace→pulse once,
+  // then the block settles back to its plain speaker colour. Two
+  // signals because a regen OVERWRITES the same filename — a URL diff alone
+  // would miss it, so "was regenerating, now idle, and has audio" also fires.
+  // The first run only seeds the map: without that, every line that already
+  // has audio would flash when the editor loads.
+  const [genAnim, setGenAnim] = useState<Map<number, 'trace' | 'pulse'>>(new Map())
+  const prevAudioRef = useRef<Map<number, string | null> | null>(null)
+  const prevRegenRef = useRef<Set<number>>(new Set())
+  const genTimersRef = useRef<Map<number, number[]>>(new Map())
+  useEffect(() => {
+    const regenNow = new Set<number>()
+    if (regeneratingSegmentIndex !== null) regenNow.add(regeneratingSegmentIndex)
+    if (queuedSegmentIndex !== null) regenNow.add(queuedSegmentIndex)
+    speakerRegenQueue.forEach(i => regenNow.add(i))
+    if (prevAudioRef.current === null) {
+      const seed = new Map<number, string | null>()
+      displaySegments.forEach((s, i) => seed.set(i, s.committed_audio_url ?? s.audio_url ?? null))
+      prevAudioRef.current = seed
+      prevRegenRef.current = regenNow
+      return
+    }
+    const prev = prevAudioRef.current
+    const fire = new Set<number>()
+    displaySegments.forEach((s, i) => {
+      const cur = s.committed_audio_url ?? s.audio_url ?? null
+      if (cur && cur !== prev.get(i)) fire.add(i)
+      prev.set(i, cur)
+    })
+    prevRegenRef.current.forEach(i => {
+      if (!regenNow.has(i) && (displaySegments[i]?.committed_audio_url ?? displaySegments[i]?.audio_url)) fire.add(i)
+    })
+    prevRegenRef.current = regenNow
+    if (fire.size === 0) return
+    setGenAnim(m => {
+      const next = new Map(m)
+      fire.forEach(i => next.set(i, 'trace'))
+      return next
+    })
+    fire.forEach(i => {
+      genTimersRef.current.get(i)?.forEach(clearTimeout)
+      const t1 = window.setTimeout(() => {
+        setGenAnim(m => {
+          if (m.get(i) !== 'trace') return m
+          const n = new Map(m); n.set(i, 'pulse'); return n
+        })
+      }, 1100)
+      const t2 = window.setTimeout(() => {
+        setGenAnim(m => { const n = new Map(m); n.delete(i); return n })
+      }, 1100 + 2700)
+      genTimersRef.current.set(i, [t1, t2])
+    })
+  }, [displaySegments, regeneratingSegmentIndex, queuedSegmentIndex, speakerRegenQueue])
+  useEffect(() => () => {
+    genTimersRef.current.forEach(ts => ts.forEach(clearTimeout))
+  }, [])
 
   // The chunk that actually contains the current playhead. The active chunk is
   // kept in sync with this so the window boundary, the viewport, and the chunk
@@ -11494,61 +12013,117 @@ export function DubVerseEditor({
               </div>
             )}
 
-            <div className="h-20 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1">
-                  <button type="button" onClick={() => setIsMutedDubbed(v => !v)} className="flex-shrink-0">
-                    {isMutedDubbed ? <VolumeX className="h-3 w-3 text-red-400" /> : <Volume2 className="h-3 w-3 text-amber-400" />}
-                  </button>
-                  <span className="truncate">{t('Dubbed')}</span>
-                </div>
-                <span className="font-mono text-neutral-500 text-[10px]">{dubbedTextVolume}</span>
-              </div>
-              <Slider
-                value={[dubbedTextVolume]}
-                onValueChange={(v) => setDubbedTextVolume(v[0])}
-                max={100}
-                step={1}
-                thumbless
-                className="w-full h-1"
-              />
-            </div>
-
-            {/* RPT Audio label */}
-            <div className="h-20 shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1">
-                  <button type="button" onClick={() => setIsMutedRPT(v => !v)} className="flex-shrink-0">
-                    {isMutedRPT ? <VolumeX className="h-3 w-3 text-red-400" /> : <Volume2 className="h-3 w-3 text-amber-400" />}
-                  </button>
-                  <span className="truncate text-amber-400">{t('Preview Audio')}</span>
-                </div>
-                <span className="font-mono text-neutral-500 text-[10px]">{rptVolume}</span>
-              </div>
-              <Slider
-                value={[rptVolume]}
-                onValueChange={(v) => setRptVolume(v[0])}
-                max={100}
-                step={1}
-                thumbless
-                className="w-full h-1"
-              />
-              <div className="flex items-center gap-1 pt-0.5">
-                {[0.5, 0.75, 1, 1.25, 1.5].map(rate => (
-                  <button
-                    key={rate}
-                    type="button"
-                    onClick={() => setRptPlaybackRate(rate)}
-                    className={cn(
-                      'text-[9px] px-1.5 py-0.5 rounded border transition-colors',
-                      rptPlaybackRate === rate
-                        ? 'bg-amber-500/20 border-amber-500/50 text-amber-400'
-                        : 'bg-neutral-800 border-neutral-700 text-neutral-500 hover:text-neutral-300 hover:border-neutral-500'
+            {/* Dubbed lane labels — one per text row, in row order, so the
+                column reads like the script. The first lane keeps the track's
+                own identity (title, mute, volume) and adds its speaker; every
+                lane after it is just its speaker, in that speaker's colour. */}
+            {(laneRows.rows.length ? laneRows.rows : [-1]).map((segIdx, row) => {
+              const seg = segIdx >= 0 ? displaySegments[segIdx] : undefined
+              const spk = seg?.speaker_id || 'speaker-1'
+              // BY NUMBER, not by id: the lane says "Speaker 3", so it has to
+              // wear speaker 3's colour even when the id behind it is
+              // speaker-11 from diarization.
+              const num = speakerNumberMap[spk] ?? 1
+              const c = getSpeakerColorByNumber(num)
+              const laneMuted = mutedSpeakers.has(spk)
+              return (
+                <div
+                  key={`dub-label-${seg?.id ?? 'empty'}-${row}`}
+                  className="shrink-0 flex flex-col justify-center px-2 text-xs text-neutral-400 border-b border-neutral-800 gap-1 overflow-hidden"
+                  style={{ height: SEG_LANE_H }}
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <div className="flex items-center gap-1 min-w-0">
+                      {row === 0 && (
+                        <button type="button" onClick={() => setIsMutedDubbed(v => !v)} className="flex-shrink-0">
+                          {isMutedDubbed ? <VolumeX className="h-3 w-3 text-red-400" /> : <Volume2 className="h-3 w-3 text-amber-400" />}
+                        </button>
+                      )}
+                      {row === 0 && <span className="truncate">{t('Dubbed')}</span>}
+                      {/* Per-lane mute. A lane is one speaker, so this silences
+                          that voice everywhere in the mix, not just this line. */}
+                      {seg && (
+                        <button
+                          type="button"
+                          onClick={() => toggleSpeakerMute(spk)}
+                          className="flex-shrink-0"
+                          title={laneMuted ? `Unmute speaker ${num}` : `Mute speaker ${num}`}
+                        >
+                          {laneMuted
+                            ? <VolumeX className="h-3 w-3 text-red-400" />
+                            : <Volume2 className={cn('h-3 w-3', c.text)} />}
+                        </button>
+                      )}
+                      <span
+                        className={cn(
+                          'px-2 py-0.5 rounded-full text-[10px] font-semibold border shrink-0 whitespace-nowrap',
+                          laneMuted ? 'bg-neutral-700/40 border-neutral-600 text-neutral-500 line-through' : cn(c.bg, c.border, c.text)
+                        )}
+                      >
+                        {`${t('Speaker')} ${num}`}
+                      </span>
+                    </div>
+                    {row === 0 && (
+                      <span className="font-mono text-neutral-500 text-[10px]">{dubbedTextVolume}</span>
                     )}
-                  >
-                    {rate === 1 ? '1×' : `${rate}×`}
-                  </button>
-                ))}
+                  </div>
+                  {row === 0 && (
+                    <Slider
+                      value={[dubbedTextVolume]}
+                      onValueChange={(v) => setDubbedTextVolume(v[0])}
+                      max={100}
+                      step={1}
+                      thumbless
+                      className="w-full h-1"
+                    />
+                  )}
+                  {seg && (
+                    <span className="truncate text-[9px] text-neutral-600">
+                      {formatTime(effStart(seg))}
+                    </span>
+                  )}
+                </div>
+              )
+            })}
+
+            {/* Preview Audio label — the mixed preview, always the last audio
+                track, directly above the emotion curve. */}
+            <div className="h-20 shrink-0 flex flex-col px-2 text-xs text-neutral-400 border-b border-neutral-800">
+              <div className="flex flex-col justify-center gap-1 h-full">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1">
+                    <button type="button" onClick={() => setIsMutedRPT(v => !v)} className="flex-shrink-0">
+                      {isMutedRPT ? <VolumeX className="h-3 w-3 text-red-400" /> : <Volume2 className="h-3 w-3 text-amber-400" />}
+                    </button>
+                    <span className="truncate text-amber-400">{t('Preview Audio')}</span>
+                  </div>
+                  <span className="font-mono text-neutral-500 text-[10px]">{rptVolume}</span>
+                </div>
+                <Slider
+                  value={[rptVolume]}
+                  onValueChange={(v) => setRptVolume(v[0])}
+                  max={100}
+                  step={1}
+                  thumbless
+                  className="w-full h-1"
+                />
+                <div className="flex items-center gap-1 pt-0.5">
+                  {[0.5, 0.75, 1, 1.25, 1.5].map(rate => (
+                    <button
+                      key={rate}
+                      type="button"
+                      onClick={() => setRptPlaybackRate(rate)}
+                      className={cn(
+                        'text-[9px] px-1.5 py-0.5 rounded border transition-colors',
+                        rptPlaybackRate === rate
+                          ? 'bg-amber-500/20 border-amber-500/50 text-amber-400'
+                          : 'bg-neutral-800 border-neutral-700 text-neutral-500 hover:text-neutral-300 hover:border-neutral-500'
+                      )}
+                    >
+                      {rate === 1 ? '1×' : `${rate}×`}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
             {/* Emotional curve track label */}
@@ -12695,301 +13270,29 @@ export function DubVerseEditor({
 
               {/* Original audio track */}
               <div className="h-20 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative" data-timeline-track>
-                {displaySegments.map((segment, index) => {
-                  if (!inActiveWindow(segment)) return null
-                  const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'original'
-                  // Any drag of this segment (on any track) moves every track's block
-                  // for it, since they all share the one committed position; a paired
-                  // neighbor (Shift+P) moves too.
-                  const isDraggingPaired = movesWithDrag(index)
-                  const isAssignmentPulse = speakerPulseId !== null && segment.speaker_id === speakerPulseId
-                  const delta = (isDraggingThis || isDraggingPaired) ? draggingSegment!.currentDelta : 0
+                {/* The source language is not edited here, so it is drawn as one
+                    solid bar for the chunk being worked on rather than as
+                    per-line blocks: a single reference for where the original
+                    performance sits, with the editable lanes below it. */}
+                {(() => {
+                  const barStart = chunkMode ? chunkStart : 0
+                  const barEnd = chunkMode ? chunkEnd : videoDuration
+                  const w = Math.max(0, (barEnd - barStart) * PIXELS_PER_SECOND)
+                  if (w <= 0) return null
                   return (
-                    <SegmentContextMenu
-                      key={`orig-${segment.id}`}
-                      index={index}
-                      segmentKey={getSegmentKey(segment)}
-                      lockedSegments={lockedSegments}
-                      stagedEmotions={stagedEmotions}
-                      emotions={EMOTIONS}
-                      onSelect={(idx) => { selectSegment(idx); setContextSegmentIndex(idx) }}
-                      onSplit={handleSplitAtPlayhead}
-                      onSplitAtWord={(idx) => setSplitWordMode(idx)}
-                      onAddAfter={handleAddSegmentAfter}
-                      onMerge={handleMergeWithNext}
-                      canMergeNext={canMergeWithNext(index)}
-                      onDelete={(idx) => setPendingDelete(idx)}
-                      onToggleLock={(idx) => setSegmentLocked(idx, !lockedSegments.has(keyAt(idx)))}
-                      sceneLockMode={sceneLockMode}
-                      sceneAnchor={sceneAnchor}
-                      onLockScene={handleLockScene}
-                      onUnlockScene={(idx) => unlockScene(idx)}
-                      onRevert={revertToOriginal}
-                      onUndoLastEdit={handleUndoLastEdit}
-                      onUndoSplit={handleUndoSplit}
-                      onCopyText={handleCopyText}
-                      onPasteText={handlePasteText}
-                      onClearSegment={handleClearSegment}
-                      onSetEmotion={(idx, emotion) => setStagedEmotions(prev => ({ ...prev, [keyAt(idx)]: emotion }))}
-                      onClearEmotion={(idx) => {
-                    setStagedEmotions(prev => ({ ...prev, [keyAt(idx)]: '' }))
-                    updateSegment(idx, { committed_emotion: null })
-                    setImportedSegments(prev => {
-                      if (!prev) return prev
-                      return prev.map((seg, i) => i === idx ? { ...seg, committed_emotion: null } : seg)
-                    })
-                  }}
-                      onRenameSpeaker={(idx) => {
-                        const spkId = displaySegments[idx]?.speaker_id
-                        if (!spkId) return
-                        setRenamingSpeakerId(spkId)
-                        setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
-                      }}
-                      onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
-                      onAddToRulebook={(idx) => setRuleCaptureIndex(idx)}
-                      onGroupSelect={enterGroupSelectMode}
-                      onClearGroup={clearGroupSelection}
-                      groupSelectActive={groupSelectMode || groupSelectedSegments.size > 0}
-                    >
                     <div
-                      data-segment-drop-zone
-                      data-index={index}
-                      data-drag-block={index}
-                      // The pan excludes [data-segment-block]. Only the Dubbed track carried it,
-                      // so a press on this track was never recognised as a segment drag: the pan
-                      // claimed the gesture and the whole timeline moved with the block, instead
-                      // of the block moving within it.
-                      data-segment-block={true}
-                      className={cn(
-                        'absolute top-1 bottom-1 bg-blue-500/30 border border-blue-500/50 rounded group',
-                        lockedSegments.has(keyAt(index)) && 'ring-1 ring-green-400/60',
-                        lockGlowIndices.has(keyAt(index)) && 'ring-2 ring-green-400 shadow-[0_0_16px_4px_rgba(74,222,128,0.95)] animate-pulse',
-                        selectedSegmentIndex === index && !lockGlowIndices.has(keyAt(index)) && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
-                        voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
-                        isAssignmentPulse && 'ring-2 ring-amber-400/60 shadow-[0_0_6px_2px_rgba(245,158,11,0.22)] animate-pulse',
-                        isDraggingThis ? 'cursor-grabbing' : 'cursor-grab'
-                      )}
-                      style={{
-                        left: (effStart(segment) + delta) * PIXELS_PER_SECOND + ((groupMoveActive && groupSelectedSegments.has(index) && !lockedSegments.has(keyAt(index))) ? groupMoveOffset.x : 0),
-                        width: (() => {
-                          const dur = effEnd(segment) - effStart(segment)
-                          const spd = dragSpeedPreview?.index === index ? dragSpeedPreview.speed : (stagedSpeeds[keyAt(index)] ?? 1.0)
-                          return (dur / spd) * PIXELS_PER_SECOND
-                        })(),
-                      }}
-                      onMouseDown={(e) => {
-                        const t = e.target as HTMLElement
-                        if (t.closest('[data-resize-handle]')) return
-
-                        // In group-select mode a Ctrl press builds the range — don't
-                        // let it start a drag or group move.
-                        if (groupSelectMode && (e.ctrlKey || e.metaKey)) return
-
-                        // Start group move if segment is selected and Shift is not pressed.
-                        // A locked segment's position is frozen, so a group selection that
-                        // includes any locked segment can't be moved as a whole.
-                        if (groupSelectedSegments.has(index) && !e.shiftKey) {
-                          const selected = Array.from(groupSelectedSegments)
-                          if (selected.some(i => lockedSegments.has(keyAt(i)))) return
-                          e.preventDefault()
-                          e.stopPropagation()
-                          groupMoveActiveRef.current = true
-                          groupMoveStartXRef.current = e.clientX
-                          groupMoveOffsetRef.current = { x: 0, y: 0 }
-                          captureGroupDragEls()
-                          setGroupMoveActive(true)
-                          setGroupMoveOffset({ x: 0, y: 0 })
-                          return
-                        }
-
-                        e.preventDefault()
-                        e.stopPropagation()
-                        const startX = e.clientX
-                        const originalStart = effStart(segment)
-                        const originalEnd = effEnd(segment)
-                        // Layout lock freezes the timeline: nothing moves.
-                        if (layoutLocked) return
-                        if (lockedSegments.has(keyAt(index))) return // locked — position frozen
-                        setDraggingSegment({ index, track: 'original', startX, originalStart, originalEnd, currentDelta: 0 })
-                        // DIRECT DOM DRAG. setDraggingSegment on every mousemove
-                        // re-rendered the whole editor 60x/sec — the drag freeze.
-                        // The state write above is the only render for the whole
-                        // drag; blocks follow the cursor via transform, and the
-                        // store is written once, on release.
-                        const dragEls: HTMLElement[] = []
-                        const tl0 = timelineRef.current
-                        tl0?.querySelectorAll<HTMLElement>(`[data-drag-block="${index}"]`).forEach(el => dragEls.push(el))
-                        dragLiveDeltaRef.current = 0
-                        let lastDeltaTime = 0
-                        // Same two rules as the Dubbed track: a press is a click until
-                        // it travels a few pixels, and the delta is clamped so the block
-                        // stops at 0:00 with its length intact.
-                        let moved = false
-                        const clampDt = (dt: number) => Math.max(dt, -originalStart)
-                        const onMouseMove = (ev: MouseEvent) => {
-                          if (!moved && Math.abs(ev.clientX - startX) < 4) return
-                          moved = true
-                          const deltaTime = clampDt((ev.clientX - startX) / PIXELS_PER_SECOND)
-                          lastDeltaTime = deltaTime
-                          dragLiveDeltaRef.current = deltaTime
-                          const px = deltaTime * PIXELS_PER_SECOND
-                          for (const el of dragEls) el.style.transform = px ? `translateX(${px}px)` : ''
-                        }
-                        const onMouseUp = (ev: MouseEvent) => {
-                          for (const el of dragEls) el.style.transform = ''
-                          dragLiveDeltaRef.current = 0
-                          if (!moved) {
-                            setDraggingSegment(null)
-                            document.removeEventListener('mousemove', onMouseMove)
-                            document.removeEventListener('mouseup', onMouseUp)
-                            document.removeEventListener('pointercancel', onMouseUp)
-                            window.removeEventListener('blur', onMouseUp)
-                            dragMoveListenerRef.current = null
-                            dragUpListenerRef.current = null
-                            return
-                          }
-                          // blur/pointercancel carry no clientX — fall back to the
-                          // last live delta rather than committing NaN.
-                          const deltaTime = clampDt(Number.isFinite(ev.clientX) ? (ev.clientX - startX) / PIXELS_PER_SECOND : lastDeltaTime)
-                          updateSegment(index, {
-                            start_time: Math.max(0, originalStart + deltaTime),
-                            end_time: Math.max(0, originalEnd + deltaTime),
-                          })
-                          commitSegmentChanges(index, {
-                            committed_start_time: Math.max(0, originalStart + deltaTime),
-                            committed_end_time: Math.max(0, originalEnd + deltaTime),
-                          })
-                          commitOrStage(segment.transcript_index ?? index, {
-                            committed_start_time: Math.max(0, originalStart + deltaTime),
-                            committed_end_time: Math.max(0, originalEnd + deltaTime),
-                          }).catch(err => console.warn('[COMMIT-TIMING]', err))
-                          // Paired neighbor (Shift+P) moves by the same amount — commit
-                          // its shifted timing too so it doesn't snap back.
-                          setImportedSegments(prev => {
-                            const base = prev ?? displaySegments
-                            return base.map((seg, i) =>
-                              i === index
-                                ? {
-                                    ...seg,
-                                    start_time: Math.max(0, originalStart + deltaTime),
-                                    end_time: Math.max(0, originalEnd + deltaTime),
-                                    committed_start_time: Math.max(0, originalStart + deltaTime),
-                                    committed_end_time: Math.max(0, originalEnd + deltaTime),
-                                  }
-                                : seg
-                            )
-                          })
-                          setDraggingSegment(null)
-                          document.removeEventListener('mousemove', onMouseMove)
-                          document.removeEventListener('mouseup', onMouseUp)
-                          document.removeEventListener('pointercancel', onMouseUp)
-                          window.removeEventListener('blur', onMouseUp)
-                          dragMoveListenerRef.current = null
-                          dragUpListenerRef.current = null
-                        }
-                        document.addEventListener('mousemove', onMouseMove)
-                        document.addEventListener('mouseup', onMouseUp)
-                        document.addEventListener('pointercancel', onMouseUp)
-                        window.addEventListener('blur', onMouseUp)
-                        dragMoveListenerRef.current = onMouseMove
-                        dragUpListenerRef.current = onMouseUp
-                      }}
+                      className="absolute top-1 bottom-1 rounded bg-blue-500/30 border border-blue-400/60"
+                      style={{ left: barStart * PIXELS_PER_SECOND, width: w }}
                     >
-                      {/* Left handle — drag to move start_time */}
-                      <div
-                        data-resize-handle={true}
-                        className={cn("absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-l", (layoutLocked || lockedSegments.has(keyAt(index))) && 'pointer-events-none')}
-                        onMouseDown={(e) => {
-                          e.preventDefault()
-                          e.stopPropagation()
-                          const startX = e.clientX
-                          const originalStart = effStart(segment)
-                          const originalEnd = effEnd(segment)
-                          const onMouseMove = (ev: MouseEvent) => {
-                            const dx = ev.clientX - startX
-                            const newStart = Math.max(0, Math.min(originalEnd - 0.1, originalStart + dx / PIXELS_PER_SECOND))
-                            setImportedSegments(prev => {
-                              const base = prev ?? displaySegments
-                              return base.map((seg, i) => i === index ? { ...seg, start_time: newStart, committed_start_time: newStart } : seg)
-                            })
-                          }
-                          const onMouseUp = (ev: MouseEvent) => {
-                            const dx = ev.clientX - startX
-                            const newStart = Math.max(0, Math.min(originalEnd - 0.1, originalStart + dx / PIXELS_PER_SECOND))
-                            updateSegment(index, { start_time: newStart })
-                            commitSegmentChanges(index, { committed_start_time: newStart })
-                            commitOrStage(segment.transcript_index ?? index, {
-                              committed_start_time: newStart,
-                            }).catch(err => console.warn('[RESIZE-LEFT]', err))
-                            setImportedSegments(prev => {
-                              const base = prev ?? displaySegments
-                              return base.map((seg, i) => i === index ? { ...seg, start_time: newStart, committed_start_time: newStart } : seg)
-                            })
-                            document.removeEventListener('mousemove', onMouseMove)
-                            document.removeEventListener('mouseup', onMouseUp)
-                            document.removeEventListener('pointercancel', onMouseUp)
-                            window.removeEventListener('blur', onMouseUp)
-                          }
-                          document.addEventListener('mousemove', onMouseMove)
-                          document.addEventListener('mouseup', onMouseUp)
-                          document.addEventListener('pointercancel', onMouseUp)
-                          window.addEventListener('blur', onMouseUp)
-                        }}
-                      >
-                        <GripHorizontal className="h-3 w-3 rotate-90" />
-                      </div>
-
-                      <div className="px-2 truncate text-[10px] h-full flex items-center text-blue-200/80">
-                        {segment.source_text}
-                      </div>
-
-                      {/* Right handle — drag to move end_time */}
-                      <div
-                        data-resize-handle={true}
-                        className={cn("absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 flex items-center justify-center bg-white/20 rounded-r", (layoutLocked || lockedSegments.has(keyAt(index))) && 'pointer-events-none')}
-                        onMouseDown={(e) => {
-                          e.preventDefault()
-                          e.stopPropagation()
-                          const startX = e.clientX
-                          const originalStart = effStart(segment)
-                          const originalEnd = effEnd(segment)
-                          const onMouseMove = (ev: MouseEvent) => {
-                            const dx = ev.clientX - startX
-                            const newEnd = Math.max(originalStart + 0.1, originalEnd + dx / PIXELS_PER_SECOND)
-                            setImportedSegments(prev => {
-                              const base = prev ?? displaySegments
-                              return base.map((seg, i) => i === index ? { ...seg, end_time: newEnd, committed_end_time: newEnd } : seg)
-                            })
-                          }
-                          const onMouseUp = (ev: MouseEvent) => {
-                            const dx = ev.clientX - startX
-                            const newEnd = Math.max(originalStart + 0.1, originalEnd + dx / PIXELS_PER_SECOND)
-                            updateSegment(index, { end_time: newEnd })
-                            commitSegmentChanges(index, { committed_end_time: newEnd })
-                            commitOrStage(segment.transcript_index ?? index, {
-                              committed_end_time: newEnd,
-                            }).catch(err => console.warn('[RESIZE-RIGHT]', err))
-                            setImportedSegments(prev => {
-                              const base = prev ?? displaySegments
-                              return base.map((seg, i) => i === index ? { ...seg, end_time: newEnd, committed_end_time: newEnd } : seg)
-                            })
-                            document.removeEventListener('mousemove', onMouseMove)
-                            document.removeEventListener('mouseup', onMouseUp)
-                            document.removeEventListener('pointercancel', onMouseUp)
-                            window.removeEventListener('blur', onMouseUp)
-                          }
-                          document.addEventListener('mousemove', onMouseMove)
-                          document.addEventListener('mouseup', onMouseUp)
-                          document.addEventListener('pointercancel', onMouseUp)
-                          window.addEventListener('blur', onMouseUp)
-                        }}
-                      >
-                        <GripHorizontal className="h-3 w-3 rotate-90" />
+                      <div className="px-3 h-full flex items-center gap-2 text-[10px] text-blue-100/80 pointer-events-none">
+                        <span className="font-medium">{t('Original')}{detectedLanguage ? ` · ${detectedLanguage.toUpperCase()}` : ''}</span>
+                        <span className="text-blue-200/50">
+                          {formatTime(barStart)} – {formatTime(barEnd)}
+                        </span>
                       </div>
                     </div>
-                    </SegmentContextMenu>
                   )
-                })}
+                })()}
               </div>
 
               {/* Reference track — shown only when a video has been imported for transcription */}
@@ -13023,24 +13326,47 @@ export function DubVerseEditor({
                 </div>
               )}
 
-{/* Dubbed audio track with stretch/squeeze handles */}
+{/* Dubbed audio track — one lane per text row, with stretch/squeeze handles */}
               <div
                 className={cn(
-                  "h-20 shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative",
+                  "shrink-0 bg-neutral-900/20 border-b border-neutral-700 relative",
                   draggedTranslation && "bg-amber-500/10 border-amber-500/30"
                 )}
+                style={{ height: dubLanesPx }}
                 data-timeline-track
                 onDragOver={handleTimelineDragOver}
                 onDrop={handleDubbedTrackDrop}
               >
+                {/* Lane beds: a faint band in the row's speaker colour, so the
+                    stack reads as the script even where a line is silent. */}
+                {laneRows.rows.map((segIdx, row) => {
+                  const c = getSpeakerColorByNumber(speakerNumberMap[displaySegments[segIdx]?.speaker_id || 'speaker-1'] ?? 1)
+                  return (
+                    <div
+                      key={`lane-bed-${row}`}
+                      className={cn('absolute left-0 right-0 border-b border-neutral-600/70 pointer-events-none', c.bg.replace('/20', '/10'))}
+                      style={{ top: row * SEG_LANE_H, height: SEG_LANE_H }}
+                    />
+                  )
+                })}
                 {displaySegments.map((segment, index) => {
                   if (!inActiveWindow(segment)) return null
+                  const laneRow = laneRows.rowOf.get(index) ?? 0
                   const droppedTranslation = droppedTranslations.find(t => t.segmentIndex === index)
                   const hasDroppedTranslation = !!droppedTranslation
 
-                  const bgColor = hasDroppedTranslation
+                  const spkId = segment.speaker_id || 'speaker-1'
+                  const spkNum = speakerNumberMap[spkId] ?? 1
+                  const spColor = getSpeakerColorByNumber(spkNum)
+                  const blockMuted = mutedSpeakers.has(spkId)
+                  // A muted lane reads as OFF at a glance — grey, dimmed, and it
+                  // keeps that look over the dropped-translation amber, because
+                  // silent is the more important fact about it.
+                  const bgColor = blockMuted
+                    ? 'bg-neutral-600/25 opacity-50'
+                    : hasDroppedTranslation
                     ? 'bg-amber-500/40 border-amber-400 ring-2 ring-amber-400/50'
-                    : 'bg-amber-500/30 border-amber-500/50'
+                    : spColor.bg
                   
                   return (
                     <SegmentContextMenu
@@ -13094,13 +13420,15 @@ export function DubVerseEditor({
                       data-index={index}
                       data-drag-block={index}
                       className={cn(
-                        'absolute top-1 bottom-1 rounded group border transition-colors',
+                        'absolute rounded group border transition-colors',
                         bgColor,
                         lockedSegments.has(keyAt(index)) && 'ring-1 ring-green-400/60',
                         lockGlowIndices.has(keyAt(index)) && 'ring-2 ring-green-400 shadow-[0_0_16px_4px_rgba(74,222,128,0.95)] animate-pulse',
                         (index === groupBounds?.firstIdx || index === groupBounds?.lastIdx)
                           ? 'border-yellow-400/90 shadow-[0_0_14px_rgba(250,204,21,0.6)] ring-2 ring-yellow-400/80'
-                          : 'border-slate-400/30',
+                          : blockMuted ? 'border-neutral-600' : hasDroppedTranslation ? 'border-amber-400' : spColor.border,
+                        genAnim.get(index) === 'trace' && 'dm-gen-trace',
+                        genAnim.get(index) === 'pulse' && 'dm-gen-pulse',
                         selectedSegmentIndex === index && !lockGlowIndices.has(keyAt(index)) && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                         voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
                         groupSelectMode && !groupSelectedSegments.has(index) && 'ring-1 ring-yellow-400/30',
@@ -13109,6 +13437,10 @@ export function DubVerseEditor({
                           : draggingSegment?.index === index && draggingSegment?.track === 'dubbed' ? 'cursor-grabbing' : 'cursor-grab'
                       )}
                       style={{
+                        // The row this line occupies in the script is the row it
+                        // occupies here — that is the whole point of the stack.
+                        top: laneRow * SEG_LANE_H + 4,
+                        height: SEG_LANE_H - 8,
                         left: (() => {
                           const isDraggingThis = draggingSegment?.index === index && draggingSegment?.track === 'dubbed'
                           // Follow any drag of this segment (any track) — shared position;
@@ -13125,6 +13457,8 @@ export function DubVerseEditor({
                             : (stagedSpeeds[keyAt(index)] ?? 1.0)
                           return (originalDuration / activeSpeed) * PIXELS_PER_SECOND
                         })(),
+                        // The generation glows read this — speaker's own colour.
+                        ['--dm-trace' as string]: getSpeakerHexByNumber(spkNum),
                       }}
                       data-segment-block={true}
                       data-segment-block-index={index}
@@ -13336,16 +13670,67 @@ export function DubVerseEditor({
                       {/* Lock icon when paired */}
                       {/* Content */}
                       <div className="px-3 truncate text-[10px] h-full flex items-center text-white/80 gap-1">
-                        {dragSpeedPreview?.index === index ? (
-                          <span data-speed-label className="text-amber-400 font-mono shrink-0">{dragSpeedPreview.speed.toFixed(2)}x</span>
-                        ) : stagedSpeeds[keyAt(index)] !== undefined ? (
-                          <>
-                            <span className="text-amber-400 font-mono shrink-0">{stagedSpeeds[keyAt(index)].toFixed(2)}x</span>
-                            <span className="truncate">{segment.preview_text ?? segment.active_text ?? segment.target_text}</span>
-                          </>
-                        ) : (
-                          segment.preview_text ?? segment.active_text ?? segment.target_text
-                        )}
+                        {/* Speed badge — DRAGGABLE. Up is faster, down is slower,
+                            0.5x–1.5x, snapping to 0.05. A line with no staged
+                            speed still gets a badge, revealed on hover like the
+                            other handles, so there is always something to grab. */}
+                        {(() => {
+                          const staged = stagedSpeeds[keyAt(index)]
+                          const live = dragSpeedPreview?.index === index ? dragSpeedPreview.speed : staged
+                          const isSet = live !== undefined
+                          return (
+                            <span
+                              data-speed-label
+                              data-resize-handle={true}
+                              title="Drag up to speed this line up, down to slow it down"
+                              className={cn(
+                                'font-mono shrink-0 cursor-ns-resize select-none px-1 rounded transition-opacity hover:bg-white/10',
+                                isSet ? 'text-amber-400' : 'text-white/50 opacity-0 group-hover:opacity-100'
+                              )}
+                              onClick={(e) => { e.preventDefault(); e.stopPropagation() }}
+                              onMouseDown={(e) => {
+                                e.preventDefault()
+                                e.stopPropagation()
+                                if (layoutLocked || lockedSegments.has(keyAt(index))) return
+                                const startY = e.clientY
+                                const originalDuration = effEnd(segment) - effStart(segment)
+                                const initialSpeed = staged ?? 1.0
+                                // Same direct-DOM rule as the edge handles: resize
+                                // this segment's block on every track per move and
+                                // write state once, on release.
+                                const els: HTMLElement[] = []
+                                timelineRef.current?.querySelectorAll<HTMLElement>(`[data-drag-block="${index}"]`).forEach(el => els.push(el))
+                                const labelEls = timelineRef.current?.querySelectorAll<HTMLElement>(`[data-drag-block="${index}"] [data-speed-label]`)
+                                let lastSpeed = initialSpeed
+                                setDragSpeedPreview({ index, speed: initialSpeed })
+                                const onMouseMove = (ev: MouseEvent) => {
+                                  // 200px of travel spans the whole range, then snap.
+                                  const raw = initialSpeed + (startY - ev.clientY) / 200
+                                  const snapped = Math.round(raw / 0.05) * 0.05
+                                  lastSpeed = Math.min(1.5, Math.max(0.5, snapped))
+                                  const w = Math.max((originalDuration / lastSpeed) * PIXELS_PER_SECOND, 2)
+                                  for (const el of els) el.style.width = `${w}px`
+                                  labelEls?.forEach(el => { el.textContent = `${lastSpeed.toFixed(2)}x` })
+                                }
+                                const onMouseUp = () => {
+                                  setStagedSpeeds(s => ({ ...s, [keyAt(index)]: lastSpeed }))
+                                  setDragSpeedPreview(null)
+                                  document.removeEventListener('mousemove', onMouseMove)
+                                  document.removeEventListener('mouseup', onMouseUp)
+                                  document.removeEventListener('pointercancel', onMouseUp)
+                                  window.removeEventListener('blur', onMouseUp)
+                                }
+                                document.addEventListener('mousemove', onMouseMove)
+                                document.addEventListener('mouseup', onMouseUp)
+                                document.addEventListener('pointercancel', onMouseUp)
+                                window.addEventListener('blur', onMouseUp)
+                              }}
+                            >
+                              {(live ?? 1).toFixed(2)}x
+                            </span>
+                          )
+                        })()}
+                        <span className="truncate">{segment.preview_text ?? segment.active_text ?? segment.target_text}</span>
                       </div>
 
                       {/* Truncated flag */}
@@ -13405,6 +13790,12 @@ export function DubVerseEditor({
                       >
                         <GripHorizontal className="h-3 w-3 rotate-90" />
                       </div>
+
+                      {/* Fades and clip gain — the same controls as the Preview
+                          Audio track below, so the mix can be built where the
+                          lines are read. Grips inset 10px: this block's corners
+                          are timing handles. */}
+                      {renderClipMixControls(segment, index, effStart(segment), effEnd(segment), 10)}
                     </div>
                     </SegmentContextMenu>
                   )
@@ -13412,8 +13803,18 @@ export function DubVerseEditor({
               </div>
 
 
-              {/* RPT Audio track */}
+              {/* Preview Audio track — the mixed preview of every line, the last
+                  audio track before the emotion curve. The per-line lanes live
+                  in the Dubbed stack above; this stays one row, the mix. */}
               <div className="h-20 shrink-0 bg-neutral-900/10 border-b border-neutral-700 relative" data-timeline-track>
+                {/* Cross Layer ranges — where overlap is deliberate talk-over. */}
+                {crosslayerRanges.map((r, ri) => (
+                  <div
+                    key={`xl-${ri}`}
+                    className="absolute top-0 bottom-0 bg-cyan-400/10 border-x border-cyan-400/30 pointer-events-none"
+                    style={{ left: r.start * PIXELS_PER_SECOND, width: Math.max((r.end - r.start) * PIXELS_PER_SECOND, 2) }}
+                  />
+                ))}
                 {displaySegments.map((seg, i) => {
                   if (!inActiveWindow(seg)) return null
                   const hasAudio = !!(seg.committed_audio_url ?? seg.audio_url)
@@ -13542,264 +13943,7 @@ export function DubVerseEditor({
                         <GripHorizontal className="h-3 w-3 rotate-90" />
                       </div>
 
-                      {/* The fade RAMPS, drawn permanently.
-                          Only the drag handles existed before, and they were hidden
-                          until hover — so setting a fade and moving the mouse away
-                          left no trace of it at all, which reads as the fade having
-                          snapped back. The shaded triangle is the attenuated part of
-                          the segment: it is what you can actually hear. */}
-                      {(seg.fade_in ?? 0) > 0 && (
-                        <div
-                          className="absolute top-0 bottom-0 left-0 pointer-events-none z-10"
-                          style={{
-                            width: (seg.fade_in ?? 0) * PIXELS_PER_SECOND,
-                            background: 'rgba(16,185,129,0.45)',
-                            // Above the ramp line: level rises 0 -> full across the
-                            // region, so the missing part is the top-left triangle.
-                            clipPath: 'polygon(0 0, 100% 0, 0 100%)',
-                          }}
-                        />
-                      )}
-                      {(seg.fade_out ?? 0) > 0 && (
-                        <div
-                          className="absolute top-0 bottom-0 right-0 pointer-events-none z-10"
-                          style={{
-                            width: (seg.fade_out ?? 0) * PIXELS_PER_SECOND,
-                            background: 'rgba(16,185,129,0.45)',
-                            // Mirrored: level falls full -> 0, so the missing part is
-                            // the top-right triangle.
-                            clipPath: 'polygon(0 0, 100% 0, 100% 100%)',
-                          }}
-                        />
-                      )}
-
-                      {/* Clip-gain level line. Unity = the line sits on the block's
-                          top edge; lower = pulled down. Always drawn when set —
-                          like the fade ramps, a lowered level must stay visible or
-                          it reads as forgotten. */}
-                      <div
-                        data-volume-line
-                        className={cn(
-                          "absolute left-0 right-0 h-0.5 pointer-events-none z-10 bg-cyan-300/80 shadow-[0_0_4px_rgba(103,232,249,0.8)]",
-                          (seg.volume ?? 1) >= 0.999 && "opacity-0"
-                        )}
-                        style={{ top: `${(1 - (seg.volume ?? 1)) * 100}%` }}
-                      />
-
-                      {/* Fade handles — only on Preview Audio track */}
-                      {!layoutLocked && (
-                        <>
-                          {/* Fade in — ramp and grip are SIBLINGS, not nested.
-                              Nested, the grip's position was tied to the ramp's box and the ramp
-                              needed a minimum width to keep the grip reachable — which painted a
-                              wedge on every block that had no fade. Separately positioned, the ramp
-                              can be zero-width (drawing nothing) while the grip still sits exactly
-                              on the block corner. */}
-                          <div
-                            data-fade-ramp="in"
-                            className="absolute top-0 left-0 h-full pointer-events-none z-10 bg-cyan-400/45"
-                            style={{
-                              width: Math.min((seg.fade_in ?? 0) * PIXELS_PER_SECOND, (endT - startT) * PIXELS_PER_SECOND / 2),
-                              clipPath: 'polygon(0 0, 100% 0, 0 100%)',
-                            }}
-                          />
-                          <div
-                            data-fade-handle="in"
-                            className={cn("absolute top-0 w-3 h-3 pointer-events-auto z-40 opacity-0 group-hover:opacity-100 transition-opacity", (seg.fade_in ?? 0) > 0 && "animate-pulse")}
-                            title={`Fade in ${(seg.fade_in ?? 0).toFixed(2)}s`}
-                            style={{
-                              left: Math.min((seg.fade_in ?? 0) * PIXELS_PER_SECOND, (endT - startT) * PIXELS_PER_SECOND / 2),
-                              background: 'linear-gradient(135deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
-                              clipPath: 'polygon(0 0, 100% 0, 0 100%)',
-                              boxShadow: '0 0 8px rgba(0,245,212,0.9)',
-                              willChange: 'transform',
-                            }}
-                            // The block below also handles click-to-seek. Without this the playhead
-                            // jumped to wherever the drag ended, every single time.
-                            onClick={(e) => { e.preventDefault(); e.stopPropagation() }}
-                            onPointerDown={(e) => {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch {}
-                              const grip = e.currentTarget as HTMLElement
-                              const ramp = grip.parentElement?.querySelector('[data-fade-ramp="in"]') as HTMLElement | null
-                              const startX = e.clientX
-                              const initialFade = seg.fade_in ?? 0
-                              const maxFade = (endT - startT) / 2
-                              let latest = initialFade
-                              // Drive the DOM directly while dragging. This used to call
-                              // setImportedSegments on every pointermove, which rebuilt an 818-entry
-                              // array and re-rendered the whole editor per mouse event — the handle
-                              // arrived where the cursor had been half a second earlier. State is
-                              // written once, on release.
-                              const onPointerMove = (ev: PointerEvent) => {
-                                const delta = (ev.clientX - startX) / PIXELS_PER_SECOND
-                                latest = Math.min(Math.max(0, initialFade + delta), maxFade)
-                                const px = latest * PIXELS_PER_SECOND
-                                if (ramp) ramp.style.width = `${px}px`
-                                grip.style.left = `${px}px`
-                              }
-                              const onPointerUp = () => {
-                                document.removeEventListener('pointermove', onPointerMove)
-                                document.removeEventListener('pointerup', onPointerUp)
-                                document.removeEventListener('pointercancel', onPointerUp)
-                                window.removeEventListener('blur', onPointerUp)
-                                const finalFade = latest
-                                updateSegment(i, { fade_in: finalFade })
-                                commitSegmentChanges(i, { fade_in: finalFade })
-                                commitOrStage(seg.transcript_index ?? i, { fade_in: finalFade }).catch(err => console.warn('[FADE]', err))
-                                setImportedSegments(prev => {
-                                  const base = prev ?? displaySegmentsRef.current
-                                  return base.map((s, idx) => idx === i ? { ...s, fade_in: finalFade } : s)
-                                })
-                                if (audioContextRef.current) {
-                                  const stitchSegs = displaySegmentsRef.current.map((s, idx) => idx === i ? { ...s, fade_in: finalFade } : s)
-                                  requestStitchWith(stitchSegs, audioContextRef.current)
-                                }
-                              }
-                              document.addEventListener('pointermove', onPointerMove)
-                              document.addEventListener('pointerup', onPointerUp)
-                              document.addEventListener('pointercancel', onPointerUp)
-                              window.addEventListener('blur', onPointerUp)
-                            }}
-                          />
-                          {/* Fade out — ramp and grip are SIBLINGS, not nested.
-                              Nested, the grip's position was tied to the ramp's box and the ramp
-                              needed a minimum width to keep the grip reachable — which painted a
-                              wedge on every block that had no fade. Separately positioned, the ramp
-                              can be zero-width (drawing nothing) while the grip still sits exactly
-                              on the block corner. */}
-                          <div
-                            data-fade-ramp="out"
-                            className="absolute top-0 right-0 h-full pointer-events-none z-10 bg-cyan-400/45"
-                            style={{
-                              width: Math.min((seg.fade_out ?? 0) * PIXELS_PER_SECOND, (endT - startT) * PIXELS_PER_SECOND / 2),
-                              clipPath: 'polygon(100% 0, 100% 100%, 0 0)',
-                            }}
-                          />
-                          <div
-                            data-fade-handle="out"
-                            className={cn("absolute top-0 w-3 h-3 pointer-events-auto z-40 opacity-0 group-hover:opacity-100 transition-opacity", (seg.fade_out ?? 0) > 0 && "animate-pulse")}
-                            title={`Fade out ${(seg.fade_out ?? 0).toFixed(2)}s`}
-                            style={{
-                              right: Math.min((seg.fade_out ?? 0) * PIXELS_PER_SECOND, (endT - startT) * PIXELS_PER_SECOND / 2),
-                              background: 'linear-gradient(225deg, rgb(15,23,42) 0%, rgb(0,245,212) 100%)',
-                              clipPath: 'polygon(100% 0, 100% 100%, 0 0)',
-                              boxShadow: '0 0 8px rgba(0,245,212,0.9)',
-                              willChange: 'transform',
-                            }}
-                            // The block below also handles click-to-seek. Without this the playhead
-                            // jumped to wherever the drag ended, every single time.
-                            onClick={(e) => { e.preventDefault(); e.stopPropagation() }}
-                            onPointerDown={(e) => {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch {}
-                              const grip = e.currentTarget as HTMLElement
-                              const ramp = grip.parentElement?.querySelector('[data-fade-ramp="out"]') as HTMLElement | null
-                              const startX = e.clientX
-                              const initialFade = seg.fade_out ?? 0
-                              const maxFade = (endT - startT) / 2
-                              let latest = initialFade
-                              // Drive the DOM directly while dragging. This used to call
-                              // setImportedSegments on every pointermove, which rebuilt an 818-entry
-                              // array and re-rendered the whole editor per mouse event — the handle
-                              // arrived where the cursor had been half a second earlier. State is
-                              // written once, on release.
-                              const onPointerMove = (ev: PointerEvent) => {
-                                // Inverted: fade-out grows as the grip is pulled LEFT, back into the
-                            // block, mirroring fade-in growing rightward.
-                            const delta = (startX - ev.clientX) / PIXELS_PER_SECOND
-                                latest = Math.min(Math.max(0, initialFade + delta), maxFade)
-                                const px = latest * PIXELS_PER_SECOND
-                                if (ramp) ramp.style.width = `${px}px`
-                                grip.style.right = `${px}px`
-                              }
-                              const onPointerUp = () => {
-                                document.removeEventListener('pointermove', onPointerMove)
-                                document.removeEventListener('pointerup', onPointerUp)
-                                document.removeEventListener('pointercancel', onPointerUp)
-                                window.removeEventListener('blur', onPointerUp)
-                                const finalFade = latest
-                                updateSegment(i, { fade_out: finalFade })
-                                commitSegmentChanges(i, { fade_out: finalFade })
-                                commitOrStage(seg.transcript_index ?? i, { fade_out: finalFade }).catch(err => console.warn('[FADE]', err))
-                                setImportedSegments(prev => {
-                                  const base = prev ?? displaySegmentsRef.current
-                                  return base.map((s, idx) => idx === i ? { ...s, fade_out: finalFade } : s)
-                                })
-                                if (audioContextRef.current) {
-                                  const stitchSegs = displaySegmentsRef.current.map((s, idx) => idx === i ? { ...s, fade_out: finalFade } : s)
-                                  requestStitchWith(stitchSegs, audioContextRef.current)
-                                }
-                              }
-                              document.addEventListener('pointermove', onPointerMove)
-                              document.addEventListener('pointerup', onPointerUp)
-                              document.addEventListener('pointercancel', onPointerUp)
-                              window.addEventListener('blur', onPointerUp)
-                            }}
-                          />
-                          {/* Clip gain — grab the block's TOP EDGE and pull it down
-                              to lower the level, DAW-style. The grip hugs the top
-                              on hover; the cyan line (drawn above) is the level
-                              itself and becomes visible once set. Same DOM-during-
-                              drag / state-on-release rule as the fade handles. */}
-                          <div
-                            data-volume-handle
-                            data-resize-handle={true}
-                            className="absolute top-0 left-2 right-2 h-2 cursor-ns-resize z-30 opacity-0 group-hover:opacity-100 transition-opacity flex items-start justify-center"
-                            title={`Level ${Math.round((seg.volume ?? 1) * 100)}% — pull the top edge down to lower`}
-                            onClick={(e) => { e.preventDefault(); e.stopPropagation() }}
-                            onPointerDown={(e) => {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch {}
-                              const grip = e.currentTarget as HTMLElement
-                              const block = grip.parentElement as HTMLElement | null
-                              const blockH = block?.getBoundingClientRect().height || 40
-                              const line = block?.querySelector('[data-volume-line]') as HTMLElement | null
-                              const startY = e.clientY
-                              const initialVolume = seg.volume ?? 1
-                              let latest = initialVolume
-                              const onPointerMove = (ev: PointerEvent) => {
-                                // Full block height of travel = 0..1. Pulling the
-                                // edge DOWN lowers the level; the line rides with
-                                // the cursor exactly.
-                                const dy = (ev.clientY - startY) / blockH
-                                latest = Math.min(1, Math.max(0, initialVolume - dy))
-                                if (line) {
-                                  line.style.top = `${(1 - latest) * 100}%`
-                                  line.style.opacity = latest < 0.999 ? '1' : '0'
-                                }
-                              }
-                              const onPointerUp = () => {
-                                document.removeEventListener('pointermove', onPointerMove)
-                                document.removeEventListener('pointerup', onPointerUp)
-                                document.removeEventListener('pointercancel', onPointerUp)
-                                window.removeEventListener('blur', onPointerUp)
-                                const finalVolume = latest
-                                updateSegment(i, { volume: finalVolume })
-                                commitSegmentChanges(i, { volume: finalVolume })
-                                commitOrStage(seg.transcript_index ?? i, { volume: finalVolume }).catch(err => console.warn('[VOLUME]', err))
-                                setImportedSegments(prev => {
-                                  const base = prev ?? displaySegmentsRef.current
-                                  return base.map((s, idx) => idx === i ? { ...s, volume: finalVolume } : s)
-                                })
-                                if (audioContextRef.current) {
-                                  const stitchSegs = displaySegmentsRef.current.map((s, idx) => idx === i ? { ...s, volume: finalVolume } : s)
-                                  requestStitchWith(stitchSegs, audioContextRef.current)
-                                }
-                              }
-                              document.addEventListener('pointermove', onPointerMove)
-                              document.addEventListener('pointerup', onPointerUp)
-                              document.addEventListener('pointercancel', onPointerUp)
-                              window.addEventListener('blur', onPointerUp)
-                            }}
-                          >
-                            <div className="w-6 h-1 rounded-full bg-cyan-300/80" />
-                          </div>
-                        </>
-                      )}
+                      {renderClipMixControls(seg, i, startT, endT)}
                     </div>
                   )
                 })}
@@ -13964,6 +14108,44 @@ export function DubVerseEditor({
                   }} />
               </div>
 
+              {/* 10s graph grid — one element per line, running from the top of
+                  the timeline to the foot of Preview Audio (the last audio
+                  track; the emotion curve and filler below stay clean). Each
+                  line carries its timecode at the top. z-35: above the blocks,
+                  under the needle (z-50) and fade grips (z-40).
+                  pointer-events:none so pan, click-to-seek and every handle
+                  still work. */}
+              {Array.from({ length: Math.max(0, Math.floor(videoDuration / 10)) }, (_, gi) => (
+                <div
+                  key={`grid10-${gi}`}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    // Layover+ruler (PLAYHEAD_TOP) + picture + Original +
+                    // optional Reference + dubbed lanes + Preview Audio.
+                    height: PLAYHEAD_TOP + 160 + (referenceSegments && referenceSegments.length > 0 ? 80 : 0) + dubLanesPx + 80,
+                    left: (gi + 1) * 10 * PIXELS_PER_SECOND,
+                    width: 1,
+                    background: 'rgba(160,160,160,0.38)',
+                    zIndex: 35,
+                    pointerEvents: 'none',
+                  }}
+                >
+                  <span
+                    style={{
+                      position: 'absolute',
+                      top: 2,
+                      left: 3,
+                      fontSize: 9,
+                      fontFamily: 'monospace',
+                      color: 'rgba(160,160,160,0.75)',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {(gi + 1) * 10}s
+                  </span>
+                </div>
+              ))}
             </div>
             </SegmentContextMenu>
           </div>

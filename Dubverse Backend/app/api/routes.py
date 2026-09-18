@@ -2,7 +2,7 @@ from typing import Optional, Dict, List, Any
 from pydantic import BaseModel, Field
 import fastapi
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Request, Body, Depends
-from fastapi.responses import JSONResponse, FileResponse, Response
+from fastapi.responses import JSONResponse, FileResponse, Response, StreamingResponse
 import uuid
 import os
 import json as _json
@@ -5375,7 +5375,7 @@ async def serve_project_thumbnail(project_id: str):
 
 
 @router.get("/media/{job_id}/video", dependencies=[Depends(_dep_job_access)])
-async def serve_job_video(job_id: str):
+async def serve_job_video(job_id: str, request: Request):
     """Serve the original uploaded video so Sync.Labs can fetch it by URL."""
     job = await _get_or_rehydrate_job(job_id)
     if not job:
@@ -5393,8 +5393,16 @@ async def serve_job_video(job_id: str):
     # Vary: Origin so the browser cache keys this by origin — the crossorigin
     # thumbnail request and the no-cors player request never share (and poison)
     # a cache entry, which otherwise makes the thumbnail fetch fail CORS.
-    return FileResponse(job.video_path, media_type=media_types.get(ext, "video/mp4"),
-        headers={"Vary": "Origin"})
+    # Range-aware: without 206 partial content every video seek restarted the
+    # whole-file download — the freeze mid-playback on feature-length sources.
+    serve_path = job.video_path
+    if ext == ".mp4":
+        # A trailing moov atom stalls playback where the linear download meets
+        # the playhead — deterministic mid-film freeze. Remux once, serve the
+        # faststart copy.
+        serve_path = await _ensure_faststart(job.video_path)
+    return _range_media_response(request, serve_path,
+        media_types.get(ext, "video/mp4"), {"Vary": "Origin"})
 
 
 # Segment audio is REGENERATED in place (same filename overwritten), so it must
@@ -5408,6 +5416,108 @@ _NO_STORE_HEADERS = {
 }
 
 
+# HTTP Range support for media. FileResponse answers every request with a full
+# 200 body, but the <video> element always asks in byte ranges — so a seek to an
+# unbuffered region meant the browser abandoned its fetch and restarted the
+# linear download FROM ZERO. On a 300MB feature that is minutes of stall per
+# seek: the picture froze while the audio clock ran on, and the drift corrector
+# seeking the stalled picture forward made it worse (another restart). Serving
+# 206 partial content is the difference between a seek costing one HTTP fetch
+# and one costing the whole file.
+def _range_media_response(request: Request, path: str, media_type: str, extra_headers: Optional[Dict[str, str]] = None) -> Response:
+    file_size = os.path.getsize(path)
+    headers = {"Accept-Ranges": "bytes", **(extra_headers or {})}
+    range_header = request.headers.get("range")
+    if not range_header:
+        return FileResponse(path, media_type=media_type, headers=headers)
+    try:
+        units, rng = range_header.split("=", 1)
+        if units.strip() != "bytes":
+            raise ValueError
+        start_s, _, end_s = rng.partition("-")
+        start = int(start_s) if start_s.strip() else 0
+        end = int(end_s) if end_s.strip() else file_size - 1
+        start = max(0, start)
+        end = min(file_size - 1, end)
+        if start > end:
+            raise ValueError
+    except ValueError:
+        return Response(
+            status_code=416,
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
+    length = end - start + 1
+
+    def _stream():
+        with open(path, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    return StreamingResponse(
+        _stream(),
+        status_code=206,
+        media_type=media_type,
+        headers={
+            **headers,
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Content-Length": str(length),
+        },
+    )
+
+
+def _moov_is_early(path: str, scan: int = 1 << 20) -> bool:
+    """True when the mp4's moov atom precedes mdat within the first `scan` bytes.
+
+    A trailing moov means the browser must fetch the END of the file before it
+    knows the frame index — linear playback stalls where the download meets the
+    playhead, and every seek costs a tail fetch. ffmpeg -movflags +faststart
+    fixes it with a remux (no re-encode).
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(scan)
+    except OSError:
+        return True
+    m, d = head.find(b"moov"), head.find(b"mdat")
+    return m != -1 and (d == -1 or m < d)
+
+
+async def _ensure_faststart(path: str) -> str:
+    """Return a faststart-remuxed copy of `path`, creating it once if needed."""
+    fast_path = path + ".faststart.mp4"
+    if os.path.exists(fast_path) or _moov_is_early(path):
+        return fast_path if os.path.exists(fast_path) else path
+    loop = asyncio.get_event_loop()
+
+    def _remux() -> bool:
+        tmp = fast_path + ".tmp"
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", path, "-c", "copy",
+                 "-movflags", "+faststart", tmp],
+                check=True, capture_output=True, timeout=300,
+            )
+            os.replace(tmp, fast_path)
+            return True
+        except Exception as exc:
+            logger.warning("[VIDEO] faststart remux failed for %s: %s", path, exc)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return False
+
+    if await loop.run_in_executor(None, _remux):
+        return fast_path
+    return path
+
+
 # Scrub proxy: a low-res, all-keyframe copy of the source video. Long-GOP
 # H.264 seeks by decoding back to the last keyframe — anywhere up to seconds of
 # work — so live scrubbing the original stalls and jumps no matter how
@@ -5417,7 +5527,7 @@ _scrub_proxy_locks: Dict[str, asyncio.Lock] = {}
 
 
 @router.get("/media/{job_id}/scrub-proxy", dependencies=[Depends(_dep_job_access)])
-async def serve_scrub_proxy(job_id: str, background_tasks: BackgroundTasks):
+async def serve_scrub_proxy(job_id: str, background_tasks: BackgroundTasks, request: Request):
     """Serve the all-keyframe scrub proxy.
 
     202 while it is being generated — transcoding a feature in the request path
@@ -5432,7 +5542,9 @@ async def serve_scrub_proxy(job_id: str, background_tasks: BackgroundTasks):
 
     proxy_path = os.path.join(settings.DUBBED_DIR, job_id, "scrub_proxy.mp4")
     if os.path.exists(proxy_path):
-        return FileResponse(proxy_path, media_type="video/mp4")
+        # Range-aware for the same reason as the main video — a seek overlay is
+        # pointless if every drag resumes the download from byte zero.
+        return _range_media_response(request, proxy_path, "video/mp4")
 
     lock = _scrub_proxy_locks.setdefault(job_id, asyncio.Lock())
     if lock.locked():

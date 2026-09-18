@@ -161,3 +161,62 @@
   66%  { box-shadow: 0 0 24px rgba(139,92,246,0.35), inset 0 1px 0 rgba(255,255,255,0.06); }
   100% { box-shadow: 0 0 24px rgba(245,158,11,0.35), inset 0 1px 0 rgba(255,255,255,0.06); }
 }
+
+/* ── Segment generation feedback ─────────────────────────────────────────────
+   A successful take announces itself in three stages, so the director sees the
+   result land without watching a spinner: a light rides once around the block's
+   outline back to where it started, the block pulses three times, and then a
+   faint fluorescent outline stays on it for good — the standing mark of a line
+   that has a take. --dm-trace carries the speaker's own colour.            */
+@property --dm-ang {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes dm-trace-spin {
+  to { --dm-ang: 360deg; }
+}
+
+/* The ring is a rotating conic gradient masked down to the border itself:
+   background in the padding box, minus the content box, leaves 2px of edge. */
+.dm-gen-trace::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  padding: 2px;
+  background: conic-gradient(
+    from var(--dm-ang),
+    transparent 0deg 296deg,
+    var(--dm-trace, #5eead4) 340deg,
+    #ffffff 352deg,
+    transparent 360deg
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: dm-trace-spin 1.1s linear 1;
+  pointer-events: none;
+  z-index: 20;
+}
+
+@keyframes dm-gen-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(94, 234, 212, 0); }
+  50%      { box-shadow: 0 0 16px 4px var(--dm-trace, #5eead4); }
+}
+
+.dm-gen-pulse {
+  animation: dm-gen-pulse 0.9s ease-in-out 3;
+}
+
+/* Permanent: this line has a take. Light enough to read as a state, not as an
+   alert — the alert colours (regenerating, queued, failed) still have to win.
+   --dm-trace carries the speaker's own colour, so the standing outline matches
+   the lane and the speaker chip. */
+.dm-gen-done {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--dm-trace, #5eead4) 55%, transparent),
+    0 0 9px color-mix(in srgb, var(--dm-trace, #5eead4) 30%, transparent);
+}
