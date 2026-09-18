@@ -5408,6 +5408,68 @@ _NO_STORE_HEADERS = {
 }
 
 
+# Scrub proxy: a low-res, all-keyframe copy of the source video. Long-GOP
+# H.264 seeks by decoding back to the last keyframe — anywhere up to seconds of
+# work — so live scrubbing the original stalls and jumps no matter how
+# carefully seeks are queued. An intra-only file seeks in one frame, which is
+# what makes lip-sync editing possible. Generated once per job, on demand.
+_scrub_proxy_locks: Dict[str, asyncio.Lock] = {}
+
+
+@router.get("/media/{job_id}/scrub-proxy", dependencies=[Depends(_dep_job_access)])
+async def serve_scrub_proxy(job_id: str, background_tasks: BackgroundTasks):
+    """Serve the all-keyframe scrub proxy.
+
+    202 while it is being generated — transcoding a feature in the request path
+    would hang the editor's probe for minutes. The frontend retries until the
+    file appears, and scrubs the original long-GOP video until then.
+    """
+    job = await _get_or_rehydrate_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not os.path.exists(job.video_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    proxy_path = os.path.join(settings.DUBBED_DIR, job_id, "scrub_proxy.mp4")
+    if os.path.exists(proxy_path):
+        return FileResponse(proxy_path, media_type="video/mp4")
+
+    lock = _scrub_proxy_locks.setdefault(job_id, asyncio.Lock())
+    if lock.locked():
+        return Response(status_code=202)
+
+    def _build() -> None:
+        tmp_path = proxy_path + ".tmp.mp4"
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", job.video_path,
+            # 480p is enough to read a mouth; -g 1 makes every frame a keyframe
+            # so seeking never decodes a GOP. faststart puts the moov atom
+            # first so the browser can seek before it has the whole file.
+            "-vf", "scale=480:-2",
+            "-c:v", "libx264", "-preset", "veryfast",
+            "-g", "1", "-keyint_min", "1", "-sc_threshold", "0",
+            "-an", "-movflags", "+faststart",
+            tmp_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode != 0 or not os.path.exists(tmp_path):
+            logger.error(
+                f"[SCRUB-PROXY] generation failed for job={job_id}: "
+                f"{result.stderr.decode(errors='ignore')[:500]}")
+        else:
+            os.replace(tmp_path, proxy_path)
+
+    async def _build_locked() -> None:
+        async with lock:
+            # Re-check inside the lock: a sibling request may have finished it.
+            if not os.path.exists(proxy_path):
+                await asyncio.to_thread(_build)
+
+    background_tasks.add_task(_build_locked)
+    return Response(status_code=202)
+
+
 @router.get("/media/{job_id}/audio/{filename}", dependencies=[Depends(_dep_job_access)])
 async def serve_job_audio(job_id: str, filename: str):
     """Serve a dubbed audio file so Sync.Labs can fetch it by URL."""
@@ -7805,6 +7867,9 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     committed_emotion = body.get("committed_emotion")
     fade_in = body.get("fade_in")
     fade_out = body.get("fade_out")
+    # Clip gain 0..1 from the block's top-edge drag - a MIX field, not a render
+    # one: the take on disk is untouched, the mixdown multiplies by it.
+    volume = body.get("volume")
     flag_status = body.get("flag_status")
     correction_type = body.get("correction_type")
     locked = body.get("locked")
@@ -7862,6 +7927,8 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         update_data["fade_in"] = fade_in
     if fade_out is not None:
         update_data["fade_out"] = fade_out
+    if volume is not None:
+        update_data["volume"] = volume
     if flag_status is not None:
         update_data["flag_status"] = flag_status
     if "correction_type" in body:
@@ -7907,6 +7974,8 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
         seg["fade_in"] = fade_in
     if fade_out is not None:
         seg["fade_out"] = fade_out
+    if volume is not None:
+        seg["volume"] = volume
     if flag_status is not None:
         seg["flag_status"] = flag_status
     if "correction_type" in body:
@@ -8062,7 +8131,7 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest):
         "committed_adapted_text", "committed_start_time", "committed_end_time",
         "committed_audio_url", "committed_voice_id", "committed_emotion",
         "committed_speed", "audio_url", "status",
-        "fade_in", "fade_out",
+        "fade_in", "fade_out", "volume",
     }
 
     result = []

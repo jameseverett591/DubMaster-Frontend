@@ -3260,6 +3260,15 @@ class DubbingService:
             copy_len = end - offset
             seg_data = data[:copy_len].copy()
 
+            # Clip gain from the block's top-edge drag. A plain multiplier, not
+            # an envelope — composes with the fades below exactly as the browser
+            # stitch does, and unlike a fade it leaves the level flat across the
+            # whole take.
+            _vol = float(seg.get("volume") or 1.0)
+            _vol = max(0.0, min(1.0, _vol))
+            if _vol < 1.0:
+                seg_data *= _vol
+
             # Apply per-segment fade handles. fade_in/fade_out are seconds, stored
             # in segments.json by the editor. They are independent of overlap — a
             # segment with a long fade_out fades out over its own tail regardless of
@@ -3373,6 +3382,11 @@ class DubbingService:
                 fade_in = float(seg.get("fade_in") or 0)
                 fade_out = float(seg.get("fade_out") or 0)
                 fade_filters = []
+                # Clip gain from the top-edge drag — a level, not an envelope,
+                # so it orders before the fades and multiplies through them.
+                _vol = float(seg.get("volume") or 1.0)
+                if 0.0 <= _vol < 1.0:
+                    fade_filters.append(f"volume={_vol:.3f}")
                 if fade_in > 0:
                     fade_filters.append(f"afade=t=in:st=0:d={fade_in:.3f}:curve=qsin")
                 if fade_out > 0 and fade_out < slot_dur:

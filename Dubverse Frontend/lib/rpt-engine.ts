@@ -63,6 +63,8 @@ interface Placed {
   /** Fades set by hand on the segment's corner handles, in seconds. */
   manualFadeIn: number
   manualFadeOut: number
+  /** Clip gain 0..1 from the block's top-edge drag. 1 (absent) = unity. */
+  volume: number
 }
 
 /**
@@ -271,6 +273,7 @@ export async function stitchRPT(
         audioEnd: startTime + copyLength / sampleRate,
         manualFadeIn: seg.fade_in ?? 0,
         manualFadeOut: seg.fade_out ?? 0,
+        volume: seg.volume ?? 1,
         startSample,
         copyLength,
       })
@@ -300,13 +303,16 @@ export async function stitchRPT(
     const fadeIn = Math.min(Math.floor((f?.fadeIn ?? 0) * sampleRate), copyLength)
     const fadeOut = Math.min(Math.floor((f?.fadeOut ?? 0) * sampleRate), copyLength - fadeIn)
     const fadeOutFrom = copyLength - fadeOut
+    // Clip gain multiplies the whole segment — the top-edge drag is a level,
+    // not an envelope, so it composes with rather than replaces the fades.
+    const volume = Math.max(0, Math.min(1, item.volume))
 
     for (let i = 0; i < copyLength; i++) {
-      let gain = 1
+      let gain = volume
       if (fadeIn > 0 && i < fadeIn) {
-        gain = Math.sin((i / fadeIn) * Math.PI / 2)
+        gain = Math.sin((i / fadeIn) * Math.PI / 2) * volume
       } else if (fadeOut > 0 && i >= fadeOutFrom) {
-        gain = Math.cos(((i - fadeOutFrom) / fadeOut) * Math.PI / 2)
+        gain = Math.cos(((i - fadeOutFrom) / fadeOut) * Math.PI / 2) * volume
       }
       leftChannel[startSample + i] += srcLeft[i] * gain
       rightChannel[startSample + i] += srcRight[i] * gain
@@ -429,6 +435,7 @@ export async function stitchRPTWindow(
         audioEnd: absStart + audibleSec,
         manualFadeIn: seg.fade_in ?? 0,
         manualFadeOut: seg.fade_out ?? 0,
+        volume: seg.volume ?? 1,
         absStart, absEnd,
         dstStartSample, srcOffsetSamples, copyLength,
         ratio: segBuffer.sampleRate / sampleRate,
@@ -463,17 +470,20 @@ export async function stitchRPTWindow(
       : Number.POSITIVE_INFINITY
     const fadeOutLen = Math.floor(fadeOutSec * sampleRate)
 
+    // Clip gain multiplies the whole segment, like the full-film stitch.
+    const volume = Math.max(0, Math.min(1, item.volume))
+
     const gainAt = (i: number): number => {
       if (fadeInLen > 0 && i < fadeInEnd) {
         // Distance back to the segment's true start, which may precede i = 0.
         const pos = fadeInLen - (fadeInEnd - i)
-        if (pos < fadeInLen) return Math.sin((Math.max(0, pos) / fadeInLen) * Math.PI / 2)
+        if (pos < fadeInLen) return Math.sin((Math.max(0, pos) / fadeInLen) * Math.PI / 2) * volume
       }
       if (fadeOutLen > 0 && i >= fadeOutFrom) {
         const pos = i - fadeOutFrom
-        return Math.cos((Math.min(fadeOutLen, pos) / fadeOutLen) * Math.PI / 2)
+        return Math.cos((Math.min(fadeOutLen, pos) / fadeOutLen) * Math.PI / 2) * volume
       }
-      return 1
+      return volume
     }
 
     if (Math.abs(ratio - 1) < 0.001) {
