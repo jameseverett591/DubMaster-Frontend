@@ -1368,6 +1368,45 @@ export function DubVerseEditor({
     return () => subscription.unsubscribe()
   }, [])
 
+  // Video element stall diagnostics. When the picture freezes mid-playback the
+  // element tells you why — but only if you listen. 'stalled' and 'waiting'
+  // mean the decoder starved (buffer underrun or an un-decodable stretch of the
+  // file); 'error' is terminal; 'ended' fires when it reaches the last frame.
+  // Logged once each per stall episode (seeked/playing clears the latch), so a
+  // stuck video yields ONE line naming the cause instead of a wall of events.
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    let stallLogged = false
+    let endedLogged = false
+    const onStall = (kind: string) => {
+      if (stallLogged) return
+      stallLogged = true
+      console.warn(`[VIDEO-${kind.toUpperCase()}] at video.currentTime=${v.currentTime.toFixed(2)} readyState=${v.readyState} networkState=${v.networkState}`, v.error ?? '')
+    }
+    const onSeeked = () => { videoSeekInFlightRef.current = false; stallLogged = false; endedLogged = false }
+    const onSeeking = () => { videoSeekInFlightRef.current = true }
+    const onEnded = () => {
+      if (endedLogged) return
+      endedLogged = true
+      console.warn(`[VIDEO-ENDED] fired at video.currentTime=${v.currentTime.toFixed(2)} — element thinks it reached the last frame`)
+    }
+    const stalled = () => onStall('stalled')
+    const waiting = () => onStall('waiting')
+    v.addEventListener('stalled', stalled)
+    v.addEventListener('waiting', waiting)
+    v.addEventListener('seeking', onSeeking)
+    v.addEventListener('seeked', onSeeked)
+    v.addEventListener('ended', onEnded)
+    return () => {
+      v.removeEventListener('stalled', stalled)
+      v.removeEventListener('waiting', waiting)
+      v.removeEventListener('seeking', onSeeking)
+      v.removeEventListener('seeked', onSeeked)
+      v.removeEventListener('ended', onEnded)
+    }
+  }, [])
+
   // Selected re-transcription index for highlighting in QC monitor
   const [selectedRetranscriptionIndex, setSelectedRetranscriptionIndex] = useState<number | null>(null)
 
@@ -1551,8 +1590,22 @@ export function DubVerseEditor({
   const [pendingChunkSwitch, setPendingChunkSwitch] = useState<number | null>(null)
   const [chunkSwitchBusy, setChunkSwitchBusy] = useState<'save' | 'discard' | null>(null)
   const isDraggingNeedleRef = useRef(false)
+  /** All-keyframe scrub proxy. Long-GOP H.264 seeks by decoding back to the
+   *  last keyframe — anywhere up to seconds of work, which is why dragging the
+   *  needle stalls and jumps no matter how carefully seeks are queued. The
+   *  proxy is 480p with every frame a keyframe, so a seek costs one frame of
+   *  decode. While a needle drag is in progress it sits over the real video
+   *  and takes every scrub seek; on mouseup the real video seeks once to the
+   *  drop point and the overlay hides. */
+  const scrubProxyRef = useRef<HTMLVideoElement>(null)
+  const scrubProxyReadyRef = useRef(false)
+  const [scrubProxyUrl, setScrubProxyUrl] = useState<string | null>(null)
+  const [scrubProxyVisible, setScrubProxyVisible] = useState(false)
   // Ref bridge to the RPT stop helper, which is declared later in the component.
   const stopAllRptAudioRef = useRef<() => void>(() => {})
+  // Ref bridge to requestStitchWith — also declared later (after the audio
+  // engine), so the Delete-key handler can't name it directly without a TDZ.
+  const requestStitchWithRef = useRef<(segs: Segment[], ctx: AudioContext) => void>(() => {})
   // Ref bridge to dynamic chunk boundaries, computed later in the component.
   const chunkBoundariesRef = useRef<number[]>([0])
 
@@ -2601,6 +2654,45 @@ export function DubVerseEditor({
         return
       }
 
+      // Delete / Backspace — remove the selected segment ROW entirely. The row
+      // the segment sits on (its speaker row) stays; this deletes the block,
+      // its take, and its place in the film. Used for killing hallucinated or
+      // credit lines ("subtitles by Amara.org") that should never have been a
+      // segment at all — the reason there is no softer action like clearing
+      // the text: an empty segment still holds a slot and still blocks the
+      // neighbors' fade math.
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const target = e.target as HTMLElement
+        if (
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.contentEditable === 'true'
+        ) return
+        if (selectedSegmentIndex === null) return
+        // Layout lock is the safety switch — a stray keypress must not remove
+        // a row when the timeline is frozen for review.
+        if (layoutLocked) return
+        e.preventDefault()
+        const removedTi = displaySegmentsRef.current[selectedSegmentIndex]?.transcript_index
+        const remaining = displaySegmentsRef.current.filter((_, idx) => idx !== selectedSegmentIndex)
+        selectSegment(null)
+        setImportedSegments(remaining)
+        // sync_segments merges by transcript_index and writes back ONLY what
+        // the payload contains — an absent row is a deletion, and the removed
+        // segment's rendered file is left orphaned on disk (harmless; retention
+        // sweeps it). Any later row that had rpt_dirty still carries its audio
+        // fields, so the strip logic leaves it alone.
+        syncSegmentsToBackend(remaining)
+        // The deleted block's audio is part of the stitched buffer — rebuild
+        // so Preview stops playing a line that no longer exists.
+        if (audioContextRef.current) {
+          rptBufferRef.current = null
+          requestStitchWithRef.current(remaining, audioContextRef.current)
+        }
+        console.log('[DELETE] removed segment transcript_index', removedTi)
+        return
+      }
+
       if (e.key === 'c' || e.key === 'C') {
         if (selectedSegmentIndex === null) return
         const target = e.target as HTMLElement
@@ -2615,7 +2707,7 @@ export function DubVerseEditor({
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [selectedSegmentIndex, displaySegments, handleSplitAtPlayhead, jobId])
+  }, [selectedSegmentIndex, displaySegments, handleSplitAtPlayhead, jobId, layoutLocked, selectSegment, setImportedSegments, syncSegmentsToBackend])
 
   // Video thumbnails for timeline
   const [videoThumbnails, setVideoThumbnails] = useState<string[]>([])
@@ -3571,6 +3663,37 @@ export function DubVerseEditor({
       extractVideoThumbnails(videoUrl)
     }
   }, [videoUrl, importedVideoUrl, extractVideoThumbnails])
+
+  // Request the all-keyframe scrub proxy once per job. The backend generates
+  // it in the background and answers 202 until the file is ready, so poll.
+  // Scrubbing works without it (falls back to the long-GOP original) — this
+  // is purely a smoothness upgrade.
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const probe = async () => {
+      try {
+        const url = apiClient.refreshMediaUrl(apiClient.toAbsoluteUrl(`/api/media/${jobId}/scrub-proxy`))
+        const headers = await apiClient.ensureAuthHeaders()
+        const res = await fetch(url, { method: 'GET', headers })
+        if (cancelled) return
+        if (res.ok) {
+          // Release the probe body — the <video> fetches the file itself.
+          res.body?.cancel().catch(() => {})
+          setScrubProxyUrl(url)
+        } else if (res.status === 202) {
+          timer = setTimeout(probe, 5000)
+        }
+      } catch {
+        if (!cancelled) timer = setTimeout(probe, 15000)
+      }
+    }
+    probe()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [jobId])
   
 // Regenerate waveform when video is imported
   const regenerateWaveform = useCallback(() => {
@@ -3996,6 +4119,12 @@ export function DubVerseEditor({
    *  "picture lurches", so it must be diagnosable instead of silent. */
   const srcFollowWarnedRef = useRef(false)
   const srcFollowLogRef = useRef(0)
+  /** True while the video has a seek outstanding. The picture-resync below
+   *  re-seats a stalled picture at the audio clock — but issuing another seek
+   *  while the decoder is still walking the GOP for the last one aborts that
+   *  walk and starts over, so the element never paints: the freeze-and-lurch
+   *  this latch exists to prevent. */
+  const videoSeekInFlightRef = useRef(false)
   useEffect(() => {
     let raf: number
     const loop = () => {
@@ -4051,20 +4180,26 @@ export function DubVerseEditor({
             })
             if (
               Math.abs(video.currentTime - a.currentTime) > 0.12 &&
-              now - rafLastVideoResyncRef.current > 500
+              now - rafLastVideoResyncRef.current > 500 &&
+              // Same latch as the preview resync below — re-seeking mid-seek
+              // aborts the GOP decode walk and freezes the picture.
+              !videoSeekInFlightRef.current
             ) {
               rafLastVideoResyncRef.current = now
               video.currentTime = a.currentTime
+              videoSeekInFlightRef.current = true
             }
           } else {
             // Picture is running — the warning latch resets for the next episode.
             srcFollowWarnedRef.current = false
             if (
               Math.abs(video.currentTime - a.currentTime) > 0.12 &&
-              now - rafLastVideoResyncRef.current > 500
+              now - rafLastVideoResyncRef.current > 500 &&
+              !videoSeekInFlightRef.current
             ) {
               rafLastVideoResyncRef.current = now
               video.currentTime = a.currentTime
+              videoSeekInFlightRef.current = true
             }
           }
         }
@@ -4130,7 +4265,12 @@ export function DubVerseEditor({
         !pictureAdvancing &&
         audioContextRef.current &&
         audioStartTimeRef.current !== null &&
-        now - rafLastVideoResyncRef.current > 500
+        now - rafLastVideoResyncRef.current > 500 &&
+        // Do NOT re-seek while a seek is still outstanding — on long-GOP video
+        // each write aborts the decoder's walk from the keyframe, so re-seeking
+        // every 500ms freezes the picture permanently instead of nudging it.
+        // The 3s escape valve covers a 'seeked' event that never arrives.
+        (!videoSeekInFlightRef.current || now - rafLastVideoResyncRef.current > 3000)
       ) {
         const audioT = lastStartPosRef.current + (audioContextRef.current.currentTime - audioStartTimeRef.current)
         const target = timelineToSourceTime(audioT, scenesRef.current) ?? audioT
@@ -4138,6 +4278,7 @@ export function DubVerseEditor({
           rafLastVideoResyncRef.current = now
           if (video.paused) video.play().catch(() => {})
           video.currentTime = target
+          videoSeekInFlightRef.current = true
           seekSettleUntilRef.current = now + 500
         }
       }
@@ -4262,6 +4403,32 @@ export function DubVerseEditor({
     setGroupMoveOffset({ x: 0, y: 0 })
   }, [endGroupDrag])
 
+  // Ctrl+G arms group-select: the next plain click marks the group's first
+  // segment, the click after marks its last, and the run between drags as one.
+  // Ctrl+X releases the group (and the mode). These live here rather than in
+  // the main keydown effect because that handler is declared long before
+  // enterGroupSelectMode/clearGroupSelection exist.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return
+      const target = e.target as HTMLElement
+      if (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.contentEditable === 'true'
+      ) return
+      if (e.code === 'KeyG') {
+        e.preventDefault()
+        if (!groupSelectMode) enterGroupSelectMode()
+      } else if (e.code === 'KeyX') {
+        e.preventDefault()
+        clearGroupSelection()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [groupSelectMode, enterGroupSelectMode, clearGroupSelection])
+
   /** Scene lock — pick a contiguous run and freeze it.
    *
    *  Deliberately a SEPARATE mode from group move, not a shared selection with
@@ -4358,7 +4525,10 @@ export function DubVerseEditor({
       handleSceneRangeClick(index)
       return
     }
-    if (groupSelectMode && e && (e.ctrlKey || e.metaKey)) {
+    // Group-select armed: EVERY click marks a range end (first click = anchor,
+    // second = far edge). Plain clicks, not ctrl — the mode itself is the
+    // opt-in (Ctrl+G), so requiring the modifier too made it a two-hand op.
+    if (groupSelectMode && e) {
       e.stopPropagation()
       handleGroupRangeClick(index)
       return
@@ -4628,8 +4798,24 @@ export function DubVerseEditor({
     let pendingScrubTime: number | null = null
     let scrubWatchdog: ReturnType<typeof setTimeout> | null = null
 
+    // SCRUB PROXY. The main video is long-GOP H.264 — every seek walks back to
+    // the last keyframe and decodes forward, so a fast drag stalls and jumps.
+    // The proxy overlay has every frame as a keyframe: seeking it is one
+    // frame's decode, and the mouth tracks the cursor. While it is ready it
+    // takes all drag-time seeks; the real video only learns the final drop
+    // position on mouseup (below).
+    const proxy = (scrubProxyReadyRef.current && scrubProxyRef.current) ? scrubProxyRef.current : null
+    const seekTarget: HTMLVideoElement | null = proxy ?? videoRef.current
+    if (proxy) {
+      setScrubProxyVisible(true)
+      // Start from where the main picture is, not from wherever a previous
+      // drag left the proxy.
+      const startT = timelineToSourceTime(currentTimeRef.current, scenesRef.current) ?? currentTimeRef.current
+      try { proxy.currentTime = startT } catch {}
+    }
+
     const pumpScrubSeek = () => {
-      const v = videoRef.current
+      const v = seekTarget
       if (!v || scrubSeeking || pendingScrubTime === null) return
       const t = pendingScrubTime
       pendingScrubTime = null
@@ -4718,11 +4904,25 @@ export function DubVerseEditor({
       window.removeEventListener('blur', handleMouseUp)
       isDraggingNeedleRef.current = false
       if (scrubWatchdog) { clearTimeout(scrubWatchdog); scrubWatchdog = null }
-      // Land the exact drop point. A seek may still have been in flight when the
-      // button came up, and the frame under the release position is the one the
-      // whole scrub was for. Clearing the latch first guarantees this one runs.
-      scrubSeeking = false
-      seekVideoTo(currentTimeRef.current, true)
+      if (proxy) {
+        // Retire the overlay, then land the REAL video on the drop point. The
+        // proxy handled every in-flight seek; this is the only seek the
+        // long-GOP original pays for during the whole drag.
+        setScrubProxyVisible(false)
+        const dropT = currentTimeRef.current
+        const v = videoRef.current
+        if (v) {
+          const src = timelineToSourceTime(dropT, scenesRef.current) ?? dropT
+          try { v.currentTime = src } catch {}
+        }
+      } else {
+        // Land the exact drop point. A seek may still have been in flight when
+        // the button came up, and the frame under the release position is the
+        // one the whole scrub was for. Clearing the latch first guarantees
+        // this one runs.
+        scrubSeeking = false
+        seekVideoTo(currentTimeRef.current, true)
+      }
       if (playheadRef.current) playheadRef.current.style.transition = ''
       setCurrentTime(currentTimeRef.current)
     }
@@ -5621,6 +5821,9 @@ export function DubVerseEditor({
       editorStitchTimerRef.current = null
     }, 500)
   }, [stitchWith])
+  // Bridge for the Delete-key handler, which runs in a keydown effect declared
+  // long before this callback exists.
+  requestStitchWithRef.current = requestStitchWith
 
   // Schedule offset for the RPT buffer: windowed buffers are local-timebase,
   // so an absolute playhead of 5:00 into window 2's buffer is offset 0 — not
@@ -9327,6 +9530,24 @@ export function DubVerseEditor({
                 // in Dubbed.
                 muted={playbackMode === 'preview'}
               />
+              {/* Scrub proxy: all-keyframe 480p copy of the picture, shown ONLY
+                  while the needle is being dragged. Seeks in it decode a single
+                  frame instead of a backward GOP walk, so the mouth actually
+                  tracks the cursor instead of stalling and jumping. */}
+              {scrubProxyUrl && (
+                <video
+                  ref={scrubProxyRef}
+                  src={scrubProxyUrl}
+                  muted
+                  preload="auto"
+                  className="absolute top-0 left-0 w-full h-full object-cover pointer-events-none"
+                  style={{ display: scrubProxyVisible ? 'block' : 'none' }}
+                  onLoadedData={() => {
+                    // Sized and decodable — safe to show now.
+                    scrubProxyReadyRef.current = true
+                  }}
+                />
+              )}
               <div
                 ref={videoFadeOverlayRef}
                 className="absolute top-0 left-0 w-full h-full bg-black pointer-events-none"
@@ -13352,6 +13573,19 @@ export function DubVerseEditor({
                         />
                       )}
 
+                      {/* Clip-gain level line. Unity = the line sits on the block's
+                          top edge; lower = pulled down. Always drawn when set —
+                          like the fade ramps, a lowered level must stay visible or
+                          it reads as forgotten. */}
+                      <div
+                        data-volume-line
+                        className={cn(
+                          "absolute left-0 right-0 h-0.5 pointer-events-none z-10 bg-cyan-300/80 shadow-[0_0_4px_rgba(103,232,249,0.8)]",
+                          (seg.volume ?? 1) >= 0.999 && "opacity-0"
+                        )}
+                        style={{ top: `${(1 - (seg.volume ?? 1)) * 100}%` }}
+                      />
+
                       {/* Fade handles — only on Preview Audio track */}
                       {!layoutLocked && (
                         <>
@@ -13505,6 +13739,65 @@ export function DubVerseEditor({
                               window.addEventListener('blur', onPointerUp)
                             }}
                           />
+                          {/* Clip gain — grab the block's TOP EDGE and pull it down
+                              to lower the level, DAW-style. The grip hugs the top
+                              on hover; the cyan line (drawn above) is the level
+                              itself and becomes visible once set. Same DOM-during-
+                              drag / state-on-release rule as the fade handles. */}
+                          <div
+                            data-volume-handle
+                            data-resize-handle={true}
+                            className="absolute top-0 left-2 right-2 h-2 cursor-ns-resize z-30 opacity-0 group-hover:opacity-100 transition-opacity flex items-start justify-center"
+                            title={`Level ${Math.round((seg.volume ?? 1) * 100)}% — pull the top edge down to lower`}
+                            onClick={(e) => { e.preventDefault(); e.stopPropagation() }}
+                            onPointerDown={(e) => {
+                              e.preventDefault()
+                              e.stopPropagation()
+                              try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch {}
+                              const grip = e.currentTarget as HTMLElement
+                              const block = grip.parentElement as HTMLElement | null
+                              const blockH = block?.getBoundingClientRect().height || 40
+                              const line = block?.querySelector('[data-volume-line]') as HTMLElement | null
+                              const startY = e.clientY
+                              const initialVolume = seg.volume ?? 1
+                              let latest = initialVolume
+                              const onPointerMove = (ev: PointerEvent) => {
+                                // Full block height of travel = 0..1. Pulling the
+                                // edge DOWN lowers the level; the line rides with
+                                // the cursor exactly.
+                                const dy = (ev.clientY - startY) / blockH
+                                latest = Math.min(1, Math.max(0, initialVolume - dy))
+                                if (line) {
+                                  line.style.top = `${(1 - latest) * 100}%`
+                                  line.style.opacity = latest < 0.999 ? '1' : '0'
+                                }
+                              }
+                              const onPointerUp = () => {
+                                document.removeEventListener('pointermove', onPointerMove)
+                                document.removeEventListener('pointerup', onPointerUp)
+                                document.removeEventListener('pointercancel', onPointerUp)
+                                window.removeEventListener('blur', onPointerUp)
+                                const finalVolume = latest
+                                updateSegment(i, { volume: finalVolume })
+                                commitSegmentChanges(i, { volume: finalVolume })
+                                commitOrStage(seg.transcript_index ?? i, { volume: finalVolume }).catch(err => console.warn('[VOLUME]', err))
+                                setImportedSegments(prev => {
+                                  const base = prev ?? displaySegmentsRef.current
+                                  return base.map((s, idx) => idx === i ? { ...s, volume: finalVolume } : s)
+                                })
+                                if (audioContextRef.current) {
+                                  const stitchSegs = displaySegmentsRef.current.map((s, idx) => idx === i ? { ...s, volume: finalVolume } : s)
+                                  requestStitchWith(stitchSegs, audioContextRef.current)
+                                }
+                              }
+                              document.addEventListener('pointermove', onPointerMove)
+                              document.addEventListener('pointerup', onPointerUp)
+                              document.addEventListener('pointercancel', onPointerUp)
+                              window.addEventListener('blur', onPointerUp)
+                            }}
+                          >
+                            <div className="w-6 h-1 rounded-full bg-cyan-300/80" />
+                          </div>
                         </>
                       )}
                     </div>

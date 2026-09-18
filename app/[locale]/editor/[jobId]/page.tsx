@@ -181,6 +181,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             committed_end_time: seg.committed_end_time ?? undefined,
             fade_in: seg.fade_in ?? undefined,
             fade_out: seg.fade_out ?? undefined,
+            volume: seg.volume ?? undefined,
             // Casting and pacing. Absent here, the editor's restore had nothing
             // to read and every per-segment voice override vanished on reload.
             committed_voice_id: seg.committed_voice_id ?? undefined,

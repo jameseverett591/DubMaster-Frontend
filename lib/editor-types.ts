@@ -105,6 +105,10 @@ export interface Segment {
   // 0 = no explicit fade; the RPT engine falls back to overlap-based crossfade.
   fade_in?: number
   fade_out?: number
+  // Clip gain, 0..1, default 1 (absent). Set by pulling the top edge of the
+  // segment block down. Applied as a plain multiplier in the preview stitch
+  // and the export mixdown — unlike fades it does not reshape the envelope.
+  volume?: number
   committed_adapted_text?: string
   // True only when a human committed a text correction. Never written by any
   // pipeline path, so it — unlike committed_adapted_text, which Generate Speech
