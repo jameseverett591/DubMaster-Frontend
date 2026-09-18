@@ -327,12 +327,92 @@ export const SPEAKER_COLORS: Record<string, { bg: string; border: string; text: 
   'speaker-4': { bg: 'bg-amber-500/20', border: 'border-amber-500', text: 'text-amber-400' },
   'speaker-5': { bg: 'bg-rose-500/20', border: 'border-rose-500', text: 'text-rose-400' },
   'speaker-6': { bg: 'bg-cyan-500/20', border: 'border-cyan-500', text: 'text-cyan-400' },
+  'speaker-7': { bg: 'bg-lime-500/20', border: 'border-lime-500', text: 'text-lime-400' },
+  'speaker-8': { bg: 'bg-orange-500/20', border: 'border-orange-500', text: 'text-orange-400' },
+  'speaker-9': { bg: 'bg-fuchsia-500/20', border: 'border-fuchsia-500', text: 'text-fuchsia-400' },
+  'speaker-10': { bg: 'bg-sky-500/20', border: 'border-sky-500', text: 'text-sky-400' },
+  'speaker-11': { bg: 'bg-teal-500/20', border: 'border-teal-500', text: 'text-teal-400' },
+  'speaker-12': { bg: 'bg-red-500/20', border: 'border-red-500', text: 'text-red-400' },
+}
+
+export const SPEAKER_PALETTE_SIZE = 12
+
+/**
+ * Colours are chosen by a speaker's DISPLAY NUMBER, not by the digits in its id.
+ *
+ * Those two are not the same thing. Display numbers are assigned 1..N in order
+ * of appearance, while ids come from diarization and can be any digits at all —
+ * so speaker-1, speaker-7 and speaker-13 are shown as 1, 2 and 3 but all three
+ * parsed back to the same slot under the old modulo, and three differently
+ * numbered lanes came out the same colour. Number in, colour out: two lanes can
+ * only share a colour now if the film has more speakers than the palette.
+ */
+export function getSpeakerColorByNumber(num: number) {
+  const n = Number.isFinite(num) && num > 0 ? Math.floor(num) : 1
+  return SPEAKER_COLORS[`speaker-${((n - 1) % SPEAKER_PALETTE_SIZE) + 1}`]
 }
 
 export function getSpeakerColor(speakerId: string) {
   const index = parseInt((speakerId ?? '').replace(/\D/g, '')) || 1
-  const key = `speaker-${((index - 1) % 6) + 1}`
-  return SPEAKER_COLORS[key] || SPEAKER_COLORS['speaker-1']
+  return getSpeakerColorByNumber(index)
+}
+
+// Solid hex per speaker for CSS glow effects — --dm-trace can't take a
+// Tailwind class. Same rotation as SPEAKER_COLORS.
+export const SPEAKER_HEX: Record<string, string> = {
+  'speaker-1': '#60a5fa',
+  'speaker-2': '#c084fc',
+  'speaker-3': '#34d399',
+  'speaker-4': '#fbbf24',
+  'speaker-5': '#fb7185',
+  'speaker-6': '#22d3ee',
+  'speaker-7': '#a3e635',
+  'speaker-8': '#fb923c',
+  'speaker-9': '#e879f9',
+  'speaker-10': '#38bdf8',
+  'speaker-11': '#2dd4bf',
+  'speaker-12': '#f87171',
+}
+
+export function getSpeakerHexByNumber(num: number) {
+  const n = Number.isFinite(num) && num > 0 ? Math.floor(num) : 1
+  return SPEAKER_HEX[`speaker-${((n - 1) % SPEAKER_PALETTE_SIZE) + 1}`]
+}
+
+export function getSpeakerHex(speakerId: string) {
+  const index = parseInt((speakerId ?? '').replace(/\D/g, '')) || 1
+  return getSpeakerHexByNumber(index)
+}
+
+// Timeline colours for a speaker's lane and blocks, matching that speaker's
+// button above. Every class is written out in full rather than derived from
+// SPEAKER_COLORS by string surgery, because Tailwind only emits a class it can
+// SEE in the source — a class assembled at runtime renders as nothing at all.
+// `glow` is a raw colour for the generation trace light, which is drawn by CSS
+// rather than by a utility class.
+export const SPEAKER_TIMELINE_COLORS: Record<string, { block: string; bed: string; glow: string }> = {
+  'speaker-1': { block: 'bg-blue-500/40 border-blue-400/70', bed: 'bg-blue-500/5', glow: '#60a5fa' },
+  'speaker-2': { block: 'bg-purple-500/40 border-purple-400/70', bed: 'bg-purple-500/5', glow: '#c084fc' },
+  'speaker-3': { block: 'bg-emerald-500/40 border-emerald-400/70', bed: 'bg-emerald-500/5', glow: '#34d399' },
+  'speaker-4': { block: 'bg-amber-500/40 border-amber-400/70', bed: 'bg-amber-500/5', glow: '#fbbf24' },
+  'speaker-5': { block: 'bg-rose-500/40 border-rose-400/70', bed: 'bg-rose-500/5', glow: '#fb7185' },
+  'speaker-6': { block: 'bg-cyan-500/40 border-cyan-400/70', bed: 'bg-cyan-500/5', glow: '#22d3ee' },
+  'speaker-7': { block: 'bg-lime-500/40 border-lime-400/70', bed: 'bg-lime-500/5', glow: '#a3e635' },
+  'speaker-8': { block: 'bg-orange-500/40 border-orange-400/70', bed: 'bg-orange-500/5', glow: '#fb923c' },
+  'speaker-9': { block: 'bg-fuchsia-500/40 border-fuchsia-400/70', bed: 'bg-fuchsia-500/5', glow: '#e879f9' },
+  'speaker-10': { block: 'bg-sky-500/40 border-sky-400/70', bed: 'bg-sky-500/5', glow: '#38bdf8' },
+  'speaker-11': { block: 'bg-teal-500/40 border-teal-400/70', bed: 'bg-teal-500/5', glow: '#2dd4bf' },
+  'speaker-12': { block: 'bg-red-500/40 border-red-400/70', bed: 'bg-red-500/5', glow: '#f87171' },
+}
+
+export function getSpeakerTimelineColorByNumber(num: number) {
+  const n = Number.isFinite(num) && num > 0 ? Math.floor(num) : 1
+  return SPEAKER_TIMELINE_COLORS[`speaker-${((n - 1) % SPEAKER_PALETTE_SIZE) + 1}`]
+}
+
+export function getSpeakerTimelineColor(speakerId: string) {
+  const index = parseInt((speakerId ?? '').replace(/\D/g, '')) || 1
+  return getSpeakerTimelineColorByNumber(index)
 }
 
 // QC severity colors
