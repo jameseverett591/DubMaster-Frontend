@@ -6,7 +6,7 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Mic2, Trash2, Loader2, Upload, Check, Wand2 } from 'lucide-react'
+import { Mic2, Trash2, Loader2, Upload, Check, Wand2, Play, Square, FolderOpen, Copy } from 'lucide-react'
 import { apiClient, type CustomVoice } from '@/lib/api-client'
 import { useT } from '@/lib/use-t'
 
@@ -25,7 +25,37 @@ export function CustomVoicesModal({ open, onOpenChange, onChanged }: CustomVoice
   const [name, setName] = useState('')
   const [cloning, setCloning] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [playingId, setPlayingId] = useState<string | null>(null)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  const stopSample = useCallback(() => {
+    audioRef.current?.pause()
+    audioRef.current = null
+    setPlayingId(null)
+  }, [])
+
+  const playSample = useCallback((v: CustomVoice) => {
+    if (playingId === v.voice_id) { stopSample(); return }
+    stopSample()
+    const audio = new Audio(apiClient.getCustomVoiceSampleUrl(v.voice_id))
+    audio.onended = () => { if (audioRef.current === audio) setPlayingId(null) }
+    audio.onerror = () => { if (audioRef.current === audio) setPlayingId(null) }
+    audioRef.current = audio
+    setPlayingId(v.voice_id)
+    audio.play().catch(() => setPlayingId(null))
+  }, [playingId, stopSample])
+
+  const copyPath = useCallback(async (v: CustomVoice) => {
+    if (!v.sample_path) return
+    try {
+      await navigator.clipboard.writeText(v.sample_path)
+      setCopiedId(v.voice_id)
+      setTimeout(() => setCopiedId(prev => prev === v.voice_id ? null : prev), 1500)
+    } catch {}
+  }, [])
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -38,7 +68,9 @@ export function CustomVoicesModal({ open, onOpenChange, onChanged }: CustomVoice
 
   useEffect(() => {
     if (open) refresh()
-  }, [open, refresh])
+    else { stopSample(); setExpandedId(null) }
+    return stopSample
+  }, [open, refresh, stopSample])
 
   const handleClone = useCallback(async () => {
     if (!file || cloning) return
@@ -126,28 +158,78 @@ export function CustomVoicesModal({ open, onOpenChange, onChanged }: CustomVoice
               {t('No custom voices yet. Upload a clip above to create one.')}
             </p>
           ) : (
-            voices.map(v => (
+            voices.map(v => {
+              const expanded = expandedId === v.voice_id
+              return (
               <div
                 key={`${v.provider}:${v.voice_id}`}
-                className="flex items-center gap-2 rounded border border-slate-700 bg-slate-900/40 px-3 py-2"
+                className="rounded border border-slate-700 bg-slate-900/40"
               >
-                <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm text-slate-200 truncate">{v.name}</div>
-                  <div className="text-[10px] text-slate-500 truncate">
-                    {(v as { cloned?: boolean }).cloned ? 'Your cloned voice' : v.provider === 'fish-audio' ? 'Fish Audio' : 'ElevenLabs'}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleDelete(v)}
-                  className="text-slate-500 hover:text-red-400 transition-colors shrink-0"
-                  aria-label={t('Remove voice')}
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setExpandedId(expanded ? null : v.voice_id)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setExpandedId(expanded ? null : v.voice_id) }}
+                  className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-slate-800/40 transition-colors"
                 >
-                  <Trash2 className="h-4 w-4" />
-                </button>
+                  <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm text-slate-200 truncate">{v.name}</div>
+                    <div className="text-[10px] text-slate-500 truncate">
+                      {v.cloned ? 'Your cloned voice' : v.provider === 'fish-audio' ? 'Fish Audio' : 'ElevenLabs'}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); handleDelete(v) }}
+                    className="text-slate-500 hover:text-red-400 transition-colors shrink-0"
+                    aria-label={t('Remove voice')}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+                {expanded && (
+                  <div className="border-t border-slate-700/60 px-3 py-2 space-y-1.5">
+                    <div className="flex items-start gap-1.5">
+                      <FolderOpen className="h-3.5 w-3.5 text-slate-500 shrink-0 mt-px" />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[10px] uppercase tracking-wide text-slate-500">{t('Source clip')}</div>
+                        {v.sample_path ? (
+                          <div className="flex items-center gap-1.5">
+                            <code className="text-[11px] text-amber-200/90 break-all select-all">{v.sample_path}</code>
+                            <button
+                              type="button"
+                              onClick={() => copyPath(v)}
+                              title={t('Copy path')}
+                              className="shrink-0 text-slate-500 hover:text-amber-300 transition-colors"
+                            >
+                              {copiedId === v.voice_id ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-slate-500">{t('No stored clip — cloned before samples were kept')}</div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="text-[10px] text-slate-500 truncate">
+                      {v.provider} · id: <code className="select-all">{v.voice_id}</code>
+                    </div>
+                    {v.sample_ext && (
+                      <button
+                        type="button"
+                        onClick={() => playSample(v)}
+                        className="inline-flex items-center gap-1.5 rounded border border-amber-500/30 bg-slate-950/60 px-2 py-1 text-[11px] text-amber-200 hover:bg-amber-500/10 transition-colors"
+                      >
+                        {playingId === v.voice_id
+                          ? <><Square className="h-3 w-3 fill-current" /> {t('Stop')}</>
+                          : <><Play className="h-3 w-3" /> {t('Play source clip')}</>}
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
-            ))
+              )
+            })
           )}
         </div>
       </DialogContent>

@@ -39,12 +39,17 @@ export interface VideoChapter {
 }
 
 export interface VideoNotes {
-  status: 'ok' | 'skipped' | 'error'
+  status: 'ok' | 'skipped' | 'error' | 'processing'
   reason?: string
   preset?: VideoNotesPreset
+  provider?: 'videotranscriber' | 'deepgram' | 'claude'
+  stage?: string
+  retry_after?: number
   video_title?: string
   notes?: VideoNote[]
   chapters?: VideoChapter[]
+  language?: string
+  duration?: number
 }
 
 // ============================================================================
@@ -59,6 +64,7 @@ export type RuleClass =
   | 'persona'          // speaker slot → character profile
   | 'stance'           // scene-style directive (register/stance)
   | 'translation_fix'  // exact source line → forced target line
+  | 'pronunciation'    // displayed term → spoken respelling (TTS only)
   | 'delivery'         // speaker → emotion/speed/pitch defaults
   | 'glossary'         // source term → canonical English term
 
@@ -265,9 +271,12 @@ export interface CustomVoice {
   name: string
   tags?: string[]
   custom?: boolean
+  cloned?: boolean
   /** Extension of the stored source clip. Absent on voices cloned before the
    *  upload was kept — those have no sample to preview. */
   sample_ext?: string
+  /** Absolute path of the stored source clip on the server, when one exists. */
+  sample_path?: string
 }
 
 export interface DubRequest {
@@ -282,8 +291,7 @@ export interface DubRequest {
     pitch?: number  // semitone shift, e.g. +8 for child-like voice
   }>
   source_language?: string
-  dubbing_engine?: 'dubmaster' | 'vozo'
-  vozo_user_prompt?: string
+  dubbing_engine?: 'dubmaster'
 }
 
 export interface DubResponse {
@@ -457,17 +465,6 @@ export interface RetranscribedSegment {
   confidence: number
 }
 
-export interface ScreenAppInsight {
-  status: string
-  label?: string
-  summary?: string
-  segments?: Array<{ start: number; end: number; text: string }>
-  speakers?: Array<{ id: string; name?: string }>
-  key_moments?: Array<{ time: number; description: string }>
-  confidence_scores?: Array<{ start: number; end: number; confidence: number }>
-  reason?: string
-}
-
 export interface EmotionAnalysis {
   status: string
   emotion_variance?: number
@@ -516,7 +513,6 @@ export interface AnalysisSummary {
   component_scores: Record<string, number>
   weights_used: Record<string, number>
   services_available?: Record<string, boolean>
-  screenapp_available?: boolean
 }
 
 export interface QualityAnalysis {
@@ -554,8 +550,6 @@ export interface QualityAnalysis {
     reason?: string
   }
   loudness: LoudnessAnalysis
-  screenapp_original: ScreenAppInsight | null
-  screenapp_dubbed: ScreenAppInsight | null
   emotion?: EmotionAnalysis
   pronunciation?: PronunciationAssessment
   translation?: TranslationQuality
@@ -579,8 +573,12 @@ export interface LipSyncWindowResult {
     score?: number
     correlation?: number
     offset_ms?: number
+    abs_offset_ms?: number
     severity?: string
     reason?: string
+    method?: string
+    scored?: number
+    total?: number
   }
 }
 
@@ -1710,6 +1708,60 @@ class DubVerseAPIClient {
     return response.json()
   }
 
+  // ── Scoped lip-sync (pay per selected segment) ──────────────────────────
+  async getLipsyncSelection(jobId: string): Promise<string[]> {
+    const res = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/lipsync-selection`)
+    if (!res.ok) return []
+    const data = await res.json()
+    return (data.segment_ids || []).map(String)
+  }
+
+  async putLipsyncSelection(jobId: string, segmentIds: string[]): Promise<void> {
+    await this._fetch(`${this.baseURL}/api/jobs/${jobId}/lipsync-selection`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ segment_ids: segmentIds }),
+    })
+  }
+
+  // ── Page-level text lock — seal every line's words at once ───────────────
+  async getTextLock(jobId: string): Promise<boolean> {
+    const res = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/text-lock`)
+    if (!res.ok) return false
+    return !!(await res.json()).locked
+  }
+
+  async setTextLock(jobId: string, locked: boolean): Promise<void> {
+    await this._fetch(`${this.baseURL}/api/jobs/${jobId}/text-lock`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ locked }),
+    })
+  }
+
+  async getLipsyncQuote(jobId: string): Promise<{
+    available: boolean; scoped: boolean; range_count: number
+    selected_seconds: number; cost_usd: number; charge_seconds: number
+    wallet_seconds: number; shortfall_seconds: number; shortfall_cents: number
+    bypassed?: boolean
+    synced_selection: string[] | null; current_selection: string[]
+  } | null> {
+    const res = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/lipsync-quote`)
+    if (!res.ok) return null
+    return res.json()
+  }
+
+  /** Render cost quote for the cost counter — needed_seconds is 0 when the
+   *  job was already billed (re-renders are free). */
+  async getQuotaEstimate(jobId: string): Promise<{
+    already_billed: boolean; needed_seconds: number; ok: boolean
+    shortfall_cents: number; bypassed?: boolean
+  } | null> {
+    const res = await this._fetch(`${this.baseURL}/api/quota/estimate/${jobId}`)
+    if (!res.ok) return null
+    return res.json()
+  }
+
   async remixDub(jobId: string, opts?: { lipsync?: boolean }): Promise<RemixResponse> {
     const qs = opts?.lipsync ? '?lipsync=true' : ''
     const response = await this._fetch(`${this.baseURL}/api/dub/remix/${jobId}${qs}`, {
@@ -1761,6 +1813,8 @@ class DubVerseAPIClient {
     start?: number; end?: number
     sync_score?: number; correlation?: number; offset_ms?: number
     face_coverage?: number; severity?: string; reason?: string
+    visual?: LipSyncWindowResult['visual']
+    audio?: LipSyncWindowResult['audio']
   }> {
     const res = await this._fetch(`${this.baseURL}/api/analyze-lipsync/${jobId}`, {
       method: 'POST',
@@ -1785,6 +1839,7 @@ class DubVerseAPIClient {
       paired_with_next?: boolean
       text?: string
       text_locked?: boolean
+      text_edit_locked?: boolean
       fade_in?: number
       fade_out?: number
       // Promote a staged take: backend sets BOTH path and committed_audio_url

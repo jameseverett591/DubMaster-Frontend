@@ -66,7 +66,7 @@ import { useEditorStore, type SidebarTab, CHUNK_SECONDS } from '@/lib/editor-sto
 import type { Segment, Scene, QCScore, QCFinding, QCFindingType, QCReport, SegmentNuances, NuanceMarker, NuanceMarkerType, StagedEdit, PlaybackMode } from '@/lib/editor-types'
 import { normalizeScenes } from '@/lib/editor-types'
 import { DEFAULT_NUANCES, NUANCE_MARKER_META, newSegmentId, newSceneId, getSegmentKey, defaultScenes, computeVideoFadeOpacity, timelineToSourceTime, sourceToTimelineTime } from '@/lib/editor-types'
-import { formatTime, getSpeakerColor, getSpeakerColorByNumber, getSpeakerHexByNumber } from '@/lib/editor-types'
+import { formatTime, getSpeakerColorByNumber, getSpeakerHexByNumber } from '@/lib/editor-types'
 import { applyQCFix } from '@/lib/qc-fixes'
 import { VideoRecorder } from '@/components/video-recorder'
 import { QCQualityPanel } from '@/components/editor/qc-quality-panel'
@@ -149,6 +149,32 @@ const QC_TABS: { id: QCCategory; label: string; icon: React.ComponentType<{ clas
   { id: 'delivery', label: 'Delivery', icon: Zap, qcType: 'delivery', isQCTab: true },
   { id: 'sync', label: 'Sync', icon: Music2, qcType: 'sync', isQCTab: true },
 ]
+
+// Right-panel tab set — shared between the horizontal top row and the
+// vertical rail that appears when the panel's right-edge bar is dragged left.
+const RIGHT_PANEL_TABS = [
+  { id: 'result',     label: 'Video' },
+  { id: 'quality',    label: 'Quality' },
+  { id: 'velma',      label: 'Velma',        feature: 'velmaPanel' },
+  { id: 'respeecher', label: 'Respeecher',   feature: 'respeecher' },
+  // Labelled 'Custom Voices' until now, which is what the cloned-voice
+  // dialog and the Test Clips tab are also called — three things, one
+  // name, and only one of them about custom voices. This panel converts
+  // existing audio to another voice; it is the voice changer.
+  { id: 'perform',    label: 'Voice Changer', feature: 'voiceChanger' },
+  { id: 'seeds',      label: 'Seed Library', feature: 'respeecher' },
+  { id: 'studio',     label: 'Studio',       feature: 'studioCollaboration' },
+  { id: 'scene',      label: 'Summary' },
+  { id: 'rulebook',   label: 'Rulebook' },
+  { id: 'adaptation', label: 'Adaptation' },
+  { id: 'speakers',   label: 'Speakers' },
+  { id: 'library',    label: 'Voice Library' },
+  // Opens the clone manager dialog rather than a panel tab — intercepted in
+  // the tab click handlers below, like Studio.
+  { id: 'customvoices', label: 'Custom Voices' },
+  { id: 'testclips',  label: 'Test Clips',   feature: 'customVoices' },
+  { id: 'ei-library', label: 'E.I. Library', feature: 'emotionalIntelligence' },
+] as const
 
 // Suggestion type - alternative translations
 interface Suggestion {
@@ -1016,6 +1042,11 @@ export function DubVerseEditor({
    *  new one still gets its own attempt. Reset by the effect below. */
   const videoRetriedRef = useRef(false)
   const videoFadeOverlayRef = useRef<HTMLDivElement>(null)
+  /** The box the video element fills. The video letterboxes inside it
+   *  (object-contain), so captions and the watermark are anchored to a frame
+   *  div that this effect keeps matched to the rendered picture rect. */
+  const videoBoxRef = useRef<HTMLDivElement>(null)
+  const videoFrameRef = useRef<HTMLDivElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const layoverTrackRef = useRef<HTMLDivElement>(null)
   const videoTrackRef = useRef<HTMLDivElement>(null)
@@ -1267,7 +1298,7 @@ export function DubVerseEditor({
   })
 
   // Right preview panel tab: Result (video) | Quality (QC) | Studio
-  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'respeecher' | 'perform' | 'seeds' | 'studio' | 'scene' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'ei-library' | 'nuances' | 'chord' | 'advanced' | 'characters' | 'testclips' | 'rulebook'>('result')
+  const [rightPanelTab, setRightPanelTab] = useState<'result' | 'quality' | 'velma' | 'respeecher' | 'perform' | 'seeds' | 'studio' | 'scene' | 'adaptation' | 'speakers' | 'library' | 'emotions' | 'ei-library' | 'nuances' | 'chord' | 'advanced' | 'characters' | 'testclips' | 'rulebook' | 'customvoices'>('result')
   const [velmaEnrichLoading, setVelmaEnrichLoading] = useState(false)
   const [velmaEnrichResult, setVelmaEnrichResult] = useState<{ patched: number; total: number } | null>(null)
 
@@ -1330,6 +1361,7 @@ export function DubVerseEditor({
       }
       const user = session?.user
       if (!user) return
+      setUserAccount({ id: user.id, email: user.email || '' })
       const name = (user.user_metadata?.full_name as string | undefined) || user.email || ''
       const parts = name.trim().split(/\s+/)
       setUserInitials(
@@ -1414,6 +1446,45 @@ export function DubVerseEditor({
       v.removeEventListener('seeking', onSeeking)
       v.removeEventListener('seeked', onSeeked)
       v.removeEventListener('ended', onEnded)
+    }
+  }, [])
+
+  // Letterbox frame — the video element letterboxes inside its box
+  // (object-contain), which leaves bars that captions and the watermark would
+  // otherwise float in. This keeps a frame div matched to the exact rect the
+  // picture occupies so overlays always sit ON the picture. ResizeObserver
+  // covers panel/rail resizes; loadedmetadata covers source and aspect changes.
+  useLayoutEffect(() => {
+    const box = videoBoxRef.current
+    const frame = videoFrameRef.current
+    const v = videoRef.current
+    if (!box || !frame || !v) return
+    const update = () => {
+      const vw = v.videoWidth, vh = v.videoHeight
+      if (!vw || !vh) {
+        // No picture yet — fall back to the whole box so nothing breaks.
+        frame.style.inset = '0px'
+        frame.style.width = ''
+        frame.style.height = ''
+        return
+      }
+      const bw = box.clientWidth, bh = box.clientHeight
+      if (!bw || !bh) return
+      const vr = vw / vh, br = bw / bh
+      const w = vr > br ? bw : bh * vr
+      const h = vr > br ? bw / vr : bh
+      frame.style.left = `${(bw - w) / 2}px`
+      frame.style.top = `${(bh - h) / 2}px`
+      frame.style.width = `${w}px`
+      frame.style.height = `${h}px`
+    }
+    const ro = new ResizeObserver(update)
+    ro.observe(box)
+    v.addEventListener('loadedmetadata', update)
+    update()
+    return () => {
+      ro.disconnect()
+      v.removeEventListener('loadedmetadata', update)
     }
   }, [])
 
@@ -2119,6 +2190,23 @@ export function DubVerseEditor({
   })
   const [isResizingPreview, setIsResizingPreview] = useState(false)
   const previewPanelRef = useRef<HTMLDivElement>(null)
+
+  // Vertical tab rail — the strip docked to the right edge of the preview
+  // panel. 0 means the tabs live in the horizontal row at the top; any value
+  // above the snap threshold means the tabs run down a resizable rail. The bar
+  // that opens it sits on the right edge of the viewing screen.
+  const [tabRailWidth, setTabRailWidth] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('dubverse.editor.tabRailWidth')
+      return saved ? parseInt(saved, 10) : 0
+    }
+    return 0
+  })
+  const [isResizingTabRail, setIsResizingTabRail] = useState(false)
+  const tabRailRef = useRef<HTMLDivElement>(null)
+  const rightTabRowRef = useRef<HTMLDivElement>(null)
+  const railGripRef = useRef<HTMLDivElement>(null)
+  const collapsedRailGripRef = useRef<HTMLDivElement>(null)
   const [timelineHeight, setTimelineHeight] = useState(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('dubverse.editor.timelineHeight')
@@ -2370,6 +2458,13 @@ export function DubVerseEditor({
     prevSegCountRef.current = displaySegments.length
   }, [displaySegments])
 
+  // A "speaker-N" string is an id, not a name — segments can carry a stale one
+  // (speaker-2 labelled "speaker-1"), and trusting it displays two rows numbered
+  // the same. Only treat speaker_label as a name when it is neither digits nor
+  // an id echo.
+  const isCustomSpeakerName = (label?: string | null): label is string =>
+    !!label && !/^\d+$/.test(label) && !/^speaker[-_\s]?\d+$/i.test(label)
+
   // Unique speakers across all segments — used for reassignment dropdown
   const uniqueSpeakers = useMemo(() => {
     const seen = new Map<string, { id: string; label: string; gender: 'male' | 'female' | 'child' }>()
@@ -2377,7 +2472,7 @@ export function DubVerseEditor({
       if (seg.speaker_id && !seen.has(seg.speaker_id)) {
         seen.set(seg.speaker_id, {
           id: seg.speaker_id,
-          label: seg.speaker_label && !/^\d+$/.test(seg.speaker_label) ? seg.speaker_label : `Speaker ${seen.size + 1}`,
+          label: isCustomSpeakerName(seg.speaker_label) ? seg.speaker_label : `Speaker ${seen.size + 1}`,
           gender: seg.speaker_gender || 'male',
         })
       }
@@ -2408,8 +2503,10 @@ export function DubVerseEditor({
       status: 'edited' as const,
       rpt_dirty: true,
     }
-    const leftText = segment.target_text
-    const leftSegment = { ...segment, end_time: currentTime, ...audioCleared }
+    // The line lives in preview/committed text on edited segments — target_text
+    // alone can be empty there, which silently split into two blank halves.
+    const leftText = segment.preview_text ?? segment.committed_adapted_text ?? segment.active_text ?? segment.target_text ?? ''
+    const leftSegment = { ...segment, end_time: currentTime, target_text: leftText, active_text: leftText, preview_text: null, ...audioCleared }
     const rightSegment = { ...segment, id: newSegmentId(), transcript_index: undefined, start_time: currentTime, target_text: '', source_text: '', active_text: '', preview_text: null, ...audioCleared }
     setImportedSegments(prev => {
       const base = prev ?? displaySegments
@@ -2428,7 +2525,7 @@ export function DubVerseEditor({
       const gen = handleGenerateSpeechRef.current
       if (leftText.trim()) await gen(index, undefined, leftText.trim())
     }, 0)
-    undoStack.current.push({ kind: 'segment-split', index, at: 'playhead' })
+    undoStack.current.push({ kind: 'segment-split', key: keyAt(index), index, at: 'playhead' })
     setUndoSplitLabel('Segment Split')
   }, [displaySegments, currentTime, syncSegmentsToBackend])
 
@@ -2496,7 +2593,10 @@ export function DubVerseEditor({
   const handleSplitAtWord = useCallback((index: number, wordIndex: number) => {
     const segment = displaySegments[index]
     if (!segment || wordIndex <= 0) return
-    const words = segment.target_text.split(' ')
+    // Split the same text the word-picker displays — preview/committed first.
+    // Reading target_text alone silently no-ops on committed lines whose words
+    // live in committed_adapted_text (target_text can be empty there).
+    const words = (segment.preview_text ?? segment.committed_adapted_text ?? segment.active_text ?? segment.target_text ?? '').split(' ')
     if (wordIndex >= words.length) return
     const leftText = words.slice(0, wordIndex).join(' ')
     const rightText = words.slice(wordIndex).join(' ')
@@ -2532,7 +2632,7 @@ export function DubVerseEditor({
       if (leftText.trim()) await gen(index, undefined, leftText.trim())
       if (rightText.trim()) await gen(index + 1, undefined, rightText.trim())
     }, 0)
-    undoStack.current.push({ kind: 'segment-split', index, at: 'word' })
+    undoStack.current.push({ kind: 'segment-split', key: keyAt(index), index, at: 'word' })
     setUndoSplitLabel('Word Split')
   }, [displaySegments, syncSegmentsToBackend])
 
@@ -2921,9 +3021,16 @@ export function DubVerseEditor({
 
   // Dragged translation state for timeline
   const [draggedTranslation, setDraggedTranslation] = useState<{ segmentIndex: number; text: string } | null>(null)
-  const [droppedTranslations, setDroppedTranslations] = useState<{ segmentIndex: number; text: string; startTime: number; endTime: number }[]>([])
+  const [droppedTranslations, setDroppedTranslations] = useState<{ segmentIndex: number; segmentKey?: string; text: string; startTime: number; endTime: number }[]>([])
   
   // Locked segments (after Generate Speech)
+  // Page-level text lock — seals every line's words at once (persisted
+  // job-level via segments.json's text_edits_locked field). A line is
+  // effectively locked when this OR its own text_edit_locked flag is set.
+  const [pageTextLocked, setPageTextLocked] = useState(false)
+  const pageTextLockedRef = useRef(false)
+  pageTextLockedRef.current = pageTextLocked
+
   const [lockedSegments, setLockedSegments] = useState<Set<string>>(new Set())
   // Read by the scene helpers, which are declared before setSegmentLocked and run
   // long after the render that created them.
@@ -2995,6 +3102,44 @@ export function DubVerseEditor({
   }, [jobId, keyAt])
   // Published for the scene helpers above, which are declared earlier in the file.
   setSegmentLockedRef.current = setSegmentLocked
+
+  // Restore the page-level text lock once per job load.
+  const textLockInitRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!jobId || textLockInitRef.current === jobId) return
+    textLockInitRef.current = jobId
+    setPageTextLocked(false)
+    apiClient.getTextLock(jobId)
+      .then(locked => setPageTextLocked(locked))
+      .catch(() => {})
+  }, [jobId])
+
+  const togglePageTextLock = useCallback(() => {
+    if (!jobId) return
+    const next = !pageTextLockedRef.current
+    setPageTextLocked(next)
+    apiClient.setTextLock(jobId, next)
+      .catch(err => console.warn('[TEXT-LOCK] page persist failed:', err))
+  }, [jobId])
+
+  // Text-edit lock — the tiny padlock on a segment's line. Unlike `locked`
+  // (which freezes position AND audio regen) this only seals the words:
+  // emotion, voice, speed, and FX still work. Persisted via commitOrStage so
+  // it survives refresh, same channel as every other per-segment flag.
+  const toggleTextEditLock = useCallback((index: number) => {
+    const seg = displaySegmentsRef.current[index]
+    if (!seg) return
+    const lock = !seg.text_edit_locked
+    const ti = seg.transcript_index ?? index
+    commitOrStageRef.current?.(ti, { text_edit_locked: lock })
+      ?.catch(err => console.warn('[TEXT-LOCK] persist failed', err))
+    apiClient.commitSegmentTiming(jobId, ti, { text_edit_locked: lock })
+      .catch(err => console.warn('[TEXT-LOCK] persist failed:', err))
+    setImportedSegments(prev => {
+      const base = prev ?? displaySegments
+      return base.map((s, i) => i === index ? { ...s, text_edit_locked: lock } : s)
+    })
+  }, [jobId, displaySegments])
 
   const canMergeWithNext = useCallback((index: number): boolean => {
     const first = displaySegments[index]
@@ -3413,7 +3558,7 @@ export function DubVerseEditor({
       start_time: startTime,
       end_time: endTime,
       speaker_id: `speaker-${currentSegments.length + 1}`,
-      speaker_label: `Speaker ${currentSegments.length + 1}`,
+      speaker_label: `speaker-${currentSegments.length + 1}`,
       speaker_gender: 'male' as const,
       source_text: newSegmentOriginal,
       target_text: newSegmentTranslation || newSegmentOriginal,
@@ -3496,7 +3641,7 @@ export function DubVerseEditor({
                 start_time: parseSrtTime(timeMatch[1]),
                 end_time: parseSrtTime(timeMatch[2]),
                 speaker_id: `speaker-${idx + 1}`,
-                speaker_label: `Speaker ${idx + 1}`,
+                speaker_label: `speaker-${idx + 1}`,
                 source_text: textLines,
                 target_text: textLines,
                 active_text: textLines,
@@ -3533,7 +3678,7 @@ export function DubVerseEditor({
                 start_time: parseVttTime(timeMatch[1]),
                 end_time: parseVttTime(timeMatch[2]),
                 speaker_id: `speaker-${segIdx + 1}`,
-                speaker_label: `Speaker ${segIdx + 1}`,
+                speaker_label: `speaker-${segIdx + 1}`,
                 source_text: textLines.join(' '),
                 target_text: textLines.join(' '),
                 active_text: textLines.join(' '),
@@ -4610,6 +4755,22 @@ export function DubVerseEditor({
   const setSceneRangeRef = useRef(setSceneRange)
   setSceneRangeRef.current = setSceneRange
 
+  // Scroll the transcript to a segment's row. Centres it only when the row is
+  // not already fully inside the scrollport, so a click on a row you can
+  // already see never slides the list around.
+  const scrollTranscriptToIndex = useCallback((index: number | null) => {
+    if (index === null) return
+    const row = document.querySelector<HTMLElement>(
+      `[data-segment-row][data-index="${index}"]`
+    )
+    if (!row) return // not rendered — outside the active chunk window
+    const port = row.closest('[data-slot="scroll-area-viewport"]')
+    const rr = row.getBoundingClientRect()
+    const pr = port?.getBoundingClientRect()
+    const fullyVisible = pr ? rr.top >= pr.top && rr.bottom <= pr.bottom : false
+    if (!fullyVisible) row.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [])
+
   const handleSegmentClick = useCallback((index: number, e?: React.MouseEvent) => {
     // In group-selection mode a Ctrl+click builds the range instead of selecting
     // /seeking; stopPropagation keeps the context-menu wrapper from also selecting.
@@ -4629,11 +4790,15 @@ export function DubVerseEditor({
       return
     }
     selectSegment(index)
+    // Bring the transcript row up directly — the selection effect only fires
+    // when the index CHANGES, so re-clicking the selected block would do
+    // nothing without this.
+    scrollTranscriptToIndex(index)
     const seg = displaySegmentsRef.current[index]
     if (seg) {
       // No seek: selecting a block is not a request to move the playhead.
     }
-  }, [selectSegment, groupSelectMode, handleGroupRangeClick, sceneLockMode, handleSceneRangeClick])
+  }, [selectSegment, groupSelectMode, handleGroupRangeClick, sceneLockMode, handleSceneRangeClick, scrollTranscriptToIndex])
   
   // Shared resize drag helper: batches DOM writes in requestAnimationFrame,
   // uses pointer capture so the cursor can leave the window, and only writes
@@ -4739,6 +4904,44 @@ export function DubVerseEditor({
     })
   }, [startResizeDrag, previewWidth, layoutLocked])
 
+  // Tab rail — the right-edge bar of the viewing screen. Dragging it left
+  // opens a vertical strip of the same tabs that otherwise sit in the top row;
+  // dragging it back to the right edge snaps it shut and restores the row.
+  // The rail stays mounted with display:none while collapsed so the drag can
+  // drive the DOM directly mid-gesture — React's prop diffing leaves
+  // unchanged style props alone, so the imperative width/display survive
+  // timeupdate re-renders and only commit to state on release.
+  const TAB_RAIL_SNAP = 48
+  const handleTabRailResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    startResizeDrag({
+      e,
+      axis: 'x',
+      min: 0,
+      max: Math.max(TAB_RAIL_SNAP + 8, (previewPanelRef.current?.clientWidth ?? 400) * 0.5),
+      startSize: tabRailWidth,
+      invertDelta: true,
+      onStart: () => setIsResizingTabRail(true),
+      setSize: (size) => {
+        const w = size < TAB_RAIL_SNAP ? 0 : size
+        if (tabRailRef.current) {
+          tabRailRef.current.style.display = w ? 'flex' : 'none'
+          tabRailRef.current.style.width = `${w}px`
+        }
+        if (railGripRef.current) railGripRef.current.style.display = w ? '' : 'none'
+        if (collapsedRailGripRef.current) collapsedRailGripRef.current.style.display = w ? 'none' : ''
+        if (rightTabRowRef.current) rightTabRowRef.current.style.display = w ? 'none' : ''
+      },
+      onEnd: (size) => {
+        const w = size < TAB_RAIL_SNAP ? 0 : size
+        setIsResizingTabRail(false)
+        setTabRailWidth(w)
+        if (!layoutLocked) {
+          localStorage.setItem('dubverse.editor.tabRailWidth', w.toString())
+        }
+      },
+    })
+  }, [startResizeDrag, tabRailWidth, layoutLocked])
+
   // Handle timeline resize (vertical)
   const handleTimelineResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     startResizeDrag({
@@ -4812,10 +5015,11 @@ export function DubVerseEditor({
       localStorage.setItem('dubverse.editor.previewWidth', previewWidth.toString())
       localStorage.setItem('dubverse.editor.timelineHeight', timelineHeight.toString())
       localStorage.setItem('dubverse.editor.zoomLevel', zoomLevel.toString())
+      localStorage.setItem('dubverse.editor.tabRailWidth', tabRailWidth.toString())
       const el = timelineRef.current
       if (el) localStorage.setItem('dubverse.editor.scrollPosition', el.scrollLeft.toString())
     }
-  }, [layoutLocked, previewWidth, timelineHeight, zoomLevel])
+  }, [layoutLocked, previewWidth, timelineHeight, zoomLevel, tabRailWidth])
 
   // Native wheel zoom on the timeline: non-passive listener so we can prevent
   // the default horizontal scroll, current zoom via ref so rapid notches stack,
@@ -5047,14 +5251,19 @@ export function DubVerseEditor({
     try {
       const data = JSON.parse(e.dataTransfer.getData('application/json'))
       if (data.suggestion) {
-        updateSegmentText(targetSegmentIndex, data.suggestion.text)
+        // Text-edit lock: a sealed line refuses a dropped suggestion.
+        const targetSeg = displaySegments[targetSegmentIndex]
+        if (!targetSeg?.text_edit_locked && !pageTextLockedRef.current) {
+          updateSegmentText(targetSegmentIndex, data.suggestion.text)
+        }
         // Add to dropped translations for timeline display
         const segment = displaySegments[targetSegmentIndex]
         if (segment) {
           setDroppedTranslations(prev => [
-            ...prev.filter(t => t.segmentIndex !== targetSegmentIndex),
+            ...prev.filter(t => t.segmentIndex !== targetSegmentIndex && t.segmentKey !== getSegmentKey(segment)),
             {
               segmentIndex: targetSegmentIndex,
+              segmentKey: getSegmentKey(segment),
               text: data.suggestion.text,
               startTime: segment.start_time,
               endTime: segment.end_time
@@ -5073,21 +5282,25 @@ export function DubVerseEditor({
       const data = JSON.parse(e.dataTransfer.getData('application/json'))
       if (data.suggestion && data.startTime !== undefined) {
         // Add the translation to the dropped translations
+        const dropSeg = displaySegments[data.segmentIndex]
         setDroppedTranslations(prev => [
-          ...prev.filter(t => t.segmentIndex !== data.segmentIndex),
+          ...prev.filter(t => t.segmentIndex !== data.segmentIndex && (!dropSeg || t.segmentKey !== getSegmentKey(dropSeg))),
           {
             segmentIndex: data.segmentIndex,
+            segmentKey: dropSeg ? getSegmentKey(dropSeg) : undefined,
             text: data.suggestion.text,
             startTime: data.startTime,
             endTime: data.endTime
           }
         ])
-        // Update the segment text
-        updateSegmentText(data.segmentIndex, data.suggestion.text)
+        // Update the segment text — unless the line's words are sealed.
+        if (!dropSeg?.text_edit_locked && !pageTextLockedRef.current) {
+          updateSegmentText(data.segmentIndex, data.suggestion.text)
+        }
       }
     } catch {}
     setDraggedTranslation(null)
-  }, [updateSegmentText])
+  }, [updateSegmentText, displaySegments])
 
   // Capture every block (all tracks) belonging to the selected group, plus the
   // group frame, once at drag start. The move handler then only writes
@@ -5174,22 +5387,44 @@ export function DubVerseEditor({
    *  would undo a text change you made five minutes ago in preference to the
    *  split you made a second ago. */
   type UndoEntry =
-    | { kind: 'text'; index: number; prevText: string }
+    // `key` is the segment's stable id — `index` alone goes stale the moment a
+    // split/merge/delete shifts positions, which made entries unreachable (the
+    // context menu silently no-ops) or, worse, applied old text to the wrong
+    // line. index stays on the entry only for reference/debugging.
+    | { kind: 'text'; key: string; index: number; prevText: string }
     // A scene boundary on the video strip. Reversed by dissolving the boundary.
     | { kind: 'scene-split'; sceneId: string }
     // A segment cut in two, at the playhead or at a word. Both splice one segment
     // into two at index/index+1, so both are reversed by merging index with next.
+    // `key` is the left half's segment id — it survives the split (the right half
+    // gets a fresh id), so the merge target is re-resolved at undo time.
     // `at` exists only to name the action in the menu — undoing them is identical.
-    | { kind: 'segment-split'; index: number; at: 'playhead' | 'word' }
+    | { kind: 'segment-split'; key: string; index: number; at: 'playhead' | 'word' }
   const undoStack = useRef<UndoEntry[]>([])
   // Hume auto-fire guard, lifted out of FloatingEmotionChart so Clear Segment
   // and text edits can reset it (re-fire emotion analysis on next dwell).
   const emotionAutoFiredRef = useRef<Set<number>>(new Set())
 
-  const _applyUndo = useCallback((index: number, prevText: string) => {
+  const _applyUndo = useCallback((entry: { key?: string; index?: number; prevText: string }) => {
+    const segs = displaySegmentsRef.current
+    let index = entry.key ? segs.findIndex(s => getSegmentKey(s) === entry.key) : -1
+    // Entries pushed before the key existed are still on the stack after a hot
+    // reload — they only carry a display index, so use it when the key misses.
+    if (index < 0 && typeof entry.index === 'number') index = entry.index
+    if (index < 0) return
+    const prevText = entry.prevText
     setPreviewText(index, prevText)
     updateSegment(index, { preview_text: prevText, active_text: prevText, isUserEdited: true })
-    setImportedSegments(p => p ? p.map((seg, i) => i === index ? { ...seg, preview_text: prevText, active_text: prevText } : seg) : p)
+    setImportedSegments(p => p ? p.map((seg, i) => i === index
+      // Restore committed_adapted_text too — saveEditing writes it, so leaving
+      // the new text there would make a regen speak the line you just undid.
+      ? { ...seg, preview_text: prevText, active_text: prevText, committed_adapted_text: prevText, text_locked: false }
+      : seg) : p)
+    // Same persistence channel saveEditing uses — the revert must reach disk,
+    // or a refresh resurrects the text you undid.
+    const ti = segs[index]?.transcript_index ?? index
+    commitOrStageRef.current?.(ti, { committed_adapted_text: prevText, text_locked: false })
+      .catch(err => console.warn('[UNDO] persist failed:', err))
   }, [setPreviewText, updateSegment])
 
   const _splitLabelOf = (e: UndoEntry): string | null =>
@@ -5221,12 +5456,18 @@ export function DubVerseEditor({
     }
     if (entry.kind === 'segment-split') {
       // Rejoin the two halves. Same merge the context menu offers, so there is no
-      // second un-split path that could drift from it.
-      handleMergeWithNextRef.current?.(entry.index)
+      // second un-split path that could drift from it. Re-resolve the left half's
+      // position from its id — later splits/merges may have moved it.
+      const idx = entry.key
+        ? displaySegmentsRef.current.findIndex(s => getSegmentKey(s) === entry.key)
+        : -1
+      // Legacy entries without a key fall back to the stored index.
+      if (idx >= 0) handleMergeWithNextRef.current?.(idx)
+      else handleMergeWithNextRef.current?.(entry.index)
       _refreshUndoSplit()
       return
     }
-    _applyUndo(entry.index, entry.prevText)
+    _applyUndo(entry)
   }, [_applyUndo, mergeSceneWithPrevious, jobId, _refreshUndoSplit])
 
   const submitAskAiChat = useCallback(async () => {
@@ -5264,18 +5505,19 @@ export function DubVerseEditor({
 
   // Per-segment undo (context menu) — splices the most recent entry for that segment.
   const handleUndoLastEdit = useCallback((index: number) => {
+    const key = keyAt(index)
     const stackArr = undoStack.current
     for (let i = stackArr.length - 1; i >= 0; i--) {
       // Segment-scoped: skip scene splits, which belong to no segment. They stay
       // on the stack and remain reachable through the global undo.
       const e = stackArr[i]
-      if (e.kind === 'text' && e.index === index) {
+      if (e.kind === 'text' && (e.key === key || e.index === index)) {
         stackArr.splice(i, 1)
-        _applyUndo(e.index, e.prevText)
+        _applyUndo(e)
         return
       }
     }
-  }, [_applyUndo])
+  }, [_applyUndo, keyAt])
 
   /** Undo the most recent scene split, wherever it was made.
    *
@@ -5352,7 +5594,7 @@ export function DubVerseEditor({
     setStagedVoices(prev => { const n = { ...prev }; delete n[keyAt(index)]; return n })
     setStagedPitches(prev => { const n = { ...prev }; delete n[keyAt(index)]; return n })
     setLockedSegments(prev => { const next = new Set(prev); next.delete(keyAt(index)); return next })
-    setDroppedTranslations(prev => prev.filter(t => t.segmentIndex !== index))
+    setDroppedTranslations(prev => prev.filter(t => t.segmentIndex !== index && t.segmentKey !== keyAt(index)))
     // reset_segment (routes.py) matches on transcript_index, NOT array position.
     // The two diverge permanently after any split (a split's right half gets a
     // fresh, unrelated transcript_index), so sending the raw index would clear a
@@ -5665,17 +5907,14 @@ export function DubVerseEditor({
           return audioContextRef.current
         })(),
       )
-      if (!droppedTranslations.some(t => t.segmentIndex === activeIndex)) {
-        setDroppedTranslations(prev => [
-          ...prev,
-          {
-            segmentIndex: activeIndex,
-            text: response.segment.text,
-            startTime: segment.start_time,
-            endTime: segment.end_time,
-          }
-        ])
-      }
+      // Do NOT push into droppedTranslations here — that state means "a
+      // translation suggestion was dropped on this segment" and paints the
+      // timeline block amber. Generation is not a drop; the speaker-coloured
+      // dm-gen-* feedback already marks the fresh take. And a fresh take makes
+      // any prior drop marker stale, so clear it (key or index match).
+      setDroppedTranslations(prev => prev.filter(t =>
+        !(t.segmentIndex === activeIndex || t.segmentKey === keyAt(activeIndex))
+      ))
       return true
     } catch (err: any) {
       console.error('[Generate Speech] Failed:', err.message)
@@ -5699,7 +5938,7 @@ export function DubVerseEditor({
         }, 0)
       }
     }
-  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, droppedTranslations, updateSegment, stagedSpeeds, lockedSegments, selectSegment, setImportedSegments, setPlaybackMode, keyAt])
+  }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, updateSegment, stagedSpeeds, lockedSegments, selectSegment, setImportedSegments, setPlaybackMode, keyAt])
 
   const handleGenerateSpeechRef = useRef(handleGenerateSpeech)
   handleGenerateSpeechRef.current = handleGenerateSpeech
@@ -6362,7 +6601,7 @@ export function DubVerseEditor({
       next.delete(keyAt(selectedSegmentIndex))
       return next
     })
-    setDroppedTranslations(prev => prev.filter(t => t.segmentIndex !== selectedSegmentIndex))
+    setDroppedTranslations(prev => prev.filter(t => t.segmentIndex !== selectedSegmentIndex && t.segmentKey !== keyAt(selectedSegmentIndex)))
     setStagedSpeeds(prev => { const next = { ...prev }; delete next[keyAt(selectedSegmentIndex)]; return next })
     setStagedEmotions(prev => { const next = { ...prev }; delete next[keyAt(selectedSegmentIndex)]; return next })
   }, [selectedSegmentIndex, initialSegments, jobId, updateSegment, setImportedSegments, keyAt])
@@ -6566,9 +6805,20 @@ export function DubVerseEditor({
   } | null>(null)
   const [lipSyncNote, setLipSyncNote] = useState<string | null>(null)
   useEffect(() => {
-    apiClient.getDubbingEngines()
-      .then(r => setLipsyncInfo(r.engines?.lipsync ?? null))
-      .catch(() => {})
+    // Retry on failure: the page can mount while the backend is mid-restart,
+    // and a swallowed rejection used to leave lipsyncInfo null for the whole
+    // session — the Lip sync checkbox silently vanished.
+    let alive = true
+    let attempts = 0
+    const load = () => {
+      apiClient.getDubbingEngines()
+        .then(r => { if (alive) setLipsyncInfo(r.engines?.lipsync ?? null) })
+        .catch(() => {
+          if (alive && ++attempts < 4) setTimeout(load, 3000 * attempts)
+        })
+    }
+    load()
+    return () => { alive = false }
   }, [])
 
   // A paid add-on: visible only to users who can pay — Pro (included minutes)
@@ -6581,7 +6831,85 @@ export function DubVerseEditor({
   const lipSyncEligible = isPro || usage.walletSeconds > 0
   const lipSyncAffordable = lipSyncEstSeconds <= Math.round(usage.minutesRemaining * 60)
 
+  // ── Scoped lip-sync: per-segment selection, live cost, pay-before-render ──
+  // Selection is keyed by transcript_index — the backend's stable identity for
+  // a segment (segment.id is only a React key).
+  const [userAccount, setUserAccount] = useState<{ id: string; email: string } | null>(null)
+  const [lipSel, setLipSel] = useState<Set<string>>(new Set())
+  const [lipQuote, setLipQuote] = useState<Awaited<ReturnType<typeof apiClient.getLipsyncQuote>>>(null)
+  const [renderQuote, setRenderQuote] = useState<{ needed_seconds: number; already_billed: boolean; bypassed?: boolean } | null>(null)
+  const [lipCheckout, setLipCheckout] = useState<{
+    shortfall_cents: number; cost_usd: number; selected_seconds: number
+    range_count: number; scoped: boolean
+  } | null>(null)
+  const [budgetUsd, setBudgetUsd] = useState('')
+  const lipSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const lipKeyOf = useCallback(
+    (seg: { transcript_index?: number; id?: string }) => String(seg.transcript_index ?? seg.id ?? ''),
+    [],
+  )
+
+  useEffect(() => {
+    apiClient.getLipsyncSelection(jobId).then(ids => setLipSel(new Set(ids))).catch(() => {})
+    apiClient.getQuotaEstimate(jobId).then(setRenderQuote).catch(() => {})
+    try { setBudgetUsd(localStorage.getItem('dm.budgetUsd') ?? '') } catch {}
+  }, [jobId])
+
+  const toggleLipSegment = useCallback((seg: { transcript_index?: number; id?: string }) => {
+    const key = lipKeyOf(seg)
+    if (!key) return
+    setLipSel(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      if (lipSaveTimer.current) clearTimeout(lipSaveTimer.current)
+      lipSaveTimer.current = setTimeout(() => {
+        apiClient.putLipsyncSelection(jobId, [...next])
+          .catch(err => console.warn('[LIPSYNC-SEL]', err))
+      }, 600)
+      return next
+    })
+  }, [jobId, lipKeyOf])
+
+  // Live cost quote — refetches as the selection or whole-film toggle changes.
+  const wantsLipSync = lipsyncOptIn || lipSel.size > 0
+  useEffect(() => {
+    if (!wantsLipSync) { setLipQuote(null); return }
+    const t = setTimeout(() => {
+      apiClient.getLipsyncQuote(jobId).then(setLipQuote).catch(() => setLipQuote(null))
+    }, 300)
+    return () => clearTimeout(t)
+  }, [jobId, wantsLipSync, lipSel])
+
+  // Return from the lip-sync checkout resumes the render it was gating.
+  const lipResumeRef = useRef(false)
+  useEffect(() => {
+    try {
+      const sp = new URLSearchParams(window.location.search)
+      if (sp.get('lip_paid') === '1') {
+        lipResumeRef.current = true
+        window.history.replaceState({}, '', window.location.pathname)
+      }
+    } catch {}
+  }, [])
+
+  // The counter: unbilled render (re-renders are free) + current lip-sync scope.
+  const renderUsd = renderQuote && !renderQuote.already_billed ? renderQuote.needed_seconds * 2.5 / 60 : 0
+  const lipUsd = wantsLipSync ? (lipQuote?.cost_usd ?? 0) : 0
+  const estCostUsd = renderUsd + lipUsd
+  const budgetNum = parseFloat(budgetUsd)
+  const budgetRemaining = Number.isFinite(budgetNum) ? budgetNum - estCostUsd : null
+
   const handleRebuildVideo = useCallback(async () => {
+    // Lip-sync is paid BEFORE the vendor runs — if the wallet can't cover the
+    // selected scope, stop here and hand off to the checkout modal instead of
+    // rendering first and silently skipping the sync.
+    if (lipsyncOptIn || lipSel.size > 0) {
+      try {
+        const q = await apiClient.getLipsyncQuote(jobId)
+        if (q?.available && q.shortfall_cents > 0) { setLipCheckout(q); return }
+      } catch {}
+    }
     // Anything committed after this moment is not in the film this rebuild
     // produces, however fast the render is.
     rebuildStartedAtRef.current = Date.now()
@@ -6603,7 +6931,10 @@ export function DubVerseEditor({
       setRebuildProgress(prev => Math.min(90, prev + (90 / 56)))
     }, 500)
     try {
-      const response = await apiClient.remixDub(jobId, { lipsync: lipsyncOptIn })
+      // The backend resolves the scoped pass itself from the persisted
+      // selection — the flag just says "lip-sync is wanted", whether the
+      // whole-film box or only per-segment picks are on.
+      const response = await apiClient.remixDub(jobId, { lipsync: lipsyncOptIn || lipSel.size > 0 })
       if (rebuildIntervalRef.current) clearInterval(rebuildIntervalRef.current)
       setRebuildProgress(100)
       const absUrl = apiClient.toAbsoluteUrl(response.dubbed_video_url)
@@ -6657,7 +6988,17 @@ export function DubVerseEditor({
     } finally {
       setIsRebuilding(false)
     }
-  }, [jobId, setPlaybackMode, setCurrentTime, isMuted, masterVolume, setRebuildStatus, clearAllDirty, lipsyncOptIn])
+  }, [jobId, setPlaybackMode, setCurrentTime, isMuted, masterVolume, setRebuildStatus, clearAllDirty, lipsyncOptIn, lipSel])
+
+  // Returning from the lip-sync checkout resumes the render it was gating —
+  // once the duration is known the preflight re-quotes, finds the wallet now
+  // covers the scope, and proceeds straight through.
+  useEffect(() => {
+    if (lipResumeRef.current && videoDuration > 0) {
+      lipResumeRef.current = false
+      handleRebuildVideo()
+    }
+  }, [videoDuration, handleRebuildVideo])
 
   const handleRetranslate = useCallback(async () => {
     if (isRetranslating) return
@@ -6728,6 +7069,9 @@ export function DubVerseEditor({
   
   // Start editing a segment — immediately enters preview mode
   const startEditing = useCallback((index: number) => {
+    // Text-edit lock: the words are sealed. Everything else (FX, voice, speed)
+    // still works — only the text refuses to open.
+    if (displaySegments[index]?.text_edit_locked || pageTextLockedRef.current) return
     const currentText = displaySegments[index]?.preview_text ?? displaySegments[index]?.committed_adapted_text ?? displaySegments[index]?.active_text ?? displaySegments[index]?.target_text ?? ''
     setEditingSegmentIndex(index)
     setEditingText(currentText); editingTextRef.current = currentText
@@ -6762,7 +7106,7 @@ export function DubVerseEditor({
       const text = editingTextRef.current
       const previousDisplayText = displaySegments[idx]?.preview_text ?? displaySegments[idx]?.active_text ?? displaySegments[idx]?.target_text ?? ''
       // Push pre-edit text onto the global undo stack before applying the change.
-      undoStack.current.push({ kind: 'text', index: idx, prevText: previousDisplayText })
+      undoStack.current.push({ kind: 'text', key: keyAt(idx), index: idx, prevText: previousDisplayText })
       emotionAutoFiredRef.current.delete(idx)
       setPreviewText(idx, text)
       setImportedSegments(prev => {
@@ -6834,7 +7178,7 @@ export function DubVerseEditor({
     if (text == null) return
     const segs = displaySegmentsRef.current
     const previousDisplayText = segs[index]?.preview_text ?? segs[index]?.active_text ?? segs[index]?.target_text ?? ''
-    undoStack.current.push({ kind: 'text', index, prevText: previousDisplayText })
+    undoStack.current.push({ kind: 'text', key: keyAt(index), index, prevText: previousDisplayText })
     emotionAutoFiredRef.current.delete(index)
     setPreviewText(index, text)
     // Pasting is authorship too — revoke any earlier Release on this line.
@@ -7122,7 +7466,14 @@ export function DubVerseEditor({
   // the timeline reads exactly like the script. Three lines for speaker 1 means
   // three speaker-1 lanes, in order. Only rows inside the active chunk get a
   // lane, so walking to the next chunk re-derives the stack.
-  const SEG_LANE_H = 80 // the Dubbed track's own height (h-20), unchanged
+  const [fitLanes, setFitLanes] = useState(() =>
+    typeof window !== 'undefined' && localStorage.getItem('dubverse.editor.fitLanes') === '1'
+  )
+  const [fittedLaneH, setFittedLaneH] = useState(80)
+  const laneFixedRef = useRef<number | null>(null)
+  const fitPrevHeightRef = useRef<number | null>(null)
+  const fitSetHeightRef = useRef<number | null>(null)
+  const SEG_LANE_H = fitLanes ? fittedLaneH : 80
   const laneRows = useMemo(() => {
     const rows: number[] = []
     const rowOf = new Map<number, number>()
@@ -7136,6 +7487,69 @@ export function DubVerseEditor({
   // Never collapse to nothing: with no rows in the window the track still has
   // to carry the Dubbed label, its mute and its volume slider.
   const dubLanesPx = Math.max(1, laneRows.rows.length) * SEG_LANE_H
+
+  const measureLaneFit = useCallback(() => {
+    const tl = timelineRef.current
+    const lanesEl = tl?.querySelector<HTMLElement>('[data-dub-lanes]')
+    if (!tl || !lanesEl) return
+    // Everything that is NOT the lane stack — layover, ruler, picture, original,
+    // reference, preview, emotion — is fixed chrome the fit has to work around.
+    // Captured while content overflows, when scrollHeight is the true content
+    // height; reused afterwards so lanes can relax back when the panel grows.
+    if (tl.scrollHeight > tl.clientHeight || laneFixedRef.current == null) {
+      laneFixedRef.current = Math.max(0, tl.scrollHeight - lanesEl.offsetHeight)
+    }
+    const count = Math.max(1, laneRows.rows.length)
+    const laneH = Math.max(12, Math.min(80, Math.floor((tl.clientHeight - laneFixedRef.current) / count)))
+    setFittedLaneH(laneH)
+  }, [laneRows.rows.length])
+
+  const toggleFitLanes = useCallback(() => {
+    const next = !fitLanes
+    setFitLanes(next)
+    localStorage.setItem('dubverse.editor.fitLanes', next ? '1' : '0')
+    if (next) {
+      const tl = timelineRef.current
+      const lanesEl = tl?.querySelector<HTMLElement>('[data-dub-lanes]')
+      if (tl && lanesEl) {
+        laneFixedRef.current = Math.max(0, tl.scrollHeight - lanesEl.offsetHeight)
+        const count = Math.max(1, laneRows.rows.length)
+        const needed = laneFixedRef.current + count * 30
+        if (needed > tl.clientHeight) {
+          // Compressing alone can't surface every line — the fixed tracks eat
+          // the panel — so grow the panel too, capped so the transcript keeps
+          // a usable strip above it.
+          fitPrevHeightRef.current = timelineHeight
+          const chrome = timelineHeight - tl.clientHeight
+          const cap = Math.max(700, window.innerHeight - 220)
+          const grown = Math.min(cap, Math.max(150, needed + chrome))
+          setTimelineHeight(grown)
+          fitSetHeightRef.current = grown
+          if (!layoutLocked) localStorage.setItem('dubverse.editor.timelineHeight', String(grown))
+        }
+      }
+    } else {
+      setFittedLaneH(80)
+      // Give the panel back only if the user hasn't resized it themselves
+      // since the fit grew it.
+      if (fitPrevHeightRef.current != null && timelineHeight === fitSetHeightRef.current) {
+        setTimelineHeight(fitPrevHeightRef.current)
+        if (!layoutLocked) localStorage.setItem('dubverse.editor.timelineHeight', String(fitPrevHeightRef.current))
+      }
+      fitPrevHeightRef.current = null
+      fitSetHeightRef.current = null
+    }
+  }, [fitLanes, laneRows.rows.length, timelineHeight, layoutLocked])
+
+  useEffect(() => {
+    if (!fitLanes) return
+    measureLaneFit()
+    const tl = timelineRef.current
+    if (!tl) return
+    const ro = new ResizeObserver(() => measureLaneFit())
+    ro.observe(tl)
+    return () => ro.disconnect()
+  }, [fitLanes, measureLaneFit, timelineHeight, laneRows.rows.length, referenceSegments?.length])
 
   // ── Clip mixing controls (fades + clip gain) ─────────────────────────────
   // The fade ramps, the cyan clip-gain line and their drag handles, rendered
@@ -7573,8 +7987,21 @@ export function DubVerseEditor({
         container.scrollLeft = Math.max(0, px - container.clientWidth * 0.3)
       }
     }
+
+    // The other half of the sync: the transcript follows the selection too.
+    // Covers non-click selections — QC jumps, keyboard nav, programmatic
+    // selects. Click selections are handled in handleSegmentClick because a
+    // re-click on the selected segment never changes the index.
+    scrollTranscriptToIndex(selectedSegmentIndex)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSegmentIndex])
+
+  const fitTimelineToView = useCallback(() => {
+    const el = timelineRef.current
+    if (!el || !Number.isFinite(videoDuration) || videoDuration <= 0) return
+    setZoomLevel((el.clientWidth - 8) / (videoDuration * 40))
+    el.scrollLeft = 0
+  }, [videoDuration, setZoomLevel])
 
   // Find pending segment count
   const pendingCount = displaySegments.filter(s =>
@@ -7763,12 +8190,7 @@ export function DubVerseEditor({
         [&::-webkit-scrollbar-thumb]:bg-teal-400/45
         [&::-webkit-scrollbar-thumb]:rounded-full
         [&::-webkit-scrollbar-thumb:hover]:bg-teal-300">
-        {/* Offset right of true centre: Make Movie now sits at the end of the
-            nav and reaches into the middle of the header, which this used to
-            overlap. */}
-        <span className="absolute left-1/2 -translate-x-1/2 ml-40 text-xs font-mono text-amber-400 select-all">
-          {jobId}
-        </span>
+
         <div className="flex items-center gap-4 shrink-0">
           {/* Logo */}
           <Link href="/studio" className="flex items-center gap-2">
@@ -7793,17 +8215,7 @@ export function DubVerseEditor({
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/dashboard')}>{t('Dashboard')}</Button>
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/studio?tab=projects')}>{t('My Projects')}</Button>
             <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/collaborate')}>{t('Collaborate')}</Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className={cn(
-                'text-slate-400 hover:text-white',
-                rightPanelTab === 'library' && 'bg-slate-800 text-white'
-              )}
-              onClick={() => setRightPanelTab('library')}
-            >
-              {t('Voice Library')}
-            </Button>
+            <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white" onClick={() => router.push('/studio')}>{t('Studio')}</Button>
             <Button variant="ghost" size="sm" className="bg-slate-800 text-white">{t('Editor')}</Button>
 
             {/* Edit counters, in the top bar beside MAKE MOVIE — the place the
@@ -7882,13 +8294,10 @@ export function DubVerseEditor({
 
             {/* Optional AI lip-sync — opt-in only, shown only when the vendor
                 is configured AND the user can pay (Pro or wallet balance).
-                The job id is an absolutely-positioned span at the TOP of this
-                header — self-end drops the label to the row's bottom edge so
-                the two never share a baseline. shrink-0 + whitespace-nowrap
-                keep it from being squeezed horizontally either. */}
+                shrink-0 + whitespace-nowrap keep it from being squeezed. */}
             {lipsyncInfo?.available && !usage.loading && lipSyncEligible && (
               <label
-                className="ml-3 flex shrink-0 self-end items-center gap-1.5 translate-y-2.5 cursor-pointer select-none whitespace-nowrap"
+                className="ml-3 flex shrink-0 items-center gap-1.5 cursor-pointer select-none whitespace-nowrap"
                 title={t(
                   'Charged when the lip sync job is submitted to the provider. ' +
                   'The provider bills on attempt — not on output quality. ' +
@@ -7900,7 +8309,7 @@ export function DubVerseEditor({
                   type="checkbox"
                   checked={lipsyncOptIn}
                   onChange={(e) => setLipsyncOptIn(e.target.checked)}
-                  disabled={isRebuilding || !lipSyncAffordable}
+                  disabled={isRebuilding}
                   className="h-3 w-3 accent-teal-400 cursor-pointer"
                 />
                 <span className="text-[11px] text-white">
@@ -7909,9 +8318,6 @@ export function DubVerseEditor({
                     <span className="text-white">
                       {' '}~${lipSyncEstUsd.toFixed(2)} {t('(charged on submission)')}
                     </span>
-                  )}
-                  {!lipSyncAffordable && (
-                    <span className="text-red-400"> {t('— insufficient credit')}</span>
                   )}
                   {lipSyncNote && (
                     <span className="text-teal-300"> · {lipSyncNote}</span>
@@ -7923,6 +8329,14 @@ export function DubVerseEditor({
           </nav>
         </div>
         
+        {/* Job id — centered in the open middle of the top bar, between the
+            lip-sync label and the right-side controls. */}
+        <div className="flex-1 flex justify-center min-w-0 px-4">
+          <span className="text-xs font-mono text-amber-400 select-all whitespace-nowrap">
+            {jobId}
+          </span>
+        </div>
+
         <div className="flex items-center gap-3 shrink-0">
           <Button
             variant="ghost"
@@ -7994,6 +8408,73 @@ export function DubVerseEditor({
               </span>
             </div>
           )}
+        </div>
+
+        {/* Live cost counter + budget — the big panel in the middle of the
+            sub-header, always in view while editing. The figure is the render
+            estimate (first render only; re-renders are free) plus whatever
+            lip-sync scope is currently selected, so it moves as lines are
+            checked. The budget field turns the remaining figure amber near the
+            limit and red past it. */}
+        <div className="flex-1 flex justify-end min-w-0 px-4">
+          <div
+            className="flex items-center gap-4 rounded-lg border border-slate-700 bg-slate-800/60 px-5 py-1.5"
+            title={`Render ~$${renderUsd.toFixed(2)} + lip sync ~$${lipUsd.toFixed(2)}${lipQuote?.scoped ? ` (${lipQuote.range_count} range${lipQuote.range_count === 1 ? '' : 's'})` : ' (whole film)'}`}
+          >
+            <div className="flex items-baseline gap-2 whitespace-nowrap">
+              <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">{t('Render')}</span>
+              <span className={cn('text-lg font-mono font-bold', renderUsd > 0 ? 'text-white' : 'text-slate-500')}>
+                ${renderUsd.toFixed(2)}
+              </span>
+            </div>
+            <div className="h-6 w-px bg-slate-700" />
+            <div className="flex items-baseline gap-2 whitespace-nowrap">
+              <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">{t('Lip sync')}</span>
+              <span className={cn('text-lg font-mono font-bold', lipUsd > 0 ? 'text-teal-300' : 'text-slate-500')}>
+                ${lipUsd.toFixed(2)}
+              </span>
+            </div>
+            <div className="h-6 w-px bg-slate-700" />
+            <div className="flex items-center gap-2 whitespace-nowrap">
+              <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">{t('Budget')}</span>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                placeholder="$0"
+                value={budgetUsd}
+                onChange={(e) => {
+                  setBudgetUsd(e.target.value)
+                  try { localStorage.setItem('dm.budgetUsd', e.target.value) } catch {}
+                }}
+                className="w-16 rounded border border-slate-600 bg-slate-900 px-1.5 py-0.5 text-sm font-mono text-slate-200 placeholder:text-slate-600"
+                title="Budget — remaining turns amber near the limit, red over it"
+              />
+            </div>
+            {(renderQuote?.bypassed || lipQuote?.bypassed) && (
+              <>
+                <div className="h-6 w-px bg-slate-700" />
+                <span className="text-[10px] font-bold uppercase tracking-widest text-cyan-400 whitespace-nowrap">
+                  {t('Test — not billed')}
+                </span>
+              </>
+            )}
+            {budgetRemaining !== null && !(renderQuote?.bypassed || lipQuote?.bypassed) && (
+              <>
+                <div className="h-6 w-px bg-slate-700" />
+                <span className={cn(
+                  'text-sm font-mono font-semibold whitespace-nowrap',
+                  budgetRemaining < 0 ? 'text-red-400'
+                    : budgetRemaining < budgetNum * 0.2 ? 'text-amber-400'
+                    : 'text-emerald-400',
+                )}>
+                  {budgetRemaining < 0
+                    ? `OVER $${(-budgetRemaining).toFixed(2)}`
+                    : `$${budgetRemaining.toFixed(2)} LEFT`}
+                </span>
+              </>
+            )}
+          </div>
         </div>
 
         {/* overflow-x-auto: at narrow widths the buttons (Record/Save/Upgrade)
@@ -8524,6 +9005,30 @@ export function DubVerseEditor({
                       </span>
                       {' failed'}
                     </span>
+                    <span className="text-slate-700">|</span>
+                    {/* Page text lock — seal every line's words at once once the
+                        editing pass is done. FX/voice/speed stay editable; only
+                        the text is frozen. */}
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); togglePageTextLock() }}
+                      title={pageTextLocked
+                        ? t('Text locked for the whole page — click to allow editing')
+                        : t('Lock all text — prevent any further edits to every line')}
+                      className={cn(
+                        "inline-flex items-center gap-1 transition-colors",
+                        pageTextLocked
+                          ? "text-amber-300 hover:text-amber-200"
+                          : "text-slate-500 hover:text-slate-300",
+                      )}
+                    >
+                      {pageTextLocked
+                        ? <Lock className="h-3 w-3" />
+                        : <Unlock className="h-3 w-3" />}
+                      <span className="text-[10px] font-semibold uppercase tracking-wider">
+                        {pageTextLocked ? t('text locked') : t('lock text')}
+                      </span>
+                    </button>
                   </>
                 )}
               </span>
@@ -8692,7 +9197,9 @@ export function DubVerseEditor({
               // than filtering: `index` feeds editingSegmentIndex, keyAt(index) and
               // every commit handler, so a renumbered index would edit the wrong row.
               if (!inActiveWindow(segment)) return null
-              const speakerColor = getSpeakerColor(segment.speaker_id)
+              // Colour by display number (appearance order), not id digits —
+              // ids can be out of order while numbers cannot.
+              const speakerColor = getSpeakerColorByNumber(speakerNumberMap[segment.speaker_id] ?? 1)
               const isEditing = editingSegmentIndex === index
               const hasQCFindings = (segment.qc_findings?.length ?? 0) > 0
               const segmentSuggestions = suggestions[index] || []
@@ -8737,7 +9244,7 @@ export function DubVerseEditor({
                     const spkId = displaySegments[idx]?.speaker_id
                     if (!spkId) return
                     setRenamingSpeakerId(spkId)
-                    setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
+                    setRenameValue(isCustomSpeakerName(displaySegments[idx]?.speaker_label) ? displaySegments[idx].speaker_label! : `Speaker ${speakerNumberMap[spkId] ?? 1}`)
                   }}
                   onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
                   onAddToRulebook={(idx) => setRuleCaptureIndex(idx)}
@@ -8922,7 +9429,7 @@ export function DubVerseEditor({
                             onClick={(e) => e.stopPropagation()}
                             title={t('Click to reassign speaker')}
                           >
-                            <span>{segment.speaker_label && !/^\d+$/.test(segment.speaker_label) ? segment.speaker_label : `speaker-${speakerNumberMap[segment.speaker_id] ?? 1}`}</span>
+                            <span>{isCustomSpeakerName(segment.speaker_label) ? segment.speaker_label : `speaker-${speakerNumberMap[segment.speaker_id] ?? 1}`}</span>
                           </div>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="start" className="w-44 max-h-72 overflow-y-auto bg-slate-900 border-slate-700">
@@ -8932,7 +9439,10 @@ export function DubVerseEditor({
                               cannot be cast. */}
                           {Array.from({ length: 15 }, (_, i) => i + 1).map(n => {
                             const spkId = `speaker-${n}`
-                            const spkColor = getSpeakerColor(spkId)
+                            // In-use speakers are coloured by their display
+                            // number so the dot always matches the label;
+                            // unused slots keep their own number's colour.
+                            const spkColor = getSpeakerColorByNumber(speakerNumberMap[spkId] ?? n)
                             const existing = uniqueSpeakers.find(s => s.id === spkId)
                             const label = existing?.label || `Speaker ${n}`
                             return (
@@ -8940,7 +9450,15 @@ export function DubVerseEditor({
                                 key={spkId}
                                 onClick={() => {
                                   if (spkId === segment.speaker_id) return
-                                  const newLabel = existing?.label || `Speaker ${n}`
+                                  // Carry a real custom name across if the target
+                                  // speaker already has one; otherwise write the
+                                  // id echo — a display label like "Speaker 3"
+                                  // persisted here freezes the pill number while
+                                  // the colour follows live appearance order.
+                                  const custom = displaySegments.find(
+                                    s => s.speaker_id === spkId && isCustomSpeakerName(s.speaker_label)
+                                  )?.speaker_label
+                                  const newLabel = custom || spkId
                                   updateSegmentSpeaker(index, spkId, newLabel)
                                   if (importedSegments !== null) {
                                     setImportedSegments(prev => {
@@ -9384,12 +9902,11 @@ export function DubVerseEditor({
                                   : 'border-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
                             )}
                             onDoubleClick={() => {
-                              // Locked segments are audio-frozen and cannot be
-                              // regenerated; editing their text would desync the
-                              // displayed line from the existing take. Preview-only
-                              // segments still can't be edited because there is
-                              // nothing committed yet.
-                              if (segment.isPreviewing) return
+                              // Text-edit lock: the line's words are sealed —
+                              // double-click does nothing. Preview-only segments
+                              // still can't be edited because there is nothing
+                              // committed yet.
+                              if (segment.text_edit_locked || pageTextLocked || segment.isPreviewing) return
                               // When the write-in box is open, double-clicking the line drops it
                               // into that field (Delivery Script) so you can add [tags]. Otherwise
                               // double-click edits the line inline as before.
@@ -9443,6 +9960,28 @@ export function DubVerseEditor({
                               : <span className="text-slate-500 italic">Enter text…</span>}
                           </div>
                         )}
+                        {/* Text-edit lock — seals the line's words against editing,
+                            Clear, and dropped suggestions. FX/voice/speed untouched.
+                            A page-level lock (Segment Counter chip) seals them all. */}
+                        <button
+                          type="button"
+                          title={pageTextLocked
+                            ? t('Page text locked — use the lock in the segment counter to unlock')
+                            : segment.text_edit_locked
+                            ? t('Text locked — click to allow editing')
+                            : t('Lock text — prevent changes to this line')}
+                          onClick={(e) => { e.stopPropagation(); if (!pageTextLocked) toggleTextEditLock(index) }}
+                          className={cn(
+                            'shrink-0 p-0.5 rounded transition-colors',
+                            pageTextLocked || segment.text_edit_locked
+                              ? 'text-amber-400 hover:text-amber-300'
+                              : 'text-slate-600 hover:text-slate-300 opacity-0 group-hover:opacity-100'
+                          )}
+                        >
+                          {pageTextLocked || segment.text_edit_locked
+                            ? <Lock className="h-3 w-3" />
+                            : <Unlock className="h-3 w-3" />}
+                        </button>
                         {/* Subtle QC icon on hover — clicking selects segment and opens Quality tab */}
                         {hasQCFindings && (
                           <button
@@ -9560,9 +10099,14 @@ export function DubVerseEditor({
                       )}
                         <button
                           type="button"
-                          className="text-[10px] px-2 py-0.5 rounded bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30 hover:text-red-300 transition-colors pointer-events-auto cursor-pointer select-none"
-                          title={t('Reset segment to pipeline-original — wipes all edits, emotion, voice, speed, and audio')}
-                          onClick={(e) => { e.stopPropagation(); handleClearSegment(index) }}
+                          disabled={!!segment.text_edit_locked || pageTextLocked}
+                          className="text-[10px] px-2 py-0.5 rounded bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30 hover:text-red-300 transition-colors pointer-events-auto cursor-pointer select-none disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-red-500/20 disabled:hover:text-red-400"
+                          title={pageTextLocked
+                            ? t('Page text locked — unlock the page to clear lines')
+                            : segment.text_edit_locked
+                            ? t('Text locked — unlock the line to clear it')
+                            : t('Reset segment to pipeline-original — wipes all edits, emotion, voice, speed, and audio')}
+                          onClick={(e) => { e.stopPropagation(); if (!segment.text_edit_locked && !pageTextLocked) handleClearSegment(index) }}
                         >
                           {t('Clear')}
                         </button>
@@ -9901,8 +10445,14 @@ export function DubVerseEditor({
               isResizingPreview && "bg-amber-500"
             )} />
           </div>
-          {/* Right panel tabs: Result / Quality / Studio */}
-          <div className="flex items-center justify-between gap-1 px-2 pt-1.5 border-b border-slate-800 bg-neutral-900">
+          {/* Right panel tabs: Result / Quality / Studio. Hidden (not
+              unmounted) while the vertical rail is open — the rail carries the
+              same tab set down the right edge of the panel. */}
+          <div
+            ref={rightTabRowRef}
+            className="flex items-center justify-between gap-1 px-2 pt-1.5 border-b border-slate-800 bg-neutral-900"
+            style={{ display: tabRailWidth > 0 ? 'none' : undefined }}
+          >
             {/* overflow-x-auto: the tab set is wider than the panel at narrow
                 viewer widths — Test Clips etc. were unreachable. No visible
                 scrollbar — the vertical mouse wheel (or trackpad) drives the
@@ -9917,32 +10467,17 @@ export function DubVerseEditor({
                 e.currentTarget.scrollLeft += e.deltaY
               }}
             >
-              {([
-                { id: 'result',     label: 'Video' },
-                { id: 'quality',    label: 'Quality' },
-                { id: 'velma',      label: 'Velma',        feature: 'velmaPanel' },
-                { id: 'respeecher', label: 'Respeecher',   feature: 'respeecher' },
-                // Labelled 'Custom Voices' until now, which is what the cloned-voice
-                // dialog and the Test Clips tab are also called — three things, one
-                // name, and only one of them about custom voices. This panel converts
-                // existing audio to another voice; it is the voice changer.
-                { id: 'perform',    label: 'Voice Changer', feature: 'voiceChanger' },
-                { id: 'seeds',      label: 'Seed Library', feature: 'respeecher' },
-                { id: 'studio',     label: 'Studio',       feature: 'studioCollaboration' },
-                { id: 'scene',      label: 'Scene' },
-                { id: 'rulebook',   label: 'Rulebook' },
-                { id: 'adaptation', label: 'Adaptation' },
-                { id: 'speakers',   label: 'Speakers' },
-                { id: 'library',    label: 'Voice Library' },
-                { id: 'testclips',  label: 'Test Clips',   feature: 'customVoices' },
-                { id: 'ei-library', label: 'E.I. Library', feature: 'emotionalIntelligence' },
-              ] as const).map((tab) => (
+              {RIGHT_PANEL_TABS.map((tab) => (
                 <button
                   type="button"
                   key={tab.id}
                   onClick={() => {
                     if (tab.id === 'studio') {
                       router.push('/studio')
+                      return
+                    }
+                    if (tab.id === 'customvoices') {
+                      setCustomVoicesOpen(true)
                       return
                     }
                     setRightPanelTab(tab.id)
@@ -10001,6 +10536,27 @@ export function DubVerseEditor({
             )}
           </div>
 
+          {/* Content + optional vertical tab rail. The rail docks to the right
+              edge of the viewing screen; the grip at its left edge widens or
+              narrows it, and the collapsed-state grip on the panel's right
+              edge is what pulls it open. */}
+          <div className="flex-1 min-h-0 min-w-0 flex relative">
+            {/* Collapsed-state grip — the resize bar on the right of the
+                viewing screen. Dragging it left pulls the tab rail open;
+                while the rail is closed this is the only edge handle. */}
+            <div
+              ref={collapsedRailGripRef}
+              className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize z-30 group select-none touch-none"
+              style={{ display: tabRailWidth > 0 ? 'none' : undefined }}
+              onPointerDown={handleTabRailResizeStart}
+              title={t('Drag left to dock the tabs down the side')}
+            >
+              <div className={cn(
+                "absolute inset-y-0 right-0 w-0.5 bg-neutral-700 group-hover:bg-amber-500 transition-colors",
+                isResizingTabRail && "bg-amber-500"
+              )} />
+            </div>
+            <div className="flex-1 min-w-0 min-h-0 flex flex-col relative">
           {/* Result tab — Video fills panel; hidden when a sub-tab is active (sub-tab panel takes over) */}
           <div
             className="flex flex-col min-h-0"
@@ -10008,6 +10564,7 @@ export function DubVerseEditor({
           >
             {/* Video player — fills all space; hidden (not unmounted) when sub-tab is active so ref stays valid */}
             <div
+              ref={videoBoxRef}
               className="relative bg-black"
               style={{ display: videoSubTab ? 'none' : 'flex', flex: 1, minHeight: 0 }}
             >
@@ -10039,7 +10596,7 @@ export function DubVerseEditor({
                     if (wasPlaying) v.play().catch(() => {})
                   }, { once: true })
                 }}
-                className="absolute top-0 left-0 w-full h-full object-cover"
+                className="absolute top-0 left-0 w-full h-full object-contain"
                 controls={false}
                 // MUTED IN PREVIEW ONLY. Preview is the editing mode: the segment
                 // blocks are the audio there, and the video track would double it.
@@ -10059,7 +10616,7 @@ export function DubVerseEditor({
                   src={scrubProxyUrl}
                   muted
                   preload="auto"
-                  className="absolute top-0 left-0 w-full h-full object-cover pointer-events-none"
+                  className="absolute top-0 left-0 w-full h-full object-contain pointer-events-none"
                   style={{ display: scrubProxyVisible ? 'block' : 'none' }}
                   onLoadedData={() => {
                     // Sized and decodable — safe to show now.
@@ -10072,14 +10629,19 @@ export function DubVerseEditor({
                 className="absolute top-0 left-0 w-full h-full bg-black pointer-events-none"
                 style={{ opacity: 0 }}
               />
-              <CaptionOverlay
-                playbackMode={playbackMode}
-                selectedSegmentIndex={selectedSegmentIndex}
-                displaySegments={displaySegments}
-                currentTimeRef={currentTimeRef}
-              />
-              <div className="absolute bottom-2 right-2 flex items-center gap-1 text-xs text-slate-500">
-                <span>{t('Video Translated by DubMaster')}</span>
+              {/* Letterbox-matched frame — captions and the watermark sit on
+                  the picture instead of floating in the object-contain bars.
+                  Sized by the ResizeObserver effect above. */}
+              <div ref={videoFrameRef} className="absolute pointer-events-none" style={{ inset: 0 }}>
+                <CaptionOverlay
+                  playbackMode={playbackMode}
+                  selectedSegmentIndex={selectedSegmentIndex}
+                  displaySegments={displaySegments}
+                  currentTimeRef={currentTimeRef}
+                />
+                <div className="absolute bottom-2 right-2 flex items-center gap-1 text-xs text-slate-500">
+                  <span>{t('Video Translated by DubMaster')}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -10917,6 +11479,104 @@ export function DubVerseEditor({
               </div>
             )}
           </div>
+            </div>
+
+            {/* Open-state grip — the rail's left edge. Dragging right resizes
+                the rail; dragging past the snap point collapses it and the
+                tabs return to the top row. */}
+            <div
+              ref={railGripRef}
+              className={cn(
+                "w-1.5 shrink-0 cursor-ew-resize transition-colors z-30 select-none touch-none",
+                isResizingTabRail ? "bg-amber-500" : "bg-amber-500/40 hover:bg-amber-500"
+              )}
+              style={{ display: tabRailWidth > 0 ? undefined : 'none' }}
+              onPointerDown={handleTabRailResizeStart}
+              title={t('Drag to resize the tab rail — push all the way right to restore the top tabs')}
+            />
+
+            {/* Vertical tab rail — the top-row tabs docked down the right side.
+                Same tab set, same handlers; only the layout changes. */}
+            <div
+              ref={tabRailRef}
+              className="shrink-0 border-l border-neutral-800 bg-neutral-900 overflow-y-auto overflow-x-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+              style={{
+                display: tabRailWidth > 0 ? 'flex' : 'none',
+                flexDirection: 'column',
+                width: tabRailWidth > 0 ? tabRailWidth : undefined,
+              }}
+            >
+              {/* Source / Dubbed / Preview live at the top of the rail — the
+                  same cluster the top row shows, just stacked. */}
+              {rightPanelTab === 'result' && (
+                <div className="flex flex-col gap-0.5 p-1 border-b border-slate-800 shrink-0">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={cn('h-6 text-[10px] px-1 w-full', playbackMode === 'original' ? 'text-white' : 'text-slate-500')}
+                    onClick={() => switchPlaybackMode('original')}
+                  >
+                    {t('Source')}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={cn(
+                      'h-6 text-[10px] px-1 w-full rounded-full',
+                      playbackMode === 'dubbed' ? 'bg-slate-700 text-white' : 'text-slate-500'
+                    )}
+                    onClick={() => switchPlaybackMode('dubbed')}
+                    disabled={!activeDubbedVideoUrl}
+                    title={activeDubbedVideoUrl ? t('Watch the rendered dub') : t('Render with Make Movie first')}
+                  >
+                    {t('Dubbed')}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={cn(
+                      'h-6 text-[10px] px-1 w-full rounded-full',
+                      playbackMode === 'preview'
+                        ? 'bg-amber-600/40 text-amber-300 ring-1 ring-amber-500/50'
+                        : 'text-slate-500'
+                    )}
+                    onClick={() => switchPlaybackMode('preview')}
+                  >
+                    {t('Preview')}
+                  </Button>
+                </div>
+              )}
+              {RIGHT_PANEL_TABS.map((tab) => (
+                <button
+                  type="button"
+                  key={tab.id}
+                  title={t(tab.label)}
+                  onClick={() => {
+                    if (tab.id === 'studio') {
+                      router.push('/studio')
+                      return
+                    }
+                    if (tab.id === 'customvoices') {
+                      setCustomVoicesOpen(true)
+                      return
+                    }
+                    setRightPanelTab(tab.id)
+                  }}
+                  className={cn(
+                    'shrink-0 w-full px-1 py-2 text-[10px] leading-tight font-medium text-center break-words transition-colors border-b border-neutral-800/60',
+                    rightPanelTab === tab.id
+                      ? 'bg-slate-700 text-white'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                  )}
+                >
+                  {t(tab.label)}
+                  {tab.id === 'quality' && qcReport && (qcReport.grade === 'D' || qcReport.grade === 'F') && (
+                    <span className="ml-1 inline-block w-1.5 h-1.5 rounded-full bg-red-500 align-middle" />
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -11042,6 +11702,75 @@ export function DubVerseEditor({
                     ? 'border-slate-600 text-slate-300'
                     : 'bg-teal-600 hover:bg-teal-700 text-white')}>
                 {confirmRender.staged > 0 ? t('Make movie without them') : t('Make movie anyway')}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Lip-sync payment — shown when the wallet can't cover the selected
+          scope. Wallet credit is applied first; only the exact shortfall goes
+          to Stripe (below the usual $10 top-up floor). Payment returns here
+          with ?lip_paid=1 and the render resumes automatically. */}
+      {lipCheckout && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
+          role="dialog" aria-modal="true" aria-labelledby="lip-checkout-title"
+          onClick={() => setLipCheckout(null)}>
+          <div className="w-full max-w-md rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}>
+            <h2 id="lip-checkout-title" className="text-base font-semibold text-slate-100">
+              {t('Payment needed for lip sync')}
+            </h2>
+            <div className="mt-3 space-y-1.5 text-xs text-slate-300">
+              <div className="flex justify-between">
+                <span className="text-slate-400">{t('Scope')}</span>
+                <span>
+                  {lipCheckout.scoped
+                    ? `${lipCheckout.range_count} selected range${lipCheckout.range_count === 1 ? '' : 's'} — ${lipCheckout.selected_seconds.toFixed(1)}s`
+                    : `${t('Whole film')} — ${lipCheckout.selected_seconds.toFixed(1)}s`}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">{t('Lip sync cost')}</span>
+                <span>${lipCheckout.cost_usd.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">{t('Wallet covers')}</span>
+                <span>${Math.max(0, lipCheckout.cost_usd - lipCheckout.shortfall_cents / 100).toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between border-t border-slate-700 pt-1.5 font-semibold text-slate-100">
+                <span>{t('Due now')}</span>
+                <span>${(lipCheckout.shortfall_cents / 100).toFixed(2)}</span>
+              </div>
+            </div>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <Button variant="ghost" size="sm"
+                onClick={() => setLipCheckout(null)}
+                className="h-8 text-xs text-slate-400">
+                {t('Cancel')}
+              </Button>
+              <Button size="sm"
+                onClick={async () => {
+                  try {
+                    const res = await fetch('/api/create-lipsync-checkout', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        user_id: userAccount?.id ?? 'guest',
+                        email: userAccount?.email ?? '',
+                        amount_cents: lipCheckout.shortfall_cents,
+                        job_id: jobId,
+                      }),
+                    })
+                    const data = await res.json()
+                    if (data.url) window.location.href = data.url
+                    else setLipCheckout(null)
+                  } catch {
+                    setLipCheckout(null)
+                  }
+                }}
+                className="h-8 text-xs bg-teal-600 hover:bg-teal-700 text-white">
+                {t('Pay')} ${(lipCheckout.shortfall_cents / 100).toFixed(2)} {t('with Stripe')}
               </Button>
             </div>
           </div>
@@ -11670,6 +12399,29 @@ export function DubVerseEditor({
             <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => setZoomLevel(zoomLevel * 1.5)}>
               <ZoomIn className="h-4 w-4" />
             </Button>
+            <button
+              type="button"
+              onClick={fitTimelineToView}
+              title={t('Zoom out so the whole film fits in the timeline')}
+              className="h-7 px-2 rounded text-[11px] font-medium text-neutral-400 hover:text-neutral-200 hover:bg-white/10 transition-colors whitespace-nowrap"
+            >
+              {t('FIT')}
+            </button>
+            <button
+              type="button"
+              onClick={toggleFitLanes}
+              title={fitLanes
+                ? t('All lines in view — lanes are compressed. Click to restore full-height lanes.')
+                : t('Pull every line into view — compresses the lanes, growing the panel if needed')}
+              className={cn(
+                'h-7 px-2 rounded text-[11px] font-medium transition-colors whitespace-nowrap',
+                fitLanes
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                  : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/10'
+              )}
+            >
+              {t('FIT ↕')}
+            </button>
             <div className="w-px h-5 bg-white/10 mx-1" />
             <button
               type="button"
@@ -11879,6 +12631,11 @@ export function DubVerseEditor({
                   segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
                   jobId={jobId}
                   segmentIndex={selectedSegmentIndex !== null ? (displaySegments[selectedSegmentIndex]?.transcript_index ?? selectedSegmentIndex) : null}
+                  workingRange={videoDuration > 0
+                    ? (chunkMode && activeChunk !== null
+                        ? { start: chunkStart, end: chunkEnd }
+                        : { start: 0, end: videoDuration })
+                    : null}
                   onJumpToTime={(t) => {
                     setCurrentTime(t)
                     if (videoRef.current) videoRef.current.currentTime = t
@@ -12222,7 +12979,7 @@ export function DubVerseEditor({
                 const spkId = displaySegments[idx]?.speaker_id
                 if (!spkId) return
                 setRenamingSpeakerId(spkId)
-                setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
+                setRenameValue(isCustomSpeakerName(displaySegments[idx]?.speaker_label) ? displaySegments[idx].speaker_label! : `Speaker ${speakerNumberMap[spkId] ?? 1}`)
               }}
               onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
               onAddToRulebook={(idx) => setRuleCaptureIndex(idx)}
@@ -13334,6 +14091,7 @@ export function DubVerseEditor({
                 )}
                 style={{ height: dubLanesPx }}
                 data-timeline-track
+                data-dub-lanes
                 onDragOver={handleTimelineDragOver}
                 onDrop={handleDubbedTrackDrop}
               >
@@ -13352,7 +14110,10 @@ export function DubVerseEditor({
                 {displaySegments.map((segment, index) => {
                   if (!inActiveWindow(segment)) return null
                   const laneRow = laneRows.rowOf.get(index) ?? 0
-                  const droppedTranslation = droppedTranslations.find(t => t.segmentIndex === index)
+                  // Entries keyed by segment id survive index drift (splits,
+                  // merges, inserts); index match remains as fallback for
+                  // entries created before the key existed.
+                  const droppedTranslation = droppedTranslations.find(t => t.segmentKey ? t.segmentKey === keyAt(index) : t.segmentIndex === index)
                   const hasDroppedTranslation = !!droppedTranslation
 
                   const spkId = segment.speaker_id || 'speaker-1'
@@ -13407,7 +14168,7 @@ export function DubVerseEditor({
                         const spkId = displaySegments[idx]?.speaker_id
                         if (!spkId) return
                         setRenamingSpeakerId(spkId)
-                        setRenameValue(displaySegments[idx]?.speaker_label || `Speaker ${speakerNumberMap[spkId] ?? 1}`)
+                        setRenameValue(isCustomSpeakerName(displaySegments[idx]?.speaker_label) ? displaySegments[idx].speaker_label! : `Speaker ${speakerNumberMap[spkId] ?? 1}`)
                       }}
                       onShowProfile={(idx, x, y) => setCharacterProfileOpen({ segmentIndex: idx, x, y })}
                       onAddToRulebook={(idx) => setRuleCaptureIndex(idx)}
@@ -13429,6 +14190,10 @@ export function DubVerseEditor({
                           : blockMuted ? 'border-neutral-600' : hasDroppedTranslation ? 'border-amber-400' : spColor.border,
                         genAnim.get(index) === 'trace' && 'dm-gen-trace',
                         genAnim.get(index) === 'pulse' && 'dm-gen-pulse',
+                        // "This line has a take" — a standing speaker-coloured
+                        // outline (reads --dm-trace), lighter than the trace/
+                        // pulse animations so it doesn't compete with them.
+                        (segment.committed_audio_url || segment.audio_url) && 'dm-gen-done',
                         selectedSegmentIndex === index && !lockGlowIndices.has(keyAt(index)) && 'ring-2 ring-amber-400/70 shadow-[0_0_8px_2px_rgba(251,191,36,0.4)] animate-pulse',
                         voiceDragOverIndex === index && 'ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] animate-pulse',
                         groupSelectMode && !groupSelectedSegments.has(index) && 'ring-1 ring-yellow-400/30',
@@ -13670,6 +14435,26 @@ export function DubVerseEditor({
                       {/* Lock icon when paired */}
                       {/* Content */}
                       <div className="px-3 truncate text-[10px] h-full flex items-center text-white/80 gap-1">
+                        {/* Lip-sync picker — include this line in the scoped
+                            vendor job. Hover-revealed when out, pinned teal
+                            when in; cost and quote track it live. */}
+                        {lipsyncInfo?.available && (
+                          <button
+                            type="button"
+                            data-resize-handle={true}
+                            title={lipSel.has(lipKeyOf(segment))
+                              ? 'Included in lip-sync — click to remove'
+                              : 'Include this line in lip-sync'}
+                            onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleLipSegment(segment) }}
+                            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation() }}
+                            className={cn(
+                              'h-3 w-3 shrink-0 rounded-sm border border-white bg-white flex items-center justify-center transition-opacity',
+                              !lipSel.has(lipKeyOf(segment)) && 'opacity-0 group-hover:opacity-100',
+                            )}
+                          >
+                            {lipSel.has(lipKeyOf(segment)) && <Check className="h-2 w-2 text-slate-900" />}
+                          </button>
+                        )}
                         {/* Speed badge — DRAGGABLE. Up is faster, down is slower,
                             0.5x–1.5x, snapping to 0.05. A line with no staged
                             speed still gets a badge, revealed on hover like the
@@ -13858,6 +14643,7 @@ export function DubVerseEditor({
                         )
                       }}
                       title={seg.committed_adapted_text ?? seg.active_text ?? seg.target_text}
+                      onClick={(e) => handleSegmentClick(i, e)}
                     >
                       {/* Left speed handle (blue) */}
                       <div
@@ -13970,6 +14756,7 @@ export function DubVerseEditor({
                       // claimed the gesture and the whole timeline moved with the block, instead
                       // of the block moving within it.
                       data-segment-block={true}
+                      onClick={(e) => handleSegmentClick(index, e)}
                       onDoubleClick={(e) => {
                         e.stopPropagation()
                         setAdvancedBrowserSegment(index)

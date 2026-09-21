@@ -14,7 +14,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 // runs quota_add_credits. Idempotent on stripe_payment_id — Stripe may
 // redeliver this webhook. A non-2xx throws so Stripe retries; the backend
 // returns already_applied on the retry instead of double-crediting.
-async function creditWallet(userId: string, amountCents: number, paymentId: string) {
+async function creditWallet(userId: string, amountCents: number, paymentId: string, allowBelowMin = false) {
   const res = await fetch(`${API_BASE}/api/internal/quota/credit`, {
     method: "POST",
     headers: {
@@ -25,6 +25,7 @@ async function creditWallet(userId: string, amountCents: number, paymentId: stri
       user_id: userId,
       amount_cents: amountCents,
       stripe_payment_id: paymentId,
+      allow_below_min: allowBelowMin,
     }),
   })
   if (!res.ok) {
@@ -83,7 +84,10 @@ export async function POST(request: Request) {
               ? session.payment_intent
               : session.payment_intent?.id) ?? session.id
           const amountCents = session.amount_total ?? 0
-          const result = await creditWallet(userId, amountCents, paymentId)
+          const result = await creditWallet(
+            userId, amountCents, paymentId,
+            session.metadata?.allow_below_min === "true"
+          )
 
           await supabase.from("payments").insert({
             user_id: userId,

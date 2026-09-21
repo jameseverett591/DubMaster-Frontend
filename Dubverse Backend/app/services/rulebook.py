@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -35,6 +36,7 @@ RULE_CLASSES = {
     "persona",          # speaker slot → character profile (register + delivery)
     "stance",           # scene-style directive, fires when conditions match
     "translation_fix",  # exact source line → forced target line
+    "pronunciation",    # displayed term → spoken respelling for TTS only
     "delivery",         # speaker → emotion/speed/pitch defaults for TTS
     "glossary",         # source term → canonical English term
 }
@@ -215,6 +217,7 @@ def resolve_rules(
     character_profiles: Dict[str, Dict[str, Any]] = {}   # keyed by name — job wins
     stance_directives: List[str] = []
     translation_fixes: Dict[str, str] = {}
+    pronunciations: Dict[str, str] = {}                  # displayed term → spoken form
     delivery: Dict[str, Dict[str, Any]] = {}             # keyed by speaker
     applied_rule_ids: List[str] = []
 
@@ -251,6 +254,8 @@ def resolve_rules(
             )
         elif cls == "translation_fix" and src and tgt:
             translation_fixes[src] = tgt
+        elif cls == "pronunciation" and src and tgt:
+            pronunciations[src] = tgt
         elif cls == "delivery":
             speaker = (cond.get("speaker") or src or "").strip()
             if speaker:
@@ -265,6 +270,7 @@ def resolve_rules(
         "character_profiles": list(character_profiles.values()),
         "stance_directives": stance_directives,
         "translation_fixes": translation_fixes,
+        "pronunciations": pronunciations,
         "delivery": delivery,
         "applied_rule_ids": [rid for rid in applied_rule_ids if rid],
     }
@@ -314,6 +320,32 @@ def apply_translation_fixes(
     if applied:
         logger.info(f"[RULEBOOK] translation_fix applied to {applied} segment(s)")
     return applied
+
+
+def apply_pronunciations(
+    text: str,
+    pronunciations: Optional[Dict[str, str]] = None,
+) -> str:
+    """Respell display text into its spoken form for TTS — e.g. 'Ip Man' is
+    spoken as 'Yip Man'. Synthesis-only: the subtitle/transcript text is never
+    touched, so 'Ip Man' still displays while the voice says 'Yip Man'.
+
+    Matching is case-insensitive with word-edge boundaries on both sides, so a
+    rule for 'Ip' cannot chew the inside of 'Ipswich'. Returns text unchanged
+    when nothing matches.
+    """
+    if not text or not pronunciations:
+        return text
+    out = text
+    for src, tgt in pronunciations.items():
+        if not src or not tgt:
+            continue
+        pattern = re.compile(
+            r"(?<![A-Za-z])" + re.escape(src.strip()) + r"(?![A-Za-z])",
+            re.IGNORECASE,
+        )
+        out = pattern.sub(tgt.strip(), out)
+    return out
 
 
 def build_rulebook_prompt(directives: List[str], fixes: Dict[str, str]) -> str:

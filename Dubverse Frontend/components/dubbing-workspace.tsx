@@ -222,15 +222,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
       .catch(() => {})
   }, [])
 
-  // ── Load dubbing engines from backend ────────────────────────────────────
-  const [dubbingEngine, setDubbingEngine] = useState<'dubmaster' | 'vozo'>('dubmaster')
-  const [engineInfo, setEngineInfo] = useState<Record<string, { available: boolean; description: string; features: string[] }>>({})
 
-  useEffect(() => {
-    apiClient.getDubbingEngines()
-      .then(({ engines }) => setEngineInfo(engines))
-      .catch(() => {})
-  }, [])
 
   const handleSwitchProvider = async (provider: string) => {
     if (provider === ttsProvider || switchingProvider) return
@@ -608,7 +600,6 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
         target_language: targetLanguage,
         transcript: transcriptSegments,
         voice_mapping: voiceMapping,
-        dubbing_engine: dubbingEngine,
         ...(Object.keys(voiceSettings).length > 0 && { voice_settings: voiceSettings }),
       })
 
@@ -695,37 +686,20 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
-              <DropdownMenuLabel>{t('Dubbing Engine')}</DropdownMenuLabel>
+              <DropdownMenuLabel>{t('TTS Engine')}</DropdownMenuLabel>
               <DropdownMenuSeparator />
-              <DropdownMenuRadioGroup value={dubbingEngine} onValueChange={(v) => setDubbingEngine(v as 'dubmaster' | 'vozo')}>
-                <DropdownMenuRadioItem value="dubmaster">
-                  DubMaster (Local)
+              <DropdownMenuRadioGroup value={ttsProvider} onValueChange={handleSwitchProvider}>
+                <DropdownMenuRadioItem value="elevenlabs" disabled={!providerInfo.elevenlabs?.available}>
+                  {t('ElevenLabs')}
                 </DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="vozo" disabled={!engineInfo.vozo?.available}>
-                  Vozo AI (Cloud)
+                <DropdownMenuRadioItem value="fish-audio" disabled={!providerInfo["fish-audio"]?.available}>
+                  Fish Audio S1 {providerInfo["fish-audio"]?.voice_cloning && "(Voice Clone)"}
                 </DropdownMenuRadioItem>
               </DropdownMenuRadioGroup>
-              {dubbingEngine === "dubmaster" && (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuLabel>{t('TTS Engine')}</DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuRadioGroup value={ttsProvider} onValueChange={handleSwitchProvider}>
-                    <DropdownMenuRadioItem value="elevenlabs" disabled={!providerInfo.elevenlabs?.available}>
-                      {t('ElevenLabs')}
-                    </DropdownMenuRadioItem>
-                    <DropdownMenuRadioItem value="fish-audio" disabled={!providerInfo["fish-audio"]?.available}>
-                      Fish Audio S1 {providerInfo["fish-audio"]?.voice_cloning && "(Voice Clone)"}
-                    </DropdownMenuRadioItem>
-                  </DropdownMenuRadioGroup>
-                </>
-              )}
             </DropdownMenuContent>
           </DropdownMenu>
           <Badge variant="outline" className={`text-xs h-6 font-normal ${switchingProvider ? "animate-pulse" : ""}`}>
-            {dubbingEngine === "vozo"
-              ? "Vozo AI"
-              : ttsProvider === "fish-audio" ? t('Fish Audio S1') : t('ElevenLabs')}
+            {ttsProvider === "fish-audio" ? t('Fish Audio S1') : t('ElevenLabs')}
           </Badge>
           <Button
             onClick={handleStartDubbing}

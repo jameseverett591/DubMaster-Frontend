@@ -163,6 +163,7 @@ export const EMOTION_LIBRARY: EmotionCategory[] = [
       { name: 'Severe', desc: 'strict tone, controlled cadence' },
       { name: 'Harried', desc: 'rushed tone, stressed pacing' },
       { name: 'Snide', desc: 'sly, mocking tone' },
+      { name: 'Mockingly', desc: 'taunting tone, singsong mimicry' },
     ],
   },
   {

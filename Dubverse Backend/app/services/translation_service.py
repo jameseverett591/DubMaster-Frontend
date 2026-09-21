@@ -862,17 +862,14 @@ class TranslationService:
         if is_cantonese:
             logger.info(
                 f"[TRANSLATE] Cantonese/CJK detected ({source_language}) — "
-                f"using source=yue-HK for Google Cloud; GPT-4 fallback available"
+                f"using source=yue-HK for Google Cloud"
             )
 
         # LLM translation first for Cantonese — handles spoken grammar, idioms,
         # tone, and dubbing context better than any MT engine.
-        # Priority: Claude (Anthropic) → Azure OpenAI → OpenAI
+        # Claude (Anthropic) is the only LLM translator; OpenAI/Azure were cut
+        # as redundant spend — the cascade falls through to Google/DeepL.
         anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-        openai_key = os.getenv("OPENAI_API_KEY", "")
-        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "")
-        azure_key = os.getenv("AZURE_OPENAI_KEY", "")
-        has_llm = bool(anthropic_key) or bool(openai_key) or (bool(azure_endpoint) and bool(azure_key))
 
         # --- FIX 3: Universal short-segment bypass ---
         # Segments ≤3 words that are pure punctuation/particles get direct lookup
@@ -906,8 +903,11 @@ class TranslationService:
                 # Already looks like English — keep as-is
                 _SHORT_BYPASS_INDICES.add(i)
 
-        if is_cantonese and has_llm:
-            # Try Claude first (most reliable for Cantonese)
+        if is_cantonese:
+            # Claude is the only LLM tier for Cantonese — spoken grammar,
+            # idioms, character profiles and dubbing context produce
+            # performable lines. Literal MT was tried and removed: it
+            # faithfully translated a corrupted ASR transcript into garbage.
             if anthropic_key:
                 result = await self._translate_segments_claude(
                     segments, target_norm, source_norm,
@@ -922,20 +922,7 @@ class TranslationService:
                     # paraphrasing that breaks word-for-word fidelity to the source script.
                     self._apply_rulebook_fixes(translated)
                     return translated
-                logger.warning("[TRANSLATE] Claude Cantonese translation failed — trying GPT")
-
-            # Fall back to GPT-4 (Azure or OpenAI)
-            if bool(openai_key) or (bool(azure_endpoint) and bool(azure_key)):
-                result = await self._translate_segments_gpt(
-                    segments, target_norm, source_norm,
-                    character_profiles=character_profiles,
-                    dubbing_style=dubbing_style,
-                    localized_aliases=localized_aliases,
-                )
-                if result is not None:
-                    self._apply_rulebook_fixes(result)
-                    return result
-                logger.warning("[TRANSLATE] GPT-4 Cantonese translation failed — falling back")
+                logger.warning("[TRANSLATE] Claude Cantonese translation failed — falling back to MT")
 
         # DeepL: does not support Cantonese as source, so skip for yue content.
         if self.deepl_api_key and not is_cantonese:
@@ -1022,7 +1009,7 @@ class TranslationService:
                     })
 
     # ── Batch-translation line markers ────────────────────────────────────────
-    # Shared by _translate_segments_claude and _translate_segments_gpt. Both send
+    # Used by _translate_segments_claude. It sends
     # every segment in one prompt as a numbered-line list and parse the reply
     # back — plain "1. 2. 3." numbering let the model "helpfully" merge two
     # short adjacent lines under one number, silently desyncing every segment's
@@ -1159,19 +1146,6 @@ class TranslationService:
                             **_ctx,
                         ),
                         chunk, "Claude (retry)", start,
-                    )
-                if chunk_result is None:
-                    logger.warning(
-                        f"[TRANSLATE] Claude chunk {start}-{start + len(chunk)} failed "
-                        f"twice — falling back to GPT-4 for THIS CHUNK ONLY"
-                    )
-                    chunk_result = _aligned(
-                        await self._translate_segments_gpt(
-                            chunk, target_language, source_language, character_profiles,
-                            dubbing_style=dubbing_style, localized_aliases=localized_aliases,
-                            **_ctx,
-                        ),
-                        chunk, "GPT-4", start,
                     )
                 if chunk_result is None:
                     logger.error(
@@ -1570,326 +1544,6 @@ class TranslationService:
 
         except Exception as e:
             logger.error(f"[TRANSLATE] Claude error: {e}")
-            return None
-
-    async def _translate_segments_gpt(
-        self,
-        segments: List[Dict],
-        target_language: str,
-        source_language: str = "yue",
-        character_profiles: Optional[List[Dict]] = None,
-        allow_recursive: bool = True,
-        dubbing_style: Optional[str] = None,
-        localized_aliases: Optional[Dict[str, str]] = None,
-        film_segments: Optional[List[Dict]] = None,
-        prior_context: Optional[List[Dict]] = None,
-    ) -> Optional[List[Dict]]:
-        """
-        Translate segments using GPT-4 via Azure OpenAI or OpenAI API.
-
-        film_segments / prior_context: same meaning as on the Claude path —
-        whole-film names and the tail of already-translated dialogue, so a
-        chunk that falls back to GPT keeps the same names and referents as
-        the Claude chunks around it instead of switching register mid-film.
-
-        Designed for Cantonese → English where standard MT engines fail
-        because they treat Cantonese speech as Standard Written Chinese,
-        losing grammar, particles, and idiomatic meaning.
-
-        Each segment is translated individually with dubbing context so GPT
-        can preserve emotional tone and natural spoken phrasing.
-        """
-        import httpx
-
-        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
-        azure_key = os.getenv("AZURE_OPENAI_KEY", "")
-        azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
-        openai_key = os.getenv("OPENAI_API_KEY", "")
-
-        use_azure = bool(azure_endpoint) and bool(azure_key)
-        use_openai = bool(openai_key) and not use_azure
-
-        if not use_azure and not use_openai:
-            return None
-
-        lang_name = LANGUAGE_NAMES.get(source_language, "Cantonese")
-        target_name = LANGUAGE_NAMES.get(target_language, "English")
-
-        # Build all segment texts with glossary pre-processing
-        texts = [seg.get("text", "") for seg in segments]
-        _film = film_segments or segments
-        _film_texts = [s.get("source_text") or s.get("text", "") for s in _film]
-        protected: List[str] = []
-        replacements_per_seg: List[List[Tuple[str, str]]] = []
-        entity_replacements_per_seg: List[List[Tuple[str, str]]] = []
-        for t in texts:
-            p, r, _fuzz = self._apply_glossary_pre(t)
-            if _fuzz:
-                logger.info("[GLOSSARY-FUZZY] %s", " | ".join(_fuzz))
-            p2, r2 = protect_entities(p)
-            protected.append(p2)
-            replacements_per_seg.append(r)
-            entity_replacements_per_seg.append(r2)
-
-        # Build a single prompt with all segments + their timing slot.
-        # GPT uses the duration to choose words that fit the on-screen moment —
-        # a 0.8s slot needs "Sure." not "Absolutely, without question."
-        def _slot(seg: Dict) -> str:
-            start = float(seg.get("start", 0))
-            end = float(seg.get("end", start))
-            dur = round(max(0.3, end - start), 1)
-            return f"{dur}s"
-
-        def _build_marked_lines(markers: List[str]) -> str:
-            return "\n".join(
-                f"[[SEG-{markers[i]}]] ({_slot(segments[i])}){self._speaker_tag(segments[i])} {p}"
-                for i, p in enumerate(protected)
-            )
-
-        _prior_block = build_prior_context_block(prior_context or [])
-
-        # Build centralized system prompt from policy layer
-        _gpt_is_literal = resolve_dubbing_style(dubbing_style) == "literal"
-        system_prompt_parts = [get_translation_system_prompt(dubbing_style)]
-
-        detected_profile = detect_character_from_text("\n".join(_film_texts))
-        if detected_profile:
-            system_prompt_parts.append("")
-            system_prompt_parts.append(detected_profile.to_prompt())
-
-        name_mapping = build_name_mapping_prompt(_film_texts)
-        if name_mapping:
-            system_prompt_parts.append("")
-            system_prompt_parts.append(name_mapping)
-
-        # Localized role/address mappings are only appropriate for natural dubbing.
-        if not _gpt_is_literal:
-            localized_mapping = build_localized_name_mapping_prompt(_film_texts, extra=localized_aliases)
-            if localized_mapping:
-                system_prompt_parts.append("")
-                system_prompt_parts.append(localized_mapping)
-
-        # Per-job character profiles (Fix 2)
-        if character_profiles:
-            system_prompt_parts.append("")
-            system_prompt_parts.append("CHARACTER PROFILES FOR THIS PROJECT:")
-            for cp in character_profiles:
-                name = cp.get("name", "Unknown")
-                traits = ", ".join(cp.get("traits", []))
-                style = cp.get("speech_style", "")
-                system_prompt_parts.append(f"- {name}: traits=[{traits}]. Speech style: {style}")
-            system_prompt_parts.append("Apply these character voices consistently across all lines.")
-
-        # Rulebook — the director's standing rules (stance directives +
-        # exact-match translation overrides). Resolved in translate_segments.
-        _rb_prompt = ""
-        if getattr(self, "_rulebook_directives", None) or getattr(self, "_rulebook_fixes", None):
-            from app.services.rulebook import build_rulebook_prompt
-            _rb_prompt = build_rulebook_prompt(self._rulebook_directives, self._rulebook_fixes)
-        if _rb_prompt:
-            system_prompt_parts.append("")
-            system_prompt_parts.append(_rb_prompt)
-
-        # Speaker gender map — prevents him/her pronoun errors in translation
-        _gender_map_gpt: dict = {}
-        for _seg in segments:
-            _spk = _seg.get("speaker") or _seg.get("speaker_label", "")
-            _gender = (_seg.get("speaker_gender") or _seg.get("gender") or "").lower().strip()
-            if _spk and _gender and _spk not in _gender_map_gpt:
-                _gender_map_gpt[_spk] = _gender
-        if _gender_map_gpt:
-            system_prompt_parts.append("")
-            system_prompt_parts.append("SPEAKER GENDERS — use correct pronouns when referring to each speaker:")
-            for _spk, _g in _gender_map_gpt.items():
-                _pronoun = "he/him" if _g in ("male", "m", "man", "child") else "she/her" if _g in ("female", "f", "woman") else "he/him"
-                system_prompt_parts.append(f"- {_spk}: {_pronoun}")
-            system_prompt_parts.append("NEVER use 'her' or 'she' for a male speaker, or 'him'/'he' for a female speaker.")
-
-        system_prompt_parts.append("")
-        system_prompt_parts.append("DOMAIN-SPECIFIC RULES:")
-        system_prompt_parts.append("- These are SPOKEN Cantonese martial arts film dialogue lines.")
-        system_prompt_parts.append("- Each line has a timing budget (Xs) — choose words that fit naturally in that time.")
-        system_prompt_parts.append("- Short exclamations must stay short (1-3 syllables).")
-        system_prompt_parts.append("- NEVER combine two [[SEG-...]] marked lines into one answer — answer each marker separately, even short ones.")
-        system_prompt_parts.append("- Do NOT echo or repeat the timing value (Xs) in your answer.")
-        system_prompt_parts.append("- Lines may carry a bracketed speaker tag like [Mrs. Ip — clipped, dismissive] — it is context for register only. Do NOT echo it, and do NOT prefix output with speaker names (e.g. NEVER 'Ip Man: ...').")
-        system_prompt_parts.append("- Drop Cantonese discourse particles (講, 係, 喂, 嗱, 嚟, 囉, 㗎) entirely.")
-        system_prompt_parts.append("- [[ENTITY:n]] tokens are PROTECTED placeholders — keep them EXACTLY.")
-        system_prompt_parts.append("")
-        system_prompt_parts.append("CANTONESE TRANSLATION PITFALLS (critical for accuracy):")
-        system_prompt_parts.append("- 開武館 means 'OPENING a martial arts school' — use present continuous or 'going to open', NOT 'we run a school'.")
-        system_prompt_parts.append("- 切磋 means 'spar' or 'challenge to a duel' — choose based on context. A challenger at the door is 'challenge', not 'spar'.")
-        system_prompt_parts.append("- 打 means 'fight' or 'hit' — NOT 'spar'. Use 'spar' ONLY when the source explicitly says 切磋.")
-        system_prompt_parts.append("- 離開/出去 means 'leave' or 'get out' — do NOT translate as 'go away' when the speaker is being polite.")
-        system_prompt_parts.append("- 收聲/閉嘴 means 'shut up' — do NOT translate as 'get out' or 'leave'.")
-        system_prompt_parts.append("- 威 means 'might' or 'power' — 'show our might' NOT 'show what we can do'.")
-        system_prompt_parts.append("- 不敢 means 'afraid' or 'scared' — 'Don't you dare' or 'Are you scared?' NOT 'Don't push me'.")
-        system_prompt_parts.append("- 行開 means 'walk away' — 'Don't walk away!' NOT 'Don't push me!'.")
-        system_prompt_parts.append("- 武館 means 'martial arts school/club' — NOT 'ring' or 'gym'.")
-        system_prompt_parts.append("- 女人 means 'woman' — if the source says 'created by a woman', translate 'woman' — do NOT truncate or omit it.")
-        system_prompt_parts.append("- 不用雙手/不用手 means 'without hands' or 'no hands' — NOT 'give him more advantage'.")
-        system_prompt_parts.append("- 失望 means 'disappointed' — 'Foshan has disappointed me' or 'Foshan's let me down' NOT 'Foshan's truly weak'.")
-        system_prompt_parts.append("- 打不死 means 'can't be beaten' is an EXCLAMATION — translate as 'Unbeatable!' or 'Can't beat me!' NOT as a statement about someone else.")
-        system_prompt_parts.append("- 好厲害 means 'amazing' or 'impressive' — NOT 'I can't believe it'.")
-        system_prompt_parts.append("- If a line is CUT OFF mid-sentence by another speaker interrupting, translate only what was said — do NOT complete the unfinished thought.")
-        system_prompt_parts.append("")
-        system_prompt_parts.append("SIMPLICITY RULE (critical — stop overcompensating):")
-        system_prompt_parts.append("- Translate EXACTLY what is there. Do NOT add words the source doesn't have.")
-        system_prompt_parts.append("- Do NOT add 'you're set', 'you're good', 'how's that', 'right this way', 'be my guest' — these are NOT in the source.")
-        system_prompt_parts.append("- Do NOT add conversational fillers ('well', 'so', 'now then') that aren't in the source.")
-        system_prompt_parts.append("- 請你離開 means simply 'Please leave.' — do NOT add 'and you're set' or 'and go'.")
-        system_prompt_parts.append("- 請便 means 'go ahead' or 'suit yourself' — do NOT add 'right this way' or 'be my guest'.")
-        system_prompt_parts.append("- 帶我進去 means 'take me inside' or 'go back inside' — do NOT add extra words.")
-        system_prompt_parts.append("- Keep translations SHORT and LITERAL when the source is short. A 3-word source = a 3-5 word translation, NOT a 10-word translation.")
-        system_prompt_parts.append("- Do NOT add stage directions, emotional coloring, or dramatic phrasing not present in the source.")
-        system_prompt_parts.append("- When in doubt, translate word-for-word. A plain literal translation is ALWAYS better than a clever embellished one.")
-        system_prompt_parts.append("")
-        system_prompt_parts.append("TONE AND EMOTIONAL STANCE:")
-        system_prompt_parts.append("- This is a classic period martial arts film. Characters speak with dignity, restraint, and warmth.")
-        system_prompt_parts.append("- PRESERVE the speaker's emotional stance. If a character is being self-deprecating or humble, the translation MUST reflect that.")
-        system_prompt_parts.append("- NEVER make a humble, self-deprecating line sound like a criticism of another character.")
-        system_prompt_parts.append("- Do NOT optimise for a 'clever' English line at the cost of faithfulness. A plain faithful translation beats a witty unfaithful one.")
-        system_prompt_parts.append("- Calm, friendly exchanges between friends must stay calm and friendly.")
-        system_prompt_parts.append("- NEVER add condescension, sarcasm, or aggressive subtext not present in the source.")
-        system_prompt_parts.append("")
-        system_prompt_parts.append(NO_HALLUCINATION_GUARDS)
-
-        system_prompt = "\n".join(system_prompt_parts)
-
-        def _build_user_prompt(marked_lines: str) -> str:
-            if _gpt_is_literal:
-                return (
-                    f"Translate these spoken {lang_name} dialogue lines to {target_name} word-for-word.\n\n"
-                    f"Rules:\n"
-                    f"- Translate LITERALLY. Do NOT substitute synonyms, paraphrase, or rewrite for 'naturalness'.\n"
-                    f"- Keep the exact meaning of each word.\n"
-                    f"- Preserve every line. Do NOT drop, merge, or skip any [[SEG-...]] marked line.\n"
-                    f"- Match the original speech rhythm — keep translations concise to fit the timing budget.\n\n"
-                    f"{_prior_block}{marked_lines}"
-                )
-            return (
-                f"Translate these spoken {lang_name} dialogue lines to natural {target_name} for voice actors.\n\n"
-                f"Preserve meaning, emotion, and character voice. "
-                f"Use colloquial spoken English — not formal or written style.\n"
-                + (f"The PRECEDING DIALOGUE block is what was just said — resolve pronouns and running names against it, and keep names rendered the way they already were.\n" if _prior_block else "")
-                + f"\n{_prior_block}{marked_lines}"
-            )
-
-        if use_azure:
-            api_version = "2024-06-01"
-            url = (
-                f"{azure_endpoint}/openai/deployments/{azure_deployment}"
-                f"/chat/completions?api-version={api_version}"
-            )
-            headers = {"api-key": azure_key, "Content-Type": "application/json"}
-        else:
-            url = "https://api.openai.com/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {openai_key}",
-                "Content-Type": "application/json",
-            }
-
-        async def _send_and_validate(markers: List[str]) -> Optional[Dict[str, str]]:
-            payload = {
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": _build_user_prompt(_build_marked_lines(markers))},
-                ],
-                "temperature": 0.3,
-                "max_tokens": 8192,
-            }
-            if use_openai:
-                payload["model"] = "gpt-4o"
-            response = await asyncio.to_thread(
-                lambda: httpx.post(url, json=payload, headers=headers, timeout=60.0)
-            )
-            if response.status_code != 200:
-                logger.warning(
-                    f"[TRANSLATE] GPT-4 failed: {response.status_code} "
-                    f"{response.text[:200]}"
-                )
-                return None
-            data = response.json()
-            reply = data["choices"][0]["message"]["content"].strip()
-            pairs = self._parse_marked_reply(reply)
-            return self._validate_marked_mapping(markers, pairs)
-
-        try:
-            logger.info(
-                f"[TRANSLATE] GPT-4 batch: {len(segments)} segments, "
-                f"{lang_name} -> {target_name} via {'Azure OpenAI' if use_azure else 'OpenAI'}"
-            )
-
-            markers = self._generate_line_markers(len(protected))
-            marker_map = await _send_and_validate(markers)
-
-            if marker_map is None:
-                logger.warning(
-                    f"[TRANSLATE-ZIP-MISMATCH] GPT-4's reply markers didn't validate "
-                    f"1:1 against the {len(markers)} segments sent — rejecting this "
-                    f"mapping rather than risk a silently desynced text/timing zip. "
-                    f"Retrying once with fresh markers."
-                )
-                markers = self._generate_line_markers(len(protected))
-                marker_map = await _send_and_validate(markers)
-
-            if marker_map is None:
-                logger.warning(
-                    f"[TRANSLATE-ZIP-FALLBACK] Retry also failed validation for this "
-                    f"{len(segments)}-segment batch — falling back to one GPT-4 call "
-                    f"per segment (slower, but a single-segment batch has zero merge "
-                    f"risk by construction, so it's guaranteed aligned)."
-                )
-                result: List[Dict] = []
-                for i, seg in enumerate(segments):
-                    if allow_recursive:
-                        single = await self._translate_segments_gpt(
-                            [seg], target_language, source_language, character_profiles,
-                            allow_recursive=False,
-                            dubbing_style=dubbing_style,
-                            localized_aliases=localized_aliases,
-                        )
-                    else:
-                        # Base case: the single-segment GPT call already failed;
-                        # do not recurse again, just keep the original text.
-                        single = None
-                    if single is None:
-                        logger.error(
-                            f"[TRANSLATE-ZIP-FALLBACK] seg {i} individual GPT-4 call "
-                            f"also failed — keeping original text untranslated"
-                        )
-                        result.append({**seg, "original_text": seg.get("text", ""), "text": seg.get("text", "")})
-                    else:
-                        result.extend(single)
-                return result
-
-            result: List[Dict] = []
-            changed = 0
-            for i, seg in enumerate(segments):
-                raw = marker_map[markers[i]]
-                # Restore protected entities first, then fix hallucinations, then glossary
-                raw = restore_entities(raw, entity_replacements_per_seg[i])
-                raw = fix_translation_names(raw)
-                final = self._apply_glossary_post(raw, replacements_per_seg[i])
-                final, _v_warns = self._verify_translation(final, replacements_per_seg[i])
-                for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
-                if raw.strip() != protected[i].strip():
-                    changed += 1
-                result.append({
-                    **seg,
-                    "original_text": seg.get("text", ""),
-                    "text": final,
-                })
-
-            ratio = changed / max(1, len(segments))
-            logger.info(
-                f"[TRANSLATE] GPT-4: {changed}/{len(segments)} segments "
-                f"changed ({ratio:.0%})"
-            )
-            return result
-
-        except Exception as e:
-            logger.error(f"[TRANSLATE] GPT-4 error: {e}")
             return None
 
     def _deepl_batch_sync(

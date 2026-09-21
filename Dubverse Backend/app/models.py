@@ -54,7 +54,7 @@ class TranscriptSegment(BaseModel):
     velma_deepfake_score: Optional[float] = None
     # True for subtitle/credit/narration segments that should not be dubbed.
     is_credit: bool = False
-    # ASR engine provenance (e.g. "whisper", "tencent_only", "paraformer_only").
+    # ASR engine provenance (e.g. "whisper", "paraformer_only", "deepgram").
     # Preserved so downstream hallucination filters can distinguish Whisper
     # hallucinations from legitimate non-Whisper dialogue.
     source: Optional[str] = None
@@ -122,7 +122,7 @@ class Job(BaseModel):
     dubbed_video_url: Optional[str] = None
     tts_engine: Optional[str] = None
     segment_tts_engines: Optional[List[Optional[str]]] = None
-    dubbing_engine: Optional[str] = None  # "dubmaster" or "vozo"
+    dubbing_engine: Optional[str] = None  # "dubmaster"
 
     error_message: Optional[str] = None
     created_at: datetime
@@ -176,13 +176,12 @@ class DubRequest(BaseModel):
     voice_mapping: Dict[str, str]
     voice_settings: Optional[Dict[str, Dict[str, float]]] = None
     source_language: Optional[str] = None
-    dubbing_engine: Optional[str] = None  # "dubmaster" (default) or "vozo"
-    vozo_user_prompt: Optional[str] = None  # translation guidance for Vozo
+    dubbing_engine: Optional[str] = None  # "dubmaster"
     adaptation_selections: Optional[Dict[str, str]] = None  # segment_id → "faithful"|"performable"|"sync_fit"
     character_profiles: Optional[List[Dict]] = None  # [{name, traits, speech_style}]
     dubbing_style: Optional[str] = None  # "natural" (localized dub) or "literal" (word-for-word); routes default to persisted job value then "natural"
     localized_aliases: Optional[Dict[str, str]] = None  # e.g. {"Brother Gen": "Broker", "San Gu": "Auntie"}
-    lipsync: bool = False  # opt-in AI lip-sync post-pass (Sync.Labs/Vozo); billed per rendered second
+    lipsync: bool = False  # opt-in AI lip-sync post-pass (Sync Labs); billed per rendered second
 
 
 class AdaptVariant(BaseModel):

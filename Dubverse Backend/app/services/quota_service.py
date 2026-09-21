@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 from typing import Any, Dict, Optional
 
@@ -41,6 +42,19 @@ TIER_FREE = "free"
 TIER_PRO = "pro"
 
 LIPSYNC_MARKUP = 1.25           # vendor cost + 25% platform fee
+
+# Accounts that are never billed — owner/tester ids running the system end to
+# end (rebuilds, exports, lip-sync) without paying themselves. Comma-separated
+# Supabase user ids via BILLING_BYPASS_USER_IDS. The ledger is untouched for
+# these callers: no debit rows, no refund rows, nothing to reconcile.
+_BYPASS_USER_IDS = {
+    u.strip() for u in os.environ.get("BILLING_BYPASS_USER_IDS", "").split(",")
+    if u.strip()
+}
+
+
+def is_billing_bypassed(user_id: str) -> bool:
+    return bool(user_id) and user_id in _BYPASS_USER_IDS
 
 
 class QuotaExceeded(Exception):
@@ -146,6 +160,19 @@ def _first(res) -> Dict[str, Any]:
 def get_balance(user_id: str) -> Dict[str, Any]:
     """Balance for the UI. Never raises; a failed read returns zeros with
     `available: False` so the widget can say so instead of showing 0 min."""
+    if is_billing_bypassed(user_id):
+        return {
+            # Report the REAL tier — usePlan reads tier off this response and a
+            # synthetic value would strip Pro from a bypassed Pro account.
+            "tier": tier_for(user_id), "included_seconds": 0,
+            "included_remaining_seconds": 10 ** 9,
+            "credit_balance_seconds": 0, "credit_balance_cents": 0,
+            "total_remaining_seconds": 10 ** 9,
+            "low_balance": False, "period_start": None,
+            "rate_cents_per_minute": CENTS_PER_MINUTE,
+            "min_deposit_cents": MIN_DEPOSIT_CENTS,
+            "bypassed": True, "available": True,
+        }
     tier = tier_for(user_id)
     try:
         row = _first(_rpc("quota_touch", {"p_user_id": user_id, "p_tier": tier}))
@@ -212,6 +239,10 @@ def deduct_quota(user_id: str, actual_seconds: int, job_id: str, kind: str = "re
     need = int(actual_seconds or 0)
     if need <= 0:
         return {"included_seconds": 0, "credit_seconds": 0}
+    if is_billing_bypassed(user_id):
+        logger.info(f"[QUOTA] {user_id} job={job_id}: bypassed account — {kind} {need}s not debited")
+        return {"included_seconds": 0, "credit_seconds": 0,
+                "tier": "bypassed", "billed_seconds": need, "bypassed": True}
     tier = tier_for(user_id)
     try:
         row = _first(_rpc("quota_deduct", {
@@ -253,11 +284,16 @@ def refund_quota(user_id: str, job_id: str) -> Dict[str, Any]:
         return {"included_seconds": 0, "credit_seconds": 0, "error": str(e)}
 
 
-def add_credits(user_id: str, amount_cents: int, stripe_payment_id: Optional[str]) -> Dict[str, Any]:
+def add_credits(user_id: str, amount_cents: int, stripe_payment_id: Optional[str],
+                allow_below_min: bool = False) -> Dict[str, Any]:
     """Wallet top-up from a completed Stripe payment. Returns credited_seconds.
     Idempotent on stripe_payment_id. Raises QuotaUnavailable on failure so the
-    webhook returns non-2xx and Stripe retries."""
-    if amount_cents < MIN_DEPOSIT_CENTS:
+    webhook returns non-2xx and Stripe retries.
+
+    allow_below_min: the user-facing deposit floor is $10, but the lip-sync
+    shortfall checkout charges EXACTLY what's owed — often under $10 — and
+    crediting less than Stripe collected would strand paid money."""
+    if amount_cents < MIN_DEPOSIT_CENTS and not allow_below_min:
         raise ValueError(f"deposit {amount_cents}c is below the ${MIN_DEPOSIT_CENTS / 100:.0f} minimum")
     tier = tier_for(user_id)
     try:

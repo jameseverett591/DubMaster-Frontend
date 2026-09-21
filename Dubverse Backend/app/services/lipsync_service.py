@@ -35,6 +35,8 @@ class LipSyncService:
         audio_path: str,
         output_path: str,
         access_token: str = "",
+        video_url: str = "",
+        audio_url: str = "",
     ) -> dict:
         """
         Send the original video + dubbed audio to Sync.Labs, wait for the
@@ -53,12 +55,13 @@ class LipSyncService:
             logger.info("[LIPSYNC] Skipped: SYNCLABS_API_KEY or PUBLIC_BASE_URL not set")
             return _skipped
 
-        audio_filename = Path(audio_path).name
+        audio_filename = Path(audio_path).name if audio_path else ""
         # Media routes require _dep_job_access; vendors can't send headers, so
         # the JWT travels as access_token — the same pattern the <video> tag uses.
+        # Scoped (per-range) calls pass ready-made URLs for cut subclips.
         qs = f"?access_token={access_token}" if access_token else ""
-        video_url = f"{self.public_base_url}/api/media/{job_id}/video{qs}"
-        audio_url = f"{self.public_base_url}/api/media/{job_id}/audio/{audio_filename}{qs}"
+        video_url = video_url or f"{self.public_base_url}/api/media/{job_id}/video{qs}"
+        audio_url = audio_url or f"{self.public_base_url}/api/media/{job_id}/audio/{audio_filename}{qs}"
 
         # Never log the credential-bearing URL — the JWT in ?access_token=
         # would let anyone with log access impersonate the user until expiry.

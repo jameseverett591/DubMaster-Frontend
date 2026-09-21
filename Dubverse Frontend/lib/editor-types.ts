@@ -114,6 +114,11 @@ export interface Segment {
   // pipeline path, so it — unlike committed_adapted_text, which Generate Speech
   // and initRPTFromSegments both populate — is evidence of authorship.
   text_locked?: boolean
+  // Text-edit lock: a UI guard set from the tiny lock icon on the segment's
+  // line. When true the words are final — double-click editing, Clear, and
+  // dropped/AI text suggestions are all refused. FX, voice, speed, and
+  // emotion stay fully editable; the lock is about the text only.
+  text_edit_locked?: boolean
   committed_at?: string
   emotionalCurve?: EmotionalCurve
   attached_traits?: string[] | null

@@ -580,7 +580,7 @@ export const useEditorStore = create<EditorState>(
   })),
 
   // Timeline
-  setZoomLevel: (zoom) => set({ zoomLevel: Math.max(0.25, Math.min(4, zoom)) }),
+  setZoomLevel: (zoom) => set({ zoomLevel: Math.max(0.05, Math.min(4, zoom)) }),
   setScrollPosition: (position) => set({ scrollPosition: position }),
   
   // Selection
@@ -659,6 +659,12 @@ export const useEditorStore = create<EditorState>(
   })),
   
   updateSegmentText: (index, text) => set((state) => {
+    // Text-edit lock: a sealed line refuses the write entirely — the funnel
+    // guard, so suggestion drops, bulk applies, and any future caller can't
+    // bypass the padlock by skipping the UI-level checks. The flag is toggled
+    // through importedSegments, so check both arrays.
+    if (state.segments[index]?.text_edit_locked
+        || state.importedSegments?.[index]?.text_edit_locked) return {}
     const patchFor = (seg: Segment): Partial<Segment> => ({
       target_text: text,
       active_text: text,

@@ -28,6 +28,12 @@ from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
 from app.services.respeecher_service import respeecher_tts, SEED_HISTORY_MAX
 from app.services import tts_usage
+from app.services.rulebook import (
+    apply_pronunciations,
+    load_global_rules,
+    load_job_rules,
+    resolve_rules,
+)
 from app.services.translation_service import (
     translation_service,
     natural_duration,
@@ -163,6 +169,27 @@ MEANING_DIVERGENCE_THRESHOLD = 0.7
 # keep their full music-and-effects bed. Remove this once the RunPod worker
 # returns the stems it already produces on GPU.
 ACCOMPANIMENT_MAX_DURATION_S = 600
+
+
+def _phonetic_respelling(
+    text: str,
+    pronunciations: Optional[Dict[str, str]] = None,
+    label: str = "",
+) -> str:
+    """Spoken-form respelling for TTS — the display/transcript text is never
+    touched. Built-in defaults (Ip Man → "Yip Man", stray Master Jin
+    romanisations → "Master Jin") apply first; rulebook `pronunciation` rules
+    then layer on top, so the director's explicit decision wins.
+    """
+    out = re.sub(r'\bIp Man\b', 'Yip Man', text, flags=re.IGNORECASE)
+    out = re.sub(
+        r'\bMaster (?:Shin|Sheen|Xin|Xing|Kin|Gam)\b',
+        'Master Jin', out, flags=re.IGNORECASE,
+    )
+    out = apply_pronunciations(out, pronunciations)
+    if out != text:
+        logger.info(f"[PHONETIC]{label}: {text!r} -> {out!r}")
+    return out
 
 
 def stamp_job_edited(data) -> None:
@@ -1084,6 +1111,8 @@ class DubbingService:
         character_profiles: Optional[List[Dict]] = None,
         dubbing_style: Optional[str] = None,
         localized_aliases: Optional[Dict[str, str]] = None,
+        pronunciations: Optional[Dict[str, str]] = None,
+        user_id: Optional[str] = None,
     ) -> Optional[Dict[str, str]]:
         logger.info(f"Starting dubbing for job {job_id}")
         logger.info(f"Voice mapping received: {voice_mapping}")
@@ -1096,6 +1125,21 @@ class DubbingService:
 
             # Normalize source language early so pre-translation cleanup can use it.
             source_norm = normalize_language_code(source_language, allow_auto=True)
+
+            # Rulebook pronunciation rules — resolve here so every caller gets
+            # them (the rulebook kwargs helper is not wired to all call sites).
+            # An explicitly passed map wins over resolved rules of the same key.
+            try:
+                _rb = resolve_rules(
+                    job_rules=load_job_rules(job_id),
+                    global_rules=load_global_rules(user_id) if user_id else [],
+                    source_language=source_norm,
+                )
+                pronunciations = {**(_rb.get("pronunciations") or {}), **(pronunciations or {})}
+                if pronunciations:
+                    logger.info(f"[PHONETIC] {len(pronunciations)} pronunciation rule(s) active")
+            except Exception as _rb_err:
+                logger.warning(f"[PHONETIC] rulebook resolve failed: {_rb_err}")
 
             # --- Recover per-segment voice assignments from a previous dub ---
             # This makes the speaker->voice mapping survive re-diarization or
@@ -1534,21 +1578,10 @@ class DubbingService:
                         logger.warning(f"[TTS] Segment {i}: text was entirely a placeholder — skipping")
                         return {"index": i, "skipped": True, "reason": "unresolved_placeholder"}
 
-                # TTS-only phonetic substitutions — display/transcript text unchanged
-                tts_text = re.sub(r'\bIp Man\b', 'Yip Man', text, flags=re.IGNORECASE)
-                # Canonical name is "Master Jin", matching the full name
-                # "Jin Shan Zhao" used on his introduction. English TTS already
-                # says "Jin" as /dʒɪn/, which is correct for 金, so no
-                # respelling is needed. Normalise any stray romanisation that
-                # slipped past the glossary so the spoken name matches the
-                # subtitle instead of diverging from it.
-                tts_text = re.sub(
-                    r'\bMaster (?:Shin|Sheen|Xin|Xing|Kin|Gam)\b',
-                    'Master Jin', tts_text, flags=re.IGNORECASE,
-                )
-                tts_text = re.sub(r'\bWing Chun\b', 'Wing Chun', tts_text)  # already correct
-                if tts_text != text:
-                    logger.info(f"[PHONETIC] seg {i}: {text!r} -> {tts_text!r}")
+                # TTS-only phonetic substitutions — display/transcript text
+                # unchanged. Built-in respellings first, then any rulebook
+                # `pronunciation` rules for this job.
+                tts_text = _phonetic_respelling(text, pronunciations, f" seg {i}")
 
                 tts_provider, provider_name = self._get_tts_provider(target_norm)
                 voice_key = _voice_key
@@ -4260,6 +4293,7 @@ class DubbingService:
         stage: bool = False,
         text: Optional[str] = None,
         allow_adapt_fit: bool = False,
+        user_id: Optional[str] = None,
     ) -> Dict:
         output_dir = os.path.join(self.dubbed_dir, job_id)
         segments_path = os.path.join(output_dir, "segments.json")
@@ -4442,6 +4476,23 @@ class DubbingService:
             tts_text_processed = self._nuance_translator.apply_markers_to_text(
                 tts_text_processed, nuance_markers, engine="fish_audio"
             )
+        # Rulebook pronunciation rules resolve once, before the verbatim fork —
+        # Respeecher sources its text from tts_text_processed (not speak_text),
+        # so the map must be in scope on both sides. Built-in respellings
+        # (Ip Man → "Yip Man") plus job/global rules; applied after marker/pause
+        # processing so marker char offsets stay valid against the displayed
+        # text. use_text is never touched, so the seg["text"] write-back keeps
+        # the canonical spelling.
+        _pron: Dict[str, str] = {}
+        try:
+            _rb = resolve_rules(
+                job_rules=load_job_rules(job_id),
+                global_rules=load_global_rules(user_id) if user_id else [],
+            )
+            _pron = _rb.get("pronunciations") or {}
+        except Exception as _pron_err:
+            logger.warning(f"[PHONETIC] seg {segment_index}: rulebook resolve failed: {_pron_err}")
+
         # Verbatim override: the user authored the exact line to synthesise, so the
         # composed directive is skipped. Engine-agnostic — Fish parses [tags] in it,
         # Respeecher reads the punctuation and structure as written.
@@ -4449,7 +4500,9 @@ class DubbingService:
             speak_text = tts_text
             directive = ""
         else:
-            speak_text = tts_text_processed
+            speak_text = _phonetic_respelling(
+                tts_text_processed, _pron, f" seg {segment_index}"
+            )
             # One composed S2 directive: traits + emotion + nuance delivery/cadence
             # clauses + the free-text write-in from the Nuances panel (last).
             directive = compose_fish_directive(
@@ -4621,6 +4674,9 @@ class DubbingService:
             # marker pass, which Respeecher would otherwise read aloud.
             resp_text = re.sub(r"\[[^\]]*\]", " ", tts_text_processed)
             resp_text = re.sub(r"\s+", " ", resp_text).strip() or tts_text_processed
+            # Pronunciation rules apply to every engine, not just Fish —
+            # Respeecher voices "Ip Man" as "eye-pee" just the same.
+            resp_text = _phonetic_respelling(resp_text, _pron, f" seg {segment_index} (resp)")
             # Respeecher exposes no directive, speed or pitch parameters. Its only
             # lever on duration is which take we keep, so hand it the slot and let
             # it choose; staged speed is applied separately below.
@@ -5203,10 +5259,54 @@ class DubbingService:
         if not video_duration:
             video_duration = await asyncio.to_thread(self._get_video_duration, video_path)
 
-        merge_segments = [
-            {"path": seg["path"], "start": seg["start"], "end": seg["end"]}
-            for seg in segments
-        ]
+        # A segment with no renderable audio must not kill the film. Rows reach
+        # segments.json without a usable path — a staged text edit synced before
+        # TTS ran, or a commit that carried committed_audio_url but never
+        # stamped path back. Recover the file from the media URL first; when
+        # nothing points at a real file, the line renders as silence and the
+        # build carries on — a missing line is fixable in the editor, a dead
+        # render is not.
+        def _resolve_segment_audio(seg: Dict) -> Optional[str]:
+            p = seg.get("path")
+            if p and os.path.exists(p):
+                return p
+            for key in ("committed_audio_url", "audio_url"):
+                url = seg.get(key) or ""
+                if "/audio/" not in url:
+                    continue
+                fname = url.split("/audio/", 1)[1].split("?", 1)[0]
+                if not fname:
+                    continue
+                cand = os.path.join(output_dir, fname)
+                if os.path.exists(cand):
+                    return cand
+            return None
+
+        merge_segments = []
+        silent_indices = []
+        for seg in segments:
+            p = _resolve_segment_audio(seg)
+            if p is None:
+                silent_indices.append(seg.get("transcript_index"))
+                continue
+            merge_segments.append({
+                "path": p,
+                "start": seg.get("start") or seg.get("start_time") or 0,
+                "end": seg.get("end") or seg.get("end_time") or 0,
+                # Fades and clip gain are part of the mix the director approved.
+                # The mixdown reads them — dropping them here made the export
+                # ignore what the preview played.
+                "fade_in": seg.get("fade_in"),
+                "fade_out": seg.get("fade_out"),
+                "volume": seg.get("volume"),
+            })
+        if silent_indices:
+            logger.warning(
+                f"[REMIX] job={job_id}: {len(silent_indices)} segment(s) have no audio — "
+                f"rendered silent (transcript_index={silent_indices})"
+            )
+        if not merge_segments:
+            raise RuntimeError(f"Remix failed: no segments have audio for job {job_id}")
 
         merged_audio = os.path.join(output_dir, "dubbed_audio.wav")
         ok = await asyncio.to_thread(
@@ -5280,6 +5380,10 @@ class DubbingService:
             "status": "ok",
             "remix_duration_ms": elapsed_ms,
             "segments_used": len(merge_segments),
+            # Lines that had no audio to mix — rendered silent. The frontend
+            # surfaces this so "the film rendered" does not read as "every
+            # line made it in".
+            "segments_silent": silent_indices,
         }
 
 

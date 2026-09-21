@@ -4,10 +4,9 @@ Unified Chinese (Cantonese + Mandarin) transcription pipeline.
 Deepgram Nova-3 is the primary ASR for Cantonese and Mandarin. The rest
 act as fallbacks / gap-fillers:
   1. Deepgram      (cloud) — primary for Cantonese and Mandarin
-  2. Tencent ASR   (cloud) — high recall, catches speech in noise
-  3. Paraformer    (local) — high precision for Mandarin tones/characters
-  4. Whisper       (local) — fallback gap fill
-  5. Merge engine           — combines the best of each
+  2. Paraformer    (local) — high precision for Mandarin tones/characters
+  3. Whisper       (local) — fallback gap fill
+  4. Merge engine           — combines the best of each
 
 (WenetSpeech-Yue was tried twice as a second ASR and removed both times,
 2026-09-11 -- Deepgram alone outperforms it and it never contributed
@@ -22,9 +21,8 @@ reconciliation path as pyannote. Speechmatics' own transcribed text is
 NOT used — Deepgram's Cantonese transcription is noticeably more accurate.
 
 The pipeline gracefully degrades:
-  - If Deepgram is not configured → Tencent + Paraformer + Whisper
-  - If Tencent is not configured → Deepgram + Paraformer + Whisper
-  - If Paraformer is not installed → Deepgram + Tencent + Whisper
+  - If Deepgram is not configured → Paraformer + Whisper
+  - If Paraformer is not installed → Deepgram + Whisper
   - If all unavailable → Whisper only (existing behavior)
 
 Environment variables:
@@ -33,7 +31,6 @@ Environment variables:
   CANTONESE_ASR_WHISPER_GAP_FILL — "1" to fill gaps with Whisper (default: "1")
 """
 
-import concurrent.futures
 import logging
 import os
 import tempfile
@@ -164,7 +161,6 @@ def transcribe_cantonese(
             "engines_used": [],
         }
 
-    tencent_segments: List[Dict] = []
     paraformer_segments: List[Dict] = []
     whisper_segments: List[Dict] = []
     deepgram_segments: List[Dict] = []
@@ -200,34 +196,7 @@ def transcribe_cantonese(
             except Exception as e:
                 logger.warning(f"[CANTONESE-ASR] Deepgram failed: {e}")
 
-        # ── Engine 1 + 2: Tencent ASR and Paraformer in parallel ──
-        # Tencent is a cloud API call; Paraformer is a local model. They are
-        # independent, so run them concurrently to avoid waiting for the slower
-        # one before starting the next.
-        def _run_tencent():
-            if "tencent" not in engines:
-                return (False, [])
-            try:
-                from app.pipeline.tencent_asr import transcribe_with_tencent
-
-                tencent_result = transcribe_with_tencent(
-                    audio_path=audio_file,
-                    language=language,
-                    job_id=job_id,
-                )
-                if tencent_result.get("status") == "ok":
-                    segs = tencent_result.get("segments", [])
-                    logger.info(f"[CANTONESE-ASR] Tencent: {len(segs)} segments")
-                    return (True, segs)
-                else:
-                    logger.info(
-                        f"[CANTONESE-ASR] Tencent skipped: "
-                        f"{tencent_result.get('reason', 'unknown')}"
-                    )
-            except Exception as e:
-                logger.warning(f"[CANTONESE-ASR] Tencent failed: {e}")
-            return (False, [])
-
+        # ── Engine 2: Paraformer (local model, Mandarin tone precision) ──
         def _run_paraformer():
             if "paraformer" not in engines:
                 return (False, [])
@@ -252,32 +221,24 @@ def transcribe_cantonese(
                 logger.warning(f"[CANTONESE-ASR] Paraformer failed: {e}")
             return (False, [])
 
-        tencent_ok = False
         paraformer_ok = False
-        if "tencent" in engines or "paraformer" in engines:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                t_future = pool.submit(_run_tencent) if "tencent" in engines else None
-                p_future = pool.submit(_run_paraformer) if "paraformer" in engines else None
-                tencent_ok, tencent_segments = t_future.result() if t_future else (False, [])
-                paraformer_ok, paraformer_segments = p_future.result() if p_future else (False, [])
-            if tencent_ok:
-                engines_used.append("tencent")
+        if "paraformer" in engines:
+            paraformer_ok, paraformer_segments = _run_paraformer()
             if paraformer_ok:
                 engines_used.append("paraformer")
         else:
-            logger.info("[CANTONESE-ASR] Skipping Tencent and Paraformer (not in engine list)")
+            logger.info("[CANTONESE-ASR] Skipping Paraformer (not in engine list)")
 
         # ── Engine 3: Whisper (fallback / gap fill) ──
         run_whisper_full = (
             "whisper" in engines
             and not deepgram_segments
-            and not tencent_segments
             and not paraformer_segments
         )
         run_whisper_gaps = (
             whisper_gap_fill
             and "whisper" in engines
-            and (deepgram_segments or tencent_segments or paraformer_segments)
+            and (deepgram_segments or paraformer_segments)
         )
 
         if run_whisper_full or run_whisper_gaps:
@@ -314,7 +275,7 @@ def transcribe_cantonese(
 
         if deepgram_segments:
             # Primary Chinese (Cantonese/Mandarin) transcript: Deepgram Nova-3.
-            # Tencent/Paraformer/Whisper are only added where the primary left
+            # Paraformer/Whisper are only added where the primary left
             # non-overlapping gaps, so they never overwrite the primary text.
             merged = deepgram_segments
 
@@ -353,20 +314,24 @@ def transcribe_cantonese(
                             f"'{wrong}' -> '{right}'"
                         )
 
-            # Rescore low-confidence segments (likely homophone/garbled-
-            # character errors) BEFORE gap-fill, so the two correction
-            # mechanisms stay orthogonal: rescoring fixes WRONG text on
-            # segments Deepgram produced, gap-fill covers MISSING text
-            # where Deepgram produced nothing at all.
+            # Verify + repair low-confidence segments (homophone/garbled-
+            # character errors, fabricated credits) BEFORE gap-fill, so the
+            # two correction mechanisms stay orthogonal: rescoring fixes
+            # WRONG text on segments Deepgram produced, gap-fill covers
+            # MISSING text where Deepgram produced nothing at all.
+            # extract_result gives the stage the raw audio so suspect ranges
+            # get a second acoustic opinion (Whisper) instead of a blind
+            # text guess.
             try:
                 from app.pipeline.asr_rescore import rescore_segments
-                merged = rescore_segments(merged, job_id=job_id, source_language=source_language)
+                merged = rescore_segments(
+                    merged, job_id=job_id, source_language=source_language,
+                    extract_result=extract_result,
+                )
             except Exception as e:
                 logger.warning(f"[CANTONESE-ASR] ASR rescoring failed: {e} — using unrescored text")
 
             fallback_segments = []
-            if tencent_segments:
-                fallback_segments.extend(tencent_segments)
             if paraformer_segments:
                 fallback_segments.extend(paraformer_segments)
             if whisper_segments and run_whisper_gaps:
@@ -378,10 +343,12 @@ def transcribe_cantonese(
                     fallback_segments=fallback_segments,
                     job_id=job_id,
                 )
-        elif tencent_segments or paraformer_segments:
-            # Primary merge: Tencent + Paraformer
+        elif paraformer_segments:
+            # Deepgram unavailable: Paraformer carries the transcript alone.
+            # (merge_asr_results is kept for its garbage filtering; the Tencent
+            # input is gone.)
             merged = merge_asr_results(
-                tencent_segments=tencent_segments,
+                tencent_segments=[],
                 paraformer_segments=paraformer_segments,
                 source_language=language,
                 job_id=job_id,
