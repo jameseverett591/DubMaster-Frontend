@@ -230,16 +230,10 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
                       {t('Azure Speech')}
                     </Badge>
                   )}
-                  {summary.services_available?.azure_openai && (
+                  {summary.services_available?.translation_eval && (
                     <Badge className="text-[9px] h-4 bg-emerald-500/10 text-emerald-500 border-emerald-500/20">
                       <Languages className="h-2.5 w-2.5 mr-0.5" />
-                      {t('Azure OpenAI')}
-                    </Badge>
-                  )}
-                  {(summary.screenapp_available || summary.services_available?.screenapp) && (
-                    <Badge className="text-[9px] h-4 bg-blue-500/10 text-blue-500 border-blue-500/20">
-                      <Eye className="h-2.5 w-2.5 mr-0.5" />
-                      {t('ScreenApp')}
+                      {t('Translation Eval')}
                     </Badge>
                   )}
                 </div>
@@ -406,48 +400,7 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
           </Card>
         )}
 
-        {/* ScreenApp Insights */}
-        {analysis.screenapp_dubbed?.status === "ok" && (
-          <Card className="border-blue-500/20">
-            <CardHeader className="pb-1.5">
-              <CardTitle className="flex items-center gap-1.5 text-xs">
-                <Eye className="h-3.5 w-3.5 text-blue-500" />
-                {t('ScreenApp Insights')}
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="pt-0">
-              {analysis.screenapp_dubbed.summary && (
-                <p className="text-[10px] text-muted-foreground mb-2">
-                  {analysis.screenapp_dubbed.summary.slice(0, 200)}
-                </p>
-              )}
-              {analysis.screenapp_dubbed.key_moments && analysis.screenapp_dubbed.key_moments.length > 0 && (
-                <div className="space-y-1">
-                  <p className="text-[10px] font-medium text-foreground">{t('Key Moments')}</p>
-                  {analysis.screenapp_dubbed.key_moments.slice(0, 5).map((m, i) => (
-                    <div key={i} className="flex gap-1.5 text-[10px]">
-                      <span className="shrink-0 font-mono text-muted-foreground">
-                        {formatTime(m.time)}
-                      </span>
-                      <span className="text-foreground">{m.description}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        )}
 
-        {analysis.screenapp_dubbed?.status === "skipped" && (
-          <Card className="border-border/50">
-            <CardContent className="py-3">
-              <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-                <Eye className="h-3 w-3 opacity-40" />
-                <span>ScreenApp not configured. Set SCREENAPP_API_KEY for enhanced analysis.</span>
-              </div>
-            </CardContent>
-          </Card>
-        )}
 
         {/* Pronunciation Assessment (Azure Speech) */}
         {analysis.pronunciation?.status === "ok" && (

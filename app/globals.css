@@ -148,6 +148,102 @@
   }
 }
 
+/* ==================== DUBMASTER PROFESSIONAL SCALING ====================
+   Scale down fonts and spacing ~15-20% for tighter, more professional look
+   while preserving the color-coding system and all functionality
+   ======================================================================== */
+
+/* Global font size reduction - applies to editor and all sub-components */
+.h-screen {
+  font-size: 0.875rem; /* 14px instead of 16px base */
+}
+
+/* Scale down text sizes proportionally */
+.text-xs { font-size: 0.6875rem !important; }   /* 11px instead of 12px */
+.text-sm { font-size: 0.8125rem !important; }   /* 13px instead of 14px */
+.text-base { font-size: 0.9375rem !important; } /* 15px instead of 16px */
+.text-lg { font-size: 1.0625rem !important; }   /* 17px instead of 18px */
+.text-xl { font-size: 1.1875rem !important; }   /* 19px instead of 20px */
+.text-2xl { font-size: 1.4375rem !important; }  /* 23px instead of 24px */
+.text-3xl { font-size: 1.8125rem !important; }  /* 29px instead of 30px */
+
+/* Tighter spacing throughout */
+.gap-1 { gap: 0.1875rem !important; }   /* 3px instead of 4px */
+.gap-2 { gap: 0.375rem !important; }    /* 6px instead of 8px */
+.gap-3 { gap: 0.625rem !important; }    /* 10px instead of 12px */
+.gap-4 { gap: 0.875rem !important; }    /* 14px instead of 16px */
+
+/* Reduce padding on common elements */
+.px-2 { padding-left: 0.375rem !important; padding-right: 0.375rem !important; }
+.px-3 { padding-left: 0.625rem !important; padding-right: 0.625rem !important; }
+.px-4 { padding-left: 0.875rem !important; padding-right: 0.875rem !important; }
+.py-1 { padding-top: 0.1875rem !important; padding-bottom: 0.1875rem !important; }
+.py-2 { padding-top: 0.375rem !important; padding-bottom: 0.375rem !important; }
+.py-3 { padding-top: 0.625rem !important; padding-bottom: 0.625rem !important; }
+.p-2 { padding: 0.375rem !important; }
+.p-3 { padding: 0.625rem !important; }
+.p-4 { padding: 0.875rem !important; }
+
+/* Tighter margins */
+.mt-1 { margin-top: 0.1875rem !important; }
+.mt-2 { margin-top: 0.375rem !important; }
+.mt-3 { margin-top: 0.625rem !important; }
+.mt-4 { margin-top: 0.875rem !important; }
+.mb-1 { margin-bottom: 0.1875rem !important; }
+.mb-2 { margin-bottom: 0.375rem !important; }
+.mb-3 { margin-bottom: 0.625rem !important; }
+.mb-4 { margin-bottom: 0.875rem !important; }
+.ml-1 { margin-left: 0.1875rem !important; }
+.ml-2 { margin-left: 0.375rem !important; }
+.ml-3 { margin-left: 0.625rem !important; }
+.ml-4 { margin-left: 0.875rem !important; }
+.mr-1 { margin-right: 0.1875rem !important; }
+.mr-2 { margin-right: 0.375rem !important; }
+.mr-3 { margin-right: 0.625rem !important; }
+.mr-4 { margin-right: 0.875rem !important; }
+
+/* Button sizing - tighter but still touchable */
+.h-7 { height: 1.625rem !important; }    /* 26px instead of 28px */
+.h-8 { height: 1.875rem !important; }    /* 30px instead of 32px */
+.h-9 { height: 2.125rem !important; }    /* 34px instead of 36px */
+.h-10 { height: 2.375rem !important; }   /* 38px instead of 40px */
+.w-7 { width: 1.625rem !important; }
+.w-8 { width: 1.875rem !important; }
+.w-9 { width: 2.125rem !important; }
+.w-10 { width: 2.375rem !important; }
+
+/* Icon sizing - smaller but still clear */
+.h-3\.5 { height: 0.75rem !important; }  /* 12px instead of 14px */
+.w-3\.5 { width: 0.75rem !important; }
+.h-4 { height: 0.875rem !important; }    /* 14px instead of 16px */
+.w-4 { width: 0.875rem !important; }
+.h-5 { height: 1.125rem !important; }    /* 18px instead of 20px */
+.w-5 { width: 1.125rem !important; }
+
+/* Segment rows - tighter spacing for transcription */
+[data-segment-row] {
+  padding-top: 0.5rem !important;    /* 8px instead of 12px */
+  padding-bottom: 0.5rem !important;
+}
+
+/* Keep color-coding intact but make borders slightly thinner */
+.border-2 {
+  border-width: 1.5px !important;
+}
+
+/* Professional look: slightly tighter line heights */
+.leading-relaxed { line-height: 1.5 !important; }
+.leading-normal { line-height: 1.4 !important; }
+
+/* Rounded corners - slightly tighter for professional look */
+.rounded-lg { border-radius: 0.4375rem !important; }  /* 7px instead of 8px */
+.rounded-md { border-radius: 0.3125rem !important; }  /* 5px instead of 6px */
+.rounded-sm { border-radius: 0.1875rem !important; }  /* 3px instead of 4px */
+
+/* Shadow refinements - subtler for professional appearance */
+.shadow-lg { box-shadow: 0 8px 16px -4px rgb(0 0 0 / 0.1), 0 4px 6px -2px rgb(0 0 0 / 0.05) !important; }
+.shadow-xl { box-shadow: 0 16px 24px -6px rgb(0 0 0 / 0.1), 0 6px 8px -4px rgb(0 0 0 / 0.05) !important; }
+
 @keyframes ask-ai-border-glow {
   0%   { border-color: #f59e0b; }
   33%  { border-color: #10b981; }

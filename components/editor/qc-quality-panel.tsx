@@ -20,6 +20,9 @@ interface QCQualityPanelProps {
   onSelectSegment?: (segmentIndex: number) => void
   onApplyFix?: (finding: QCFinding) => void
   selectedRetranscriptionIndex?: number
+  /** The span being worked on — the active chunk, or the whole clip when the
+   *  job isn't chunked. The lip-sync card scores this range as ONE window. */
+  workingRange?: { start: number; end: number } | null
 }
 
 interface LipWindow {
@@ -28,9 +31,13 @@ interface LipWindow {
   /** Audio-vs-audio timing — the trusted metric. */
   audioScore?: number
   audioOffset?: number
+  audioAbsOffset?: number
   audioCorr?: number
   audioSeverity?: string
   audioReason?: string
+  audioMethod?: string
+  audioScored?: number
+  audioTotal?: number
   /** Mouth-movement visual scorer — supplementary, needs readable faces. */
   visualScore?: number
   visualOffset?: number
@@ -76,54 +83,26 @@ function statusBadge(status: 'ok' | 'warn' | 'fail') {
   return <span className="text-[10px] px-2 py-0.5 rounded-full border border-red-500/40 text-red-300 bg-red-500/10">Fail</span>
 }
 
-export function QCQualityPanel({ report, segment, jobId, segmentIndex, onJumpToTime, onSelectFinding, onSelectSegment, onApplyFix, selectedRetranscriptionIndex }: QCQualityPanelProps) {
+export function QCQualityPanel({ report, segment, jobId, segmentIndex, onJumpToTime, onSelectFinding, onSelectSegment, onApplyFix, selectedRetranscriptionIndex, workingRange }: QCQualityPanelProps) {
   const t = useT()
 
-  // Per-minute lip-sync scores, keyed by window start. Single segments are too
-  // short for a stable correlation, so the monitor scores ~60s windows up front
-  // and re-scores an edited span (snapped to the minute grid) on demand. The
-  // first score per window is its baseline — the point is the delta after the
-  // user's manual timing edit / regenerated take, not the number alone.
+  // One overall lip-sync score for the working range — the active chunk, or
+  // the whole clip when the job isn't chunked. Cached per range so switching
+  // chunks doesn't re-run the analysis on a range already scored. The first
+  // score per range is its baseline — the point is the delta after the user's
+  // manual timing edit / regenerated take, not the number alone.
   const [lipWindows, setLipWindows] = useState<Record<string, LipWindow>>({})
   const [lipBaseline, setLipBaseline] = useState<Record<string, number>>({})
   const [lipLoading, setLipLoading] = useState(false)
   const [lipScoringKey, setLipScoringKey] = useState<string | null>(null)
   const [scoreError, setScoreError] = useState<string | null>(null)
-  const lipLoaded = useRef<string | null>(null)
+  const scoredRanges = useRef<Set<string>>(new Set())
 
-  // Upfront pass: score every minute of the timeline once, on entry.
-  useEffect(() => {
-    if (!jobId || lipLoaded.current === jobId) return
-    lipLoaded.current = jobId
-    setLipLoading(true)
-    apiClient.analyzeLipSync(jobId)
-      .then((res) => {
-        if (!res.windows) return
-        const map: Record<string, LipWindow> = {}
-        const base: Record<string, number> = {}
-        for (const w of res.windows) {
-          const k = w.start.toFixed(2)
-          map[k] = {
-            start: w.start, end: w.end,
-            audioScore: w.audio?.score, audioOffset: w.audio?.offset_ms,
-            audioCorr: w.audio?.correlation, audioSeverity: w.audio?.severity,
-            audioReason: w.audio?.reason,
-            visualScore: w.visual?.sync_score, visualOffset: w.visual?.offset_ms,
-            faceCoverage: w.visual?.face_coverage, visualReason: w.visual?.reason,
-            at: Date.now(),
-          }
-          if (w.audio?.status === 'ok' && typeof w.audio.score === 'number') base[k] = w.audio.score
-        }
-        setLipWindows(map)
-        setLipBaseline(base)
-      })
-      .catch((e) => setScoreError(e.message || 'Lip-sync analysis failed'))
-      .finally(() => setLipLoading(false))
-  }, [jobId])
+  const rangeKey = workingRange ? `${workingRange.start.toFixed(2)}-${workingRange.end.toFixed(2)}` : null
 
   const scoreRange = async (start: number, end: number) => {
     if (!jobId) return
-    const k = start.toFixed(2)
+    const k = `${start.toFixed(2)}-${end.toFixed(2)}`
     setLipScoringKey(k)
     setScoreError(null)
     try {
@@ -131,8 +110,11 @@ export function QCQualityPanel({ report, segment, jobId, segmentIndex, onJumpToT
       const merged: LipWindow = {
         start: w.start ?? start, end: w.end ?? end,
         audioScore: w.audio?.score, audioOffset: w.audio?.offset_ms,
+        audioAbsOffset: w.audio?.abs_offset_ms,
         audioCorr: w.audio?.correlation, audioSeverity: w.audio?.severity,
         audioReason: w.audio?.reason,
+        audioMethod: w.audio?.method,
+        audioScored: w.audio?.scored, audioTotal: w.audio?.total,
         visualScore: w.visual?.sync_score, visualOffset: w.visual?.offset_ms,
         faceCoverage: w.visual?.face_coverage, visualReason: w.visual?.reason,
         at: Date.now(),
@@ -150,27 +132,33 @@ export function QCQualityPanel({ report, segment, jobId, segmentIndex, onJumpToT
     }
   }
 
-  // Re-analyze the SELECTED segment's committed span, snapped out to the
-  // minute grid — a fix crossing a boundary scores e.g. 1:00–1:30 as one
-  // window, so the delta covers the whole affected range.
-  const rescoreSelectedSpan = async () => {
-    if (!segment) return
-    const s = segment.committed_start_time ?? segment.start_time ?? 0
-    const e = segment.committed_end_time ?? segment.end_time ?? 0
-    if (e <= s) return
-    await scoreRange(Math.floor(s / 60) * 60, Math.ceil(e / 60) * 60)
-  }
+  // Score the working range on entry and whenever it changes — each chunk is
+  // scored once, then served from cache under its own baseline.
+  useEffect(() => {
+    if (!jobId || !workingRange || !rangeKey) return
+    const k = `${jobId}:${rangeKey}`
+    if (scoredRanges.current.has(k)) return
+    scoredRanges.current.add(k)
+    setLipLoading(true)
+    scoreRange(workingRange.start, workingRange.end)
+      .finally(() => setLipLoading(false))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId, rangeKey])
+
+  const currentLip = rangeKey ? lipWindows[rangeKey] : undefined
+  const lipDelta = (rangeKey && lipBaseline[rangeKey] !== undefined && currentLip?.audioScore !== undefined)
+    ? currentLip.audioScore - lipBaseline[rangeKey] : 0
 
   const lipSyncCard = jobId ? (
     <div className="m-3 mb-0 p-3 rounded-xl bg-neutral-900 border border-neutral-800">
       <div className="flex items-center justify-between mb-2">
         <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-1.5">
-          <ScanFace className="h-4 w-4 text-cyan-400" />{t('Lip Sync — per minute')}
+          <ScanFace className="h-4 w-4 text-cyan-400" />{t('Lip Sync — overall')}
         </h3>
         <button
-          onClick={rescoreSelectedSpan}
-          disabled={!segment || lipScoringKey !== null}
-          title={segment ? 'Re-score this segment’s minute window' : 'Select a segment to re-score its window'}
+          onClick={() => workingRange && scoreRange(workingRange.start, workingRange.end)}
+          disabled={!workingRange || lipScoringKey !== null}
+          title={t('Re-score the whole working range')}
           className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border border-cyan-500/40 text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 disabled:opacity-50 cursor-pointer"
         >
           <RefreshCw className={cn('h-3 w-3', lipScoringKey !== null && 'animate-spin')} />
@@ -178,67 +166,55 @@ export function QCQualityPanel({ report, segment, jobId, segmentIndex, onJumpToT
         </button>
       </div>
 
-      {lipLoading ? (
-        <p className="text-xs text-slate-500">{t('Scoring the timeline, minute by minute…')}</p>
-      ) : Object.keys(lipWindows).length === 0 ? (
-        <p className="text-xs text-slate-500">{scoreError ?? t('No lip-sync scores yet.')}</p>
+      {!workingRange ? (
+        <p className="text-xs text-slate-500">{scoreError ?? t('No lip-sync score yet.')}</p>
+      ) : lipLoading && !currentLip ? (
+        <p className="text-xs text-slate-500">{t('Scoring the working range…')}</p>
+      ) : !currentLip ? (
+        <p className="text-xs text-slate-500">{scoreError ?? t('No lip-sync score yet.')}</p>
       ) : (
-        <div className="flex flex-col gap-1">
-          {Object.values(lipWindows).sort((a, b) => a.start - b.start).map((w) => {
-            const k = w.start.toFixed(2)
-            const delta = (lipBaseline[k] !== undefined && w.audioScore !== undefined)
-              ? w.audioScore - lipBaseline[k] : 0
-            const showDelta = delta !== 0
-            return (
-              <div key={k} className="flex items-center justify-between py-1 px-1 -mx-1 rounded hover:bg-neutral-800/50">
-                <span className="text-xs text-slate-400">
-                  {formatTimeShort(w.start)}–{formatTimeShort(w.end)}
+        <div className="flex items-center justify-between py-1 px-1 -mx-1 rounded">
+          <span className="text-xs text-slate-400">
+            {formatTimeShort(currentLip.start)}–{formatTimeShort(currentLip.end)}
+          </span>
+          <span className="flex items-center gap-2 text-xs">
+            {/* audio-vs-audio: the trusted timing metric */}
+            {currentLip.audioScore !== undefined ? (
+              <>
+                <span className={cn('font-semibold',
+                  currentLip.audioSeverity === 'good' ? 'text-emerald-400'
+                  : currentLip.audioSeverity === 'fair' ? 'text-yellow-400' : 'text-red-400')}
+                  title={currentLip.audioMethod === 'onset'
+                    ? `median line offset ${currentLip.audioAbsOffset}ms · scored ${currentLip.audioScored}/${currentLip.audioTotal} lines`
+                    : `rhythm score ${currentLip.audioScore}/100 · corr ${currentLip.audioCorr}`}>
+                  {currentLip.audioScore}
                 </span>
-                <span className="flex items-center gap-2 text-xs">
-                  {/* audio-vs-audio: the trusted timing metric */}
-                  {w.audioScore !== undefined ? (
-                    <>
-                      <span className={cn('font-semibold',
-                        w.audioSeverity === 'good' ? 'text-emerald-400'
-                        : w.audioSeverity === 'fair' ? 'text-yellow-400' : 'text-red-400')}
-                        title={`rhythm score ${w.audioScore}/100 · corr ${w.audioCorr}`}>
-                        {w.audioScore}
-                      </span>
-                      {showDelta && (
-                        <span className={delta > 0 ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}>
-                          {delta > 0 ? '+' : ''}{delta}
-                        </span>
-                      )}
-                      {w.audioOffset !== undefined && (
-                        <span className="text-slate-500">{w.audioOffset > 0 ? '+' : ''}{w.audioOffset}ms</span>
-                      )}
-                    </>
-                  ) : (
-                    <span className="text-slate-500 max-w-[160px] truncate"
-                      title={w.audioReason}>{w.audioReason ?? '—'}</span>
-                  )}
-                  {/* visual: face-based, secondary */}
-                  {w.visualScore !== undefined && (
-                    <span className="text-slate-500"
-                      title={`visual score ${w.visualScore} · mouth-movement offset ${w.visualOffset}ms${w.faceCoverage !== undefined ? ` · face ${Math.round(w.faceCoverage * 100)}%` : ''}`}>
-                      👁 {w.visualScore}
-                    </span>
-                  )}
-                  {w.visualScore === undefined && w.visualReason && (
-                    <span className="text-slate-600" title={w.visualReason}>👁 —</span>
-                  )}
-                  <button
-                    onClick={() => scoreRange(w.start, w.end)}
-                    disabled={lipScoringKey !== null}
-                    title="Re-score this window"
-                    className="text-slate-500 hover:text-cyan-300 disabled:opacity-40 cursor-pointer"
-                  >
-                    <RefreshCw className={cn('h-3 w-3', lipScoringKey === k && 'animate-spin text-cyan-300')} />
-                  </button>
-                </span>
-              </div>
-            )
-          })}
+                {lipDelta !== 0 && (
+                  <span className={lipDelta > 0 ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}>
+                    {lipDelta > 0 ? '+' : ''}{lipDelta}
+                  </span>
+                )}
+                {currentLip.audioMethod === 'onset' && currentLip.audioAbsOffset !== undefined ? (
+                  <span className="text-slate-500">±{currentLip.audioAbsOffset}ms</span>
+                ) : currentLip.audioOffset !== undefined ? (
+                  <span className="text-slate-500">{currentLip.audioOffset > 0 ? '+' : ''}{currentLip.audioOffset}ms</span>
+                ) : null}
+              </>
+            ) : (
+              <span className="text-slate-500 max-w-[160px] truncate"
+                title={currentLip.audioReason}>{currentLip.audioReason ?? '—'}</span>
+            )}
+            {/* visual: face-based, secondary */}
+            {currentLip.visualScore !== undefined && (
+              <span className="text-slate-500"
+                title={`visual score ${currentLip.visualScore} · mouth-movement offset ${currentLip.visualOffset}ms${currentLip.faceCoverage !== undefined ? ` · face ${Math.round(currentLip.faceCoverage * 100)}%` : ''}`}>
+                👁 {currentLip.visualScore}
+              </span>
+            )}
+            {currentLip.visualScore === undefined && currentLip.visualReason && (
+              <span className="text-slate-600" title={currentLip.visualReason}>👁 —</span>
+            )}
+          </span>
         </div>
       )}
       {scoreError && !lipLoading && <p className="text-[10px] text-red-400 mt-1">{scoreError}</p>}
