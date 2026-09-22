@@ -138,6 +138,18 @@ class UploadResponse(BaseModel):
     video_size: int
 
 
+class YouTubeImportRequest(BaseModel):
+    url: str
+    source_language: Optional[str] = None
+    target_language: Optional[str] = None
+    num_speakers: Optional[int] = None
+
+
+class YouTubeCaptionsRequest(BaseModel):
+    url: str
+    languages: Optional[List[str]] = None
+
+
 class StatusResponse(BaseModel):
     job_id: str
     status: JobStatus
