@@ -7,11 +7,11 @@ import { VideoUpload } from "@/components/video-upload"
 import { YouTubeIntegration } from "@/components/youtube-integration"
 import { PublicDomainLibrary } from "@/components/public-domain-library"
 import { CreatorCollaboration } from "@/components/creator-collaboration"
-import { UpgradePanel } from "@/components/upgrade-panel"
+import { FaqPanel } from "@/components/faq-panel"
 import { DubbingWorkspace } from "@/components/dubbing-workspace"
 import { AdvancedDubbingEditor } from "@/components/advanced-dubbing-editor"
 import { Header } from "@/components/header"
-import { Upload, Youtube, Film, Sparkles, Mic2, AlertTriangle } from "lucide-react"
+import { Upload, Youtube, Film, Mic2, AlertTriangle, HelpCircle } from "lucide-react"
 import { RecentProjects } from "@/components/recent-projects"
 
 import { createClient } from "@/lib/supabase/client"
@@ -46,6 +46,7 @@ const tabBackgrounds: Record<string, string> = {
   youtube: "/backgrounds/ipman-kungfu.jpg",
   library: "/backgrounds/streaming-library.jpg",
   studio: "/backgrounds/anime-motion-teal.jpg",
+  faq: "/backgrounds/anime-motion-teal.jpg",
   collaborate: "/backgrounds/anime-motion-teal.jpg",
   projects: "/backgrounds/anime-dark-collage.jpg",
 }
@@ -284,11 +285,11 @@ export function Dashboard() {
                     <span className="hidden sm:inline">{t('Library')}</span>
                   </TabsTrigger>
                   <TabsTrigger
-                    value="studio"
+                    value="faq"
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
                   >
-                    <Sparkles className="h-4 w-4" />
-                    <span className="hidden sm:inline">{t('Upgrade')}</span>
+                    <HelpCircle className="h-4 w-4" />
+                    <span className="hidden sm:inline">{t('FAQ')}</span>
                   </TabsTrigger>
                   <TabsTrigger
                     value="projects"
@@ -320,8 +321,8 @@ export function Dashboard() {
                 <TabsContent value="library">
                   <PublicDomainLibrary onVideoSelect={handleVideoSelect} />
                 </TabsContent>
-                <TabsContent value="studio">
-                  <UpgradePanel />
+                <TabsContent value="faq">
+                  <FaqPanel />
                 </TabsContent>
                 <TabsContent value="projects">
                   <RecentProjects onVideoSelect={handleVideoSelect} />
