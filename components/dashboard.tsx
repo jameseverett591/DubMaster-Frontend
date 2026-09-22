@@ -19,6 +19,7 @@ import { apiClient } from "@/lib/api-client"
 import { usePlan } from "@/lib/use-plan"
 import { useUsage } from "@/hooks/use-usage"
 import { useT } from '@/lib/use-t'
+import { useTranslations } from "next-intl"
 
 export type VideoSource = {
   id: string
@@ -53,6 +54,7 @@ const tabBackgrounds: Record<string, string> = {
 
 export function Dashboard() {
   const t = useT()
+  const tLanding = useTranslations('landing')
   const router = useRouter()
   const searchParams = useSearchParams()
   const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') ?? "upload")
@@ -289,7 +291,7 @@ export function Dashboard() {
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
                   >
                     <HelpCircle className="h-4 w-4" />
-                    <span className="hidden sm:inline">{t('FAQ')}</span>
+                    <span className="hidden sm:inline">{tLanding('navFaq')}</span>
                   </TabsTrigger>
                   <TabsTrigger
                     value="projects"
