@@ -121,7 +121,9 @@ def download_video(url: str, dest_path_no_ext: str, max_bytes: int,
 
     opts = {
         "quiet": True, "no_warnings": True, "noplaylist": True,
-        "format": "best[height<=1080][ext=mp4]/best[height<=1080]/best[ext=mp4]/best",
+        # YouTube mostly serves split DASH streams (video-only + audio-only)
+        # — a combined "best" often doesn't exist, so merge is mandatory.
+        "format": "bv*[height<=1080]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b",
         "outtmpl": dest_path_no_ext + ".%(ext)s",
         "max_filesize": max_bytes,
         "socket_timeout": 30,

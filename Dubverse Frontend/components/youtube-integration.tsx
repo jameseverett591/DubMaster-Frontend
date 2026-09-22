@@ -13,6 +13,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { MAX_UPLOAD_BYTES, MAX_UPLOAD_GB } from "@/lib/plan-features"
 import {
   Youtube,
+  Search,
   Clock,
   Languages,
   AlertCircle,
@@ -120,6 +121,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
   // YouTube sign-in state
   const [ytToken, setYtToken] = useState<string | null>(null)
   const [ytChannel, setYtChannel] = useState<string | null>(null)
+  const [ytChannelUrl, setYtChannelUrl] = useState<string | null>(null)
   const [channelVideos, setChannelVideos] = useState<ChannelVideo[]>([])
   const [isSigningIn, setIsSigningIn] = useState(false)
   const [isLoadingVideos, setIsLoadingVideos] = useState(false)
@@ -138,6 +140,19 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
   const [isImporting, setIsImporting] = useState(false)
   const [importingVideoId, setImportingVideoId] = useState<string | null>(null)
   const [importError, setImportError] = useState<string | null>(null)
+
+  // Search state — runs on the user's YouTube OAuth token
+  const [searchQuery, setSearchQuery] = useState("")
+  const [searchResults, setSearchResults] = useState<Array<{
+    video_id: string; title: string; channel: string
+    thumbnail: string; duration: string; views: string
+  }>>([])
+  const [isSearching, setIsSearching] = useState(false)
+  const [searchError, setSearchError] = useState<string | null>(null)
+  const [trendingVideos, setTrendingVideos] = useState<Array<{
+    video_id: string; title: string; channel: string
+    thumbnail: string; duration: string; views: string
+  }>>([])
 
 
 
@@ -166,7 +181,35 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
       const channel = chData.items?.[0]
       if (!channel) throw new Error("This Google account has no YouTube channel")
       setYtChannel(channel.snippet?.title || "Your channel")
+      const handle = channel.snippet?.customUrl
+      setYtChannelUrl(
+        handle ? `https://www.youtube.com/${handle}`
+               : channel.id ? `https://www.youtube.com/channel/${channel.id}`
+               : null)
       const uploadsId = channel.contentDetails?.relatedPlaylists?.uploads
+
+      // Trending feed — makes the browse view feel like YouTube itself,
+      // not just a channel inspector. Non-fatal if it fails.
+      fetch(
+        "https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics&chart=mostPopular&maxResults=12&regionCode=US",
+        { headers })
+        .then(r => r.ok ? r.json() : null)
+        .then(d => {
+          if (!d?.items) return
+          setTrendingVideos(d.items.map((v: any) => ({
+            video_id: v.id,
+            title: v.snippet?.title || "",
+            channel: v.snippet?.channelTitle || "",
+            thumbnail: v.snippet?.thumbnails?.medium?.url
+              || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
+            duration: formatIsoDuration(v.contentDetails?.duration || ""),
+            views: v.statistics?.viewCount
+              ? `${(parseInt(v.statistics.viewCount) / 1e6).toFixed(1)}M views`.replace(".0M", "M")
+              : "",
+          })))
+        })
+        .catch(() => {})
+
       if (!uploadsId) {
         setChannelVideos([])
         return
@@ -226,12 +269,69 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
     }
   }
 
+  // ── YouTube search (uses the signed-in token — search.list accepts
+  // youtube.readonly scope, no separate API key needed) ─────────────────────
+
+  const handleSearch = async () => {
+    if (!searchQuery.trim() || isSearching || !ytToken) return
+    setIsSearching(true)
+    setSearchError(null)
+    try {
+      const headers = { Authorization: `Bearer ${ytToken}` }
+      const sRes = await fetch(
+        `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=12&q=${encodeURIComponent(searchQuery)}`,
+        { headers })
+      if (!sRes.ok) {
+        if (sRes.status === 401) { setYtToken(null); throw new Error("YouTube session expired — sign in again") }
+        throw new Error(`YouTube search error ${sRes.status}`)
+      }
+      const sData = await sRes.json()
+      const ids = (sData.items || [])
+        .map((it: any) => it.id?.videoId)
+        .filter(Boolean)
+      if (!ids.length) {
+        setSearchResults([])
+        setSearchError("No videos found")
+        return
+      }
+      // Second call for duration + view counts
+      const vRes = await fetch(
+        `https://www.googleapis.com/youtube/v3/videos?part=contentDetails,statistics&id=${ids.join(",")}`,
+        { headers })
+      const stats: Record<string, any> = {}
+      if (vRes.ok) {
+        for (const v of (await vRes.json()).items || []) stats[v.id] = v
+      }
+      setSearchResults((sData.items || []).map((it: any) => {
+        const vid = it.id?.videoId
+        const extra = stats[vid] || {}
+        return {
+          video_id: vid,
+          title: it.snippet?.title || "",
+          channel: it.snippet?.channelTitle || "",
+          thumbnail: it.snippet?.thumbnails?.medium?.url
+            || `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
+          duration: formatIsoDuration(extra.contentDetails?.duration || ""),
+          views: extra.statistics?.viewCount
+            ? `${(parseInt(extra.statistics.viewCount) / 1e6).toFixed(1)}M`.replace(".0M", "M")
+            : "",
+        }
+      }).filter((v: any) => v.video_id))
+    } catch (e: any) {
+      setSearchResults([])
+      setSearchError(e.message || "Search failed")
+    } finally {
+      setIsSearching(false)
+    }
+  }
+
   const handleYouTubeSignOut = () => {
     if (ytToken && window.google?.accounts?.oauth2) {
       window.google.accounts.oauth2.revoke(ytToken, () => {})
     }
     setYtToken(null)
     setYtChannel(null)
+    setYtChannelUrl(null)
     setChannelVideos([])
   }
 
@@ -769,14 +869,23 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
               </CardContent>
             </Card>
           ) : (
-            <>
-              <Card className="backdrop-blur-md bg-card/50 border-border/50">
+            <div className="flex flex-col space-y-6">
+              <Card className="backdrop-blur-md bg-card/50 border-border/50 order-2">
                 <CardHeader>
                   <div className="flex items-center justify-between">
                     <div>
                       <CardTitle className="flex items-center gap-2">
                         <Youtube className="h-5 w-5 text-red-500" />
-                        {ytChannel}
+                        {ytChannelUrl ? (
+                          <a
+                            href={ytChannelUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="hover:text-primary transition-colors"
+                          >
+                            {ytChannel}
+                          </a>
+                        ) : ytChannel}
                       </CardTitle>
                       <CardDescription>
                         {channelVideos.length} {t('videos on your channel')}
@@ -858,8 +967,134 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                 </CardContent>
               </Card>
 
+              {/* Search all of YouTube — unrestricted. The rules of use are
+                  stated in the notice above; users are trusted to only import
+                  what they have the rights to. */}
+              <Card className="backdrop-blur-md bg-card/50 border-border/50 order-1">
+                <CardHeader>
+                  <CardTitle>{t('Search YouTube')}</CardTitle>
+                  <CardDescription>{t('Search any video — import what you own, have permission for, or that is public domain')}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="flex gap-3">
+                    <div className="relative flex-1">
+                      <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        placeholder={t('e.g. public domain movies, creative commons...')}
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                        className="pl-10"
+                      />
+                    </div>
+                    <Button onClick={handleSearch} disabled={isSearching || !searchQuery.trim()}>
+                      {isSearching
+                        ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        : <Search className="mr-2 h-4 w-4" />}
+                      {isSearching ? t('Searching...') : t('Search')}
+                    </Button>
+                  </div>
+
+                  {searchError && (
+                    <div className="flex items-start gap-2 text-sm text-amber-500">
+                      <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                      {searchError}
+                    </div>
+                  )}
+
+                  {searchResults.length === 0 && !searchError && trendingVideos.length > 0 && (
+                    <div className="space-y-3">
+                      <p className="text-sm font-medium text-muted-foreground">{t('Trending on YouTube')}</p>
+                      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                        {trendingVideos.map((video) => (
+                          <Card key={video.video_id}
+                            className="overflow-hidden backdrop-blur-md bg-card/50 border-border/50">
+                            <div className="relative aspect-video">
+                              <img
+                                src={video.thumbnail || "/placeholder.svg"}
+                                alt={video.title}
+                                className="h-full w-full object-cover"
+                              />
+                              {video.duration && (
+                                <div className="absolute bottom-2 right-2 flex items-center gap-1 rounded bg-black/80 px-2 py-1 text-xs text-white">
+                                  <Clock className="h-3 w-3" />
+                                  {video.duration}
+                                </div>
+                              )}
+                            </div>
+                            <CardContent className="p-4">
+                              <h4 className="line-clamp-2 font-medium text-foreground">{video.title}</h4>
+                              <p className="mt-1 text-sm text-muted-foreground">{video.channel}</p>
+                              <Button
+                                className="mt-3 w-full"
+                                size="sm"
+                                disabled={isImporting}
+                                onClick={() => {
+                                  setImportingVideoId(video.video_id)
+                                  handleImportVideo(
+                                    `https://www.youtube.com/watch?v=${video.video_id}`,
+                                    video.title, video.thumbnail, video.duration)
+                                }}
+                              >
+                                {importingVideoId === video.video_id && isImporting
+                                  ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                  : <Import className="mr-2 h-4 w-4" />}
+                                {t('Import to Studio')}
+                              </Button>
+                            </CardContent>
+                          </Card>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {searchResults.length > 0 && (
+                    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                      {searchResults.map((video) => (
+                        <Card key={video.video_id}
+                          className="overflow-hidden backdrop-blur-md bg-card/50 border-border/50">
+                          <div className="relative aspect-video">
+                            <img
+                              src={video.thumbnail || "/placeholder.svg"}
+                              alt={video.title}
+                              className="h-full w-full object-cover"
+                            />
+                            {video.duration && (
+                              <div className="absolute bottom-2 right-2 flex items-center gap-1 rounded bg-black/80 px-2 py-1 text-xs text-white">
+                                <Clock className="h-3 w-3" />
+                                {video.duration}
+                              </div>
+                            )}
+                          </div>
+                          <CardContent className="p-4">
+                            <h4 className="line-clamp-2 font-medium text-foreground">{video.title}</h4>
+                            <p className="mt-1 text-sm text-muted-foreground">{video.channel}</p>
+                            <Button
+                              className="mt-3 w-full"
+                              size="sm"
+                              disabled={isImporting}
+                              onClick={() => {
+                                setImportingVideoId(video.video_id)
+                                handleImportVideo(
+                                  `https://www.youtube.com/watch?v=${video.video_id}`,
+                                  video.title, video.thumbnail, video.duration)
+                              }}
+                            >
+                              {importingVideoId === video.video_id && isImporting
+                                ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                : <Import className="mr-2 h-4 w-4" />}
+                              {t('Import to Studio')}
+                            </Button>
+                          </CardContent>
+                        </Card>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
               {/* Direct URL import */}
-              <Card className="backdrop-blur-md bg-card/50 border-border/50">
+              <Card className="backdrop-blur-md bg-card/50 border-border/50 order-3">
                 <CardHeader>
                   <CardTitle>{t('Import by URL')}</CardTitle>
                   <CardDescription>{t('Paste a video URL — your own, public domain, or one you have permission to use')}</CardDescription>
@@ -885,7 +1120,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                   </div>
                 </CardContent>
               </Card>
-            </>
+            </div>
           )}
         </TabsContent>
       </Tabs>
