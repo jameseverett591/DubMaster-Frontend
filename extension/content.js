@@ -1,29 +1,34 @@
 // DubMaster Import — content script for youtube.com
 //
-// Adds an "Import to DubMaster" button on watch pages, next to the
-// Like/Share action row. Clicking it opens DubMaster's YouTube tab and
-// starts the import automatically (?yt_url=...).
+// Two surfaces:
+//  1. Watch pages: an "Import to DubMaster" button in the actions row
+//     (next to Like/Share), with a floating fallback if the row isn't found.
+//  2. Feeds (home, channel, search, sidebar): a small "Import" button
+//     overlaid on the top-right of every video thumbnail, shown on hover.
 //
-// YouTube is an SPA, so injection runs on yt-navigate-finish as well as
-// initial load. If the actions row isn't found (layout change), a
-// floating fallback button appears bottom-right on watch pages instead.
+// Both open DubMaster's YouTube tab via ?yt_url=..., which auto-imports.
+// YouTube is an SPA — injection runs on yt-navigate-finish plus a
+// MutationObserver for lazily-rendered thumbnails.
 
 const DUBMASTER_URL = "http://localhost:3000"; // change to the deployed origin in production
 const BUTTON_ID = "dubmaster-import-btn";
+const THUMB_BTN_CLASS = "dubmaster-thumb-btn";
 
-function videoUrl() {
+function openInDubMaster(url) {
+  const target =
+    `${DUBMASTER_URL}/dashboard?tab=youtube&yt_url=` +
+    encodeURIComponent(url);
+  window.open(target, "_blank", "noopener");
+}
+
+function watchUrl() {
   const v = new URLSearchParams(window.location.search).get("v");
   return v ? `https://www.youtube.com/watch?v=${v}` : window.location.href;
 }
 
-function openInDubMaster() {
-  const target =
-    `${DUBMASTER_URL}/dashboard?tab=youtube&yt_url=` +
-    encodeURIComponent(videoUrl());
-  window.open(target, "_blank", "noopener");
-}
+// ── 1. Watch-page actions button ──────────────────────────────────────────
 
-function makeButton(floating) {
+function makeWatchButton(floating) {
   const btn = document.createElement("button");
   btn.id = BUTTON_ID;
   btn.textContent = "Import to DubMaster";
@@ -44,11 +49,11 @@ function makeButton(floating) {
     btn.style.cssText +=
       ";position:fixed;bottom:24px;right:24px;z-index:9999;box-shadow:0 4px 14px rgba(0,0,0,.4);margin-left:0";
   }
-  btn.addEventListener("click", openInDubMaster);
+  btn.addEventListener("click", () => openInDubMaster(watchUrl()));
   return btn;
 }
 
-function inject() {
+function injectWatchButton() {
   const existing = document.getElementById(BUTTON_ID);
   const onWatch = window.location.pathname === "/watch";
 
@@ -56,34 +61,126 @@ function inject() {
     if (existing) existing.remove();
     return;
   }
-  if (existing) return; // already injected for this video
+  if (existing) return;
 
-  // Preferred spot: the actions row (Like / Share / ...) under the player.
   const actions =
     document.querySelector("ytd-watch-metadata #actions #actions-inner") ||
     document.querySelector("ytd-watch-metadata #actions") ||
     document.querySelector("#top-level-buttons-computed");
 
   if (actions) {
-    actions.appendChild(makeButton(false));
+    actions.appendChild(makeWatchButton(false));
   } else {
-    document.body.appendChild(makeButton(true));
+    document.body.appendChild(makeWatchButton(true));
   }
 }
 
-// Initial load + every SPA navigation.
-inject();
+// ── 2. Thumbnail hover buttons on feeds ───────────────────────────────────
+
+function injectThumbStyles() {
+  if (document.getElementById("dubmaster-thumb-style")) return;
+  const style = document.createElement("style");
+  style.id = "dubmaster-thumb-style";
+  style.textContent = `
+    .${THUMB_BTN_CLASS} {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      z-index: 2100;
+      font-family: Roboto, Arial, sans-serif;
+      font-size: 12px;
+      font-weight: 700;
+      color: #fff;
+      background: linear-gradient(90deg,#A855F7,#22D3EE);
+      border: none;
+      border-radius: 12px;
+      padding: 4px 10px;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity .15s;
+      box-shadow: 0 2px 8px rgba(0,0,0,.5);
+    }
+    ytd-thumbnail:hover .${THUMB_BTN_CLASS},
+    yt-lockup-view-model:hover .${THUMB_BTN_CLASS} {
+      opacity: 1;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+// Thumbnail containers across YouTube layouts (home feed, search results,
+// channel pages, watch-sidebar recommendations).
+const THUMB_SELECTORS = [
+  "ytd-rich-item-renderer",
+  "ytd-video-renderer",
+  "ytd-grid-video-renderer",
+  "ytd-compact-video-renderer",
+  "yt-lockup-view-model",
+].join(",");
+
+function injectThumbButton(container) {
+  if (container.dataset.dubmasterThumb) return;
+  container.dataset.dubmasterThumb = "1";
+
+  const anchor = container.querySelector("a#thumbnail, a.yt-lockup-view-model__content-image");
+  if (!anchor || !anchor.href || !/[?&]v=|\/shorts\//.test(anchor.href)) return;
+
+  const host = anchor.closest("ytd-thumbnail") || anchor;
+  if (getComputedStyle(host).position === "static") {
+    host.style.position = "relative";
+  }
+  const hostEl = host;
+  if (hostEl.querySelector("." + THUMB_BTN_CLASS)) return;
+
+  const btn = document.createElement("button");
+  btn.className = THUMB_BTN_CLASS;
+  btn.textContent = "Import";
+  btn.title = "Import to DubMaster";
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openInDubMaster(anchor.href);
+  });
+  hostEl.appendChild(btn);
+}
+
+function scanThumbnails(root) {
+  const scope = root instanceof Element ? root : document;
+  if (scope.matches && scope.matches(THUMB_SELECTORS)) injectThumbButton(scope);
+  for (const el of scope.querySelectorAll(THUMB_SELECTORS)) {
+    injectThumbButton(el);
+  }
+}
+
+// ── Wiring ────────────────────────────────────────────────────────────────
+
+injectThumbStyles();
+injectWatchButton();
+scanThumbnails(document);
+
 window.addEventListener("yt-navigate-finish", () => {
-  // Give the actions row a tick to mount before injecting.
-  setTimeout(inject, 300);
+  setTimeout(() => {
+    injectWatchButton();
+    scanThumbnails(document);
+  }, 300);
 });
 
-// Layout races: retry briefly if the actions row wasn't ready.
+// Feeds lazy-render thumbnails on scroll — observe for new nodes.
+const observer = new MutationObserver((mutations) => {
+  for (const m of mutations) {
+    for (const node of m.addedNodes) {
+      if (node.nodeType === Node.ELEMENT_NODE) scanThumbnails(node);
+    }
+  }
+});
+observer.observe(document.body, { childList: true, subtree: true });
+
+// Layout races: retry briefly if the watch actions row wasn't ready.
 let retries = 0;
 const retryTimer = setInterval(() => {
   if (document.getElementById(BUTTON_ID) || ++retries > 10) {
     clearInterval(retryTimer);
     return;
   }
-  inject();
+  injectWatchButton();
 }, 1000);

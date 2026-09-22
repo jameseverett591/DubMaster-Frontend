@@ -1,6 +1,6 @@
 // Toolbar button: import whatever YouTube video is on the active tab.
-// Works from any YouTube page — watch pages, Shorts, playlists — because
-// it reads the tab URL rather than relying on the content-script button.
+// On watch/Shorts pages it deep-links the video into DubMaster's import;
+// on feed/channel pages it just opens the YouTube tab (no video to grab).
 
 const DUBMASTER_URL = "http://localhost:3000";
 
@@ -8,8 +8,10 @@ chrome.action.onClicked.addListener((tab) => {
   if (!tab.url || !/youtube\.com/.test(tab.url)) {
     return;
   }
-  const target =
-    `${DUBMASTER_URL}/dashboard?tab=youtube&yt_url=` +
-    encodeURIComponent(tab.url);
+  const isVideo = /[?&]v=|\/shorts\//.test(tab.url);
+  const target = isVideo
+    ? `${DUBMASTER_URL}/dashboard?tab=youtube&yt_url=` +
+      encodeURIComponent(tab.url)
+    : `${DUBMASTER_URL}/dashboard?tab=youtube`;
   chrome.tabs.create({ url: target });
 });
