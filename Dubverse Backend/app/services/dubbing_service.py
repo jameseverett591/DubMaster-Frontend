@@ -2093,7 +2093,19 @@ class DubbingService:
                 )
 
                 # --- Flag generation ---
-                _flags = []
+                _flags = list(segment.get("flags") or [])
+                # Translation-stage flags (provider_failed, untranslated_source,
+                # empty_source) must reach the review queue — they only
+                # propagate as fields otherwise.
+                if segment.get("translation_flagged"):
+                    _flags.append({
+                        "code": segment.get("flag_reason") or "translation_flagged",
+                        "reason": next(
+                            (f.get("reason") for f in (segment.get("qc_findings") or [])
+                             if isinstance(f, dict)),
+                            "Translation flagged for human review",
+                        ),
+                    })
                 _adapted = segment.get("adapted_text") or text
                 if len(_adapted.split()) >= 2:
                     _conf = segment.get("confidence")

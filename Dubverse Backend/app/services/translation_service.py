@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import contextvars
 import re
 import secrets
 from typing import List, Dict, Optional, Tuple
@@ -437,6 +438,21 @@ def _aligned(result, chunk, provider: str, start: int):
     return result
 
 
+# Per-request translation state. TranslationService is a shared singleton, so
+# job-scoped data (rulebook directives/fixes, glossary, speaker personas, CJK
+# flag) must NOT live on self — a concurrent translate_segments call would
+# overwrite it mid-flight. ContextVar gives each asyncio task its own view;
+# helpers read via _tctx() with self.* fallbacks for direct/test callers.
+_translate_ctx: contextvars.ContextVar[dict] = contextvars.ContextVar(
+    "dub_translate_ctx", default=None
+)
+
+
+def _tctx() -> dict:
+    ctx = _translate_ctx.get()
+    return ctx if ctx is not None else {}
+
+
 class TranslationService:
     def __init__(self):
         settings = get_settings()
@@ -468,12 +484,15 @@ class TranslationService:
         text = _cjk_space_re.sub('', text)
         text = _cjk_punct_re.sub('', text)
 
+        _g = _tctx()
+        _glossary_sorted = _g.get("glossary_sorted", self._glossary_sorted)
+        _phonetic_index = _g.get("phonetic_index", self._phonetic_index)
         replacements = []
         fuzzy_log = []
-        phon_idx = len(self._glossary_sorted)
+        phon_idx = len(_glossary_sorted)
 
         # Pass 1: exact match (existing behaviour)
-        for i, (src_term, tgt_term) in enumerate(self._glossary_sorted):
+        for i, (src_term, tgt_term) in enumerate(_glossary_sorted):
             src_collapsed = _cjk_space_re.sub('', src_term)
             if src_collapsed in text:
                 placeholder = f"XGLO{i:03d}X"
@@ -484,8 +503,8 @@ class TranslationService:
         # Walks character-by-character; for each CJK run not already replaced,
         # compares pinyin against every glossary term of matching length.
         # e.g. 金山沼 / 金山找 / 金山照 all yield "jin shan zhao" and hit the same entry.
-        if self._phonetic_index:
-            term_lengths = sorted(set(v[2] for v in self._phonetic_index.values()), reverse=True)
+        if _phonetic_index:
+            term_lengths = sorted(set(v[2] for v in _phonetic_index.values()), reverse=True)
             chars = list(text)
             replaced_spans = []
 
@@ -510,8 +529,8 @@ class TranslationService:
                     if _in_span(pos, pos + tlen):
                         continue
                     key = _cjk_pinyin(span)
-                    if key and key in self._phonetic_index:
-                        canonical_src, tgt_term, _ = self._phonetic_index[key]
+                    if key and key in _phonetic_index:
+                        canonical_src, tgt_term, _ = _phonetic_index[key]
                         if span != canonical_src:
                             placeholder = f"XFUZ{phon_idx:03d}X"
                             phon_idx += 1
@@ -729,14 +748,44 @@ class TranslationService:
         localized_aliases: Optional[Dict[str, str]] = None,
         job_id: Optional[str] = None,
     ) -> List[Dict]:
+        # Request-scoped state is seeded into _translate_ctx so concurrent
+        # jobs can't overwrite each other's rulebook/glossary data on the
+        # shared service instance.
+        _ctx_token = _translate_ctx.set({})
+        try:
+            return await self._translate_segments(
+                segments, source_language, target_language,
+                character_profiles=character_profiles,
+                velma_context=velma_context,
+                dubbing_style=dubbing_style,
+                localized_aliases=localized_aliases,
+                job_id=job_id,
+            )
+        finally:
+            _translate_ctx.reset(_ctx_token)
+
+    async def _translate_segments(
+        self,
+        segments: List[Dict],
+        source_language: str,
+        target_language: str,
+        character_profiles: Optional[List[Dict]] = None,
+        velma_context: Optional[Dict] = None,
+        dubbing_style: Optional[str] = None,
+        localized_aliases: Optional[Dict[str, str]] = None,
+        job_id: Optional[str] = None,
+    ) -> List[Dict]:
+        _ctx = _tctx()
         # Load the glossary for the incoming source language so every downstream
         # call to _apply_glossary_pre/_post uses the correct language-specific terms.
-        self._glossary_sorted = sorted(
-            get_glossary(source_language).items(), key=lambda kv: len(kv[0]), reverse=True
+        _glossary = get_glossary(source_language)
+        _ctx["glossary_sorted"] = sorted(
+            _glossary.items(), key=lambda kv: len(kv[0]), reverse=True
         )
+        _ctx["phonetic_index"] = build_phonetic_index(_glossary)
         logger.info(
             f"[TRANSLATE] Loaded glossary for source_language='{source_language}' "
-            f"({len(self._glossary_sorted)} entries)"
+            f"({len(_ctx['glossary_sorted'])} entries)"
         )
 
         # ── Rulebook (Feature B) — the director's standing decisions resolve
@@ -745,13 +794,13 @@ class TranslationService:
         # every job and every source language. Individual rules may carry a
         # conditions.languages scope (e.g. the Cantonese/Mandarin section),
         # which resolve_rules filters against source_norm.
-        self._rulebook_directives: List[str] = []
-        self._rulebook_fixes: Dict[str, str] = {}
+        _ctx["rulebook_directives"] = []
+        _ctx["rulebook_fixes"] = {}
         _src_lower = (source_language or "").lower().strip()
         # The empty-source integrity guard below stays CJK-scoped — its
         # failure mode (LLM fabricating lines from punctuation scraps) is
         # specific to the Cantonese/Mandarin pipeline.
-        self._cjk_source = _src_lower in {
+        _ctx["cjk_source"] = _src_lower in {
             "yue", "zh-yue", "zh-hk", "yue-hk", "zh", "cmn", "zho",
             "zh-cn", "zh-tw", "zh-hans", "zh-hant", "zh-sg",
         }
@@ -775,8 +824,8 @@ class TranslationService:
                     character_profiles = merge_character_profiles(
                         character_profiles, _rb["character_profiles"]
                     )
-                self._rulebook_directives = _rb["stance_directives"]
-                self._rulebook_fixes = _rb["translation_fixes"]
+                _ctx["rulebook_directives"] = _rb["stance_directives"]
+                _ctx["rulebook_fixes"] = _rb["translation_fixes"]
                 if _rb["applied_rule_ids"]:
                     logger.info(
                         f"[RULEBOOK] {job_id}: {len(_rb['applied_rule_ids'])} rule(s) active — "
@@ -792,7 +841,7 @@ class TranslationService:
         # character profiles may too. This is what lets the translator know a
         # line is Mrs. Ip's (dismissive, protective) rather than a generic
         # utterance — fixing classes like sarcasm-read-as-invitation.
-        self._speaker_personas: Dict[str, Dict] = {
+        _ctx["speaker_personas"] = {
             str(cp.get("speaker") or "").strip(): cp
             for cp in (character_profiles or [])
             if isinstance(cp, dict) and cp.get("speaker")
@@ -975,14 +1024,15 @@ class TranslationService:
         Exact-source-match overrides only (see rulebook.apply_translation_fixes);
         partial matches are already covered by the prompt hint. No-ops when the
         job has no rulebook — _rulebook_fixes defaults to {}."""
-        fixes = getattr(self, "_rulebook_fixes", None)
+        _tc = _tctx()
+        fixes = _tc.get("rulebook_fixes", getattr(self, "_rulebook_fixes", None))
         if fixes and segments:
             from app.services.rulebook import apply_translation_fixes
             apply_translation_fixes(segments, fixes)
         # Source-integrity guard is Cantonese/Mandarin-only — its failure mode
         # (LLM fabricating a line from punctuation-only CJK scraps) is specific
         # to this pipeline.
-        if getattr(self, "_cjk_source", False):
+        if _tc.get("cjk_source", getattr(self, "_cjk_source", False)):
             self._enforce_source_integrity(segments)
 
     @staticmethod
@@ -1028,7 +1078,9 @@ class TranslationService:
         Personas resolve through the speaker field — character_profiles and
         rulebook persona rules both carry it. Empty string when the segment's
         speaker has no profile, so unmapped speakers cost nothing."""
-        cp = getattr(self, "_speaker_personas", {}).get(seg.get("speaker") or "")
+        cp = _tctx().get(
+            "speaker_personas", getattr(self, "_speaker_personas", {})
+        ).get(seg.get("speaker") or "")
         if not cp:
             return ""
         name = cp.get("name") or seg.get("speaker", "")
@@ -1239,9 +1291,12 @@ class TranslationService:
         # Rulebook — the director's standing rules (stance directives +
         # exact-match translation overrides). Resolved in translate_segments.
         _rb_prompt = ""
-        if getattr(self, "_rulebook_directives", None) or getattr(self, "_rulebook_fixes", None):
+        _tc = _tctx()
+        _rb_dirs = _tc.get("rulebook_directives", getattr(self, "_rulebook_directives", None))
+        _rb_fx = _tc.get("rulebook_fixes", getattr(self, "_rulebook_fixes", None))
+        if _rb_dirs or _rb_fx:
             from app.services.rulebook import build_rulebook_prompt
-            _rb_prompt = build_rulebook_prompt(self._rulebook_directives, self._rulebook_fixes)
+            _rb_prompt = build_rulebook_prompt(_rb_dirs or [], _rb_fx or {})
         if _rb_prompt:
             system_prompt_parts.append("")
             system_prompt_parts.append(_rb_prompt)
@@ -1470,7 +1525,19 @@ class TranslationService:
                             f"[TRANSLATE-ZIP-FALLBACK] seg {i} individual Claude call "
                             f"also failed — keeping original text untranslated"
                         )
-                        result.append({**seg, "original_text": seg.get("text", ""), "text": seg.get("text", "")})
+                        _failed_seg = {
+                            **seg,
+                            "original_text": seg.get("text", ""),
+                            "text": seg.get("text", ""),
+                            "translation_flagged": True,
+                            "flag_reason": "provider_failed",
+                        }
+                        _failed_seg.setdefault("qc_findings", []).append({
+                            "code": "provider_failed",
+                            "reason": "Claude single-segment call failed; source "
+                                      "text kept untranslated — needs human review.",
+                        })
+                        result.append(_failed_seg)
                     else:
                         result.extend(single)
                 return result
@@ -1534,6 +1601,19 @@ class TranslationService:
                             )
                     except Exception as retry_e:
                         logger.error(f"[TRANSLATE] Retry seg {i} failed: {retry_e}")
+
+            # Segments still carrying untranslated CJK after the retry pass go
+            # to TTS as spoken source language — flag them for human review
+            # rather than letting them ship silently.
+            for i in retry_indices:
+                if _cjk_re.search(result[i].get("text", "")):
+                    result[i]["translation_flagged"] = True
+                    result[i]["flag_reason"] = "untranslated_source"
+                    result[i].setdefault("qc_findings", []).append({
+                        "code": "untranslated_source",
+                        "reason": "Still contains source-language CJK after "
+                                  "individual retry — needs human review.",
+                    })
 
             ratio = changed / max(1, len(segments))
             logger.info(
@@ -1823,6 +1903,7 @@ class TranslationService:
                 translate_indices.append(i)
                 translate_texts.append(p)
 
+        _batch_failed = False
         try:
             from deep_translator import GoogleTranslator
 
@@ -1856,9 +1937,11 @@ class TranslationService:
         except ImportError:
             logger.warning("[TRANSLATE] deep_translator not installed — skipping translation")
             translated_batch = translate_texts
+            _batch_failed = True
         except Exception as e:
             logger.error(f"[TRANSLATE] Batch translation failed: {e} — returning original text")
             translated_batch = translate_texts
+            _batch_failed = True
 
         # Merge translate_batch results back with pre_resolved glossary-only segments
         translated_map: Dict[int, str] = {}
@@ -1879,7 +1962,16 @@ class TranslationService:
                 for _w in _v_warns: logger.warning("[VERIFY] seg %d: %s", i, _w)
                 if raw_translated.strip() != protected[i].strip():
                     changed_count += 1
-                result.append({**seg, "original_text": seg.get("text", ""), "text": final})
+                seg_out = {**seg, "original_text": seg.get("text", ""), "text": final}
+                if _batch_failed:
+                    seg_out["translation_flagged"] = True
+                    seg_out["flag_reason"] = "provider_failed"
+                    seg_out.setdefault("qc_findings", []).append({
+                        "code": "provider_failed",
+                        "reason": "Translation provider failed; source text kept "
+                                  "untranslated — needs human review.",
+                    })
+                result.append(seg_out)
 
         change_ratio = changed_count / max(1, len(segments))
         if change_ratio < 0.2:

@@ -34,7 +34,7 @@ class LipSyncService:
         video_path: str,
         audio_path: str,
         output_path: str,
-        access_token: str = "",
+        media_qs: str = "",
         video_url: str = "",
         audio_url: str = "",
     ) -> dict:
@@ -56,17 +56,18 @@ class LipSyncService:
             return _skipped
 
         audio_filename = Path(audio_path).name if audio_path else ""
-        # Media routes require _dep_job_access; vendors can't send headers, so
-        # the JWT travels as access_token — the same pattern the <video> tag uses.
-        # Scoped (per-range) calls pass ready-made URLs for cut subclips.
-        qs = f"?access_token={access_token}" if access_token else ""
+        # Media routes require auth; vendors can't send headers, so the
+        # credential travels as a scoped ?media_token= minted by the caller —
+        # job-scoped and expiring, unlike the user's JWT. Scoped (per-range)
+        # calls pass ready-made URLs for cut subclips.
+        qs = media_qs
         video_url = video_url or f"{self.public_base_url}/api/media/{job_id}/video{qs}"
         audio_url = audio_url or f"{self.public_base_url}/api/media/{job_id}/audio/{audio_filename}{qs}"
 
-        # Never log the credential-bearing URL — the JWT in ?access_token=
-        # would let anyone with log access impersonate the user until expiry.
-        logger.info(f"[LIPSYNC] Job {job_id}: videoUrl={video_url.split('?')[0]}{' (+token)' if access_token else ''}")
-        logger.info(f"[LIPSYNC] Job {job_id}: audioUrl={audio_url.split('?')[0]}{' (+token)' if access_token else ''}")
+        # Never log the credential-bearing URL — even a scoped token would
+        # let anyone with log access fetch this job's media until expiry.
+        logger.info(f"[LIPSYNC] Job {job_id}: videoUrl={video_url.split('?')[0]}{' (+token)' if qs else ''}")
+        logger.info(f"[LIPSYNC] Job {job_id}: audioUrl={audio_url.split('?')[0]}{' (+token)' if qs else ''}")
 
         submitted = False
         try:

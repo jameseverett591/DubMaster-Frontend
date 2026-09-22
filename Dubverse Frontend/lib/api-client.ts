@@ -867,7 +867,13 @@ class DubVerseAPIClient {
     })
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }))
-      throw new Error(error.detail || `Failed to start dubbing: ${response.statusText}`)
+      // detail may be a structured object — the 402 quota response carries
+      // {code, message, shortfall_cents, balance} — so surface its message,
+      // not "[object Object]".
+      const detail = typeof error.detail === 'object' && error.detail !== null
+        ? (error.detail.message ?? JSON.stringify(error.detail))
+        : error.detail
+      throw new Error(detail || `Failed to start dubbing: ${response.statusText}`)
     }
     return response.json()
   }
@@ -910,7 +916,10 @@ class DubVerseAPIClient {
     })
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }))
-      throw new Error(error.detail || `Render failed: ${response.statusText}`)
+      const detail = typeof error.detail === 'object' && error.detail !== null
+        ? (error.detail.message ?? JSON.stringify(error.detail))
+        : error.detail
+      throw new Error(detail || `Render failed: ${response.statusText}`)
     }
     return response.json()
   }

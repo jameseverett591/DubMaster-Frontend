@@ -13,6 +13,7 @@ import asyncio
 import torchaudio
 import re
 import hashlib
+import hmac
 import traceback
 import subprocess
 import tempfile
@@ -356,9 +357,10 @@ def _caller(request: Request) -> str:
     <audio src>, which cannot carry custom headers, so a header-only rule would
     force those endpoints to stay public. Same verification either way.
 
-    Tokens in query strings do land in access logs and browser history. The
-    durable fix is short-lived signed media URLs; this is the step that closes
-    the hole without breaking playback.
+    Tokens in query strings do land in access logs and browser history, so
+    vendor-facing URLs never carry this JWT — they get the scoped media_token
+    minted by _vendor_media_qs instead. This param remains for the browser's
+    own <video>/<audio> elements.
     """
     token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
     if not token:
@@ -428,6 +430,67 @@ async def _dep_admin(request: Request) -> str:
 
 async def _dep_internal(request: Request) -> None:
     _require_internal(request)
+
+
+# --- Scoped media tokens ----------------------------------------------------
+# Vendor callbacks (Sync Labs, VideoTranscriber, Deepgram) can't send auth
+# headers, and handing them the caller's JWT means a leaked vendor log entry
+# replays against EVERY endpoint until expiry. Instead vendors get an
+# HMAC-signed token scoped to one job's media routes, valid ~12h.
+
+_MEDIA_TOKEN_TTL_SECONDS = 12 * 3600
+
+
+def _media_token_secret() -> str:
+    return os.environ.get("MEDIA_TOKEN_SECRET") or os.environ.get("INTERNAL_API_SECRET", "")
+
+
+def _mint_media_token(job_id: str) -> str:
+    exp = int(time.time()) + _MEDIA_TOKEN_TTL_SECONDS
+    sig = hmac.new(
+        _media_token_secret().encode(), f"{job_id}:{exp}".encode(), hashlib.sha256
+    ).hexdigest()[:32]
+    return f"{exp}.{sig}"
+
+
+def _media_token_valid(job_id: str, token: str) -> bool:
+    secret = _media_token_secret()
+    if not secret or not token:
+        return False
+    try:
+        exp_s, sig = token.split(".", 1)
+        if int(exp_s) < int(time.time()):
+            return False
+    except (ValueError, AttributeError):
+        return False
+    expected = hmac.new(
+        secret.encode(), f"{job_id}:{exp_s}".encode(), hashlib.sha256
+    ).hexdigest()[:32]
+    return hmac.compare_digest(expected, sig)
+
+
+def _vendor_media_qs(job_id: str, access_token: str = "") -> str:
+    """Credential query-string for URLs handed to vendors. Prefers the scoped
+    media token; falls back to the JWT only when no signing secret is
+    configured (dev environments without INTERNAL_API_SECRET)."""
+    if _media_token_secret():
+        return f"?media_token={_mint_media_token(job_id)}"
+    return f"?access_token={access_token}" if access_token else ""
+
+
+async def _dep_media_access(job_id: str, request: Request):
+    """Media-serving guard: the job owner's JWT, or a scoped vendor media
+    token (?media_token=). The token only ever unlocks media bytes for the
+    one job it was minted for — never mutating routes, never other jobs."""
+    mt = request.query_params.get("media_token", "")
+    if mt:
+        if not _media_token_valid(job_id, mt):
+            raise HTTPException(status_code=401, detail="Invalid or expired media token")
+        job = await _get_or_rehydrate_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return job
+    return await _require_job(job_id, _caller(request))
 
 
 
@@ -4711,20 +4774,26 @@ async def put_lipsync_selection(job_id: str, request: Request):
         raise HTTPException(status_code=422, detail="segment_ids must be a list")
     path = _lipsync_selection_path(job_id)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    prev_sel = set(_load_lipsync_selection(job_id))
+    new_sel = {str(i) for i in ids[:2000]}
     atomic_write_json(path, {
-        "segment_ids": [str(i) for i in ids][:2000],
+        "segment_ids": sorted(new_sel),
         "updated_at": datetime.utcnow().isoformat() + "Z",
     })
-    # A selection change alters what the next film contains, so it gets the
-    # same last_edit_at stamp as any other edit — the export staleness guard
-    # then refuses a pre-selection render without a paid rebuild.
+    # Stamp the render stale only when the new selection exceeds what the paid
+    # render synced. Pure removals are export-legal — the extra synced spans
+    # were paid for and stay in the picture (see the subset check in the export
+    # gate) — so stamping them would invalidate a still-current film and force
+    # an unnecessary paid rebuild.
     try:
         _sp = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
         if os.path.exists(_sp):
             with open(_sp, "r", encoding="utf-8") as _f:
                 _data = _json.load(_f) or {}
-            stamp_job_edited(_data)   # mutates the dict
-            atomic_write_json(_sp, _data)
+            _synced = set(_data.get("lipsync_synced_selection") or [])
+            if new_sel != prev_sel and not new_sel.issubset(_synced):
+                stamp_job_edited(_data)   # mutates the dict
+                atomic_write_json(_sp, _data)
     except Exception as _e:
         logger.warning(f"Job {job_id}: lip-sync selection stamp failed: {_e}")
     return {"status": "ok", "count": len(ids)}
@@ -4774,8 +4843,10 @@ def _lipsync_selected_ranges(job_id: str, segments: list) -> list:
         keys = {str(s.get("id")), str(s.get("segment_id")), str(s.get("transcript_index"))}
         if not (keys & selected):
             continue
-        st = s.get("committed_start_time") or s.get("start_time") or s.get("start") or 0
-        en = s.get("committed_end_time") or s.get("end_time") or s.get("end") or 0
+        # `or` would skip a legitimately committed 0.0 and fall through to a
+        # stale pre-drag start/end — None-check each field explicitly.
+        st = _first_time(s.get("committed_start_time"), s.get("start_time"), s.get("start"))
+        en = _first_time(s.get("committed_end_time"), s.get("end_time"), s.get("end"))
         try:
             st, en = float(st), float(en)
         except (TypeError, ValueError):
@@ -4804,8 +4875,8 @@ async def _run_lipsync_postpass(
 
     Provider comes from LIPSYNC_PROVIDER ("synclabs" | "none"). The
     vendor pulls the ORIGINAL video + the merged dubbed_audio.wav through the
-    public media URLs — the JWT travels as ?access_token= because vendors can't
-    send headers (same pattern the <video> tag uses). Returns a result dict
+    public media URLs — they carry a scoped ?media_token= (vendors can't send
+    headers), never the caller's JWT. Returns a result dict
     when a pass was attempted/gated, None when skipped. Failure keeps the
     dubbed-only video.
 
@@ -4879,16 +4950,16 @@ async def _run_lipsync_postpass(
         progress=85,
         current_stage=f"Syncing lips to dubbed audio ({_lip_provider})",
     )
-    _qs = f"?access_token={access_token}" if access_token else ""
-    video_url = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/media/{job_id}/video{_qs}"
-    audio_url = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/media/{job_id}/audio/{os.path.basename(audio_path)}{_qs}"
+    # Vendor URLs carry a scoped media token, not the user's JWT — a leaked
+    # vendor log entry can then only read this job's media, briefly.
+    _media_qs = _vendor_media_qs(job_id, access_token)
 
     if ranges:
         # Scoped sync: one vendor job per merged range on cut subclips, then
         # splice each result back into the rendered film at the same offset.
         lipres = await _run_lipsync_ranges(
             job_id, dubbed_output_path, video_path, audio_path,
-            ranges, access_token, _lip_provider,
+            ranges, _media_qs, _lip_provider,
         )
     else:
         lipres = await lipsync_service.lipsync_video(
@@ -4896,7 +4967,7 @@ async def _run_lipsync_postpass(
             video_path=video_path,      # original video for clean faces
             audio_path=audio_path,       # merged dubbed audio
             output_path=dubbed_output_path,  # overwrites dubbed video in-place
-            access_token=access_token,
+            media_qs=_media_qs,
         )
     lipsync_ok = bool(lipres.get("output_path"))
     attempted = bool(lipres.get("vendor_attempted"))
@@ -5066,7 +5137,7 @@ async def _run_lipsync_ranges(
     video_path: str,
     audio_path: str,
     ranges: list,
-    access_token: str,
+    media_qs: str,
     provider: str,
 ) -> dict:
     """Scoped lip-sync: cut each selected span, send it to the vendor as its
@@ -5077,7 +5148,7 @@ async def _run_lipsync_ranges(
     job_dir = os.path.join(settings.DUBBED_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
     base = settings.PUBLIC_BASE_URL.rstrip("/")
-    qs = f"?access_token={access_token}" if access_token else ""
+    qs = media_qs
 
     good_idx = []
     attempted = False
@@ -5095,7 +5166,7 @@ async def _run_lipsync_ranges(
         a_url = f"{base}/api/media/{job_id}/lip_in_{i}.wav{qs}"
         res = await lipsync_service.lipsync_video(
             job_id=job_id, video_path="", audio_path="",
-            output_path=out_i, access_token=access_token,
+            output_path=out_i, media_qs=qs,
             video_url=v_url, audio_url=a_url,
         )
         attempted = attempted or bool(res.get("vendor_attempted"))
@@ -5146,6 +5217,7 @@ async def process_dubbing_pipeline(
     access_token: str = "",
     lipsync: bool = False,
     user_id: str = "",
+    render_charge: bool = False,
 ):
     try:
         if source_lang != target_lang:
@@ -5219,6 +5291,8 @@ async def process_dubbing_pipeline(
             except Exception as _qc_err:
                 logger.warning(f"Job {job_id}: QC auto-trigger skipped: {_qc_err}")
         else:
+            if render_charge and user_id:
+                await _unmeter_render(job_id, user_id)
             await job_manager.update_job_status(
                 job_id,
                 JobStatus.FAILED,
@@ -5226,6 +5300,8 @@ async def process_dubbing_pipeline(
             )
     except Exception as e:
         logger.error(f"Error dubbing job {job_id}: {e}")
+        if render_charge and user_id:
+            await _unmeter_render(job_id, user_id)
         await job_manager.update_job_status(
             job_id,
             JobStatus.FAILED,
@@ -5278,7 +5354,8 @@ async def dub_video(request: DubRequest, http_request: Request, background_tasks
     # job_id is in the body, so the _dep_job_access guard cannot reach it.
     # Without this, /transcribe-video -> /dub is a complete unauthenticated,
     # unmetered dubbing pipeline.
-    await _require_job(request.job_id, _caller(http_request))
+    _dub_uid = _caller(http_request)
+    await _require_job(request.job_id, _dub_uid)
 
     job = await _get_or_rehydrate_job(request.job_id)
 
@@ -5372,6 +5449,14 @@ async def dub_video(request: DubRequest, http_request: Request, background_tasks
         else job.localized_aliases
     )
 
+    # Rendering is the billable action — upload, transcribe, translate and
+    # edit stay free; you only pay to render. Same gate as /dub/remix: the
+    # first render debits, re-renders are free, 402 carries the shortfall.
+    # Debiting here (before the background task) is what makes two racing
+    # clicks a single charge — and metering before the status flip means a
+    # 402 doesn't leave the job stuck on "Starting dubbing pipeline".
+    _charge = await _meter_render(request.job_id, _dub_uid)
+
     await job_manager.update_job_status(
         request.job_id,
         JobStatus.PROCESSING,
@@ -5394,6 +5479,8 @@ async def dub_video(request: DubRequest, http_request: Request, background_tasks
         character_profiles=request.character_profiles or job.character_profiles,
         dubbing_style=job.dubbing_style,
         localized_aliases=job.localized_aliases,
+        user_id=_dub_uid,
+        render_charge=bool(_charge),
     )
 
     return DubResponse(
@@ -5631,6 +5718,12 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
         else job.localized_aliases
     )
 
+    # Rendering is the billable action — same gate as /dub and /dub/remix.
+    # Without it this route produced an exportable dubbed_<lang>.mp4 for free.
+    # Meter BEFORE flipping the job to SYNTHESIZING so a 402 doesn't leave the
+    # status stuck on "Generating dubbed audio".
+    _charge = await _meter_render(request.job_id, _uid)
+
     await job_manager.update_job_status(
         request.job_id,
         JobStatus.SYNTHESIZING,
@@ -5660,6 +5753,7 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
         access_token=_access_token,
         lipsync=bool(getattr(request, "lipsync", False)),
         user_id=_uid,
+        render_charge=bool(_charge),
     )
 
     return DubResponse(
@@ -5711,7 +5805,7 @@ async def serve_project_thumbnail(project_id: str):
     return FileResponse(thumb_path, media_type="image/jpeg")
 
 
-@router.get("/media/{job_id}/video", dependencies=[Depends(_dep_job_access)])
+@router.get("/media/{job_id}/video", dependencies=[Depends(_dep_media_access)])
 async def serve_job_video(job_id: str, request: Request):
     """Serve the original uploaded video so Sync.Labs can fetch it by URL."""
     job = await _get_or_rehydrate_job(job_id)
@@ -5753,6 +5847,15 @@ _NO_STORE_HEADERS = {
 }
 
 
+def _first_time(*vals):
+    """First non-None value, else 0 — `or` would skip a legitimately committed
+    0.0 (a segment dragged to time zero) and fall through to a stale value."""
+    for v in vals:
+        if v is not None:
+            return v
+    return 0
+
+
 # HTTP Range support for media. FileResponse answers every request with a full
 # 200 body, but the <video> element always asks in byte ranges — so a seek to an
 # unbuffered region meant the browser abandoned its fetch and restarted the
@@ -5769,11 +5872,21 @@ def _range_media_response(request: Request, path: str, media_type: str, extra_he
         return FileResponse(path, media_type=media_type, headers=headers)
     try:
         units, rng = range_header.split("=", 1)
-        if units.strip() != "bytes":
+        if units.strip() != "bytes" or "," in rng:
             raise ValueError
         start_s, _, end_s = rng.partition("-")
-        start = int(start_s) if start_s.strip() else 0
-        end = int(end_s) if end_s.strip() else file_size - 1
+        if start_s.strip():
+            start = int(start_s)
+            end = int(end_s) if end_s.strip() else file_size - 1
+        else:
+            # Suffix range (RFC 7233 §2.1): bytes=-N means the LAST N bytes.
+            # Without this branch "-500" parsed as 0-500 — the file's head —
+            # and moov-atom tail probes fetched the wrong end entirely.
+            suffix_len = int(end_s)
+            if suffix_len <= 0:
+                raise ValueError
+            start = max(0, file_size - suffix_len)
+            end = file_size - 1
         start = max(0, start)
         end = min(file_size - 1, end)
         if start > end:
@@ -5863,7 +5976,7 @@ async def _ensure_faststart(path: str) -> str:
 _scrub_proxy_locks: Dict[str, asyncio.Lock] = {}
 
 
-@router.get("/media/{job_id}/scrub-proxy", dependencies=[Depends(_dep_job_access)])
+@router.get("/media/{job_id}/scrub-proxy", dependencies=[Depends(_dep_media_access)])
 async def serve_scrub_proxy(job_id: str, background_tasks: BackgroundTasks, request: Request):
     """Serve the all-keyframe scrub proxy.
 
@@ -5919,7 +6032,7 @@ async def serve_scrub_proxy(job_id: str, background_tasks: BackgroundTasks, requ
     return Response(status_code=202)
 
 
-@router.get("/media/{job_id}/audio/{filename}", dependencies=[Depends(_dep_job_access)])
+@router.get("/media/{job_id}/audio/{filename}", dependencies=[Depends(_dep_media_access)])
 async def serve_job_audio(job_id: str, filename: str):
     """Serve a dubbed audio file so Sync.Labs can fetch it by URL."""
     if "/" in filename or "\\" in filename or ".." in filename:
@@ -5933,7 +6046,7 @@ async def serve_job_audio(job_id: str, filename: str):
         headers=_NO_STORE_HEADERS)
 
 
-@router.get("/media/{job_id}/separated/{audio_type}", dependencies=[Depends(_dep_job_access)])
+@router.get("/media/{job_id}/separated/{audio_type}", dependencies=[Depends(_dep_media_access)])
 async def get_separated_audio(job_id: str, audio_type: str):
     """Serve a separated audio track (vocals or accompaniment) for waveform rendering."""
     if audio_type not in ("vocals", "accompaniment"):
@@ -5952,7 +6065,7 @@ async def get_separated_audio(job_id: str, audio_type: str):
 WAVEFORM_BUCKETS = 8000
 
 
-@router.get("/media/{job_id}/waveform/{audio_type}", dependencies=[Depends(_dep_job_access)])
+@router.get("/media/{job_id}/waveform/{audio_type}", dependencies=[Depends(_dep_media_access)])
 async def get_waveform_peaks(job_id: str, audio_type: str):
     """Amplitude peaks for a separated stem, for drawing a waveform.
 
@@ -6029,7 +6142,7 @@ async def get_waveform_peaks(job_id: str, audio_type: str):
 
     return JSONResponse(data, headers={"Cache-Control": "public, max-age=3600"})
 
-@router.get("/media/{job_id}/{filename}", dependencies=[Depends(_dep_job_access)])
+@router.get("/media/{job_id}/{filename}", dependencies=[Depends(_dep_media_access)])
 async def serve_job_audio_legacy(job_id: str, filename: str):
     """Backwards-compat: serve segment audio and scene previews from the job dir.
     Resolves stale URLs persisted in client localStorage before the /audio/
@@ -6457,28 +6570,26 @@ class CustomVoiceRequest(BaseModel):
     name: str = ""
 
 
-def _with_sample_location(entry: dict) -> dict:
-    """Attach the stored source clip's absolute path, when one exists on disk.
+def _voice_visible_to(entry: dict, user_id: str) -> bool:
+    """Ownership gate for custom voices.
 
-    Computed at read time rather than persisted — voices cloned before this
-    field existed still get it, and a stale recorded path can never be served.
+    Entries with no user_id predate ownership and stay visible to any
+    authenticated caller — the same accommodation _require_job makes for
+    legacy jobs. Tighten to a hard deny once every entry has an owner.
     """
-    v = dict(entry)
-    ext = v.get("sample_ext")
-    if ext:
-        p = os.path.abspath(_custom_voice_sample_path(v.get("voice_id", ""), ext))
-        if os.path.exists(p):
-            v["sample_path"] = p
-    return v
+    owner = entry.get("user_id")
+    return not owner or owner == user_id
 
 
 @router.get("/voices/custom", dependencies=[Depends(_dep_auth)])
-async def list_custom_voices():
-    return {"voices": [_with_sample_location(v) for v in _load_custom_voices()]}
+async def list_custom_voices(request: Request):
+    caller = _caller(request)
+    return {"voices": [v for v in _load_custom_voices() if _voice_visible_to(v, caller)]}
 
 
 @router.post("/voices/custom", dependencies=[Depends(_dep_auth)])
 async def add_custom_voice(body: CustomVoiceRequest, request: Request):
+    user_id = _caller(request)
     provider = (body.provider or "").lower().strip()
     voice_id = (body.voice_id or "").strip()
     if provider not in ("fish-audio", "elevenlabs"):
@@ -6509,10 +6620,15 @@ async def add_custom_voice(body: CustomVoiceRequest, request: Request):
         "name": name or "Custom Voice",
         "tags": tags,
         "custom": True,
+        "user_id": user_id,
     }
     voices = _load_custom_voices()
-    # Replace any existing entry with the same provider+id, then put newest first.
-    voices = [v for v in voices if not (v.get("voice_id") == voice_id and v.get("provider") == provider)]
+    # Replace any existing entry with the same provider+id owned by this
+    # caller (or a legacy ownerless one), then put newest first. Another
+    # user's entry with the same voice_id is left alone.
+    voices = [v for v in voices if not (
+        v.get("voice_id") == voice_id and v.get("provider") == provider
+        and _voice_visible_to(v, user_id))]
     voices.insert(0, entry)
     _save_custom_voices(voices)
     return entry
@@ -6533,14 +6649,15 @@ def _custom_voice_sample_path(voice_id: str, ext: str) -> str:
 
 
 @router.get("/voices/custom/{voice_id:path}/sample", dependencies=[Depends(_dep_auth)])
-async def get_custom_voice_sample(voice_id: str):
+async def get_custom_voice_sample(voice_id: str, request: Request):
     """Serve the clip a voice was cloned from, so the panel can preview it.
 
     Media route: an <audio> element cannot send an Authorization header, so auth
     travels as access_token like every other media URL.
     """
     entry = next(
-        (v for v in _load_custom_voices() if v.get("voice_id") == voice_id),
+        (v for v in _load_custom_voices()
+         if v.get("voice_id") == voice_id and _voice_visible_to(v, _caller(request))),
         None,
     )
     if not entry:
@@ -6556,27 +6673,42 @@ async def get_custom_voice_sample(voice_id: str):
 
 
 @router.delete("/voices/custom/{voice_id:path}", dependencies=[Depends(_dep_auth)])
-async def delete_custom_voice(voice_id: str, provider: Optional[str] = None):
+async def delete_custom_voice(voice_id: str, request: Request, provider: Optional[str] = None):
+    caller = _caller(request)
     voices = _load_custom_voices()
     before = len(voices)
-    # Remove the stored clip too, or deleting a voice would leak its audio.
-    for v in voices:
-        if v.get("voice_id") == voice_id and v.get("sample_ext"):
+    removed_exts = {
+        v.get("sample_ext") for v in voices
+        if v.get("voice_id") == voice_id
+        and (provider is None or v.get("provider") == provider)
+        and _voice_visible_to(v, caller)
+    }
+    voices = [
+        v for v in voices
+        if not (v.get("voice_id") == voice_id
+                and (provider is None or v.get("provider") == provider)
+                and _voice_visible_to(v, caller))
+    ]
+    # Remove the stored clip too, or deleting a voice would leak its audio —
+    # but only when no surviving entry still references it (another user's
+    # entry can share a voice_id).
+    if removed_exts and not any(
+        v.get("voice_id") == voice_id and v.get("sample_ext") for v in voices
+    ):
+        for ext in removed_exts:
+            if not ext:
+                continue
             try:
-                _p = _custom_voice_sample_path(voice_id, v["sample_ext"])
+                _p = _custom_voice_sample_path(voice_id, ext)
                 if os.path.exists(_p):
                     os.remove(_p)
             except Exception as _e:
                 logger.warning(f"[VOICE-DELETE] could not remove sample for {voice_id}: {_e}")
-    voices = [
-        v for v in voices
-        if not (v.get("voice_id") == voice_id and (provider is None or v.get("provider") == provider))
-    ]
     _save_custom_voices(voices)
     return {"status": "ok", "removed": before - len(voices)}
 
 
-@router.post("/voices/clone")
+@router.post("/voices/clone", dependencies=[Depends(_dep_auth)])
 async def clone_voice(
     request: Request,
     file: UploadFile = File(...),
@@ -6592,6 +6724,7 @@ async def clone_voice(
     if not fish_audio_tts.enabled:
         raise HTTPException(status_code=503, detail="Voice cloning is not available right now")
 
+    user_id = _caller(request)
     audio_bytes = await file.read()
     if not audio_bytes or len(audio_bytes) < 2000:
         raise HTTPException(
@@ -6638,16 +6771,18 @@ async def clone_voice(
         "tags": list(getattr(voice, "tags", None) or []),
         "custom": True,
         "cloned": True,
+        "user_id": user_id,
         # Extension of the stored source clip, or absent for voices cloned before
         # samples were kept — the endpoint 404s for those rather than guessing.
         **({"sample_ext": sample_ext} if sample_ext else {}),
     }
     voices = _load_custom_voices()
-    voices = [v for v in voices if v.get("voice_id") != voice_id]
+    voices = [v for v in voices
+              if not (v.get("voice_id") == voice_id and _voice_visible_to(v, user_id))]
     voices.insert(0, entry)
     _save_custom_voices(voices)
     logger.info(f"[VOICE-CLONE] created '{title}' -> {voice_id}")
-    return _with_sample_location(entry)
+    return entry
 
 
 # ---------------------------------------------------------------------------
@@ -6810,7 +6945,7 @@ async def analyze_lipsync_windows(job_id: str, request: Request):
     if not duration:
         # Fall back to the furthest committed segment end.
         duration = max(
-            (float(s.get("committed_end_time") or s.get("end_time") or s.get("end") or 0) for s in segments),
+            (float(_first_time(s.get("committed_end_time"), s.get("end_time"), s.get("end"))) for s in segments),
             default=0.0,
         )
     if duration <= 0:
@@ -7441,9 +7576,20 @@ async def _meter_render(job_id: str, user_id: str) -> Optional[Dict[str, Any]]:
 
 async def _unmeter_render(job_id: str, user_id: str) -> None:
     """Render failed after the debit: give the seconds back and clear the
-    paid stamp so the next attempt is metered normally."""
+    paid stamp so the next attempt is metered normally.
+
+    If the refund itself fails the stamp must STAY — the debit is still
+    outstanding, and clearing it would let the next render debit again on top
+    of it. Keeping it means the customer can re-render free while the
+    orphaned debit is reconciled manually (refund_quota logs it loudly)."""
     from app.services import quota_service
-    await asyncio.to_thread(quota_service.refund_quota, user_id, job_id)
+    res = await asyncio.to_thread(quota_service.refund_quota, user_id, job_id)
+    if res.get("error"):
+        logger.error(
+            f"Job {job_id}: render refund failed ({res['error']}) — keeping "
+            f"billed_seconds so the retry is not double-charged"
+        )
+        return
     await job_manager.set_billed_seconds(job_id, None)
 
 
@@ -8206,6 +8352,35 @@ async def download_export(job_id: str, filename: str):
 async def get_segments(job_id: str):
     segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
     if not os.path.exists(segments_path):
+        # Caption-import jobs complete with only a transcript — no dub has run,
+        # so segments.json was never written. Serve transcript-shaped rows so
+        # the editor shows the source lines instead of an empty timeline.
+        job = await _get_or_rehydrate_job(job_id)
+        if job and job.transcript and job.transcript.segments:
+            data = {
+                "job_id": job_id,
+                "segments": [
+                    {
+                        "transcript_index": i,
+                        "text": "",
+                        "source_text": s.text,
+                        "speaker": s.speaker or "speaker-1",
+                        "start": s.start,
+                        "end": s.end,
+                        "duration": round((s.end or 0) - (s.start or 0), 3),
+                        "confidence": s.confidence,
+                        "confidence_tier": s.confidence_tier,
+                        "source": s.source,
+                        "translation_flagged": s.translation_flagged,
+                        "flag_reason": s.flag_reason,
+                        "flags": [],
+                        "flag_status": "unreviewed",
+                    }
+                    for i, s in enumerate(job.transcript.segments)
+                ],
+            }
+            data["retention"] = _retention_state(job_id)
+            return data
         raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
     with open(segments_path, "r", encoding="utf-8") as f:
         data = _json.load(f)
@@ -8797,7 +8972,7 @@ async def reset_segment(job_id: str, index: int):
     return {"status": "ok", "job_id": job_id, "index": index}
 
 
-@router.get("/respeecher/voices")
+@router.get("/respeecher/voices", dependencies=[Depends(_dep_auth)])
 async def list_respeecher_voices(request: Request):
     """Respeecher's voice catalogue for the editor panel.
 
@@ -8821,6 +8996,13 @@ async def respeecher_voice_preview(voice_id: str):
     """
     if not respeecher_tts.enabled:
         raise HTTPException(status_code=503, detail="Respeecher is not configured")
+
+    # voice_id:path accepts any string — without a catalogue check each unique
+    # value would trigger a fresh metered Respeecher render, cached forever
+    # under a new hash. Only real voices may preview.
+    await respeecher_tts.get_voices()
+    if not respeecher_tts.has_voice(voice_id):
+        raise HTTPException(status_code=404, detail="Unknown Respeecher voice")
 
     preview_dir = Path("data/respeecher_previews")
     preview_dir.mkdir(parents=True, exist_ok=True)
@@ -9044,7 +9226,7 @@ async def perform_segment(
     return {"status": "ok", "segment": seg}
 
 
-@router.post("/elevenlabs/sts-preview")
+@router.post("/elevenlabs/sts-preview", dependencies=[Depends(_dep_auth)])
 async def elevenlabs_sts_preview(
     request: Request,
     file: UploadFile = File(...),
@@ -9734,23 +9916,42 @@ async def add_rulebook_rule(job_id: str, request: Request):
 
 @router.patch("/jobs/{job_id}/rulebook/{rule_id}", dependencies=[Depends(_dep_job_access)])
 async def update_rulebook_rule(job_id: str, rule_id: str, request: Request):
-    """Update a rule's fields (target, conditions, notes, enabled toggle)."""
+    """Update a rule's fields (target, conditions, notes, enabled toggle).
+    scope=global in the body — or a rule_id that only exists in the caller's
+    global rules — updates the Supabase director_rules row instead of the
+    job's rulebook.json."""
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.removeprefix("Bearer ").strip()
-    verify_jwt(token)
+    user_id = verify_jwt(token)
     body = await request.json()
-    from app.services.rulebook import load_job_rules, save_job_rules
+    from app.services.rulebook import (
+        load_job_rules, save_job_rules, load_global_rules, save_global_rule,
+    )
 
-    rules = load_job_rules(job_id)
-    for rule in rules:
+    def _apply_updates(rule: Dict[str, Any]) -> None:
+        for key in ("target", "source_pattern", "notes", "enabled"):
+            if key in body:
+                rule[key] = body[key]
+        if "conditions" in body and isinstance(body["conditions"], dict):
+            rule["conditions"] = body["conditions"]
+
+    if body.get("scope") != "global":
+        rules = load_job_rules(job_id)
+        for rule in rules:
+            if rule.get("id") == rule_id:
+                _apply_updates(rule)
+                save_job_rules(job_id, rules)
+                return {"status": "ok", "rule": rule}
+        if body.get("scope") == "job":
+            raise HTTPException(status_code=404, detail="Rule not found")
+
+    for rule in load_global_rules(user_id):
         if rule.get("id") == rule_id:
-            for key in ("target", "source_pattern", "notes", "enabled"):
-                if key in body:
-                    rule[key] = body[key]
-            if "conditions" in body and isinstance(body["conditions"], dict):
-                rule["conditions"] = body["conditions"]
-            save_job_rules(job_id, rules)
-            return {"status": "ok", "rule": rule}
+            _apply_updates(rule)
+            saved = save_global_rule(user_id, rule)
+            if saved is None:
+                raise HTTPException(status_code=503, detail="Global rulebook unavailable")
+            return {"status": "ok", "rule": saved}
     raise HTTPException(status_code=404, detail="Rule not found")
 
 
@@ -10062,7 +10263,7 @@ def _vt_video_notes(job_id: str, token: str, preset: str, duration_sec: float = 
     if not state:
         source_url = (
             f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/media/{job_id}/video"
-            f"?access_token={token}"
+            f"{_vendor_media_qs(job_id, token)}"
         )
         created = vt.create_task(job_id, source_url)
         if created.get("status") != "ok":
@@ -10148,7 +10349,7 @@ def _dg_video_notes(job_id: str, token: str, preset: str) -> Optional[dict]:
 
     source_url = (
         f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/media/{job_id}/video"
-        f"?access_token={token}"
+        f"{_vendor_media_qs(job_id, token)}"
     )
     res = summarize_media_url(source_url, job_id=job_id)
     if res.get("status") != "ok":

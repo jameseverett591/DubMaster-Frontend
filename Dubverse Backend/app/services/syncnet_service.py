@@ -306,7 +306,8 @@ def _onset_deltas(segments: List[Dict], w0: float, w1: float, source_energy, fps
         oe = float(seg.get("end_time") or seg.get("end") or o + 1)
         c = seg.get("committed_start_time")
         c = float(c) if c is not None else o
-        ce = float(seg.get("committed_end_time") or oe)
+        _ce = seg.get("committed_end_time")
+        ce = float(_ce) if _ce is not None else oe
         if not (o < w1 and oe > w0) and not (c < w1 and ce > w0):
             continue
         p = _resolve_seg_audio(seg, hints)
@@ -550,10 +551,20 @@ def score_lipsync_audio_range(
             return {**base, "status": "error", "reason": "source audio extraction failed"}
 
     deltas = _onset_deltas(segments, start_s, end_s, source_energy, fps)
+
+    def _seg_time(seg, *keys):
+        # `or` chains would skip a legitimately committed 0.0 and fall through
+        # to a stale pre-drag value — pick the first present field instead.
+        for k in keys:
+            v = seg.get(k)
+            if v is not None:
+                return float(v)
+        return 0.0
+
     total_in_range = sum(
         1 for seg in segments or []
-        if float(seg.get("committed_start_time") or seg.get("start_time") or seg.get("start") or 0) < end_s
-        and float(seg.get("committed_end_time") or seg.get("end_time") or seg.get("end") or 0) > start_s
+        if _seg_time(seg, "committed_start_time", "start_time", "start") < end_s
+        and _seg_time(seg, "committed_end_time", "end_time", "end") > start_s
     )
     if deltas:
         import numpy as np
