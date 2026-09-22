@@ -1601,12 +1601,16 @@ class DubVerseAPIClient {
     numSpeakers?: number,
     targetLanguage?: string,
     signal?: AbortSignal,
+    transcript?: Array<{ text: string; start: number; end: number; speaker?: string }>,
   ): Promise<UploadResponse> {
     await this._ensureToken()
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
       const formData = new FormData()
       formData.append('file', file)
+      if (transcript && transcript.length) {
+        formData.append('transcript', JSON.stringify(transcript))
+      }
       if (sourceLanguage && sourceLanguage !== 'auto') {
         formData.append('source_language', sourceLanguage)
       }
@@ -1652,6 +1656,75 @@ class DubVerseAPIClient {
       }
       xhr.send(formData)
     })
+  }
+
+  /** Probe a YouTube URL — title, duration, thumbnail, caption languages. */
+  async getYouTubeInfo(url: string): Promise<{
+    video_id: string
+    title: string
+    duration: number
+    thumbnail: string
+    uploader: string
+    subtitle_languages: string[]
+    auto_caption_languages: string[]
+  }> {
+    const response = await this._fetch(
+      `${this.baseURL}/api/youtube/info?url=${encodeURIComponent(url)}`)
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `YouTube lookup failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  /** Fetch a video's caption track (no video) as timestamped segments. */
+  async getYouTubeCaptions(url: string, languages?: string[]): Promise<{
+    video_id: string
+    language: string
+    language_code: string
+    is_generated: boolean
+    languages: Array<{
+      language: string
+      language_code: string
+      is_generated: boolean
+      is_translatable: boolean
+    }>
+    segments: Array<{ start: number; end: number; text: string }>
+  }> {
+    const response = await this._fetch(`${this.baseURL}/api/youtube/captions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, languages }),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Caption download failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  /** Download a YouTube video into a new job and start the pipeline. */
+  async importYouTube(
+    url: string,
+    sourceLanguage?: string,
+    targetLanguage?: string,
+    numSpeakers?: number,
+  ): Promise<UploadResponse> {
+    const response = await this._fetch(`${this.baseURL}/api/youtube/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url,
+        source_language: sourceLanguage,
+        target_language: targetLanguage,
+        num_speakers: numSpeakers,
+      }),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Import failed: ${response.statusText}`)
+    }
+    return response.json()
   }
 
 
