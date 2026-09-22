@@ -1,8 +1,15 @@
 # DubMaster Import — browser extension
 
-Adds an **Import to DubMaster** button to YouTube watch pages (next to
-Like/Share) and a toolbar button that works from any YouTube page. Both open
-DubMaster's dashboard on the YouTube tab and start the import automatically.
+Adds **Import** buttons to YouTube in two places:
+
+- **Watch pages** — an "Import to DubMaster" button next to Like/Share
+- **Feeds** (home, channel, search, sidebar) — an "Import" button that
+  appears when you hover any video thumbnail
+
+The toolbar button also works everywhere: on a video it deep-links the
+import, on any other YouTube page it just opens the DubMaster YouTube tab.
+All of them land on `/dashboard?tab=youtube&yt_url=...` and start the
+import automatically.
 
 ## Install (Chrome / Edge — developer mode)
 
