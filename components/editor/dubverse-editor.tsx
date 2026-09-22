@@ -8012,7 +8012,7 @@ export function DubVerseEditor({
     <div
       ref={editorContainerRef}
       tabIndex={0}
-      className="h-screen flex flex-col bg-black text-white outline-none"
+      className="dubverse-editor-scope h-screen flex flex-col bg-black text-white outline-none"
     >
       {/* Deletion countdown — centred, modal-weight, and deliberately hard to
           miss. Unrendered work is deleted after its window closes, and losing a
