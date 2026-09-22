@@ -887,33 +887,37 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                 </CardContent>
               </Card>
 
-              {/* Direct URL import — anything else the user has the rights to */}
-              <Card className="backdrop-blur-md bg-card/50 border-border/50">
-                <CardHeader>
-                  <CardTitle>{t('Import by URL')}</CardTitle>
-                  <CardDescription>{t('Paste a video URL — your own, public domain, or one you have permission to use')}</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <div className="flex gap-3">
-                    <Input
-                      placeholder="https://www.youtube.com/watch?v=..."
-                      value={youtubeUrl}
-                      onChange={(e) => setYoutubeUrl(e.target.value)}
-                      className="flex-1"
-                    />
-                    <Button
-                      variant="outline"
-                      disabled={isImporting || !youtubeUrl.trim()}
-                      onClick={() => handleImportVideo(youtubeUrl)}
-                    >
-                      {isImporting
-                        ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        : <Import className="mr-2 h-4 w-4" />}
-                      {t('Import')}
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
+              {/* Direct URL import — pinned to the bottom so it stays
+                  reachable while scrolling the channel grid or pasting a
+                  URL copied from YouTube. */}
+              <div className="sticky bottom-4 z-10">
+                <Card className="backdrop-blur-xl bg-card/90 border-border/50 shadow-lg">
+                  <CardContent className="pt-4 pb-4">
+                    <p className="mb-2 text-xs text-muted-foreground">
+                      {t('Paste a video URL — your own, public domain, or one you have permission to use')}
+                    </p>
+                    <div className="flex gap-3">
+                      <Input
+                        placeholder="https://www.youtube.com/watch?v=..."
+                        value={youtubeUrl}
+                        onChange={(e) => setYoutubeUrl(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && youtubeUrl.trim() && !isImporting && handleImportVideo(youtubeUrl)}
+                        className="flex-1"
+                      />
+                      <Button
+                        variant="outline"
+                        disabled={isImporting || !youtubeUrl.trim()}
+                        onClick={() => handleImportVideo(youtubeUrl)}
+                      >
+                        {isImporting
+                          ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          : <Import className="mr-2 h-4 w-4" />}
+                        {t('Import')}
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
             </div>
           )}
         </TabsContent>
