@@ -2,7 +2,7 @@
 
 import React from "react"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -35,6 +35,8 @@ import { useT } from '@/lib/use-t'
 
 interface YouTubeIntegrationProps {
   onVideoSelect: (video: VideoSource) => void
+  /** Deep-linked YouTube URL (extension/bookmarklet: ?yt_url=...). Imported once on mount. */
+  initialImportUrl?: string
 }
 
 type ChannelVideo = {
@@ -112,7 +114,7 @@ function loadGis(): Promise<void> {
   })
 }
 
-export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
+export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeIntegrationProps) {
   const t = useT()
   const [youtubeUrl, setYoutubeUrl] = useState("")
   const [activeMode, setActiveMode] = useState("captions")
@@ -313,6 +315,22 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
       setImportingVideoId(null)
     }
   }
+
+  // Extension/bookmarklet deep-link: ?yt_url=... prefills the field and
+  // starts the import immediately, then the param is stripped so a refresh
+  // doesn't re-import the same video.
+  const deepLinkConsumed = useRef(false)
+  useEffect(() => {
+    if (!initialImportUrl || deepLinkConsumed.current) return
+    deepLinkConsumed.current = true
+    setYoutubeUrl(initialImportUrl)
+    handleImportVideo(initialImportUrl)
+    const params = new URLSearchParams(window.location.search)
+    params.delete('yt_url')
+    const qs = params.toString()
+    window.history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : ''))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialImportUrl])
 
   // ── Transcript download helpers ──────────────────────────────────────────
 

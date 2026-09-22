@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "DubMaster Import",
+  "version": "0.1.0",
+  "description": "Send the YouTube video you're watching to DubMaster Studio.",
+  "permissions": ["tabs"],
+  "host_permissions": ["*://*.youtube.com/*"],
+  "action": {
+    "default_title": "Import this video to DubMaster"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
