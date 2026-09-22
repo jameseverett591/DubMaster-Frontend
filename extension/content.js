@@ -108,29 +108,29 @@ function injectThumbStyles() {
   document.head.appendChild(style);
 }
 
-// Thumbnail containers across YouTube layouts (home feed, search results,
-// channel pages, watch-sidebar recommendations).
-const THUMB_SELECTORS = [
-  "ytd-rich-item-renderer",
-  "ytd-video-renderer",
-  "ytd-grid-video-renderer",
-  "ytd-compact-video-renderer",
-  "yt-lockup-view-model",
+// Thumbnail anchors across YouTube layouts (home feed, search results,
+// channel pages, watch-sidebar recommendations). Class names change, so
+// we key off the link target instead: any anchor pointing at /watch or
+// /shorts inside a thumbnail container.
+const ANCHOR_SELECTORS = [
+  "ytd-thumbnail a#thumbnail",
+  "a#thumbnail[href*='/watch']",
+  "yt-lockup-view-model a[href*='/watch']",
+  "yt-lockup-view-model a[href*='/shorts']",
 ].join(",");
 
-function injectThumbButton(container) {
-  if (container.dataset.dubmasterThumb) return;
-  container.dataset.dubmasterThumb = "1";
+function injectThumbButton(anchor) {
+  if (anchor.dataset.dubmasterThumb) return;
+  anchor.dataset.dubmasterThumb = "1";
+  if (!/[?&]v=|\/shorts\//.test(anchor.href)) return;
 
-  const anchor = container.querySelector("a#thumbnail, a.yt-lockup-view-model__content-image");
-  if (!anchor || !anchor.href || !/[?&]v=|\/shorts\//.test(anchor.href)) return;
-
-  const host = anchor.closest("ytd-thumbnail") || anchor;
+  const host = anchor.closest("ytd-thumbnail") ||
+               anchor.closest(".yt-lockup-view-model__content-image") ||
+               anchor;
+  if (host.querySelector("." + THUMB_BTN_CLASS)) return;
   if (getComputedStyle(host).position === "static") {
     host.style.position = "relative";
   }
-  const hostEl = host;
-  if (hostEl.querySelector("." + THUMB_BTN_CLASS)) return;
 
   const btn = document.createElement("button");
   btn.className = THUMB_BTN_CLASS;
@@ -141,15 +141,20 @@ function injectThumbButton(container) {
     e.stopPropagation();
     openInDubMaster(anchor.href);
   });
-  hostEl.appendChild(btn);
+  host.appendChild(btn);
 }
 
 function scanThumbnails(root) {
   const scope = root instanceof Element ? root : document;
-  if (scope.matches && scope.matches(THUMB_SELECTORS)) injectThumbButton(scope);
-  for (const el of scope.querySelectorAll(THUMB_SELECTORS)) {
+  if (scope.matches && scope.matches(ANCHOR_SELECTORS)) injectThumbButton(scope);
+  for (const el of scope.querySelectorAll(ANCHOR_SELECTORS)) {
     injectThumbButton(el);
   }
+}
+
+function reportCount() {
+  const n = document.querySelectorAll("." + THUMB_BTN_CLASS).length;
+  console.debug(`[DubMaster] ${n} thumbnail buttons injected`);
 }
 
 // ── Wiring ────────────────────────────────────────────────────────────────
@@ -158,6 +163,7 @@ console.debug("[DubMaster] content script loaded");
 injectThumbStyles();
 injectWatchButton();
 scanThumbnails(document);
+setTimeout(reportCount, 1500);
 
 window.addEventListener("yt-navigate-finish", () => {
   setTimeout(() => {
