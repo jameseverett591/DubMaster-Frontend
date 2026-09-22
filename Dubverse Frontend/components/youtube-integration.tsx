@@ -376,6 +376,20 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
     setImportError(null)
     try {
       const res = await apiClient.importYouTube(url)
+      // The import returns 'accepted' while yt-dlp downloads server-side —
+      // the media URL and segment manifest 404 until it lands, and the
+      // workspace loads data once. Poll until the download finishes (status
+      // leaves 'uploading') before handing the job over.
+      const deadline = Date.now() + 10 * 60 * 1000
+      let st = await apiClient.getJobStatus(res.job_id)
+      while (st.status === 'uploading' && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 2000))
+        st = await apiClient.getJobStatus(res.job_id)
+      }
+      if (st.status === 'failed')
+        throw new Error(st.error_message || 'YouTube download failed')
+      if (st.status === 'uploading')
+        throw new Error('The download is taking longer than expected — it will appear in your jobs when it finishes.')
       const videoUrl = await apiClient.mediaUrl(`/api/media/${res.job_id}/video`)
       onVideoSelect({
         id: res.job_id,

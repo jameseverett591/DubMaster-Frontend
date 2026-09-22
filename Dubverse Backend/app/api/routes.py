@@ -5200,7 +5200,68 @@ async def _run_lipsync_ranges(
     return {"status": "completed", "output_path": dubbed_output_path, "vendor_attempted": attempted}
 
 
+# One render per job at a time. Two racing /dub clicks share the first
+# debit via the idempotent RPC — without serialization both pipelines run,
+# and if the debit's owner fails and refunds while its sibling succeeds,
+# the completed film goes out uncharged. The lock orders them: whoever runs
+# second sees the final billed state before deciding whether to debit.
+_render_locks: Dict[str, asyncio.Lock] = {}
+
+
 async def process_dubbing_pipeline(
+    job_id: str,
+    video_path: str,
+    transcript_dicts: list,
+    target_lang: str,
+    source_lang: str,
+    voice_mapping: dict,
+    voice_settings: dict | None,
+    speaker_genders: dict | None = None,
+    adaptation_selections: dict | None = None,
+    traits_mapping: dict | None = None,
+    character_profiles: list | None = None,
+    dubbing_style: str | None = None,
+    localized_aliases: dict | None = None,
+    access_token: str = "",
+    lipsync: bool = False,
+    user_id: str = "",
+    render_charge: bool = False,
+):
+    async with _render_locks.setdefault(job_id, asyncio.Lock()):
+        # A queued render re-checks billing once it gets the lock: the
+        # request that owned the debit may have failed and refunded while
+        # this one waited, and letting it ship would produce an uncharged
+        # film. _meter_render no-ops when the job is still billed.
+        if not render_charge and user_id:
+            try:
+                render_charge = bool(await _meter_render(job_id, user_id))
+            except Exception as e:
+                detail = getattr(e, "detail", str(e))
+                await job_manager.update_job_status(
+                    job_id, JobStatus.FAILED, error_message=str(detail))
+                return
+        await _run_dubbing_pipeline(
+            job_id=job_id,
+            video_path=video_path,
+            transcript_dicts=transcript_dicts,
+            target_lang=target_lang,
+            source_lang=source_lang,
+            voice_mapping=voice_mapping,
+            voice_settings=voice_settings,
+            speaker_genders=speaker_genders,
+            adaptation_selections=adaptation_selections,
+            traits_mapping=traits_mapping,
+            character_profiles=character_profiles,
+            dubbing_style=dubbing_style,
+            localized_aliases=localized_aliases,
+            access_token=access_token,
+            lipsync=lipsync,
+            user_id=user_id,
+            render_charge=render_charge,
+        )
+
+
+async def _run_dubbing_pipeline(
     job_id: str,
     video_path: str,
     transcript_dicts: list,
@@ -7570,6 +7631,11 @@ async def _meter_render(job_id: str, user_id: str) -> Optional[Dict[str, Any]]:
             detail={"code": "billing_unavailable",
                     "message": "Billing is temporarily unavailable. Please try again in a moment."},
         ) from e
+    if split.get("already_billed"):
+        # A racing request created the debit first — it owns it, including
+        # the refund if its render fails. This call is a free re-render and
+        # must NOT refund a debit it didn't make.
+        return None
     await job_manager.set_billed_seconds(job_id, need)
     return split
 
