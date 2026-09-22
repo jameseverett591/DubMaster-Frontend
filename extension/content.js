@@ -96,7 +96,7 @@ function injectThumbStyles() {
       border-radius: 12px;
       padding: 4px 10px;
       cursor: pointer;
-      opacity: 0;
+      opacity: .9;
       transition: opacity .15s;
       box-shadow: 0 2px 8px rgba(0,0,0,.5);
     }
@@ -154,6 +154,7 @@ function scanThumbnails(root) {
 
 // ── Wiring ────────────────────────────────────────────────────────────────
 
+console.debug("[DubMaster] content script loaded");
 injectThumbStyles();
 injectWatchButton();
 scanThumbnails(document);
