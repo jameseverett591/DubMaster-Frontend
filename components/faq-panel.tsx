@@ -14,10 +14,11 @@ import {
  */
 export function FaqPanel() {
   const t = useTranslations('landing')
-  const items = [1, 2, 3, 4, 5, 6].map((i) => ({
-    q: t(`faq${i}Q`),
-    a: t(`faq${i}A`),
-  }))
+  // Locals without the newer entries just show fewer questions — t.has()
+  // keeps a half-translated locale from rendering raw key paths.
+  const items = Array.from({ length: 10 }, (_, i) => i + 1)
+    .filter((i) => t.has(`faq${i}Q`))
+    .map((i) => ({ q: t(`faq${i}Q`), a: t(`faq${i}A`) }))
 
   return (
     <div className="relative">
@@ -37,7 +38,7 @@ export function FaqPanel() {
               <AccordionTrigger className="text-left hover:no-underline py-5 text-white hover:text-[#C084FC] cursor-pointer [&[data-state=open]]:text-[#C084FC] transition-colors duration-300">
                 {item.q}
               </AccordionTrigger>
-              <AccordionContent className="text-[#10B981] pb-5 text-base leading-relaxed drop-shadow-[0_0_8px_rgba(16,185,129,0.15)]">
+              <AccordionContent className="text-[#10B981] pb-5 text-base leading-relaxed whitespace-pre-line drop-shadow-[0_0_8px_rgba(16,185,129,0.15)]">
                 {item.a}
               </AccordionContent>
             </AccordionItem>
