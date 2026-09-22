@@ -318,7 +318,10 @@ export function Dashboard() {
                 </TabsContent>
 
                 <TabsContent value="youtube">
-                  <YouTubeIntegration onVideoSelect={handleVideoSelect} />
+                  <YouTubeIntegration
+                    onVideoSelect={handleVideoSelect}
+                    initialImportUrl={searchParams.get('yt_url') ?? undefined}
+                  />
                 </TabsContent>
                 <TabsContent value="library">
                   <PublicDomainLibrary onVideoSelect={handleVideoSelect} />
