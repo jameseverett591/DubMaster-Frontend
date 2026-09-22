@@ -2866,7 +2866,10 @@ async def process_video_pipeline(job_id: str, video_path: str):
                 transcribe_cantonese, transcribe_input, vocals_path, job_id, whisper_language
             )
         else:
-            transcribe_result = await asyncio.to_thread(transcribe_audio, transcribe_input, job_id)
+            transcribe_result = await asyncio.to_thread(
+                transcribe_audio, transcribe_input, job_id,
+                source_language=whisper_language or None,
+            )
         
         if transcribe_result["status"] == "ok":
             import json
