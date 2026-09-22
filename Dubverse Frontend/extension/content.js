@@ -154,15 +154,45 @@ function scanThumbnails(root) {
 
 function reportCount() {
   const n = document.querySelectorAll("." + THUMB_BTN_CLASS).length;
-  console.debug(`[DubMaster] ${n} thumbnail buttons injected`);
+  console.log(`[DubMaster] ${n} thumbnail buttons injected`);
 }
 
 // ── Wiring ────────────────────────────────────────────────────────────────
 
-console.debug("[DubMaster] content script loaded");
+console.log("[DubMaster] content script loaded");
+document.documentElement.dataset.dubmasterImport = "1";
+function showPing() {
+  if (document.getElementById('dubmaster-import-ping')) return
+  const el = document.createElement('div')
+  el.id = 'dubmaster-import-ping'
+  el.textContent = 'DubMaster Import active'
+  el.style.cssText = [
+    'position:fixed',
+    'bottom:20px',
+    'left:20px',
+    'z-index:99999',
+    'padding:8px 10px',
+    'border-radius:10px',
+    'font-family:Roboto,Arial,sans-serif',
+    'font-size:12px',
+    'font-weight:700',
+    'color:#fff',
+    'background:linear-gradient(90deg,#A855F7,#22D3EE)',
+    'box-shadow:0 4px 14px rgba(0,0,0,.4)',
+    'opacity:.95',
+  ].join(';')
+  document.body.appendChild(el)
+  setTimeout(() => {
+    el.style.transition = 'opacity .25s'
+    el.style.opacity = '0'
+    setTimeout(() => el.remove(), 350)
+  }, 1600)
+}
+
 injectThumbStyles();
 injectWatchButton();
 scanThumbnails(document);
+showPing();
 setTimeout(reportCount, 1500);
 
 window.addEventListener("yt-navigate-finish", () => {
