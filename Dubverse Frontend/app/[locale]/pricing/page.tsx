@@ -134,7 +134,7 @@ export default function PricingPage() {
               {tUi('Optional: AI lip sync add-on')}
             </h2>
             <p className="text-[#94A3B8] leading-relaxed whitespace-pre-line">
-              {tUi("AI lip sync repaints the mouth region pixel-by-pixel — powerful on frontal, well-lit footage, fragile everywhere else. We bill it separately at vendor cost plus a small platform fee, powered by Sync Labs, so it never hides inside your render minutes.\n\nYour base render aligns audio in the time domain instead — the original face is never touched. Get the timing right in the editor first; most directors find that's all they need.")}
+              {tUi("AI lip sync repaints the mouth region pixel-by-pixel — powerful on frontal, well-lit footage, fragile everywhere else. We bill it separately at vendor cost plus a small platform fee, powered by Sync Labs, so it never hides inside your render minutes.\n\nYour base render aligns audio in the time domain instead — the original face is never touched, and the QC Monitor's lip-sync score measures the alignment in milliseconds so you can verify it. Get the timing right in the editor first; most directors find that's all they need.")}
             </p>
           </CardContent>
         </Card>
