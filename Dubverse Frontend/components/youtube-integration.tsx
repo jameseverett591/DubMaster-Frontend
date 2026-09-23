@@ -116,7 +116,10 @@ function loadGis(): Promise<void> {
 
 export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeIntegrationProps) {
   const t = useT()
+  // Import URL (sticky bar / extension deep-link) and caption-extract URL
+  // are separate fields — sharing one input confused the deep-link flow.
   const [youtubeUrl, setYoutubeUrl] = useState("")
+  const [extractUrl, setExtractUrl] = useState("")
   const [activeMode, setActiveMode] = useState("captions")
 
   // YouTube sign-in state
@@ -477,13 +480,13 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
               <div className="flex gap-3">
                 <Input
                   placeholder="https://www.youtube.com/watch?v=..."
-                  value={youtubeUrl}
-                  onChange={(e) => setYoutubeUrl(e.target.value)}
+                  value={extractUrl}
+                  onChange={(e) => setExtractUrl(e.target.value)}
                   className="flex-1"
                 />
                 <Button
-                  onClick={() => handleExtractTranscript(youtubeUrl)}
-                  disabled={isExtracting || !youtubeUrl.trim()}
+                  onClick={() => handleExtractTranscript(extractUrl)}
+                  disabled={isExtracting || !extractUrl.trim()}
                 >
                   {isExtracting
                     ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -580,7 +583,7 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
                     className="flex-1"
                     disabled={isImporting}
                     onClick={() => handleImportVideo(
-                      youtubeUrl,
+                      extractUrl,
                       extractedTitle || undefined)}
                   >
                     {isImporting
@@ -669,14 +672,14 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
                   <div className="flex gap-3">
                     <Input
                       placeholder="https://www.youtube.com/watch?v=..."
-                      value={youtubeUrl}
-                      onChange={(e) => setYoutubeUrl(e.target.value)}
+                      value={extractUrl}
+                      onChange={(e) => setExtractUrl(e.target.value)}
                       className="flex-1"
                     />
                     <Button
                       variant="outline"
-                      disabled={isExtracting || !youtubeUrl.trim()}
-                      onClick={() => handleExtractTranscript(youtubeUrl)}
+                      disabled={isExtracting || !extractUrl.trim()}
+                      onClick={() => handleExtractTranscript(extractUrl)}
                     >
                       {isExtracting
                         ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />

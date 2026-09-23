@@ -3,7 +3,7 @@
 Adds **Import** buttons to YouTube in two places:
 
 - **Watch pages** — an "Import to DubMaster" button next to Like/Share
-- **Feeds** (home, channel, search, sidebar) — an "Import" button that
+- **Feeds** (home, channel, search, sidebar) — a "DubMaster" button that
   appears when you hover any video thumbnail
 
 The toolbar button also works everywhere: on a video it deep-links the

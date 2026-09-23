@@ -17,6 +17,7 @@ import {
   AlertCircle,
   Pencil,
 } from "lucide-react"
+import { useState } from "react"
 import type { VideoSource, DetectedVoice } from "@/components/dashboard"
 import { useT } from '@/lib/use-t'
 
@@ -60,6 +61,7 @@ export function DubbedVideoResult({
 }: DubbedVideoResultProps) {
   const t = useT()
   const isComplete = !isDubbing && dubbingProgress >= 100
+  const [linkCopied, setLinkCopied] = useState(false)
 
   const handleDownload = () => {
     const url = dubbedVideoUrl ?? originalVideo.url
@@ -82,6 +84,14 @@ export function DubbedVideoResult({
       } catch {
         // User cancelled share
       }
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(window.location.href)
+      setLinkCopied(true)
+      setTimeout(() => setLinkCopied(false), 2000)
+    } catch {
+      // Clipboard unavailable
     }
   }
 
@@ -239,8 +249,8 @@ export function DubbedVideoResult({
             <Download className="h-3.5 w-3.5" />
             {t('Download')}
           </Button>
-          <Button variant="outline" className="gap-1.5 h-8 text-xs bg-transparent" onClick={handleShare}>
-            <Share2 className="h-3.5 w-3.5" />
+          <Button variant="outline" className="gap-1.5 h-8 text-xs bg-transparent" onClick={handleShare} title={linkCopied ? t('Link copied!') : t('Share')}>
+            {linkCopied ? <CheckCircle2 className="h-3.5 w-3.5 text-green-500" /> : <Share2 className="h-3.5 w-3.5" />}
           </Button>
           <Button variant="outline" className="gap-1.5 h-8 text-xs bg-transparent" onClick={onRegenerate}>
             <RefreshCw className="h-3.5 w-3.5" />
