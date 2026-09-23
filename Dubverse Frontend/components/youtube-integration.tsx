@@ -776,37 +776,6 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
                     {t('YouTube sign-in requires a Google OAuth client ID to be configured (NEXT_PUBLIC_GOOGLE_CLIENT_ID).')}
                   </p>
                 )}
-
-                {/* Direct URL import still works without sign-in */}
-                <div className="pt-4 border-t border-border/50 space-y-3">
-                  <p className="text-sm text-muted-foreground">
-                    {t('Or paste a URL — videos you own, have permission for, or that are public domain:')}
-                  </p>
-                  <div className="flex gap-3">
-                    <Input
-                      placeholder="https://www.youtube.com/watch?v=..."
-                      value={youtubeUrl}
-                      onChange={(e) => setYoutubeUrl(e.target.value)}
-                      className="flex-1"
-                    />
-                    <Button
-                      variant="outline"
-                      disabled={isImporting || !youtubeUrl.trim()}
-                      onClick={() => handleImportVideo(youtubeUrl)}
-                    >
-                      {isImporting
-                        ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        : <Import className="mr-2 h-4 w-4" />}
-                      {t('Import')}
-                    </Button>
-                  </div>
-                  {importError && (
-                    <div className="flex items-start gap-2 text-sm text-red-500">
-                      <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
-                      {importError}
-                    </div>
-                  )}
-                </div>
               </CardContent>
             </Card>
           ) : (
@@ -899,50 +868,50 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
                       {authError}
                     </div>
                   )}
-                  {importError && (
-                    <div className="mt-3 flex items-start gap-2 text-sm text-red-500">
-                      <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
-                      {importError}
-                    </div>
-                  )}
                 </CardContent>
               </Card>
-
-              {/* Direct URL import — pinned to the bottom so it stays
-                  reachable while scrolling the channel grid or pasting a
-                  URL copied from YouTube. */}
-              <div className="sticky bottom-4 z-10">
-                <Card className="backdrop-blur-xl bg-card/90 border-border/50 shadow-lg">
-                  <CardContent className="pt-4 pb-4">
-                    <p className="mb-2 text-xs text-muted-foreground">
-                      {t('Paste a video URL — your own, public domain, or one you have permission to use')}
-                    </p>
-                    <div className="flex gap-3">
-                      <Input
-                        placeholder="https://www.youtube.com/watch?v=..."
-                        value={youtubeUrl}
-                        onChange={(e) => setYoutubeUrl(e.target.value)}
-                        onKeyDown={(e) => e.key === "Enter" && youtubeUrl.trim() && !isImporting && handleImportVideo(youtubeUrl)}
-                        className="flex-1"
-                      />
-                      <Button
-                        variant="outline"
-                        disabled={isImporting || !youtubeUrl.trim()}
-                        onClick={() => handleImportVideo(youtubeUrl)}
-                      >
-                        {isImporting
-                          ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          : <Import className="mr-2 h-4 w-4" />}
-                        {t('Import')}
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
             </div>
           )}
         </TabsContent>
       </Tabs>
+
+      {/* Direct URL import — pinned to the bottom of the YouTube tab on
+          every sub-tab and whether signed in or not, so it stays reachable
+          while scrolling the channel grid or after a deep-link import. */}
+      <div className="sticky bottom-4 z-10 mt-6">
+        <Card className="backdrop-blur-xl bg-card/90 border-border/50 shadow-lg">
+          <CardContent className="pt-4 pb-4">
+            <p className="mb-2 text-xs text-muted-foreground">
+              {t('Paste a video URL — your own, public domain, or one you have permission to use')}
+            </p>
+            <div className="flex gap-3">
+              <Input
+                placeholder="https://www.youtube.com/watch?v=..."
+                value={youtubeUrl}
+                onChange={(e) => setYoutubeUrl(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && youtubeUrl.trim() && !isImporting && handleImportVideo(youtubeUrl)}
+                className="flex-1"
+              />
+              <Button
+                variant="outline"
+                disabled={isImporting || !youtubeUrl.trim()}
+                onClick={() => handleImportVideo(youtubeUrl)}
+              >
+                {isImporting
+                  ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  : <Import className="mr-2 h-4 w-4" />}
+                {t('Import')}
+              </Button>
+            </div>
+            {importError && (
+              <div className="mt-3 flex items-start gap-2 text-sm text-red-500">
+                <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                {importError}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   )
 }
