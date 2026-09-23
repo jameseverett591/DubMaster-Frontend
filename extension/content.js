@@ -108,30 +108,32 @@ function injectThumbStyles() {
   document.head.appendChild(style);
 }
 
-// Thumbnail anchors across YouTube layouts (home feed, search results,
-// channel pages, watch-sidebar recommendations). Class names change, so
-// we key off the link target instead: any anchor pointing at /watch or
-// /shorts inside a thumbnail container.
-const ANCHOR_SELECTORS = [
-  "ytd-thumbnail a#thumbnail",
-  "a#thumbnail[href*='/watch']",
-  "yt-lockup-view-model a[href*='/watch']",
-  "yt-lockup-view-model a[href*='/shorts']",
+// Card containers across YouTube layouts (home feed, channel, search,
+// sidebar recommendations). Class names churn, so instead of matching
+// thumbnail anchors directly we take each card's FIRST /watch|/shorts
+// link — in every layout the thumbnail image link precedes the title.
+const CONTAINER_SELECTORS = [
+  "ytd-rich-item-renderer",
+  "ytd-video-renderer",
+  "ytd-grid-video-renderer",
+  "ytd-compact-video-renderer",
+  "yt-lockup-view-model",
+  "ytd-thumbnail",
 ].join(",");
 
-function injectThumbButton(anchor) {
-  if (!/[?&]v=|\/shorts\//.test(anchor.href)) return;
+function injectThumbButton(container) {
+  // Presence check is the only gate — YouTube re-renders cards and wipes
+  // injected children, so data-attribute markers can't be trusted.
+  if (container.querySelector("." + THUMB_BTN_CLASS)) return;
 
-  // Only thumbnail links — a lockup's title also links to /watch but has
-  // no image inside it.
-  if (!anchor.closest("ytd-thumbnail") &&
-      !anchor.querySelector("img, yt-image, yt-thumbnail-view-model")) {
-    return;
-  }
+  const anchor =
+    container.querySelector("a#thumbnail") ||
+    container.querySelector("a[href*='/watch'], a[href*='/shorts']");
+  if (!anchor || !/[?&]v=|\/shorts\//.test(anchor.href)) return;
 
-  const host = anchor.closest("ytd-thumbnail") || anchor;
-  // No "processed" markers — YouTube re-renders thumbnails and wipes our
-  // injected children, so presence in the DOM is the only reliable check.
+  const host = container.tagName === "YTD-THUMBNAIL"
+    ? container
+    : (container.querySelector("ytd-thumbnail") || anchor);
   if (host.querySelector("." + THUMB_BTN_CLASS)) return;
   if (getComputedStyle(host).position === "static") {
     host.style.position = "relative";
@@ -154,8 +156,8 @@ function injectThumbButton(anchor) {
 
 function scanThumbnails(root) {
   const scope = root instanceof Element ? root : document;
-  if (scope.matches && scope.matches(ANCHOR_SELECTORS)) injectThumbButton(scope);
-  for (const el of scope.querySelectorAll(ANCHOR_SELECTORS)) {
+  if (scope.matches && scope.matches(CONTAINER_SELECTORS)) injectThumbButton(scope);
+  for (const el of scope.querySelectorAll(CONTAINER_SELECTORS)) {
     injectThumbButton(el);
   }
 }
