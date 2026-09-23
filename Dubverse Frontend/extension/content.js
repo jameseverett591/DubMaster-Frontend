@@ -11,7 +11,7 @@
 // MutationObserver for lazily-rendered thumbnails.
 
 const DUBMASTER_URL = "http://localhost:3000"; // change to the deployed origin in production
-const EXT_VERSION = "0.3"; // bump on every change — shown in console + toast
+const EXT_VERSION = "0.4"; // bump on every change — shown in console + toast
 const BUTTON_ID = "dubmaster-import-btn";
 const THUMB_BTN_CLASS = "dubmaster-thumb-btn";
 
@@ -176,7 +176,6 @@ function showPing() {
   if (document.getElementById('dubmaster-import-ping')) return
   const el = document.createElement('div')
   el.id = 'dubmaster-import-ping'
-  el.textContent = 'DubMaster Import active (v' + EXT_VERSION + ')'
   el.style.cssText = [
     'position:fixed',
     'bottom:20px',
@@ -191,13 +190,18 @@ function showPing() {
     'background:linear-gradient(90deg,#A855F7,#22D3EE)',
     'box-shadow:0 4px 14px rgba(0,0,0,.4)',
     'opacity:.95',
+    'cursor:pointer',
   ].join(';')
+  // Click to dismiss — it stays so the live count is visible in screenshots.
+  el.addEventListener('click', () => el.remove())
   document.body.appendChild(el)
-  setTimeout(() => {
-    el.style.transition = 'opacity .25s'
-    el.style.opacity = '0'
-    setTimeout(() => el.remove(), 350)
-  }, 1600)
+  const update = () => {
+    if (!el.isConnected) return
+    const n = document.querySelectorAll('.' + THUMB_BTN_CLASS).length
+    el.textContent = `DubMaster v${EXT_VERSION} · ${n} buttons`
+  }
+  update()
+  setInterval(update, 2000)
 }
 
 injectThumbStyles();
