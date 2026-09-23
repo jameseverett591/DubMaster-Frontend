@@ -62,6 +62,7 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid")
   const [selectedVideo, setSelectedVideo] = useState<SavedVideo | null>(null)
   const [previewOpen, setPreviewOpen] = useState(false)
+  const [copiedShareId, setCopiedShareId] = useState<string | null>(null)
 
   // Sample saved videos - in production this would come from a database
   const [savedVideos] = useState<SavedVideo[]>([
@@ -119,6 +120,29 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
   const handlePlayVideo = (video: SavedVideo) => {
     setSelectedVideo(video)
     setPreviewOpen(true)
+  }
+
+  const handleShare = async (video: SavedVideo) => {
+    const url = `${window.location.origin}/editor/${video.id}`
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: video.title,
+          text: `${video.title} — dubbed ${video.originalLanguage} → ${video.dubbedLanguage}`,
+          url,
+        })
+      } catch {
+        // User cancelled or share sheet failed — no-op
+      }
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(url)
+      setCopiedShareId(video.id)
+      setTimeout(() => setCopiedShareId(null), 2000)
+    } catch {
+      // Clipboard unavailable (insecure context / permission denied)
+    }
   }
 
   const formatDate = (dateString: string) => {
@@ -254,14 +278,14 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="bg-background/95 backdrop-blur-md">
-                        <DropdownMenuItem className="gap-2">
+                        <DropdownMenuItem className="gap-2" onClick={() => handlePlayVideo(video)}>
                           <Play className="h-4 w-4" /> {t('Play')}
                         </DropdownMenuItem>
                         <DropdownMenuItem className="gap-2">
                           <Download className="h-4 w-4" /> {t('Download')}
                         </DropdownMenuItem>
-                        <DropdownMenuItem className="gap-2">
-                          <Share2 className="h-4 w-4" /> {t('Share')}
+                        <DropdownMenuItem className="gap-2" onClick={() => handleShare(video)}>
+                          <Share2 className="h-4 w-4" /> {copiedShareId === video.id ? t('Link copied!') : t('Share')}
                         </DropdownMenuItem>
                         <DropdownMenuItem className="gap-2">
                           <Pencil className="h-4 w-4" /> {t('Rename')}
@@ -338,8 +362,8 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end" className="bg-background/95 backdrop-blur-md">
-                          <DropdownMenuItem className="gap-2">
-                            <Share2 className="h-4 w-4" /> {t('Share')}
+                          <DropdownMenuItem className="gap-2" onClick={() => handleShare(video)}>
+                            <Share2 className="h-4 w-4" /> {copiedShareId === video.id ? t('Link copied!') : t('Share')}
                           </DropdownMenuItem>
                           <DropdownMenuItem className="gap-2">
                             <Pencil className="h-4 w-4" /> {t('Rename')}
@@ -394,8 +418,8 @@ export function PublicDomainLibrary({ onVideoSelect }: PublicDomainLibraryProps)
             </div>
           </div>
           <div className="flex gap-2 justify-end">
-            <Button variant="outline" className="gap-2 bg-transparent">
-              <Share2 className="h-4 w-4" /> {t('Share')}
+            <Button variant="outline" className="gap-2 bg-transparent" onClick={() => selectedVideo && handleShare(selectedVideo)}>
+              <Share2 className="h-4 w-4" /> {selectedVideo && copiedShareId === selectedVideo.id ? t('Link copied!') : t('Share')}
             </Button>
             <Button className="gap-2">
               <Download className="h-4 w-4" /> {t('Download')}

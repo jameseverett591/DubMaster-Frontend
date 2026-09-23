@@ -3,7 +3,7 @@
 // Two surfaces:
 //  1. Watch pages: an "Import to DubMaster" button in the actions row
 //     (next to Like/Share), with a floating fallback if the row isn't found.
-//  2. Feeds (home, channel, search, sidebar): a small "Import" button
+//  2. Feeds (home, channel, search, sidebar): a small "DubMaster" button
 //     overlaid on the top-right of every video thumbnail, shown on hover.
 //
 // Both open DubMaster's YouTube tab via ?yt_url=..., which auto-imports.
@@ -11,7 +11,7 @@
 // MutationObserver for lazily-rendered thumbnails.
 
 const DUBMASTER_URL = "http://localhost:3001"; // change to the deployed origin in production
-const EXT_VERSION = "0.6"; // bump on every change — shown in console + toast
+const EXT_VERSION = "0.7"; // bump on every change — shown in console + toast
 const BUTTON_ID = "dubmaster-import-btn";
 const THUMB_BTN_CLASS = "dubmaster-thumb-btn";
 
@@ -145,7 +145,7 @@ function injectThumbButton(container) {
   const btn = document.createElement("span");
   btn.className = THUMB_BTN_CLASS;
   btn.setAttribute("role", "button");
-  btn.textContent = "Import";
+  btn.textContent = "DubMaster";
   btn.title = "Import to DubMaster";
   btn.addEventListener("click", (e) => {
     e.preventDefault();
