@@ -11,6 +11,7 @@
 // MutationObserver for lazily-rendered thumbnails.
 
 const DUBMASTER_URL = "http://localhost:3000"; // change to the deployed origin in production
+const EXT_VERSION = "0.3"; // bump on every change — shown in console + toast
 const BUTTON_ID = "dubmaster-import-btn";
 const THUMB_BTN_CLASS = "dubmaster-thumb-btn";
 
@@ -169,13 +170,13 @@ function reportCount() {
 
 // ── Wiring ────────────────────────────────────────────────────────────────
 
-console.log("[DubMaster] content script loaded");
+console.log("[DubMaster] content script loaded v" + EXT_VERSION);
 document.documentElement.dataset.dubmasterImport = "1";
 function showPing() {
   if (document.getElementById('dubmaster-import-ping')) return
   const el = document.createElement('div')
   el.id = 'dubmaster-import-ping'
-  el.textContent = 'DubMaster Import active'
+  el.textContent = 'DubMaster Import active (v' + EXT_VERSION + ')'
   el.style.cssText = [
     'position:fixed',
     'bottom:20px',
