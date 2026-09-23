@@ -2,7 +2,7 @@
 // On watch/Shorts pages it deep-links the video into DubMaster's import;
 // on feed/channel pages it just opens the YouTube tab (no video to grab).
 
-const DUBMASTER_URL = "http://localhost:3000";
+const DUBMASTER_URL = "http://localhost:3001";
 
 chrome.action.onClicked.addListener((tab) => {
   if (!tab.url || !/youtube\.com/.test(tab.url)) {
