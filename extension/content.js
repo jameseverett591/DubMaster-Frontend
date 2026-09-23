@@ -120,20 +120,28 @@ const ANCHOR_SELECTORS = [
 ].join(",");
 
 function injectThumbButton(anchor) {
-  if (anchor.dataset.dubmasterThumb) return;
-  anchor.dataset.dubmasterThumb = "1";
   if (!/[?&]v=|\/shorts\//.test(anchor.href)) return;
 
-  const host = anchor.closest("ytd-thumbnail") ||
-               anchor.closest(".yt-lockup-view-model__content-image") ||
-               anchor;
+  // Only thumbnail links — a lockup's title also links to /watch but has
+  // no image inside it.
+  if (!anchor.closest("ytd-thumbnail") &&
+      !anchor.querySelector("img, yt-image, yt-thumbnail-view-model")) {
+    return;
+  }
+
+  const host = anchor.closest("ytd-thumbnail") || anchor;
+  // No "processed" markers — YouTube re-renders thumbnails and wipes our
+  // injected children, so presence in the DOM is the only reliable check.
   if (host.querySelector("." + THUMB_BTN_CLASS)) return;
   if (getComputedStyle(host).position === "static") {
     host.style.position = "relative";
   }
 
-  const btn = document.createElement("button");
+  // span, not button — <button> inside <a> is invalid and browsers may
+  // hoist it out of the anchor entirely.
+  const btn = document.createElement("span");
   btn.className = THUMB_BTN_CLASS;
+  btn.setAttribute("role", "button");
   btn.textContent = "Import";
   btn.title = "Import to DubMaster";
   btn.addEventListener("click", (e) => {
