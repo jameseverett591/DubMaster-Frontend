@@ -25,9 +25,11 @@ import automatically.
 - Development: `http://localhost:3000`
 - Production: change to the deployed origin (e.g. `https://app.dubmaster.example`)
 
-The deep link is `/dashboard?tab=youtube&yt_url=<video-url>`. Middleware adds
-the locale prefix automatically; the YouTube tab consumes `yt_url`, runs the
-import, and strips the param so a refresh doesn't re-import.
+The deep link is `/studio?tab=youtube&yt_url=<video-url>` (`/dashboard` is
+the account/history page — the tabbed Studio UI lives at `/studio`).
+Middleware adds the locale prefix automatically; the YouTube tab consumes
+`yt_url`, runs the import, and strips the param so a refresh doesn't
+re-import.
 
 ## Notes
 

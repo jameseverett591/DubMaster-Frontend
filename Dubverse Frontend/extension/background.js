@@ -10,8 +10,8 @@ chrome.action.onClicked.addListener((tab) => {
   }
   const isVideo = /[?&]v=|\/shorts\//.test(tab.url);
   const target = isVideo
-    ? `${DUBMASTER_URL}/dashboard?tab=youtube&yt_url=` +
+    ? `${DUBMASTER_URL}/studio?tab=youtube&yt_url=` +
       encodeURIComponent(tab.url)
-    : `${DUBMASTER_URL}/dashboard?tab=youtube`;
+    : `${DUBMASTER_URL}/studio?tab=youtube`;
   chrome.tabs.create({ url: target });
 });

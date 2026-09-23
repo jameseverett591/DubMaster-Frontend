@@ -11,13 +11,13 @@
 // MutationObserver for lazily-rendered thumbnails.
 
 const DUBMASTER_URL = "http://localhost:3001"; // change to the deployed origin in production
-const EXT_VERSION = "0.5"; // bump on every change — shown in console + toast
+const EXT_VERSION = "0.6"; // bump on every change — shown in console + toast
 const BUTTON_ID = "dubmaster-import-btn";
 const THUMB_BTN_CLASS = "dubmaster-thumb-btn";
 
 function openInDubMaster(url) {
   const target =
-    `${DUBMASTER_URL}/dashboard?tab=youtube&yt_url=` +
+    `${DUBMASTER_URL}/studio?tab=youtube&yt_url=` +
     encodeURIComponent(url);
   window.open(target, "_blank", "noopener");
 }
