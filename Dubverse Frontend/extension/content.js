@@ -210,7 +210,9 @@ window.addEventListener("yt-navigate-finish", () => {
   }, 300);
 });
 
-// Feeds lazy-render thumbnails on scroll — observe for new nodes.
+// Feeds lazy-render thumbnails on scroll — observe for new nodes, and
+// re-scan periodically since Polymer re-renders can wipe injected nodes
+// without mutations we'd see on the anchors themselves.
 const observer = new MutationObserver((mutations) => {
   for (const m of mutations) {
     for (const node of m.addedNodes) {
@@ -219,6 +221,7 @@ const observer = new MutationObserver((mutations) => {
   }
 });
 observer.observe(document.body, { childList: true, subtree: true });
+setInterval(() => scanThumbnails(document), 2000);
 
 // Layout races: retry briefly if the watch actions row wasn't ready.
 let retries = 0;
