@@ -197,6 +197,40 @@ async def _load_jobs_from_db() -> None:
                 )
 
         logger.info(f"Startup: loaded {loaded} jobs from Supabase")
+
+        # Jobs in an in-flight state were being worked by asyncio tasks /
+        # RunPod pollers that died with the previous process — nothing will
+        # ever move them again, and their RunPod request (if any) would keep
+        # burning GPU time for a result nobody polls. Cancel the remote
+        # request best-effort, then fail the job so the UI shows a
+        # resubmit-able error instead of a forever-spinning stage.
+        _IN_FLIGHT = {
+            JobStatus.PENDING, JobStatus.UPLOADING, JobStatus.PROCESSING,
+            JobStatus.CHUNKING, JobStatus.EXTRACTING_AUDIO,
+            JobStatus.DIARIZING, JobStatus.TRANSCRIBING,
+            JobStatus.TRANSLATING, JobStatus.SYNTHESIZING,
+            JobStatus.LIP_SYNCING, JobStatus.REASSEMBLING,
+        }
+        for _job in list(job_manager._jobs.values()):
+            if _job.status not in _IN_FLIGHT:
+                continue
+            _rp = getattr(_job, "runpod_job_id", None)
+            if _rp:
+                try:
+                    from app.services.runpod_service import runpod_service
+                    if runpod_service.is_available():
+                        await runpod_service.cancel_job(_rp)
+                except Exception as _exc:
+                    logger.warning(
+                        f"Startup: RunPod cancel failed for orphaned "
+                        f"{_rp}: {_exc}")
+            await job_manager.update_job_status(
+                _job.job_id, JobStatus.FAILED,
+                current_stage="Failed",
+                error_message="The backend restarted while this job was "
+                              "processing — please resubmit the video.")
+            logger.info(
+                f"Startup: marked orphaned job {_job.job_id} failed")
     except Exception as exc:
         logger.warning(
             f"Startup: Supabase job load failed — "
