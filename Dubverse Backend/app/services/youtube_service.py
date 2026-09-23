@@ -103,6 +103,14 @@ def get_video_info(url: str) -> dict:
     }
 
 
+def _video_on_disk(dest_path_no_ext: str) -> str | None:
+    matches = sorted(glob.glob(dest_path_no_ext + ".*"))
+    videos = [m for m in matches
+              if os.path.splitext(m)[1].lower() in
+              (".mp4", ".webm", ".mkv", ".mov")]
+    return videos[0] if videos else None
+
+
 def download_video(url: str, dest_path_no_ext: str, max_bytes: int,
                    max_duration: float) -> tuple[str, dict]:
     """Download <=1080p mp4 + any subtitle tracks next to it.
@@ -136,21 +144,32 @@ def download_video(url: str, dest_path_no_ext: str, max_bytes: int,
         "writesubtitles": True,
         "writeautomaticsub": True,
         "subtitlesformat": "vtt",
+        # Space out subtitle requests — YouTube 429s rapid-fire caption fetches.
+        "sleep_interval_subtitles": 2,
         "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
     }
     with _dl(opts) as ydl:
         try:
             ydl.download([watch])
         except Exception as e:
-            raise ValueError(_friendly_error(e))
+            # yt-dlp fetches subtitles AFTER the media, so a subtitle error
+            # (commonly HTTP 429) usually leaves a perfectly good video on
+            # disk — captions are best-effort metadata, keep the download.
+            if not _video_on_disk(dest_path_no_ext):
+                if "subtitle" in str(e).lower() or "429" in str(e):
+                    for k in ("writesubtitles", "writeautomaticsub",
+                              "subtitlesformat", "sleep_interval_subtitles"):
+                        opts.pop(k, None)
+                    try:
+                        ydl.download([watch])
+                    except Exception as e2:
+                        raise ValueError(_friendly_error(e2))
+                else:
+                    raise ValueError(_friendly_error(e))
 
-    matches = sorted(glob.glob(dest_path_no_ext + ".*"))
-    videos = [m for m in matches
-              if os.path.splitext(m)[1].lower() in
-              (".mp4", ".webm", ".mkv", ".mov")]
-    if not videos:
+    video_path = _video_on_disk(dest_path_no_ext)
+    if not video_path:
         raise ValueError("Download produced no video file")
-    video_path = videos[0]
 
     if os.path.getsize(video_path) > max_bytes:
         os.remove(video_path)
