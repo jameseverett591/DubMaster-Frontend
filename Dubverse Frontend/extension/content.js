@@ -11,7 +11,7 @@
 // MutationObserver for lazily-rendered thumbnails.
 
 const DUBMASTER_URL = "http://localhost:3001"; // change to the deployed origin in production
-const EXT_VERSION = "0.4"; // bump on every change — shown in console + toast
+const EXT_VERSION = "0.5"; // bump on every change — shown in console + toast
 const BUTTON_ID = "dubmaster-import-btn";
 const THUMB_BTN_CLASS = "dubmaster-thumb-btn";
 
