@@ -6305,6 +6305,11 @@ async def trigger_analysis(job_id: str, language: str, background_tasks: Backgro
             content={"status": "running", "message": "Analysis already in progress"}
         )
 
+    # Server-side claim timestamp: the new run's failure can only be stamped
+    # after this, so clients can tell it apart from a stale GET response that
+    # was already in flight carrying the previous run's error.
+    claimed_at = time.time()
+
     try:
         error_file.unlink(missing_ok=True)
         background_tasks.add_task(
@@ -6318,7 +6323,8 @@ async def trigger_analysis(job_id: str, language: str, background_tasks: Backgro
 
     return JSONResponse(
         status_code=202,
-        content={"status": "started", "message": "Quality analysis started"}
+        content={"status": "started", "message": "Quality analysis started",
+                 "claimed_at": claimed_at}
     )
 
 
@@ -6472,9 +6478,12 @@ async def get_analysis(job_id: str, language: str):
     result_file = dubbed_dir / f"analysis_{lang_norm}.json"
     if sentinel.exists():
         try:
+            # Strictly newer: an equal mtime (coarse fs granularity) can't
+            # prove the run finished — the live sentinel still wins via the
+            # pid:token staleness check below.
             result_newer = (
                 result_file.exists()
-                and result_file.stat().st_mtime >= sentinel.stat().st_mtime
+                and result_file.stat().st_mtime > sentinel.stat().st_mtime
             )
         except FileNotFoundError:
             result_newer = False
@@ -6505,7 +6514,9 @@ async def get_analysis(job_id: str, language: str):
                 err = _json.loads(error_file.read_text(encoding="utf-8"))
             except Exception:
                 err = {}
-            return {"status": "failed", "reason": err.get("reason") or "Analysis failed"}
+            return {"status": "failed",
+                    "reason": err.get("reason") or "Analysis failed",
+                    "failed_at": err.get("failed_at_ts")}
 
     if not result_file.exists():
         raise HTTPException(

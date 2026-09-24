@@ -52,6 +52,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   // (the GET endpoint can serve the prior result mid-run).
   const reanalyzePendingRef = useRef(false)
   const reanalyzePrevGenRef = useRef<string | null>(null)
+  // Server-side claim time of the current retry (from the POST response).
+  // Lets a poll tell a stale in-flight 'failed' response (stamped before
+  // the claim) from the new run's own failure (stamped after).
+  const reanalyzeClaimedAtRef = useRef<number | null>(null)
 
   useEffect(() => {
     localStorage.setItem('dubverse.lastEditorJobId', jobId)
@@ -354,12 +358,20 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
               }
             }
           } else if (data.status === 'failed') {
-            // Terminal state — the run wrote its reason to disk. During a
-            // manual re-analyze this can only be the NEW run's failure: the
-            // POST handler clears the old error file synchronously before it
-            // responds, so no stale error can outlive reanalyzePendingRef.
-            // Stop polling and show it; infinite retries here were the old
-            // wedge.
+            // While a retry is armed, only a failure stamped at/after the
+            // server-side claim belongs to the new run: a poll issued before
+            // the retry POST cleared the old error can still deliver that
+            // older failure afterwards — clearing the file can't retract a
+            // response already in flight. Both timestamps come from the
+            // server, so the comparison is immune to client clock skew.
+            const claimedAt = reanalyzeClaimedAtRef.current
+            if (reanalyzePendingRef.current && claimedAt != null
+                && (typeof data.failed_at !== 'number' || data.failed_at < claimedAt)) {
+              if (!cancelled) setQcLoading(true)
+              return
+            }
+            // Terminal state — the run wrote its reason to disk. Stop
+            // polling and show it; infinite retries here were the old wedge.
             if (!cancelled) {
               setQcError(data.reason || 'QC analysis failed')
               setQcLoading(false)
@@ -421,8 +433,11 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
       setQcLoading(false)
       return
     }
+    const body = await res.json().catch(() => null)
     reanalyzePrevGenRef.current = qcAnalysis?.generated_at ?? null
     reanalyzePendingRef.current = true
+    reanalyzeClaimedAtRef.current =
+      body && typeof body.claimed_at === 'number' ? body.claimed_at : null
     setQcUpdatedAt(null)
     setReanalyzeNonce((n) => n + 1)
   }, [editorProps, jobId, qcLoading, qcAnalysis])

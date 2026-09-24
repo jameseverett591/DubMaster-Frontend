@@ -23,6 +23,7 @@ import logging
 import os
 import subprocess
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -92,6 +93,7 @@ def analyze_dub(
                 json.dumps({
                     "reason": reason,
                     "failed_at": datetime.utcnow().isoformat() + "Z",
+                    "failed_at_ts": time.time(),
                 }),
                 encoding="utf-8",
             )
