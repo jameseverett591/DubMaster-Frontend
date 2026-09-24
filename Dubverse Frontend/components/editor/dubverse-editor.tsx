@@ -1422,6 +1422,15 @@ export function DubVerseEditor({
   } | null>(null)
   const [addSegmentFeedback, setAddSegmentFeedback] = useState<'success' | 'error' | null>(null)
   const [shareCopied, setShareCopied] = useState<'link' | 'video' | null>(null)
+  // The media URL serves Content-Disposition: inline so it can also back the
+  // <video> player; ?attachment=1 is what actually triggers a browser save.
+  const downloadDubbedVideo = () => {
+    if (!activeDubbedVideoUrl) return
+    const a = document.createElement('a')
+    a.href = `${activeDubbedVideoUrl}${activeDubbedVideoUrl.includes('?') ? '&' : '?'}attachment=1`
+    a.download = `${title || 'dubbed_video'}.mp4`
+    a.click()
+  }
   const [askAiOpen, setAskAiOpen] = useState(false)
   const [askAiModel, setAskAiModel] = useState<'haiku' | 'sonnet' | 'opus'>('sonnet')
   const [characterProfileOpen, setCharacterProfileOpen] = useState<{
@@ -7331,7 +7340,7 @@ export function DubVerseEditor({
                       className="h-7 px-2 text-xs border-slate-700 text-slate-300 shrink-0"
                       asChild
                     >
-                      <a href={activeDubbedVideoUrl} download title={t('Download dubbed video')} target="_blank" rel="noreferrer">
+                      <a href={`${activeDubbedVideoUrl}${activeDubbedVideoUrl.includes('?') ? '&' : '?'}attachment=1`} download title={t('Download dubbed video')} target="_blank" rel="noreferrer">
                         <Download className="h-3 w-3" />
                       </a>
                     </Button>
@@ -7349,15 +7358,11 @@ export function DubVerseEditor({
                       URL only carries a link, so a file has to go in by hand. */}
                   <button
                     type="button"
-                    title={t('Download for Facebook')}
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#1877F2] hover:bg-[#1565C0] text-white transition-colors"
+                    title={activeDubbedVideoUrl ? t('Download for Facebook') : t('No dubbed video yet')}
+                    disabled={!activeDubbedVideoUrl}
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#1877F2] hover:bg-[#1565C0] text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[#1877F2]"
                     onClick={() => {
-                      if (activeDubbedVideoUrl) {
-                        const a = document.createElement('a')
-                        a.href = activeDubbedVideoUrl
-                        a.download = `${title || 'dubbed_video'}.mp4`
-                        a.click()
-                      }
+                      downloadDubbedVideo()
                       window.open('https://www.facebook.com/', '_blank')
                     }}
                   >
@@ -7377,15 +7382,11 @@ export function DubVerseEditor({
                   {/* YouTube — download video then open YouTube Studio */}
                   <button
                     type="button"
-                    title={t('Download for YouTube')}
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#FF0000] hover:bg-[#CC0000] text-white transition-colors"
+                    title={activeDubbedVideoUrl ? t('Download for YouTube') : t('No dubbed video yet')}
+                    disabled={!activeDubbedVideoUrl}
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#FF0000] hover:bg-[#CC0000] text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[#FF0000]"
                     onClick={() => {
-                      if (activeDubbedVideoUrl) {
-                        const a = document.createElement('a')
-                        a.href = activeDubbedVideoUrl
-                        a.download = `${title || 'dubbed_video'}.mp4`
-                        a.click()
-                      }
+                      downloadDubbedVideo()
                       window.open('https://studio.youtube.com/channel/upload', '_blank')
                     }}
                   >
@@ -7395,16 +7396,10 @@ export function DubVerseEditor({
                   {/* Instagram — download video (no web upload API) */}
                   <button
                     type="button"
-                    title={t('Download for Instagram')}
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-gradient-to-br from-[#833AB4] via-[#E1306C] to-[#F77737] hover:opacity-90 text-white transition-opacity"
-                    onClick={() => {
-                      if (activeDubbedVideoUrl) {
-                        const a = document.createElement('a')
-                        a.href = activeDubbedVideoUrl
-                        a.download = `${title || 'dubbed_video'}.mp4`
-                        a.click()
-                      }
-                    }}
+                    title={activeDubbedVideoUrl ? t('Download for Instagram') : t('No dubbed video yet')}
+                    disabled={!activeDubbedVideoUrl}
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-gradient-to-br from-[#833AB4] via-[#E1306C] to-[#F77737] hover:opacity-90 text-white transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                    onClick={downloadDubbedVideo}
                   >
                     <Instagram className="h-4 w-4" />
                     <span className="text-[9px] font-medium">{t('Instagram')}</span>
