@@ -6135,6 +6135,28 @@ async def clone_voice(
 # Quality Analysis endpoints
 # ---------------------------------------------------------------------------
 
+# Time this process booted. A BackgroundTasks analysis dies with the process
+# that spawned it, so a .running sentinel created before this boot is stale —
+# left in place it wedges QC forever: GET keeps answering 202 "running" and
+# POST refuses to start a new run.
+_PROCESS_STARTED_AT = time.time()
+
+
+def _clear_stale_analysis_sentinel(sentinel: Path) -> bool:
+    """Remove a .running sentinel left by a crashed/restarted process.
+
+    Returns True if the sentinel is gone (stale or already removed) and the
+    caller should proceed; False if a live run genuinely owns it.
+    """
+    try:
+        if sentinel.stat().st_mtime < _PROCESS_STARTED_AT:
+            sentinel.unlink(missing_ok=True)
+            return True
+    except FileNotFoundError:
+        return True
+    return False
+
+
 @router.post("/analyze/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
 async def trigger_analysis(job_id: str, language: str, background_tasks: BackgroundTasks):
     """Trigger post-dub quality analysis. Returns 202 immediately."""
@@ -6151,9 +6173,9 @@ async def trigger_analysis(job_id: str, language: str, background_tasks: Backgro
             detail=f"No dubbed video found for language '{lang_norm}'"
         )
 
-    # Check if already running
+    # Check if already running (stale sentinels cleared — see helper)
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
-    if sentinel.exists():
+    if sentinel.exists() and not _clear_stale_analysis_sentinel(sentinel):
         return JSONResponse(
             status_code=202,
             content={"status": "running", "message": "Analysis already in progress"}
@@ -6319,7 +6341,8 @@ async def get_analysis(job_id: str, language: str):
     dubbed_dir = Path(settings.DUBBED_DIR) / job_id
 
     # Check sentinel first — but also detect stale sentinels (result file
-    # already exists means the analysis finished but sentinel wasn't cleaned up).
+    # already exists means the analysis finished but sentinel wasn't cleaned up;
+    # a sentinel older than this process means the run died with the last boot).
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
     result_file = dubbed_dir / f"analysis_{lang_norm}.json"
     if sentinel.exists():
@@ -6329,13 +6352,22 @@ async def get_analysis(job_id: str, language: str):
                 sentinel.unlink(missing_ok=True)
             except Exception:
                 pass
-        else:
+        elif not _clear_stale_analysis_sentinel(sentinel):
             return JSONResponse(
                 status_code=202,
                 content={"status": "running", "message": "Analysis in progress"}
             )
 
     if not result_file.exists():
+        # A failed run leaves its reason behind — surface it instead of 404 so
+        # the editor can stop polling and show the failure.
+        error_file = dubbed_dir / f"analysis_{lang_norm}.error"
+        if error_file.exists():
+            try:
+                err = _json.loads(error_file.read_text(encoding="utf-8"))
+            except Exception:
+                err = {}
+            return {"status": "failed", "reason": err.get("reason") or "Analysis failed"}
         raise HTTPException(
             status_code=404,
             detail="Analysis not found. Trigger with POST /api/analyze/{job_id}/{language}"

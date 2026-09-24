@@ -43,6 +43,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   // QC state — populated concurrently while editor loads
   const [qcAnalysis, setQcAnalysis] = useState<any>(null)
   const [qcLoading, setQcLoading] = useState(false)
+  const [qcError, setQcError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [qcUpdatedAt, setQcUpdatedAt] = useState<string | null>(null)
   const [reanalyzeNonce, setReanalyzeNonce] = useState(0)
@@ -341,11 +342,24 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             }
             if (!cancelled) {
               setQcAnalysis(data.analysis)
+              setQcError(null)
               if (reanalyzePendingRef.current) {
                 setQcUpdatedAt(new Date().toISOString())
                 reanalyzePendingRef.current = false
               }
               setQcLoading(false)
+              if (pollRef.current) {
+                clearInterval(pollRef.current)
+                pollRef.current = null
+              }
+            }
+          } else if (data.status === 'failed') {
+            // Terminal state — the run wrote its reason to disk. Stop polling
+            // and show it; infinite retries here were the old wedge.
+            if (!cancelled) {
+              setQcError(data.reason || 'QC analysis failed')
+              setQcLoading(false)
+              reanalyzePendingRef.current = false
               if (pollRef.current) {
                 clearInterval(pollRef.current)
                 pollRef.current = null
@@ -390,6 +404,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     if (!editorProps || qcLoading) return
     const lang = editorProps.targetLangCode || 'en'
     setQcLoading(true)
+    setQcError(null)
     let res: Response | null = null
     try {
       res = await fetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, {
@@ -445,6 +460,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         qcFindings={NO_FINDINGS}
         qcAnalysis={qcAnalysis}
         qcLoading={qcLoading}
+        qcError={qcError}
         qcUpdatedAt={qcUpdatedAt}
         canReanalyze={!!editorProps.dubbedVideoUrl}
         onReanalyze={handleReanalyze}

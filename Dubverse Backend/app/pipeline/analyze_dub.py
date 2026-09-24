@@ -68,10 +68,13 @@ def analyze_dub(
     transcript_file = Path("data/transcripts") / f"{job_id}.json"
     output_file = dubbed_dir / f"analysis_{lang_norm}.json"
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
+    error_file = dubbed_dir / f"analysis_{lang_norm}.error"
 
-    # Create sentinel to indicate analysis in progress
+    # Create sentinel to indicate analysis in progress, and clear any failure
+    # recorded by a previous run — this run supersedes it.
     try:
         sentinel.touch()
+        error_file.unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -247,6 +250,18 @@ def analyze_dub(
 
     except Exception as e:
         logger.error(f"[ANALYSIS] Failed for job {job_id}: {e}", exc_info=True)
+        # Persist the failure — the GET endpoint surfaces it as status "failed"
+        # so the QC monitor shows a real error instead of polling forever.
+        try:
+            error_file.write_text(
+                json.dumps({
+                    "reason": str(e),
+                    "failed_at": datetime.utcnow().isoformat() + "Z",
+                }),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
         return {"status": "error", "reason": str(e)}
     finally:
         # Remove sentinel
