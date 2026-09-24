@@ -6135,6 +6135,139 @@ async def clone_voice(
 # Quality Analysis endpoints
 # ---------------------------------------------------------------------------
 
+# Time this process booted. A BackgroundTasks analysis dies with the process
+# that spawned it, so a .running sentinel created before this boot is stale —
+# left in place it wedges QC forever: GET keeps answering 202 "running" and
+# POST refuses to start a new run.
+_PROCESS_STARTED_AT = time.time()
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """True if a process with this PID currently exists."""
+    if os.name == "nt":
+        # os.kill(pid, 0) on Windows invokes TerminateProcess — it would kill
+        # the process being probed. OpenProcess is the safe existence check.
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _process_token(pid: int) -> Optional[str]:
+    """Opaque identity for a live process, or None if `pid` is dead.
+
+    A bare PID liveness check lies after a crash: the OS recycles PIDs, so a
+    dead run's recorded PID can now belong to an unrelated process and QC
+    would wedge again. The token pairs the PID with that process's start
+    time — 'alive' then means 'alive AND the same process that wrote it'.
+    """
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            create = wintypes.FILETIME()
+            exit_ = wintypes.FILETIME()
+            kern = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            ok = kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(create), ctypes.byref(exit_),
+                ctypes.byref(kern), ctypes.byref(user),
+            )
+            if not ok:
+                return None
+            return str((create.dwHighDateTime << 32) | create.dwLowDateTime)
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            # starttime (field 22): clock ticks since boot — used as an
+            # equality token, so no unit conversion is needed.
+            return f.read().rsplit(b")", 1)[1].split()[19].decode()
+    except FileNotFoundError:
+        return None
+    except Exception:
+        pass
+    if _pid_is_alive(pid):
+        return "?"  # alive but identity unverifiable (no /proc, e.g. macOS)
+    return None
+
+
+def _clear_stale_analysis_sentinel(sentinel: Path) -> bool:
+    """Remove a .running sentinel whose owning run can no longer finish.
+
+    Sentinels record `pid:token` — the PID plus the process's start time, so
+    a run is live only when a process still owns that exact identity. A dead
+    or recycled PID means the run is gone; a live sentinel owned by a
+    different uvicorn worker is never touched. Older pid-only sentinels and
+    platforms without process start times fall back to a liveness check.
+    Returns True when the sentinel is gone and the caller may proceed.
+    """
+    try:
+        pid_text, _, token = sentinel.read_text(encoding="utf-8").strip().partition(":")
+        pid = int(pid_text) if pid_text else None
+        token = token or None
+    except FileNotFoundError:
+        return True
+    except Exception:
+        pid, token = None, None
+
+    try:
+        if pid is not None:
+            current = _process_token(pid)
+            if token:
+                # Identity check: equal tokens mean the same live process;
+                # anything else (dead PID, recycled PID) means the run died.
+                if current == token:
+                    return False
+                sentinel.unlink(missing_ok=True)
+                return True
+            if current is None:
+                sentinel.unlink(missing_ok=True)
+                return True
+            # Identity unverifiable (legacy format or no /proc): fall back to
+            # plain liveness — accepting the rare recycled-PID false-live is
+            # safer than deleting a live worker's sentinel on mtime alone.
+            return False
+        if sentinel.stat().st_mtime < _PROCESS_STARTED_AT:
+            sentinel.unlink(missing_ok=True)
+            return True
+    except FileNotFoundError:
+        return True
+    return False
+
+
+def _claim_analysis_sentinel(sentinel: Path) -> bool:
+    """Atomically create the .running sentinel for this process.
+
+    O_EXCL fails if the file exists at all — unlike check-then-write, two
+    POSTs racing on different workers cannot both claim the run.
+    """
+    try:
+        fd = os.open(str(sentinel), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(f"{os.getpid()}:{_process_token(os.getpid()) or ''}")
+    return True
+
+
 @router.post("/analyze/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
 async def trigger_analysis(job_id: str, language: str, background_tasks: BackgroundTasks):
     """Trigger post-dub quality analysis. Returns 202 immediately."""
@@ -6151,28 +6284,47 @@ async def trigger_analysis(job_id: str, language: str, background_tasks: Backgro
             detail=f"No dubbed video found for language '{lang_norm}'"
         )
 
-    # Check if already running
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
-    if sentinel.exists():
+    error_file = dubbed_dir / f"analysis_{lang_norm}.error"
+
+    from app.pipeline.analyze_dub import analyze_dub
+
+    # Claim the run atomically before scheduling: the O_EXCL write fails if
+    # any worker already holds the sentinel, so racing POSTs can't both pass
+    # a check-then-write and duplicate the analysis. When the claim loses to
+    # an existing sentinel it may still be stale — recheck once, then either
+    # take it over or report the live run. Clearing the recorded failure up
+    # front also stops a retry from reading the old error before the new
+    # task even starts.
+    claimed = _claim_analysis_sentinel(sentinel)
+    if not claimed and _clear_stale_analysis_sentinel(sentinel):
+        claimed = _claim_analysis_sentinel(sentinel)
+    if not claimed:
         return JSONResponse(
             status_code=202,
             content={"status": "running", "message": "Analysis already in progress"}
         )
 
-    from app.pipeline.analyze_dub import analyze_dub
+    # Server-side claim timestamp: the new run's failure can only be stamped
+    # after this, so clients can tell it apart from a stale GET response that
+    # was already in flight carrying the previous run's error.
+    claimed_at = time.time()
 
-    background_tasks.add_task(
-        asyncio.to_thread,
-        analyze_dub,
-        job_id,
-        lang_norm,
-        job.video_path,
-    )
+    try:
+        error_file.unlink(missing_ok=True)
+        background_tasks.add_task(
+            asyncio.to_thread, analyze_dub, job_id, lang_norm, job.video_path
+        )
+    except Exception:
+        sentinel.unlink(missing_ok=True)
+        raise
+
     logger.info(f"Job {job_id}: quality analysis triggered for {lang_norm}")
 
     return JSONResponse(
         status_code=202,
-        content={"status": "started", "message": "Quality analysis started"}
+        content={"status": "started", "message": "Quality analysis started",
+                 "claimed_at": claimed_at}
     )
 
 
@@ -6318,22 +6470,53 @@ async def get_analysis(job_id: str, language: str):
     lang_norm = language.lower().strip()
     dubbed_dir = Path(settings.DUBBED_DIR) / job_id
 
-    # Check sentinel first — but also detect stale sentinels (result file
-    # already exists means the analysis finished but sentinel wasn't cleaned up).
+    # Check sentinel first — but also detect stale sentinels. A result file
+    # NEWER than the sentinel means a finished run's cleanup didn't fire —
+    # during a re-run the old result and the new sentinel coexist, so only
+    # that ordering proves the sentinel is leftover.
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
     result_file = dubbed_dir / f"analysis_{lang_norm}.json"
     if sentinel.exists():
-        if result_file.exists():
-            # Stale sentinel — analysis completed but cleanup didn't fire.
+        try:
+            # Strictly newer: an equal mtime (coarse fs granularity) can't
+            # prove the run finished — the live sentinel still wins via the
+            # pid:token staleness check below.
+            result_newer = (
+                result_file.exists()
+                and result_file.stat().st_mtime > sentinel.stat().st_mtime
+            )
+        except FileNotFoundError:
+            result_newer = False
+        if result_newer:
             try:
                 sentinel.unlink(missing_ok=True)
             except Exception:
                 pass
-        else:
+        elif not _clear_stale_analysis_sentinel(sentinel):
             return JSONResponse(
                 status_code=202,
                 content={"status": "running", "message": "Analysis in progress"}
             )
+
+    # A failed run leaves its reason behind — surface it instead of 404 so
+    # the editor can stop polling and show the failure. When a previous
+    # result exists, the error only wins if it is NEWER than that result:
+    # an error from a retry that just failed must beat the stale success,
+    # while an error left over from before the last success is stale.
+    error_file = dubbed_dir / f"analysis_{lang_norm}.error"
+    if error_file.exists():
+        stale_error = (
+            result_file.exists()
+            and result_file.stat().st_mtime >= error_file.stat().st_mtime
+        )
+        if not stale_error:
+            try:
+                err = _json.loads(error_file.read_text(encoding="utf-8"))
+            except Exception:
+                err = {}
+            return {"status": "failed",
+                    "reason": err.get("reason") or "Analysis failed",
+                    "failed_at": err.get("failed_at_ts")}
 
     if not result_file.exists():
         raise HTTPException(

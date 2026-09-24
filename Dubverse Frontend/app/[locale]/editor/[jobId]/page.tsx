@@ -43,6 +43,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   // QC state — populated concurrently while editor loads
   const [qcAnalysis, setQcAnalysis] = useState<any>(null)
   const [qcLoading, setQcLoading] = useState(false)
+  const [qcError, setQcError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [qcUpdatedAt, setQcUpdatedAt] = useState<string | null>(null)
   const [reanalyzeNonce, setReanalyzeNonce] = useState(0)
@@ -51,6 +52,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   // (the GET endpoint can serve the prior result mid-run).
   const reanalyzePendingRef = useRef(false)
   const reanalyzePrevGenRef = useRef<string | null>(null)
+  // Server-side claim time of the current retry (from the POST response).
+  // Lets a poll tell a stale in-flight 'failed' response (stamped before
+  // the claim) from the new run's own failure (stamped after).
+  const reanalyzeClaimedAtRef = useRef<number | null>(null)
 
   useEffect(() => {
     localStorage.setItem('dubverse.lastEditorJobId', jobId)
@@ -341,6 +346,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             }
             if (!cancelled) {
               setQcAnalysis(data.analysis)
+              setQcError(null)
               if (reanalyzePendingRef.current) {
                 setQcUpdatedAt(new Date().toISOString())
                 reanalyzePendingRef.current = false
@@ -351,11 +357,35 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
                 pollRef.current = null
               }
             }
+          } else if (data.status === 'failed') {
+            // While a retry is armed, only a failure stamped at/after the
+            // server-side claim belongs to the new run: a poll issued before
+            // the retry POST cleared the old error can still deliver that
+            // older failure afterwards — clearing the file can't retract a
+            // response already in flight. Both timestamps come from the
+            // server, so the comparison is immune to client clock skew.
+            const claimedAt = reanalyzeClaimedAtRef.current
+            if (reanalyzePendingRef.current && claimedAt != null
+                && (typeof data.failed_at !== 'number' || data.failed_at < claimedAt)) {
+              if (!cancelled) setQcLoading(true)
+              return
+            }
+            // Terminal state — the run wrote its reason to disk. Stop
+            // polling and show it; infinite retries here were the old wedge.
+            if (!cancelled) {
+              setQcError(data.reason || 'QC analysis failed')
+              setQcLoading(false)
+              reanalyzePendingRef.current = false
+              if (pollRef.current) {
+                clearInterval(pollRef.current)
+                pollRef.current = null
+              }
+            }
           } else if (data.status === 'running') {
-            if (!cancelled) setQcLoading(true)
+            if (!cancelled) { setQcLoading(true); setQcError(null) }
           }
         } else if (res.status === 202) {
-          if (!cancelled) setQcLoading(true)
+          if (!cancelled) { setQcLoading(true); setQcError(null) }
         } else if (res.status === 404) {
           // Not yet triggered — kick it off
           try {
@@ -390,6 +420,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     if (!editorProps || qcLoading) return
     const lang = editorProps.targetLangCode || 'en'
     setQcLoading(true)
+    setQcError(null)
     let res: Response | null = null
     try {
       res = await fetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, {
@@ -402,8 +433,11 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
       setQcLoading(false)
       return
     }
+    const body = await res.json().catch(() => null)
     reanalyzePrevGenRef.current = qcAnalysis?.generated_at ?? null
     reanalyzePendingRef.current = true
+    reanalyzeClaimedAtRef.current =
+      body && typeof body.claimed_at === 'number' ? body.claimed_at : null
     setQcUpdatedAt(null)
     setReanalyzeNonce((n) => n + 1)
   }, [editorProps, jobId, qcLoading, qcAnalysis])
@@ -445,6 +479,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         qcFindings={NO_FINDINGS}
         qcAnalysis={qcAnalysis}
         qcLoading={qcLoading}
+        qcError={qcError}
         qcUpdatedAt={qcUpdatedAt}
         canReanalyze={!!editorProps.dubbedVideoUrl}
         onReanalyze={handleReanalyze}

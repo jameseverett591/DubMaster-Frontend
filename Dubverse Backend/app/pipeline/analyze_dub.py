@@ -23,6 +23,7 @@ import logging
 import os
 import subprocess
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -68,12 +69,37 @@ def analyze_dub(
     transcript_file = Path("data/transcripts") / f"{job_id}.json"
     output_file = dubbed_dir / f"analysis_{lang_norm}.json"
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
+    error_file = dubbed_dir / f"analysis_{lang_norm}.error"
 
-    # Create sentinel to indicate analysis in progress
+    # Create sentinel to indicate analysis in progress, and clear any failure
+    # recorded by a previous run — this run supersedes it. The sentinel holds
+    # the owning `pid:token` (PID + process start time) so the API can tell a
+    # crashed run from a live one without trusting timestamps across restarts
+    # or tripping on recycled PIDs.
     try:
-        sentinel.touch()
+        from app.api.routes import _process_token
+        sentinel.write_text(
+            f"{os.getpid()}:{_process_token(os.getpid()) or ''}",
+            encoding="utf-8",
+        )
+        error_file.unlink(missing_ok=True)
     except Exception:
         pass
+
+    def _fail(reason: str) -> Dict[str, Any]:
+        """Persist a failure reason for the GET endpoint, then return error."""
+        try:
+            error_file.write_text(
+                json.dumps({
+                    "reason": reason,
+                    "failed_at": datetime.utcnow().isoformat() + "Z",
+                    "failed_at_ts": time.time(),
+                }),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+        return {"status": "error", "reason": reason}
 
     try:
         has_export = dubbed_video.exists()
@@ -88,7 +114,7 @@ def analyze_dub(
             # its qc_preview_ prefix keeps it unambiguous against the real
             # export artifacts (dubbed_{lang}.mp4, dubbed_audio.wav).
             if not segments_file.exists():
-                return {"status": "error", "reason": "No segments available yet"}
+                return _fail("No segments available yet")
             with open(segments_file, "r", encoding="utf-8") as f:
                 seg_data = json.load(f)
             segs = seg_data.get("segments", [])
@@ -97,7 +123,7 @@ def analyze_dub(
                 for s in segs if s.get("path")
             ]
             if not merge_segments:
-                return {"status": "error", "reason": "No generated audio yet"}
+                return _fail("No generated audio yet")
 
             from app.services.dubbing_service import dubbing_service
             video_duration = seg_data.get("video_duration") or 0.0
@@ -109,7 +135,7 @@ def analyze_dub(
                 merge_segments, str(stitched_audio), video_duration
             )
             if not ok:
-                return {"status": "error", "reason": "Could not build preview audio for QC"}
+                return _fail("Could not build preview audio for QC")
             audio_source = stitched_audio
 
         analysis: Dict[str, Any] = {
@@ -247,7 +273,9 @@ def analyze_dub(
 
     except Exception as e:
         logger.error(f"[ANALYSIS] Failed for job {job_id}: {e}", exc_info=True)
-        return {"status": "error", "reason": str(e)}
+        # Persist the failure — the GET endpoint surfaces it as status "failed"
+        # so the QC monitor shows a real error instead of polling forever.
+        return _fail(str(e))
     finally:
         # Remove sentinel
         try:
