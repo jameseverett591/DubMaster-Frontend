@@ -19,6 +19,15 @@ function formatTime(secs: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`
 }
 
+const FLAG_LABELS: Record<string, string> = {
+  meaning_divergence: 'meaning divergence',
+  velma_low_confidence: 'low confidence',
+  provider_failed: 'translation failed',
+  untranslated_source: 'untranslated source',
+  empty_source: 'empty source',
+  translation_flagged: 'translation flagged',
+}
+
 function confidenceColor(score: number | null | undefined): string {
   if (score === null || score === undefined) return 'text-slate-400'
   if (score < 0.35) return 'text-red-400'
@@ -101,7 +110,7 @@ export function ReviewQueuePanel({
                   <div className="flex gap-1 flex-wrap justify-end">
                     {seg.flags!.map((flag, fi) => (
                       <span key={fi} className="text-[10px] font-medium px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 uppercase tracking-wide whitespace-nowrap">
-                        {flag.code === 'meaning_divergence' ? 'meaning divergence' : 'low confidence'}
+                        {FLAG_LABELS[flag.code] ?? flag.code.replace(/_/g, ' ')}
                       </span>
                     ))}
                   </div>
@@ -118,12 +127,14 @@ export function ReviewQueuePanel({
                     {flag.reason && (
                       <p className="text-xs text-amber-300/80 italic">{flag.reason}</p>
                     )}
-                    <p className={cn('text-xs font-mono', confidenceColor(flag.score))}>
-                      {flag.code === 'meaning_divergence' ? 'Divergence score' : 'Velma confidence'}
-                      {': '}
-                      {flag.score !== null && flag.score !== undefined ? flag.score.toFixed(3) : 'N/A'}
-                      {' / threshold '}{flag.threshold.toFixed(2)}
-                    </p>
+                    {typeof flag.threshold === 'number' && (
+                      <p className={cn('text-xs font-mono', confidenceColor(flag.score))}>
+                        {flag.code === 'meaning_divergence' ? 'Divergence score' : 'Velma confidence'}
+                        {': '}
+                        {flag.score !== null && flag.score !== undefined ? flag.score.toFixed(3) : 'N/A'}
+                        {' / threshold '}{flag.threshold.toFixed(2)}
+                      </p>
+                    )}
                   </div>
                 ))}
 

@@ -14,6 +14,109 @@ export interface CharacterProfile {
   speech_style: string
 }
 
+export interface SceneSummary {
+  status: 'ok' | 'skipped' | 'error'
+  reason?: string
+  scene_beat?: string
+  speaker_persona?: string | null
+  line_function?: string
+  stakes_tags?: string[]
+  original_performance?: string | null
+}
+
+export type VideoNotesPreset = 'smart' | 'summary' | 'core_points' | 'chapters' | 'study_notes'
+
+export interface VideoNote {
+  start: number
+  text: string
+}
+
+export interface VideoChapter {
+  title: string
+  start: number | null
+  end: number | null
+  summary: string
+}
+
+export interface VideoNotes {
+  status: 'ok' | 'skipped' | 'error' | 'processing'
+  reason?: string
+  preset?: VideoNotesPreset
+  provider?: 'videotranscriber' | 'deepgram' | 'claude'
+  stage?: string
+  retry_after?: number
+  video_title?: string
+  notes?: VideoNote[]
+  chapters?: VideoChapter[]
+  language?: string
+  duration?: number
+}
+
+// ============================================================================
+// RULEBOOK — Feature B: the director's accumulated decisions, applied forward.
+// Spec: plan-8012dcdb5d41cf3b.md §5. A rule is a typed, scoped, reviewable
+// override; job scope is the staging area, global scope is the cross-job
+// library. Nothing is learned silently — inferred rules arrive disabled.
+// ============================================================================
+
+export type RuleClass =
+  | 'name_mapping'     // source name/term → forced English rendering
+  | 'persona'          // speaker slot → character profile
+  | 'stance'           // scene-style directive (register/stance)
+  | 'translation_fix'  // exact source line → forced target line
+  | 'pronunciation'    // displayed term → spoken respelling (TTS only)
+  | 'delivery'         // speaker → emotion/speed/pitch defaults
+  | 'glossary'         // source term → canonical English term
+
+export type RuleScope = 'job' | 'global'
+
+export interface RuleConditions {
+  speaker?: string
+  stakes_tags?: string[]
+  when?: string | string[]
+  traits?: string[] | string
+  speech_style?: string
+  emotion?: string
+  speed?: number
+  pitch?: number
+  // Source-language scope — e.g. ['yue','zh','cmn',...] for the
+  // Cantonese/Mandarin section. Absent = applies to every source language.
+  languages?: string[]
+}
+
+export const CJK_LANGUAGE_SCOPE = [
+  'yue', 'zh-yue', 'zh-hk', 'yue-hk', 'zh', 'cmn', 'zho',
+  'zh-cn', 'zh-tw', 'zh-hans', 'zh-hant', 'zh-sg',
+]
+
+export interface Rule {
+  id: string
+  class: RuleClass
+  scope: RuleScope
+  source_pattern: string
+  target: string
+  conditions: RuleConditions
+  enabled: boolean
+  inferred?: boolean
+  created_from_job?: string | null
+  created_at?: string
+  notes?: string
+}
+
+export interface EffectiveRules {
+  localized_aliases: Record<string, string>
+  character_profiles: Array<{ name: string; speaker?: string; traits: string[]; speech_style: string }>
+  stance_directives: string[]
+  translation_fixes: Record<string, string>
+  delivery: Record<string, { emotion?: string; speed?: number; pitch?: number }>
+  applied_rule_ids: string[]
+}
+
+export interface RulebookResponse {
+  rules: Rule[]
+  effective: EffectiveRules
+}
+
 // ============================================================================
 // CUSTOM ERRORS
 // ============================================================================
@@ -168,9 +271,12 @@ export interface CustomVoice {
   name: string
   tags?: string[]
   custom?: boolean
+  cloned?: boolean
   /** Extension of the stored source clip. Absent on voices cloned before the
    *  upload was kept — those have no sample to preview. */
   sample_ext?: string
+  /** Absolute path of the stored source clip on the server, when one exists. */
+  sample_path?: string
 }
 
 export interface DubRequest {
@@ -185,8 +291,7 @@ export interface DubRequest {
     pitch?: number  // semitone shift, e.g. +8 for child-like voice
   }>
   source_language?: string
-  dubbing_engine?: 'dubmaster' | 'vozo'
-  vozo_user_prompt?: string
+  dubbing_engine?: 'dubmaster'
 }
 
 export interface DubResponse {
@@ -249,6 +354,10 @@ export interface RegenerateSegmentRequest {
   // writes the file but does NOT commit it to segments.json/Supabase. The take
   // is promoted via commitSegmentTiming's staged_path when the chunk is saved.
   stage?: boolean
+  // Commit is a toggle: releasing a committed line (recommit) sends this, so
+  // REGEN-ADAPT-FIT may sync-fit the text to its window. Locked or
+  // user-authored text never sets it — verbatim is the default.
+  allow_adapt_fit?: boolean
 }
 
 export interface RegenerateSegmentResponse {
@@ -356,17 +465,6 @@ export interface RetranscribedSegment {
   confidence: number
 }
 
-export interface ScreenAppInsight {
-  status: string
-  label?: string
-  summary?: string
-  segments?: Array<{ start: number; end: number; text: string }>
-  speakers?: Array<{ id: string; name?: string }>
-  key_moments?: Array<{ time: number; description: string }>
-  confidence_scores?: Array<{ start: number; end: number; confidence: number }>
-  reason?: string
-}
-
 export interface EmotionAnalysis {
   status: string
   emotion_variance?: number
@@ -415,7 +513,6 @@ export interface AnalysisSummary {
   component_scores: Record<string, number>
   weights_used: Record<string, number>
   services_available?: Record<string, boolean>
-  screenapp_available?: boolean
 }
 
 export interface QualityAnalysis {
@@ -453,12 +550,36 @@ export interface QualityAnalysis {
     reason?: string
   }
   loudness: LoudnessAnalysis
-  screenapp_original: ScreenAppInsight | null
-  screenapp_dubbed: ScreenAppInsight | null
   emotion?: EmotionAnalysis
   pronunciation?: PronunciationAssessment
   translation?: TranslationQuality
   summary: AnalysisSummary
+}
+
+export interface LipSyncWindowResult {
+  start: number
+  end: number
+  visual?: {
+    status: string
+    sync_score?: number
+    correlation?: number
+    offset_ms?: number
+    face_coverage?: number
+    severity?: string
+    reason?: string
+  }
+  audio?: {
+    status: string
+    score?: number
+    correlation?: number
+    offset_ms?: number
+    abs_offset_ms?: number
+    severity?: string
+    reason?: string
+    method?: string
+    scored?: number
+    total?: number
+  }
 }
 
 export type AnalysisStatus = 'idle' | 'running' | 'complete' | 'error'
@@ -746,7 +867,13 @@ class DubVerseAPIClient {
     })
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }))
-      throw new Error(error.detail || `Failed to start dubbing: ${response.statusText}`)
+      // detail may be a structured object — the 402 quota response carries
+      // {code, message, shortfall_cents, balance} — so surface its message,
+      // not "[object Object]".
+      const detail = typeof error.detail === 'object' && error.detail !== null
+        ? (error.detail.message ?? JSON.stringify(error.detail))
+        : error.detail
+      throw new Error(detail || `Failed to start dubbing: ${response.statusText}`)
     }
     return response.json()
   }
@@ -789,7 +916,10 @@ class DubVerseAPIClient {
     })
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }))
-      throw new Error(error.detail || `Render failed: ${response.statusText}`)
+      const detail = typeof error.detail === 'object' && error.detail !== null
+        ? (error.detail.message ?? JSON.stringify(error.detail))
+        : error.detail
+      throw new Error(detail || `Render failed: ${response.statusText}`)
     }
     return response.json()
   }
@@ -908,9 +1038,11 @@ class DubVerseAPIClient {
     engines: Record<string, {
       available: boolean
       description: string
-      features: string[]
+      features?: string[]
       requires_public_url?: boolean
       public_url_set?: boolean
+      provider?: string
+      cost_per_second_usd?: number
     }>
   }> {
     const response = await this._fetch(`${this.baseURL}/api/dubbing-engines`)
@@ -1104,6 +1236,104 @@ class DubVerseAPIClient {
       body: JSON.stringify({ character_profiles: profiles }),
     })
     if (!response.ok) throw new Error('Failed to save character profiles')
+  }
+
+  async getSceneSummary(
+    jobId: string,
+    segmentIndex: number,
+    sceneStart?: number,
+    sceneEnd?: number
+  ): Promise<SceneSummary> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/scene-summary`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({
+        segment_index: segmentIndex,
+        ...(sceneStart !== undefined ? { scene_start: sceneStart } : {}),
+        ...(sceneEnd !== undefined ? { scene_end: sceneEnd } : {}),
+      }),
+    })
+    if (!response.ok) throw new Error('Failed to load scene summary')
+    return response.json()
+  }
+
+  async getVideoNotes(jobId: string, preset: VideoNotesPreset = 'smart'): Promise<VideoNotes> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/video-notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ preset }),
+    })
+    if (!response.ok) throw new Error('Failed to load video notes')
+    return response.json()
+  }
+
+  // ── Rulebook ──────────────────────────────────────────────────────────────
+  // Job rules + the caller's global rules merged in one view; `effective`
+  // carries the resolved params the pipeline will apply.
+  async getRulebook(jobId: string): Promise<RulebookResponse> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/rulebook`, {
+      headers: this._authHeaders(),
+    })
+    if (!response.ok) throw new Error('Failed to load rulebook')
+    return response.json()
+  }
+
+  async addRule(
+    jobId: string,
+    rule: {
+      class: RuleClass
+      source_pattern?: string
+      target?: string
+      conditions?: RuleConditions
+      notes?: string
+      scope?: RuleScope
+    }
+  ): Promise<Rule> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/rulebook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify(rule),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || 'Failed to add rule')
+    }
+    return (await response.json()).rule
+  }
+
+  async updateRule(
+    jobId: string,
+    ruleId: string,
+    updates: Partial<Pick<Rule, 'target' | 'source_pattern' | 'notes' | 'enabled' | 'conditions'>>
+  ): Promise<Rule> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/rulebook/${ruleId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify(updates),
+    })
+    if (!response.ok) throw new Error('Failed to update rule')
+    return (await response.json()).rule
+  }
+
+  async deleteRule(jobId: string, ruleId: string, scope: RuleScope = 'job'): Promise<void> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/rulebook/${ruleId}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ scope }),
+    })
+    if (!response.ok) throw new Error('Failed to delete rule')
+  }
+
+  async promoteRule(jobId: string, ruleId: string): Promise<Rule> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/rulebook/${ruleId}/promote`, {
+      method: 'POST',
+      headers: this._authHeaders(),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || 'Failed to promote rule')
+    }
+    return (await response.json()).rule
   }
 
   async regenerateSegment(
@@ -1380,12 +1610,16 @@ class DubVerseAPIClient {
     numSpeakers?: number,
     targetLanguage?: string,
     signal?: AbortSignal,
+    transcript?: Array<{ text: string; start: number; end: number; speaker?: string }>,
   ): Promise<UploadResponse> {
     await this._ensureToken()
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
       const formData = new FormData()
       formData.append('file', file)
+      if (transcript && transcript.length) {
+        formData.append('transcript', JSON.stringify(transcript))
+      }
       if (sourceLanguage && sourceLanguage !== 'auto') {
         formData.append('source_language', sourceLanguage)
       }
@@ -1431,6 +1665,75 @@ class DubVerseAPIClient {
       }
       xhr.send(formData)
     })
+  }
+
+  /** Probe a YouTube URL — title, duration, thumbnail, caption languages. */
+  async getYouTubeInfo(url: string): Promise<{
+    video_id: string
+    title: string
+    duration: number
+    thumbnail: string
+    uploader: string
+    subtitle_languages: string[]
+    auto_caption_languages: string[]
+  }> {
+    const response = await this._fetch(
+      `${this.baseURL}/api/youtube/info?url=${encodeURIComponent(url)}`)
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `YouTube lookup failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  /** Fetch a video's caption track (no video) as timestamped segments. */
+  async getYouTubeCaptions(url: string, languages?: string[]): Promise<{
+    video_id: string
+    language: string
+    language_code: string
+    is_generated: boolean
+    languages: Array<{
+      language: string
+      language_code: string
+      is_generated: boolean
+      is_translatable: boolean
+    }>
+    segments: Array<{ start: number; end: number; text: string }>
+  }> {
+    const response = await this._fetch(`${this.baseURL}/api/youtube/captions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, languages }),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Caption download failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  /** Download a YouTube video into a new job and start the pipeline. */
+  async importYouTube(
+    url: string,
+    sourceLanguage?: string,
+    targetLanguage?: string,
+    numSpeakers?: number,
+  ): Promise<UploadResponse> {
+    const response = await this._fetch(`${this.baseURL}/api/youtube/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url,
+        source_language: sourceLanguage,
+        target_language: targetLanguage,
+        num_speakers: numSpeakers,
+      }),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Import failed: ${response.statusText}`)
+    }
+    return response.json()
   }
 
 
@@ -1487,17 +1790,121 @@ class DubVerseAPIClient {
     return response.json()
   }
 
-  async remixDub(jobId: string): Promise<RemixResponse> {
-    const response = await this._fetch(`${this.baseURL}/api/dub/remix/${jobId}`, {
+  // ── Scoped lip-sync (pay per selected segment) ──────────────────────────
+  async getLipsyncSelection(jobId: string): Promise<string[]> {
+    const res = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/lipsync-selection`)
+    if (!res.ok) return []
+    const data = await res.json()
+    return (data.segment_ids || []).map(String)
+  }
+
+  async putLipsyncSelection(jobId: string, segmentIds: string[]): Promise<void> {
+    await this._fetch(`${this.baseURL}/api/jobs/${jobId}/lipsync-selection`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ segment_ids: segmentIds }),
+    })
+  }
+
+  // ── Page-level text lock — seal every line's words at once ───────────────
+  async getTextLock(jobId: string): Promise<boolean> {
+    const res = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/text-lock`)
+    if (!res.ok) return false
+    return !!(await res.json()).locked
+  }
+
+  async setTextLock(jobId: string, locked: boolean): Promise<void> {
+    await this._fetch(`${this.baseURL}/api/jobs/${jobId}/text-lock`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ locked }),
+    })
+  }
+
+  async getLipsyncQuote(jobId: string): Promise<{
+    available: boolean; scoped: boolean; range_count: number
+    selected_seconds: number; cost_usd: number; charge_seconds: number
+    wallet_seconds: number; shortfall_seconds: number; shortfall_cents: number
+    bypassed?: boolean
+    synced_selection: string[] | null; current_selection: string[]
+  } | null> {
+    const res = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/lipsync-quote`)
+    if (!res.ok) return null
+    return res.json()
+  }
+
+  /** Render cost quote for the cost counter — needed_seconds is 0 when the
+   *  job was already billed (re-renders are free). */
+  async getQuotaEstimate(jobId: string): Promise<{
+    already_billed: boolean; needed_seconds: number; ok: boolean
+    shortfall_cents: number; bypassed?: boolean
+  } | null> {
+    const res = await this._fetch(`${this.baseURL}/api/quota/estimate/${jobId}`)
+    if (!res.ok) return null
+    return res.json()
+  }
+
+  async remixDub(jobId: string, opts?: { lipsync?: boolean }): Promise<RemixResponse> {
+    const qs = opts?.lipsync ? '?lipsync=true' : ''
+    const response = await this._fetch(`${this.baseURL}/api/dub/remix/${jobId}${qs}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
     })
     if (!response.ok) {
       if (response.status === 404) throw new JobNotFoundError(jobId)
       const error = await response.json().catch(() => ({ detail: response.statusText }))
-      throw new Error(error.detail || `Failed to rebuild video: ${response.statusText}`)
+      // detail may be a structured object — the 402 quota response carries
+      // {code, message, shortfall_cents, balance} — so surface its message,
+      // not "[object Object]".
+      const detail = typeof error.detail === 'object' && error.detail !== null
+        ? (error.detail.message ?? JSON.stringify(error.detail))
+        : error.detail
+      throw new Error(detail || `Failed to rebuild video: ${response.statusText}`)
     }
     return response.json()
+  }
+
+  /** Per-segment lip-sync score — original-video mouth movement vs the
+   *  segment's CURRENT audio file + committed timing. Runs without a rebuild,
+   *  so it reflects manual timing edits and regenerated takes immediately.
+   *  NOTE: single segments are usually too short for a stable correlation —
+   *  prefer analyzeLipSync (minute windows / edited spans). */
+  async analyzeSegmentLipSync(
+    jobId: string,
+    segmentIndex: number,
+  ): Promise<{ status: string; sync_score?: number; correlation?: number; offset_ms?: number; face_coverage?: number; severity?: string; reason?: string }> {
+    const res = await this._fetch(`${this.baseURL}/api/analyze-segment/${jobId}/${segmentIndex}`, {
+      method: 'POST',
+      headers: this._authHeaders(),
+    })
+    if (!res.ok) throw new Error(await this._detail(res))
+    return res.json()
+  }
+
+  /** Minute-window lip-sync scoring. `range` omitted → every 60s window of
+   *  the timeline (the upfront pass); {start,end} → re-score one span, e.g.
+   *  an edit's full committed range snapped to the minute grid. The dubbed
+   *  signal is rebuilt from the segments' current audio + committed times —
+   *  manual lip-sync adjustments and regenerated takes are what get scored. */
+  async analyzeLipSync(
+    jobId: string,
+    range?: { start: number; end: number },
+  ): Promise<{
+    status: string
+    windows?: LipSyncWindowResult[]
+    start?: number; end?: number
+    sync_score?: number; correlation?: number; offset_ms?: number
+    face_coverage?: number; severity?: string; reason?: string
+    visual?: LipSyncWindowResult['visual']
+    audio?: LipSyncWindowResult['audio']
+  }> {
+    const res = await this._fetch(`${this.baseURL}/api/analyze-lipsync/${jobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify(range ?? {}),
+    })
+    if (!res.ok) throw new Error(await this._detail(res))
+    return res.json()
   }
 
   async commitSegmentTiming(
@@ -1514,6 +1921,7 @@ class DubVerseAPIClient {
       paired_with_next?: boolean
       text?: string
       text_locked?: boolean
+      text_edit_locked?: boolean
       fade_in?: number
       fade_out?: number
       // Promote a staged take: backend sets BOTH path and committed_audio_url
@@ -1549,6 +1957,18 @@ class DubVerseAPIClient {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify({ scenes }),
+    })
+    if (!res.ok) throw new Error(await this._detail(res))
+    return res.json()
+  }
+
+  /** Regions where overlapping lines are mixed as interruptions (both voices at
+   *  full level) instead of crossfaded. The editor's Cross Layers toggle writes these. */
+  async updateCrosslayerRanges(jobId: string, ranges: { start: number; end: number }[]): Promise<{ crosslayer_ranges: { start: number; end: number }[] }> {
+    const res = await this._fetch(`${this.baseURL}/api/crosslayer/${jobId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ crosslayer_ranges: ranges }),
     })
     if (!res.ok) throw new Error(await this._detail(res))
     return res.json()
@@ -1687,11 +2107,15 @@ class DubVerseAPIClient {
   }
 
   async updateVoiceMapping(jobId: string, voiceMapping: Record<string, string>): Promise<void> {
-    await this._fetch(`${this.baseURL}/api/jobs/${jobId}/voice-mapping`, {
+    const res = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/voice-mapping`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(voiceMapping),
     })
+    // This was a fire-and-forget swallow: a failed PATCH left voice_mapping
+    // null server-side while the UI looked assigned, and reloads rebuilt the
+    // map from whatever else was around — the "voices swapped on F5" bug.
+    if (!res.ok) throw new Error(`voice-mapping PATCH failed: ${res.status}`)
   }
 
   async getVoiceById(voiceId: string): Promise<{ voice_id: string; name: string; tags: string[] }> {
@@ -1843,6 +2267,7 @@ export function getStatusMessage(status: JobStatusValue): string {
     extracting_audio: 'Extracting audio track...',
     diarizing: 'Identifying speakers...',
     transcribing: 'Transcribing with Whisper...',
+    ready_for_review: 'Ready for review',
     ready_for_voice_selection: 'Ready for voice selection',
     translating: 'Translating dialogue...',
     synthesizing: 'Generating dubbed audio...',

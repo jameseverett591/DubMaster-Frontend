@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import asyncio
 import logging
 import os
+import re
 import sys
 
 # Load .env into os.environ before anything else so os.getenv() calls
@@ -30,6 +31,71 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+class _RedactTokensFilter(logging.Filter):
+    """Scrub credentials from log records before any handler writes them.
+
+    Media routes authenticate with ?access_token=<JWT>, because a <video> or
+    <audio> element — and an external lip-sync vendor — cannot send an
+    Authorization header. uvicorn's access log records the full path with its
+    query string, so every media request wrote the user's live Supabase JWT to
+    the log verbatim. Anyone with log access could replay it against every
+    protected route until it expired.
+
+    Redaction happens on the record rather than per call site, so it also
+    covers any future log line that happens to include such a URL.
+    """
+
+    _PATTERN = re.compile(r"((?:access|refresh)_token=)[^&\s\"']+", re.IGNORECASE)
+    # A token logged WITHOUT its name — logger.info("token %s", tok), or a
+    # structured field — carries no "access_token=" for the pattern above to
+    # anchor on. Supabase access tokens are JWTs, so match that shape directly:
+    # three base64url parts, the first two starting with "eyJ" ('{"' encoded).
+    _JWT = re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")
+    _TOKEN_KEYS = frozenset({"access_token", "refresh_token"})
+
+    def _scrub(self, value):
+        """Recursively clean strings, tuples, lists and dicts.
+
+        A dict is also checked by KEY: a structured field named access_token
+        has a bare token as its value, which neither pattern can recognise as
+        belonging to a credential by content alone.
+        """
+        if isinstance(value, str):
+            return self._JWT.sub("REDACTED", self._PATTERN.sub(r"\1REDACTED", value))
+        if isinstance(value, dict):
+            return {
+                k: "REDACTED" if str(k).lower() in self._TOKEN_KEYS else self._scrub(v)
+                for k, v in value.items()
+            }
+        if isinstance(value, tuple):
+            return tuple(self._scrub(v) for v in value)
+        if isinstance(value, list):
+            return [self._scrub(v) for v in value]
+        return value
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Redact credentials from a record's message and arguments in place.
+
+        Runs before formatting, so both halves have to be cleaned: the message
+        template, and the arguments interpolated into it, which is where
+        uvicorn's access log carries the request path. Always returns True —
+        this filter exists to sanitise records, never to suppress them.
+        """
+        record.msg = self._scrub(record.msg)
+        if isinstance(record.args, (tuple, dict)):
+            record.args = self._scrub(record.args)
+        return True  # never drop the record, only clean it
+
+
+_redact_tokens = _RedactTokensFilter()
+# uvicorn.access does not propagate to root, so it needs its own filter. The
+# root handlers get one too, for anything logged through the normal loggers.
+for _name in ("uvicorn.access", "uvicorn.error", "uvicorn"):
+    logging.getLogger(_name).addFilter(_redact_tokens)
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_redact_tokens)
 
 
 async def _load_jobs_from_db() -> None:
@@ -115,6 +181,9 @@ async def _load_jobs_from_db() -> None:
                     # record of what it was charged, and update_job_status
                     # skips the refund entirely.
                     minutes_charged=row.get("minutes_charged"),
+                    # Same for the Make Movie charge: forgotten, a re-render
+                    # after restart bills the customer a second time.
+                    billed_seconds=row.get("billed_seconds"),
                     created_at=_parse_dt(row.get("created_at")) or datetime.now(),
                     updated_at=_parse_dt(row.get("updated_at")) or datetime.now(),
                     completed_at=_parse_dt(row.get("completed_at")),
@@ -128,6 +197,40 @@ async def _load_jobs_from_db() -> None:
                 )
 
         logger.info(f"Startup: loaded {loaded} jobs from Supabase")
+
+        # Jobs in an in-flight state were being worked by asyncio tasks /
+        # RunPod pollers that died with the previous process — nothing will
+        # ever move them again, and their RunPod request (if any) would keep
+        # burning GPU time for a result nobody polls. Cancel the remote
+        # request best-effort, then fail the job so the UI shows a
+        # resubmit-able error instead of a forever-spinning stage.
+        _IN_FLIGHT = {
+            JobStatus.PENDING, JobStatus.UPLOADING, JobStatus.PROCESSING,
+            JobStatus.CHUNKING, JobStatus.EXTRACTING_AUDIO,
+            JobStatus.DIARIZING, JobStatus.TRANSCRIBING,
+            JobStatus.TRANSLATING, JobStatus.SYNTHESIZING,
+            JobStatus.LIP_SYNCING, JobStatus.REASSEMBLING,
+        }
+        for _job in list(job_manager._jobs.values()):
+            if _job.status not in _IN_FLIGHT:
+                continue
+            _rp = getattr(_job, "runpod_job_id", None)
+            if _rp:
+                try:
+                    from app.services.runpod_service import runpod_service
+                    if runpod_service.is_available():
+                        await runpod_service.cancel_job(_rp)
+                except Exception as _exc:
+                    logger.warning(
+                        f"Startup: RunPod cancel failed for orphaned "
+                        f"{_rp}: {_exc}")
+            await job_manager.update_job_status(
+                _job.job_id, JobStatus.FAILED,
+                current_stage="Failed",
+                error_message="The backend restarted while this job was "
+                              "processing — please resubmit the video.")
+            logger.info(
+                f"Startup: marked orphaned job {_job.job_id} failed")
     except Exception as exc:
         logger.warning(
             f"Startup: Supabase job load failed — "

@@ -46,11 +46,16 @@ import { useT } from '@/lib/use-t'
  *  These used Math.random() during render, which returns different values on
  *  the server and the client — a guaranteed hydration mismatch on every page
  *  load, which React reports and which makes it discard the server HTML for
- *  this subtree. Seeding from the index keeps the scatter looking random while
- *  producing identical markup on both sides. */
+ *  this subtree. The earlier Math.sin() seed fix was wrong too: sin's last
+ *  bits are implementation-defined, so Node's V8 and Chrome's V8 disagree at
+ *  ~15th-decimal precision and the server HTML still mismatches. Integer
+ *  hashing (imul/>>>) is exact on every engine — this one truly can't drift. */
 function particleRand(i: number, salt: number): number {
-  const x = Math.sin(i * 127.1 + salt * 311.7) * 43758.5453
-  return x - Math.floor(x)
+  let x = Math.imul(i + 1, 2654435761) ^ Math.imul(salt + 1, 2246822519)
+  x ^= x >>> 16; x = Math.imul(x, 2654435761)
+  x ^= x >>> 13; x = Math.imul(x, 2246822519)
+  x ^= x >>> 16
+  return (x >>> 0) / 4294967296
 }
 
 function Particles() {
@@ -95,6 +100,7 @@ function GlowSeparator() {
 export default function LandingPage() {
   const tUi = useT()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [featureDetail, setFeatureDetail] = useState<{ title: string; body: string; anchor?: string } | null>(null)
   const [videoMode, setVideoMode] = useState<"original" | "dubbed" | "split">("split")
   const [scrollY, setScrollY] = useState(0)
   const router = useRouter()
@@ -206,7 +212,7 @@ export default function LandingPage() {
             <div className="hidden md:flex items-center gap-8">
               <a href="#features" className="text-sm text-[#94A3B8] hover:text-[#C084FC] transition-colors duration-300">{t('navFeatures')}</a>
               <a href="#how-it-works" className="text-sm text-[#94A3B8] hover:text-[#C084FC] transition-colors duration-300">{t('navHowItWorks')}</a>
-              <Link href="/signup" className="text-sm text-[#94A3B8] hover:text-[#C084FC] transition-colors duration-300">{t('navPricing')}</Link>
+              <Link href="/pricing" className="text-sm text-[#94A3B8] hover:text-[#C084FC] transition-colors duration-300">{t('navPricing')}</Link>
               <a href="#faq" className="text-sm text-[#94A3B8] hover:text-[#C084FC] transition-colors duration-300">{t('navFaq')}</a>
             </div>
 
@@ -234,7 +240,7 @@ export default function LandingPage() {
             <div className="flex flex-col gap-4">
               <a href="#features" className="text-sm text-[#94A3B8] hover:text-[#C084FC]">{t('navFeatures')}</a>
               <a href="#how-it-works" className="text-sm text-[#94A3B8] hover:text-[#C084FC]">{t('navHowItWorks')}</a>
-              <Link href="/signup" className="text-sm text-[#94A3B8] hover:text-[#C084FC]">{t('navPricing')}</Link>
+              <Link href="/pricing" className="text-sm text-[#94A3B8] hover:text-[#C084FC]">{t('navPricing')}</Link>
               <a href="#faq" className="text-sm text-[#94A3B8] hover:text-[#C084FC]">{t('navFaq')}</a>
               <div className="flex items-center gap-2 pt-1">
                 <span className="text-sm text-[#64748B]">{tUi('Language:')}</span>
@@ -303,13 +309,13 @@ export default function LandingPage() {
             <Button asChild size="lg" className="bg-gradient-to-r from-[#A855F7] to-[#7C3AED] hover:opacity-90 text-lg px-8 py-6 btn-glow font-semibold shadow-[0_0_20px_rgba(168,85,247,0.3)]">
               <Link href="/signup">
                 <Upload className="mr-2 h-5 w-5" />
-                {t('getStarted')}
+                {t('heroCta1')}
               </Link>
             </Button>
             <Button asChild size="lg" variant="outline" className="border-[#22D3EE]/40 text-[#22D3EE] hover:bg-[#22D3EE]/10 text-lg px-8 py-6 btn-glow shadow-[0_0_15px_rgba(34,211,238,0.1)]">
               <a href="#how-it-works">
                 <Play className="mr-2 h-5 w-5" />
-                {t('navHowItWorks')}
+                {t('heroCta2')}
               </a>
             </Button>
           </div>
@@ -317,16 +323,16 @@ export default function LandingPage() {
           {/* Stats bar - glassmorphism */}
           <div className="inline-flex flex-wrap items-center justify-center gap-8 md:gap-12 mb-16 px-8 py-5 rounded-2xl bg-gradient-to-r from-[#A855F7]/10 via-[#22D3EE]/5 to-[#A855F7]/10 backdrop-blur-md border border-[#A855F7]/20 shadow-[0_0_30px_rgba(168,85,247,0.1)]">
             {[
-              { value: "99%", label: "Emotion" },
-              { value: "Voice", label: "Cloning" },
-              { value: "24-48hr", label: "Turnaround" },
-              { value: "$500-2K", label: "per film" },
+              { value: "3 min", label: "statEmotion" },
+              { value: "$49/mo", label: "statVoiceCloning" },
+              { value: "$2.50/min", label: "statTurnaround" },
+              { value: "120 min", label: "statPerFilm" },
             ].map((stat, i) => (
               <div key={i} className="text-center">
                 <div className="text-2xl md:text-3xl font-bold text-[#FDB022] drop-shadow-[0_0_15px_rgba(253,176,34,0.4)]">
                   {stat.value}
                 </div>
-                <div className="text-sm text-[#94A3B8]">{tUi(stat.label)}</div>
+                <div className="text-sm text-[#94A3B8]">{t(stat.label)}</div>
               </div>
             ))}
           </div>
@@ -370,21 +376,16 @@ export default function LandingPage() {
             {/* Glowing divider */}
             <div className="hidden md:block absolute left-1/2 top-0 bottom-0 w-px bg-gradient-to-b from-transparent via-[#22D3EE]/50 to-transparent shadow-[0_0_10px_rgba(34,211,238,0.3)]" />
 
-            {/* Traditional */}
+            {/* One-shot tools */}
             <Card className="bg-gradient-to-br from-[#1A0000]/30 to-[#020817] border-[#EF4444]/20 rounded-none md:rounded-l-xl md:rounded-r-none card-glow transition-all duration-300">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-[#EF4444] text-xl">
                   <X className="h-6 w-6 drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]" />
-                  {t('traditionalStudios')}
+                  {t('problemLeftTitle')}
                 </CardTitle>
               </CardHeader>
-              <CardContent className="space-y-4">
-                {[t('traditional1'), t('traditional2'), t('traditional3'), t('traditional4'), t('traditional5')].map((item, i) => (
-                  <div key={i} className="flex items-center gap-3 text-[#94A3B8]">
-                    <X className="h-4 w-4 text-[#EF4444] shrink-0 drop-shadow-[0_0_5px_rgba(239,68,68,0.4)]" />
-                    <span>{item}</span>
-                  </div>
-                ))}
+              <CardContent>
+                <p className="text-[#94A3B8] leading-relaxed">{t('problemLeftBody')}</p>
               </CardContent>
             </Card>
 
@@ -393,16 +394,11 @@ export default function LandingPage() {
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-[#10B981] text-xl">
                   <Check className="h-6 w-6 drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
-                  {t('dubmaster')}
+                  {t('problemRightTitle')}
                 </CardTitle>
               </CardHeader>
-              <CardContent className="space-y-4">
-                {[t('dubmaster1'), t('dubmaster2'), t('dubmaster3'), t('dubmaster4'), t('dubmaster5')].map((item, i) => (
-                  <div key={i} className="flex items-center gap-3 text-[#E2E8F0]">
-                    <Check className="h-4 w-4 text-[#10B981] shrink-0 drop-shadow-[0_0_5px_rgba(16,185,129,0.4)]" />
-                    <span>{item}</span>
-                  </div>
-                ))}
+              <CardContent>
+                <p className="text-[#E2E8F0] leading-relaxed">{t('problemRightBody')}</p>
               </CardContent>
             </Card>
           </div>
@@ -465,7 +461,7 @@ export default function LandingPage() {
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
           <h2 className="text-3xl md:text-5xl font-bold text-center mb-16 tracking-tight text-white">{t('marketsTitle')}</h2>
 
-          <div className="grid md:grid-cols-3 gap-8">
+          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-8">
             {[
               {
                 icon: Film,
@@ -490,6 +486,14 @@ export default function LandingPage() {
                 body: t('streamingBody'),
                 stats: t('streamingStats'),
                 cta: t('streamingCta'),
+              },
+              {
+                icon: Settings2,
+                title: t('prosTitle'),
+                headline: t('prosHeadline'),
+                body: t('prosBody'),
+                stats: t('prosStats'),
+                cta: t('prosCta'),
               },
             ].map((card, i) => (
               <Card
@@ -556,10 +560,10 @@ export default function LandingPage() {
                 {t('techDetails')}
               </AccordionTrigger>
               <AccordionContent className="text-[#94A3B8] space-y-2">
-                <p><strong className="text-[#C084FC]">{tUi('Voice Cloning:')}</strong> Fish Audio S1 (zero-shot, 30-60s samples)</p>
-                <p><strong className="text-[#C084FC]">{tUi('Emotion Analysis:')}</strong> Hume AI + emotion2vec</p>
-                <p><strong className="text-[#C084FC]">{tUi('Quality Control:')}</strong> {tUi('Azure Speech, SyncNet, Claude synthesis')}</p>
-                <p><strong className="text-[#C084FC]">{tUi('Lip-Sync:')}</strong> {tUi('Industry-standard LSE-D scoring')}</p>
+                <p><strong className="text-[#C084FC]">{tUi('Transcription:')}</strong> Deepgram Nova-3 (Cantonese/Mandarin), Speechmatics diarization, Whisper fallback</p>
+                <p><strong className="text-[#C084FC]">{tUi('Voice Cloning:')}</strong> Fish Audio S2.1 zero-shot cloning + emotion directives; Respeecher & ElevenLabs</p>
+                <p><strong className="text-[#C084FC]">{tUi('Translation:')}</strong> {tUi('Scene-aware Claude translation; Gemini & Azure OpenAI')}</p>
+                <p><strong className="text-[#C084FC]">{tUi('Quality Control:')}</strong> {tUi('SyncNet LSE-D lip-sync + emotion2vec scoring, Claude-written QC report')}</p>
               </AccordionContent>
             </AccordionItem>
           </Accordion>
@@ -575,17 +579,18 @@ export default function LandingPage() {
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
             {[
-              { icon: Mic2, title: "Voice Cloning", desc: "Preserves original actor's voice, accent, and speaking patterns" },
-              { icon: Heart, title: "99% Emotion", desc: "Verified by emotion2vec - maintains emotional authenticity" },
-              { icon: Film, title: "Frame-Perfect Sync", desc: "SyncNet LSE-D industry-standard lip-sync analysis" },
-              { icon: Shield, title: "7-Metric QC", desc: "Azure Speech, Hume AI, SyncNet, emotion2vec validation" },
-              { icon: Globe, title: "50+ Languages", desc: "Optimized for Asian cinema - Cantonese, Mandarin, Hindi, Tamil" },
-              { icon: Zap, title: "Fast Turnaround", desc: "24-48 hours for features, real-time for short content" },
-              { icon: Settings2, title: "Professional Editor", desc: "Frame-by-frame control, manual refinement, perfect results" },
-              { icon: GitBranch, title: "Dual-Mode", desc: "Automatic for creators, Professional for studios" },
+              { icon: Mic2, title: t('feat1Title'), desc: t('feat1Desc'), detail: t('feat1Detail') },
+              { icon: Heart, title: t('feat2Title'), desc: t('feat2Desc'), detail: t('feat2Detail') },
+              { icon: Film, title: t('feat3Title'), desc: t('feat3Desc'), detail: t('feat3Detail'), anchor: '#lipsync' },
+              { icon: Shield, title: t('feat4Title'), desc: t('feat4Desc'), detail: t('feat4Detail') },
+              { icon: Globe, title: t('feat5Title'), desc: t('feat5Desc'), detail: t('feat5Detail') },
+              { icon: Zap, title: t('feat6Title'), desc: t('feat6Desc'), detail: t('feat6Detail') },
+              { icon: Settings2, title: t('feat7Title'), desc: t('feat7Desc'), detail: t('feat7Detail') },
+              { icon: GitBranch, title: t('feat8Title'), desc: t('feat8Desc'), detail: t('feat8Detail'), anchor: '#rulebook' },
             ].map((feature, i) => (
               <Card
                 key={i}
+                onClick={() => setFeatureDetail({ title: feature.title, body: feature.detail, anchor: feature.anchor })}
                 className="bg-[#020817]/80 border-[#A855F7]/15 hover:border-[#A855F7]/40 transition-all duration-300 card-glow cursor-pointer relative overflow-hidden"
               >
                 {/* Top purple gradient border */}
@@ -605,33 +610,140 @@ export default function LandingPage() {
 
       <GlowSeparator />
 
+      {/* ══════════ DIRECTOR PANEL ══════════ */}
+      <section className="py-24 bg-[#020817]">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+          <h2 className="text-3xl md:text-5xl font-bold text-center mb-6 tracking-tight">
+            <span className="gradient-text-animated">{t('directorTitle')}</span>
+          </h2>
+          <p className="text-[#94A3B8] text-lg text-center max-w-3xl mx-auto mb-16 leading-relaxed">
+            {t('directorBody')}
+          </p>
+
+          <div className="grid md:grid-cols-5 gap-6">
+            {[
+              { title: t('director1Title'), desc: t('director1Desc') },
+              { title: t('director2Title'), desc: t('director2Desc') },
+              { title: t('director3Title'), desc: t('director3Desc') },
+              { title: t('director4Title'), desc: t('director4Desc') },
+              { title: t('director5Title'), desc: t('director5Desc') },
+            ].map((item, i) => (
+              <Card key={i} className="bg-[#020817]/80 border-[#A855F7]/15 hover:border-[#A855F7]/40 transition-all duration-300 card-glow relative overflow-hidden">
+                <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#A855F7]/40 to-transparent" />
+                <CardContent className="pt-6">
+                  <h3 className="font-semibold mb-2 text-white">{item.title}</h3>
+                  <p className="text-sm text-[#94A3B8]">{item.desc}</p>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <GlowSeparator />
+
+      {/* ══════════ RULEBOOK / MOAT ══════════ */}
+      <section id="rulebook" className="py-24 bg-[#1E0A3C]/10">
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+          <h2 className="text-3xl md:text-5xl font-bold mb-8 tracking-tight">
+            <span className="gradient-text-animated">{t('rulebookTitle')}</span>
+          </h2>
+          <p className="text-[#94A3B8] text-lg leading-relaxed mb-6">
+            {t('rulebookBody')}
+          </p>
+          <p className="text-[#E2E8F0] text-lg leading-relaxed mb-8">
+            {t('rulebookList')}
+          </p>
+          <p className="text-2xl text-[#C084FC] font-semibold italic drop-shadow-[0_0_15px_rgba(192,132,252,0.3)]">
+            {t('rulebookPunch')}
+          </p>
+        </div>
+      </section>
+
+      <GlowSeparator />
+
+      {/* ══════════ LIP SYNC, HONESTLY ══════════ */}
+      <section id="lipsync" className="py-24 bg-[#020817]">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+          <h2 className="text-3xl md:text-4xl font-bold text-center mb-16 tracking-tight">
+            <span className="gradient-text-animated">{t('lipsyncTitle')}</span>
+          </h2>
+
+          <div className="grid md:grid-cols-2 gap-8 mb-8">
+            <Card className="bg-[#020817]/80 border-[#A855F7]/15 card-glow relative overflow-hidden">
+              <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#A855F7]/40 to-transparent" />
+              <CardHeader>
+                <CardTitle className="text-xl text-white">{t('lipsyncWhatTitle')}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-[#94A3B8] leading-relaxed">{t('lipsyncWhatBody')}</p>
+              </CardContent>
+            </Card>
+
+            <Card className="bg-[#020817]/80 border-[#22D3EE]/20 card-glow relative overflow-hidden">
+              <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#22D3EE]/50 to-transparent" />
+              <CardHeader>
+                <CardTitle className="text-xl text-white">{t('lipsyncOursTitle')}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-[#94A3B8] leading-relaxed">{t('lipsyncOursBody')}</p>
+              </CardContent>
+            </Card>
+          </div>
+
+          <Card className="bg-gradient-to-br from-[#0F0520]/50 to-[#020817] border-[#FDB022]/20 card-glow relative overflow-hidden mb-8">
+            <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#FDB022]/50 to-transparent" />
+            <CardHeader>
+              <CardTitle className="text-xl text-[#FDB022]">{t('lipsyncActionTitle')}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-[#94A3B8] leading-relaxed">{t('lipsyncActionBody')}</p>
+            </CardContent>
+          </Card>
+
+          <Card className="bg-[#020817]/80 border-[#A855F7]/15 card-glow relative overflow-hidden mb-10">
+            <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#A855F7]/40 to-transparent" />
+            <CardHeader>
+              <CardTitle className="text-xl text-white">{t('lipsyncAddonTitle')}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-[#94A3B8] leading-relaxed">{t('lipsyncAddonBody')}</p>
+            </CardContent>
+          </Card>
+
+          <p className="text-center text-xl text-[#C084FC] font-semibold italic max-w-3xl mx-auto drop-shadow-[0_0_15px_rgba(192,132,252,0.3)]">
+            {t('lipsyncPunch')}
+          </p>
+        </div>
+      </section>
+
+      <GlowSeparator />
+
       {/* ══════════ SECTION 7: COMPARISON TABLE ══════════ */}
       <section className="py-24 bg-[#020817]">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
-          <h2 className="text-3xl md:text-5xl font-bold text-center mb-16 tracking-tight">
-            <span className="gradient-text-animated">{t('comparisonTitle')}</span>
+          <h2 className="text-3xl md:text-5xl font-bold text-center mb-4 tracking-tight">
+            <span className="gradient-text-animated">{t('pricingTitle')}</span>
           </h2>
+          <p className="text-[#94A3B8] text-lg text-center max-w-2xl mx-auto mb-16">{t('pricingSub')}</p>
 
           <div className="overflow-x-auto rounded-xl border border-[#A855F7]/20 bg-[#0F0520]/20">
             <table className="w-full border-collapse">
               <thead>
                 <tr className="border-b border-[#A855F7]/20">
                   <th className="text-left py-5 px-6 text-[#94A3B8]">{tUi('Feature')}</th>
-                  <th className="py-5 px-6 text-[#C084FC] font-bold text-lg">DubMaster</th>
-                  <th className="py-5 px-6 text-[#64748B]">{tUi('Dubverse.ai')}</th>
-                  <th className="py-5 px-6 text-[#64748B]">{tUi('HeyGen')}</th>
-                  <th className="py-5 px-6 text-[#64748B]">{tUi('Traditional')}</th>
+                  <th className="py-5 px-6 text-[#22D3EE] font-bold text-lg">{t('pricingFreeTier')}</th>
+                  <th className="py-5 px-6 text-[#C084FC] font-bold text-lg">{t('pricingProTier')}</th>
+                  <th className="py-5 px-6 text-[#FDB022] font-bold text-lg">{t('pricingPaygTier')}</th>
                 </tr>
               </thead>
               <tbody>
                 {[
-                  { feature: "Voice Cloning", dm: true, dv: false, hg: false, tr: true },
-                  { feature: "Emotion (99%)", dm: true, dv: false, hg: false, tr: true },
-                  { feature: "Action/Martial Arts", dm: true, dv: false, hg: false, tr: true },
-                  { feature: "Cost", dm: "$500-2K", dv: "$XXX", hg: "$XXX", tr: "$50K-100K" },
-                  { feature: "Turnaround", dm: "24-48hr", dv: "XX days", hg: "XX days", tr: "6-8 weeks" },
-                  { feature: "Professional QC", dm: "7 tools", dv: "Basic", hg: "Basic", tr: "Manual" },
-                  { feature: "Timeline Editor", dm: true, dv: false, hg: false, tr: true },
+                  { feature: t('pricingStudioAccess'), dm: t('pricingFull'), dv: t('pricingFull'), hg: t('pricingFull') },
+                  { feature: t('pricingSceneSummaries'), dm: true, dv: true, hg: true },
+                  { feature: t('pricingRulebook'), dm: true, dv: true, hg: true },
+                  { feature: t('pricingRenderMinutes'), dm: t('pricingFreeRenders'), dv: t('pricingProRenders'), hg: t('pricingPaygRenders') },
+                  { feature: t('pricingPrice'), dm: t('pricingFreePrice'), dv: t('pricingProPrice'), hg: t('pricingPaygPrice') },
                 ].map((row, i) => (
                   <tr key={i} className="border-b border-[#A855F7]/10 hover:bg-[#A855F7]/5 transition-colors duration-200">
                     <td className="py-4 px-6 text-[#E2E8F0] font-medium">{row.feature}</td>
@@ -639,28 +751,21 @@ export default function LandingPage() {
                       {typeof row.dm === "boolean" ? (
                         row.dm ? <Check className="h-5 w-5 text-[#10B981] mx-auto drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]" /> : <X className="h-5 w-5 text-[#EF4444] mx-auto drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]" />
                       ) : (
-                        <span className="text-[#C084FC] font-semibold">{row.dm}</span>
+                        <span className="text-[#22D3EE] font-semibold">{row.dm}</span>
                       )}
                     </td>
                     <td className="py-4 px-6 text-center">
                       {typeof row.dv === "boolean" ? (
                         row.dv ? <Check className="h-5 w-5 text-[#10B981] mx-auto" /> : <X className="h-5 w-5 text-[#EF4444] mx-auto drop-shadow-[0_0_5px_rgba(239,68,68,0.3)]" />
                       ) : (
-                        <span className="text-[#64748B]">{row.dv}</span>
+                        <span className="text-[#C084FC] font-semibold">{row.dv}</span>
                       )}
                     </td>
                     <td className="py-4 px-6 text-center">
                       {typeof row.hg === "boolean" ? (
                         row.hg ? <Check className="h-5 w-5 text-[#10B981] mx-auto" /> : <X className="h-5 w-5 text-[#EF4444] mx-auto drop-shadow-[0_0_5px_rgba(239,68,68,0.3)]" />
                       ) : (
-                        <span className="text-[#64748B]">{row.hg}</span>
-                      )}
-                    </td>
-                    <td className="py-4 px-6 text-center">
-                      {typeof row.tr === "boolean" ? (
-                        row.tr ? <Check className="h-5 w-5 text-[#10B981] mx-auto drop-shadow-[0_0_5px_rgba(16,185,129,0.3)]" /> : <X className="h-5 w-5 text-[#EF4444] mx-auto" />
-                      ) : (
-                        <span className="text-[#64748B]">{row.tr}</span>
+                        <span className="text-[#FDB022] font-semibold">{row.hg}</span>
                       )}
                     </td>
                   </tr>
@@ -685,18 +790,6 @@ export default function LandingPage() {
               <p className="text-sm text-[#94A3B8]">{t('testimonialSub')}</p>
             </CardContent>
           </Card>
-
-          <div className="flex flex-wrap items-center justify-center gap-6 mt-12">
-            {[
-              "99% Emotion Preservation",
-              "SyncNet LSE-D Certified",
-              "Azure Powered",
-            ].map((badge, i) => (
-              <Badge key={i} variant="outline" className="border-[#A855F7]/30 text-[#C084FC] px-4 py-2 shadow-[0_0_10px_rgba(168,85,247,0.15)]">
-                {badge}
-              </Badge>
-            ))}
-          </div>
         </div>
       </section>
 
@@ -708,19 +801,15 @@ export default function LandingPage() {
           <h2 className="text-3xl md:text-5xl font-bold text-center mb-16 tracking-tight text-white">{t('faqTitle')}</h2>
 
           <Accordion type="single" collapsible className="space-y-4">
-            {[
-              { q: t('faq1Q'), a: t('faq1A') },
-              { q: t('faq2Q'), a: t('faq2A') },
-              { q: t('faq3Q'), a: t('faq3A') },
-              { q: t('faq4Q'), a: t('faq4A') },
-              { q: t('faq5Q'), a: t('faq5A') },
-              { q: t('faq6Q'), a: t('faq6A') },
-            ].map((item, i) => (
+            {Array.from({ length: 10 }, (_, i) => i + 1)
+              .filter((i) => t.has(`faq${i}Q`))
+              .map((i) => ({ q: t(`faq${i}Q`), a: t(`faq${i}A`) }))
+              .map((item, i) => (
               <AccordionItem key={i} value={`faq-${i}`} className="border border-[#A855F7]/15 rounded-lg px-6 bg-[#020817]/50 data-[state=open]:bg-[#0F0520]/30 data-[state=open]:border-[#A855F7]/30 transition-all duration-300">
                 <AccordionTrigger className="text-left hover:no-underline py-6 text-white hover:text-[#C084FC] cursor-pointer [&[data-state=open]]:text-[#C084FC] transition-colors duration-300">
                   {item.q}
                 </AccordionTrigger>
-                <AccordionContent className="text-[#10B981] pb-6 text-base leading-relaxed drop-shadow-[0_0_8px_rgba(16,185,129,0.15)]">
+                <AccordionContent className="text-[#10B981] pb-6 text-base leading-relaxed whitespace-pre-line drop-shadow-[0_0_8px_rgba(16,185,129,0.15)]">
                   {item.a}
                 </AccordionContent>
               </AccordionItem>
@@ -744,17 +833,48 @@ export default function LandingPage() {
           <p className="text-xl text-[#94A3B8] mb-10">{t('ctaSub')}</p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-8">
-            <Button size="lg" className="bg-gradient-to-r from-[#A855F7] to-[#22D3EE] text-white hover:opacity-90 text-lg px-8 py-6 font-semibold btn-glow shadow-[0_0_25px_rgba(168,85,247,0.3)] cursor-pointer">
-              {t('ctaPrimary')}
+            <Button asChild size="lg" className="bg-gradient-to-r from-[#A855F7] to-[#22D3EE] text-white hover:opacity-90 text-lg px-8 py-6 font-semibold btn-glow shadow-[0_0_25px_rgba(168,85,247,0.3)] cursor-pointer">
+              <Link href="/signup">{t('ctaPrimary')}</Link>
             </Button>
-            <Button size="lg" variant="outline" className="border-[#A855F7]/30 text-[#C084FC] hover:bg-[#A855F7]/10 text-lg px-8 py-6 btn-glow cursor-pointer">
-              {t('ctaSecondary')}
+            <Button asChild size="lg" variant="outline" className="border-[#A855F7]/30 text-[#C084FC] hover:bg-[#A855F7]/10 text-lg px-8 py-6 btn-glow cursor-pointer">
+              <Link href="/subscribe">{t('ctaSecondary')}</Link>
             </Button>
           </div>
 
           <p className="text-sm text-[#94A3B8]">{t('ctaNote')}</p>
         </div>
       </section>
+
+      {/* Feature detail modal — the grid cards are teasers; this is the read-up. */}
+      {featureDetail && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
+          role="dialog" aria-modal="true"
+          onClick={() => setFeatureDetail(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-[#A855F7]/30 bg-[#0F0520] p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold text-white mb-3">{featureDetail.title}</h3>
+            <p className="text-[#94A3B8] leading-relaxed text-sm">{featureDetail.body}</p>
+            <div className="mt-5 flex items-center justify-end gap-3">
+              {featureDetail.anchor && (
+                <a
+                  href={featureDetail.anchor}
+                  onClick={() => setFeatureDetail(null)}
+                  className="text-sm text-[#22D3EE] hover:text-[#22D3EE]/80"
+                >
+                  {tUi('Read more')} →
+                </a>
+              )}
+              <Button size="sm" variant="ghost" className="text-slate-400" onClick={() => setFeatureDetail(null)}>
+                {tUi('Close')}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ══════════ FOOTER ══════════ */}
       <footer className="py-16 bg-[#020817] border-t border-[#A855F7]/10">
@@ -775,7 +895,7 @@ export default function LandingPage() {
             {[
               { title: t('footerProduct'), links: [
                 { label: "Features", href: "#features" },
-                { label: "Pricing", href: "/subscribe" },
+                { label: "Pricing", href: "/pricing" },
                 { label: "How It Works", href: "#how-it-works" },
               ]},
               { title: t('footerCompany'), links: [

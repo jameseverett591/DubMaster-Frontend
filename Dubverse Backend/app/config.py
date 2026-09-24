@@ -58,28 +58,27 @@ class Settings(BaseSettings):
     SYNCLABS_API_KEY: str = ""
     PUBLIC_BASE_URL: str = ""  # e.g. https://your-server.com — needed for Sync.Labs media access
 
+    # VideoTranscriber.ai — primary provider for the Summary panel's
+    # whole-video notes + chapters. Falls back to Claude when unset.
+    # VT_MAX_MINUTES caps how long a video may be before we skip their API
+    # (0 = no cap) — their billing is ~2 quota/minute of film.
+    VT_API_KEY: str = ""
+    VT_MAX_MINUTES: float = 0
+
     # Azure Speech (pronunciation assessment)
     AZURE_SPEECH_KEY: str = ""
     AZURE_SPEECH_REGION: str = ""
 
     # Azure OpenAI (translation quality evaluation)
-    AZURE_OPENAI_ENDPOINT: str = ""
-    AZURE_OPENAI_KEY: str = ""
-    AZURE_OPENAI_DEPLOYMENT: str = ""
+
 
     # ScreenApp (AI video analysis)
-    SCREENAPP_API_KEY: str = ""
-    SCREENAPP_TEAM_ID: str = ""
-    SCREENAPP_FOLDER_ID: str = ""
+
 
     # TTS Provider: "elevenlabs" or "fish-audio"
     TTS_PROVIDER: str = "elevenlabs"
 
-    # Vozo AI (full-pipeline cloud dubbing)
-    VOZO_API_KEY: str = ""
-    VOZO_ENABLED: bool = False
-
-    # Lip-sync provider: "synclabs", "vozo", or "none"
+    # Lip-sync provider: "synclabs" or "none"
     LIPSYNC_PROVIDER: str = "synclabs"
 
     # Dubbing pipeline tuning

@@ -242,34 +242,185 @@ def _filter_garbage(
     return filtered
 
 
+_HOMOPHONE_FOLD = str.maketrans({"她": "他", "它": "他", "牠": "他", "妳": "你", "祂": "他"})
+
+
+def _text_shared_run(a: str, b: str, min_len: int = 4) -> bool:
+    """True when the two texts share a contiguous run of >= min_len characters.
+
+    A cheap stand-in for edit distance that matches the observed failure: the
+    same phrase transcribed twice from two overlapping utterances, each with
+    a different lead-in/tail. 要是怕她輸 vs 要是怕他輸我讓他單手 share 要是怕
+    (3) + 輸 — homophone drift breaks exact-substring tests, so the run is
+    checked on both strings' substrings rather than containment.
+    """
+    # 他/她/它 and 你/妳 are the same sound — the ASR picks one at random per
+    # utterance, so the two copies of a line routinely differ only there.
+    a = re.sub(r"\s+", "", a).translate(_HOMOPHONE_FOLD)
+    b = re.sub(r"\s+", "", b).translate(_HOMOPHONE_FOLD)
+    if len(a) < min_len or len(b) < min_len:
+        return a == b
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    for i in range(len(shorter) - min_len + 1):
+        if shorter[i:i + min_len] in longer:
+            return True
+    return False
+
+
+def _shared_boundary_run(prev_text: str, next_text: str, min_len: int = 4) -> int:
+    """How many leading characters of next_text repeat the END of prev_text.
+
+    Deepgram utterances that overlap by a fraction of a second each carry the
+    words in the overlap — the phrase 要是怕他輸 came out as the tail of one
+    utterance AND the head of the next (…你要是怕她輸 | 要是怕他輸我讓他單手…),
+    was translated twice, and was voiced twice. The time overlap (0.65s of a
+    6s utterance) is far too small for a ratio test to see, so the join is
+    checked on TEXT: the longest suffix of prev that is a prefix of next,
+    homophone-folded (她/他). Returns the count of next_text chars to drop
+    (whitespace inside the run included), or 0.
+    """
+    a = re.sub(r"\s+", "", prev_text).translate(_HOMOPHONE_FOLD)
+    b_stripped = re.sub(r"\s+", "", next_text).translate(_HOMOPHONE_FOLD)
+    best = 0
+    for k in range(min(len(a), len(b_stripped)), min_len - 1, -1):
+        if a.endswith(b_stripped[:k]):
+            best = k
+            break
+    if not best:
+        return 0
+    # Map the folded/stripped count back onto next_text's real indices.
+    seen = 0
+    for i, ch in enumerate(next_text):
+        if not ch.isspace():
+            seen += 1
+        if seen == best:
+            return i + 1
+    return len(next_text)
+
+
+def _drop_leading_words(words: List[Dict], n_chars: int) -> List[Dict]:
+    """Drop leading word alignments covering roughly the first n_chars."""
+    out = list(words or [])
+    covered = 0
+    while out and covered < n_chars:
+        covered += len(re.sub(r"\s+", "", out[0].get("word", "")))
+        out.pop(0)
+    return out
+
+
+def _same_speaker(a: Dict, b: Dict) -> bool:
+    sa, sb = a.get("speaker"), b.get("speaker")
+    # Unlabelled segments (pre-diarization) are treated as same-speaker: the
+    # duplicates being removed here come from the ASR engine, not diarization.
+    return sa is None or sb is None or sa == sb
+
+
 def _deduplicate_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Remove duplicate segments that overlap heavily with identical/similar text."""
+    """Remove duplicate segments that overlap heavily with identical/similar text.
+
+    Two failure shapes, both observed on a Deepgram + Speechmatics job, and
+    they need OPPOSITE treatment:
+
+      DUPLICATE — the same words transcribed twice. Identical text within
+        0.5s, or same speaker + >50% time overlap + a shared phrase (the same
+        line caught by two overlapping utterances, each with its own lead-in:
+        要是怕她輸 / 要是怕他輸我讓他單手). Keep the longer text — it is the
+        more complete transcription — and drop the other.
+
+      MIS-TIMESTAMPED SPLIT — one line emitted as two utterances stamped with
+        the same start, DIFFERENT consecutive text (打什麼打你當我家是武館 /
+        進來打打殺殺馬上請 at 23.43 twice). These are not duplicates: dropping
+        either loses real dialogue. Concatenate in emission order instead, so
+        the translator sees the whole line.
+
+    The old rule dropped anything with >80% overlap regardless of text — right
+    for two engines covering one span, wrong for one engine mis-stamping two
+    halves of a line. Input must be sorted by start (stable, so equal starts
+    keep emission order).
+    """
     if len(segments) <= 1:
         return segments
+
+    def _keep_better(a: Dict, b: Dict) -> Dict:
+        ta, tb = a.get("text", "").strip(), b.get("text", "").strip()
+        if len(tb) != len(ta):
+            return b if len(tb) > len(ta) else a
+        return b if b.get("confidence", 0) > a.get("confidence", 0) else a
 
     deduped = [segments[0]]
 
     for seg in segments[1:]:
         prev = deduped[-1]
-
-        # Check if this segment is a duplicate of the previous one
         overlap = _segments_overlap(prev, seg)
-        if overlap > 0.8:
-            # Nearly identical timing — keep the one with higher confidence
-            if seg.get("confidence", 0) > prev.get("confidence", 0):
-                deduped[-1] = seg
+        same_spk = _same_speaker(prev, seg)
+        p_text, s_text = prev.get("text", "").strip(), seg.get("text", "").strip()
+        same_text = p_text == s_text
+        shared = same_text or _text_shared_run(p_text, s_text)
+        near_start = abs(seg["start"] - prev["start"]) < 0.15
+
+        is_dup = (
+            (abs(seg["start"] - prev["start"]) < 0.5 and same_text)
+            or (overlap > 0.8 and shared)
+            or (same_spk and overlap > 0.5 and shared)
+        )
+        is_split = same_spk and not shared and (near_start or overlap > 0.8)
+
+        # Adjacent utterances that repeat a phrase at the join. Not a
+        # duplicate (most of each is unique) and not a split (they are
+        # already consecutive): trim the repeated run off the head of the
+        # later one. Only for touching/overlapping neighbours — a phrase
+        # genuinely said twice seconds apart must stay.
+        if not is_dup and not is_split and same_spk and seg["start"] - prev["end"] < 0.3:
+            cut = _shared_boundary_run(p_text, s_text)
+            if cut:
+                trimmed = dict(seg)
+                trimmed["text"] = s_text[cut:].lstrip()
+                if seg.get("words"):
+                    trimmed["words"] = _drop_leading_words(seg["words"], cut)
+                logger.info(
+                    f"[ASR-DEDUP] trim [{seg['start']:.2f}] repeated '{s_text[:cut]}' "
+                    f"at join with '{p_text[-12:]}' → '{trimmed['text'][:30]}'"
+                )
+                if trimmed["text"]:
+                    deduped.append(trimmed)
+                continue
+
+        if is_dup:
+            winner = dict(_keep_better(prev, seg))
+            logger.info(
+                f"[ASR-DEDUP] dup [{prev['start']:.2f}-{prev['end']:.2f}] '{p_text[:24]}' "
+                f"vs [{seg['start']:.2f}-{seg['end']:.2f}] '{s_text[:24]}' "
+                f"(overlap={overlap:.2f}) → kept '{winner.get('text','')[:24]}'"
+            )
+        elif is_split:
+            winner = dict(prev)
+            winner["text"] = (p_text + " " + s_text).strip() if _has_cjk(p_text) is False else p_text + s_text
+            winner["words"] = list(prev.get("words") or []) + list(seg.get("words") or [])
+            if seg.get("confidence") is not None and prev.get("confidence") is not None:
+                winner["confidence"] = min(prev["confidence"], seg["confidence"])
+            logger.info(
+                f"[ASR-DEDUP] rejoin [{prev['start']:.2f}] '{p_text[:20]}' + '{s_text[:20]}' "
+                f"(same start, different text) → '{winner['text'][:40]}'"
+            )
+        else:
+            deduped.append(seg)
             continue
 
-        # Check for near-identical text at similar times
-        if (
-            abs(seg["start"] - prev["start"]) < 0.5
-            and seg["text"].strip() == prev["text"].strip()
-        ):
-            continue
-
-        deduped.append(seg)
+        # Survivor covers the audio both segments claimed.
+        winner["start"] = min(prev["start"], seg["start"])
+        winner["end"] = max(prev["end"], seg["end"])
+        deduped[-1] = winner
 
     return deduped
+
+
+def deduplicate_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Public entry: sort by start, then remove duplicates."""
+    ordered = sorted(segments, key=lambda s: s["start"])
+    result = _deduplicate_segments(ordered)
+    if len(result) != len(ordered):
+        logger.info(f"[ASR-DEDUP] {len(ordered)} segments -> {len(result)} after dedup")
+    return result
 
 
 def fill_gaps_with_fallbacks(
@@ -279,9 +430,16 @@ def fill_gaps_with_fallbacks(
 ) -> List[Dict[str, Any]]:
     """Add fallback segments that do not overlap the primary segments.
 
-    Used when WenetSpeech is the primary Chinese ASR: Tencent/Paraformer/Whisper
-    segments are only added where WenetSpeech left a gap, so the primary
-    transcript is never overwritten by a weaker engine.
+    Tencent/Paraformer/Whisper segments are only added where the primary
+    (Deepgram) left a gap, so the primary transcript is never overwritten
+    by a weaker engine.
+
+    Gap-filled segments are stamped `gap_filled=True`: the primary engine
+    found nothing there (usually fight-scene noise, music, or shouting —
+    the audio stretch where hallucination risk is highest), and the
+    fallback's self-reported confidence is not calibrated against the
+    primary's. Translation marks them translation_flagged so a fabricated
+    line can't reach the dub unreviewed.
     """
     if not fallback_segments:
         return primary_segments
@@ -297,7 +455,9 @@ def fill_gaps_with_fallbacks(
             for p in result
         )
         if not has_overlap:
-            result.append(dict(fb))
+            filled = dict(fb)
+            filled["gap_filled"] = True
+            result.append(filled)
 
     result.sort(key=lambda s: s["start"])
     return result
@@ -329,6 +489,7 @@ def merge_with_whisper_fallback(
         if not has_overlap:
             w_seg_copy = dict(w_seg)
             w_seg_copy["source"] = "whisper_gap_fill"
+            w_seg_copy["gap_filled"] = True
             result.append(w_seg_copy)
             logger.debug(
                 f"[ASR-MERGE] Whisper gap fill: "

@@ -54,7 +54,7 @@ class TranscriptSegment(BaseModel):
     velma_deepfake_score: Optional[float] = None
     # True for subtitle/credit/narration segments that should not be dubbed.
     is_credit: bool = False
-    # ASR engine provenance (e.g. "whisper", "tencent_only", "paraformer_only").
+    # ASR engine provenance (e.g. "whisper", "paraformer_only", "deepgram").
     # Preserved so downstream hallucination filters can distinguish Whisper
     # hallucinations from legitimate non-Whisper dialogue.
     source: Optional[str] = None
@@ -95,6 +95,9 @@ class Job(BaseModel):
     # Cleared once refunded, so a job that fails twice — or a retried status
     # update — can't return the same minutes more than once.
     minutes_charged: Optional[int] = None
+    # Seconds debited by the first Make Movie render of this job. Set means
+    # "already paid": re-renders of the same job are free. See quota_service.
+    billed_seconds: Optional[int] = None
     # 0 means "not specified — let diarization decide". It must NOT default to a
     # real speaker count: the clamp in routes.py reads any value in 1..10 as an
     # explicit user choice and forces pyannote to exactly that many speakers.
@@ -119,7 +122,7 @@ class Job(BaseModel):
     dubbed_video_url: Optional[str] = None
     tts_engine: Optional[str] = None
     segment_tts_engines: Optional[List[Optional[str]]] = None
-    dubbing_engine: Optional[str] = None  # "dubmaster" or "vozo"
+    dubbing_engine: Optional[str] = None  # "dubmaster"
 
     error_message: Optional[str] = None
     created_at: datetime
@@ -133,6 +136,18 @@ class UploadResponse(BaseModel):
     message: str
     video_filename: str
     video_size: int
+
+
+class YouTubeImportRequest(BaseModel):
+    url: str
+    source_language: Optional[str] = None
+    target_language: Optional[str] = None
+    num_speakers: Optional[int] = None
+
+
+class YouTubeCaptionsRequest(BaseModel):
+    url: str
+    languages: Optional[List[str]] = None
 
 
 class StatusResponse(BaseModel):
@@ -173,12 +188,12 @@ class DubRequest(BaseModel):
     voice_mapping: Dict[str, str]
     voice_settings: Optional[Dict[str, Dict[str, float]]] = None
     source_language: Optional[str] = None
-    dubbing_engine: Optional[str] = None  # "dubmaster" (default) or "vozo"
-    vozo_user_prompt: Optional[str] = None  # translation guidance for Vozo
+    dubbing_engine: Optional[str] = None  # "dubmaster"
     adaptation_selections: Optional[Dict[str, str]] = None  # segment_id → "faithful"|"performable"|"sync_fit"
     character_profiles: Optional[List[Dict]] = None  # [{name, traits, speech_style}]
     dubbing_style: Optional[str] = None  # "natural" (localized dub) or "literal" (word-for-word); routes default to persisted job value then "natural"
     localized_aliases: Optional[Dict[str, str]] = None  # e.g. {"Brother Gen": "Broker", "San Gu": "Auntie"}
+    lipsync: bool = False  # opt-in AI lip-sync post-pass (Sync Labs); billed per rendered second
 
 
 class AdaptVariant(BaseModel):
@@ -277,3 +292,9 @@ class RegenerateRequest(BaseModel):
     # uncommitted text edit spoke the old line. Staged editing makes that flow
     # normal, so it is now honored.
     text: Optional[str] = None
+    # Commit is a toggle: a second Commit on a locked row releases the text for
+    # alteration. When released, the next Generate may run REGEN-ADAPT-FIT on the
+    # line (sync_fit paraphrase) so an over-long take can be shortened to its
+    # window instead of time-stretched. Locked or freshly-typed text never sends
+    # this — verbatim is the default.
+    allow_adapt_fit: Optional[bool] = None

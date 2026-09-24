@@ -3,32 +3,37 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { usePlan } from '@/lib/use-plan'
-import { PLAN_MINUTES } from '@/lib/plan-features'
+import { API_BASE_URL } from '@/lib/api-client'
 
 export interface UsageInfo {
-  /** Minutes consumed this month, from the usage table. */
+  /** Included seconds consumed this period (from the quota row), in minutes. */
   minutesUsed: number
-  /** Purchased top-up minutes, from bonus_minutes. */
+  /** Wallet balance in minutes — was "bonus" packs, now prepaid credit. */
   bonusBalance: number
-  /** Plan allowance for the month. 0 means no plan resolved yet. */
+  /** Included allowance for the tier: 30 pro / 3 free. */
   planLimit: number
-  /** Plan allowance minus usage, plus bonus. Never negative. */
+  /** Included remaining + wallet, in minutes. Never negative. */
   minutesRemaining: number
+  /** Wallet balance in seconds — kept for callers that want precision. */
+  walletSeconds: number
+  /** Under 5 min total remaining — drives the low-balance warning. */
+  lowBalance: boolean
   loading: boolean
 }
 
-/** Real monthly usage, read from the same two tables the dashboard uses.
+/** Real balance, read from /quota/balance — the same endpoint the Make Movie
+ *  gate uses, so the badge can never disagree with the charge.
  *
- *  Extracted into a hook because the editor header previously displayed
- *  hardcoded values (pointsLeft={100} minutesAvailable={60}) that were shown
- *  identically to every customer and contradicted the dashboard on the same
- *  screen. Two components computing balance from two sources is how that
- *  happens, so both now read from here.
- */
+ *  Replaces the old usage+bonus_minutes reads. The hook keeps the old field
+ *  names (minutesUsed/bonusBalance/planLimit/minutesRemaining) so dashboard,
+ *  profile and the editor header compile unchanged — the fields' MEANING
+ *  moves from "plan minutes + packs" to "included seconds + wallet". */
 export function useUsage(): UsageInfo {
-  const { plan, loading: planLoading } = usePlan()
-  const [minutesUsed, setMinutesUsed] = useState(0)
-  const [bonusBalance, setBonusBalance] = useState(0)
+  const { loading: planLoading } = usePlan()
+  const [info, setInfo] = useState({
+    minutesUsed: 0, bonusBalance: 0, planLimit: 0, minutesRemaining: 0,
+    walletSeconds: 0, lowBalance: true,
+  })
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -39,34 +44,25 @@ export function useUsage(): UsageInfo {
       try {
         const { data: { session } } = await supabase.auth.getSession()
         if (!session) { if (!cancelled) setLoading(false); return }
-        const uid = session.user.id
 
-        // Keyed to the current month exactly as the backend writes it
-        // (usage_service._current_month → "YYYY-MM-01", UTC). Taking the most
-        // recent row instead would carry LAST month's total into a fresh
-        // billing period, so a heavy user would open the new month already
-        // showing "0 min left" until their first job wrote a row.
-        const now = new Date()
-        const monthKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`
-
-        const { data: usageData } = await supabase
-          .from('usage')
-          .select('minutes_used')
-          .eq('user_id', uid)
-          .eq('month', monthKey)
-          .maybeSingle()
-
-        // maybeSingle here too: a user who has never bought top-ups has no row,
-        // and single() would treat that as an error.
-        const { data: bonusData } = await supabase
-          .from('bonus_minutes')
-          .select('balance')
-          .eq('user_id', uid)
-          .maybeSingle()
+        const res = await fetch(`${API_BASE_URL}/api/quota/balance`, {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        })
+        if (!res.ok) throw new Error(`balance ${res.status}`)
+        const b = await res.json()
 
         if (cancelled) return
-        setMinutesUsed(usageData?.minutes_used || 0)
-        setBonusBalance(bonusData?.balance || 0)
+        const includedUsed = (b.included_used_seconds || 0) / 60
+        const includedRemaining = (b.included_remaining_seconds || 0) / 60
+        const wallet = b.credit_balance_seconds || 0
+        setInfo({
+          minutesUsed: includedUsed,
+          bonusBalance: wallet / 60,
+          planLimit: (b.included_seconds || 0) / 60,
+          minutesRemaining: Math.round(includedRemaining + wallet / 60),
+          walletSeconds: wallet,
+          lowBalance: !!b.low_balance,
+        })
       } catch {
         // Leave the zeros. A failed read must not render as "you have no
         // minutes" — callers check `loading` before trusting the numbers.
@@ -80,15 +76,5 @@ export function useUsage(): UsageInfo {
     return () => { cancelled = true; subscription.unsubscribe() }
   }, [])
 
-  const planLimit = plan ? PLAN_MINUTES[plan] : 0
-  // Rounded: the badge renders this raw, and a fractional bonus balance would
-  // otherwise show as "57.7133333 min left".
-  const minutesRemaining = Math.round(planLimit > 0
-    ? Math.max(0, planLimit - minutesUsed) + bonusBalance
-    : bonusBalance)
-
-  // The plan resolves independently of the usage fetch. Reporting loading=false
-  // while plan is still null yields planLimit=0 and a red "0 min left" badge on
-  // every load — callers must keep waiting until BOTH have landed.
-  return { minutesUsed, bonusBalance, planLimit, minutesRemaining, loading: loading || planLoading }
+  return { ...info, loading: loading || planLoading }
 }

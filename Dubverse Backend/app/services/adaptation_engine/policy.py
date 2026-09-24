@@ -278,8 +278,8 @@ CHARACTER_REGISTRY: Dict[str, CharacterProfile] = {
         traits=["energetic", "slightly theatrical", "proud", "confident"],
         speech_style="More animated than Ip Man. Speaks faster and with more enthusiasm. Proud of his martial arts skills.",
     ),
-    "Master Shin": CharacterProfile(
-        name="Master Shin",
+    "Master Jin": CharacterProfile(
+        name="Master Jin",
         traits=["aggressive", "competitive", "prideful", "direct"],
         speech_style="Confrontational and direct. Speaks with force and challenge. No humility.",
     ),
@@ -306,9 +306,9 @@ CHARACTER_ALIASES: Dict[str, str] = {
     "ye wen": "Ip Man",
     "ipman": "Ip Man",
     "文哥": "Ip Man",   # informal address for Ip Man (given name 文)
-    "master shin": "Master Shin",
-    "shin": "Master Shin",
-    "金師傅": "Master Shin",
+    "master shin": "Master Jin",
+    "shin": "Master Jin",
+    "金師傅": "Master Jin",
     "master chin": "Master Chin",
     "chin": "Master Chin",
     "chan": "Master Chin",
@@ -395,7 +395,7 @@ def build_timing_constraints(duration_seconds: float) -> TimingConstraints:
 # or phonetically replaced by the LLM.
 PROTECTED_ENTITIES: List[str] = [
     "Ip Man", "Master Ip", "Yip Man",
-    "Master Shin",
+    "Master Jin",
     "Master Chin",
     "Chin",
     "Chan",

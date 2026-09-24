@@ -65,20 +65,37 @@ are remembered across sessions (saved in the browser):
   *currently selected segment's* dubbed text based on a free-text request or a quick
   preset ("Make this sound more natural," "Shorten to fit lip-sync," etc.). It only
   sees that one segment's source/dubbed text and language pair — it cannot see or
-  change voice, emotion, QC scores, or other segments. Requires a Premium or
-  Professional plan.
+  change voice, emotion, QC scores, or other segments. Requires a Pro plan.
 
 ## Voice engines — Fish Audio and Respeecher
 
 DubMaster can render a segment with either of two voice engines, chosen per
-segment. The **Respeecher** tab shows which one a segment last used as a small
-chip in its header (`fish-audio` or `respeecher`).
+segment. The **Respeecher** tab's header has a two-way toggle —
+**Respeecher | Fish Audio** — that shows which engine the selected segment
+last used and switches it. Clicking the half a segment is already on is a
+no-op (it does not spend a render).
 
-- **To use Respeecher:** open the Respeecher tab, pick a voice, press Generate.
-- **To go back to Fish Audio:** press the **Fish Audio** button next to the
-  Respeecher tab's title. It re-renders the segment with the voice that
-  speaker is mapped to.
+- **To use Respeecher:** open the Respeecher tab, pick a voice in the list,
+  press **Generate**. DubMaster races three takes and commits the one that
+  best fits the slot. Generate applies to the selected segment only —
+  assigning a voice to every segment of a speaker at once is the Voice
+  Library's job (Fish voices).
+- **To go back to Fish Audio:** press the **Fish Audio** half of the toggle.
+  It re-renders the segment with the voice that speaker is mapped to.
 - **Dropping a Fish voice** onto a segment also moves it to Fish Audio.
+
+### Auditioning voices in the Respeecher tab
+
+- **Each Respeecher voice row has a small play button** next to its name. The
+  first audition of a voice generates a short sample — one metered render,
+  since the engine ships no sample library. The sample is cached from then
+  on, so every later play of that voice is instant and costs nothing.
+  Clicking the row selects the voice; clicking the play icon only previews.
+- **The amber play button** next to the engine toggle previews the voice the
+  **Fish Audio** half would use — the selected speaker's mapped voice — so
+  you can hear it before spending a re-render. It works for catalog voices,
+  cloned voices, and the built-in presets (Male 1 etc., resolved to their
+  real voice automatically).
 
 Some segments always render on Fish Audio regardless: **child speakers**
 (Respeecher has no child voice), and any segment whose voice isn't in
@@ -95,8 +112,14 @@ do **not** reach a Respeecher render. On Respeecher your levers are:
 
 - **Punctuation and phrasing.** A comma buys a beat; a full stop buys more.
   This is the main way to shape a Respeecher read.
-- **The voice you cast.** Each Respeecher voice ships its own tuning.
-- **The sampling controls** in the Respeecher tab.
+- **The voice you cast.** Each Respeecher voice ships its own tuning — picking
+  a voice loads that voice's own defaults into the controls.
+- **The sampling controls** in the Respeecher tab — sliders for Temperature,
+  Top P, Min P, Repetition, Presence and Frequency, plus a Top K number
+  input. **Temperature is the main dial worth moving**; the penalties suppress
+  artifacts rather than shape performance, so leave them at the voice's
+  defaults unless you hear a specific defect. A slider takes effect on the
+  next Generate — moving it does not re-render by itself.
 
 Respeecher also has no speed or pitch parameter. The speed chip still works —
 DubMaster time-stretches the finished audio instead.
@@ -106,7 +129,14 @@ DubMaster time-stretches the finished audio instead.
 Respeecher's read length varies noticeably between generations of the same
 line. DubMaster generates three takes and keeps the one that best fits the
 segment's slot — the longest that still fits, since that's closest to natural
-pacing. The other two stay listed as `alt1` and `alt2` so you can hear them.
+pacing. The other two stay listed below Generate as auditionable alternates.
+
+- **Re-roll** races three fresh takes and harvests a new seed — use it to
+  escape a read you don't want.
+- **Lock** (next to the seed field) pins the seed so later regenerations
+  reproduce that exact take. A seed reproduces only under the same voice and
+  sampling settings — moving a slider while locked gives a different read
+  than the pinned take.
 
 If even the best take overruns the slot by more than can be corrected cleanly,
 DubMaster tells you rather than squashing the audio to fit.
@@ -437,19 +467,28 @@ in order: it **shortens** the wording (using the sync_fit adaptation variant), t
 
 Things you can do, most effective first:
 
-1. **Try a different voice.** Voices differ in how fast they speak — the same line
+1. **Split the segment in two.** If the original line packs two thoughts into one
+   breath — a name plus a statement, a greeting plus a question — split it at the
+   playhead or by word (right-click → Split). Each half gets its own slot and its
+   own Generate Speech render, so both can be spoken at natural pace. This is the
+   strongest fix when the line is fundamentally too long for its window.
+2. **Try a different voice.** Voices differ in how fast they speak — the same line
    can run noticeably longer in one voice than another. If a character consistently
    sounds hurried, assigning a faster-speaking voice from the Voice Library often
    fixes it on its own, with no text change. DubMaster learns each voice's actual
    speaking rate as it dubs and uses that rate when deciding how much to shorten,
    so this is a real lever rather than a workaround.
-2. **Shorten the text yourself** using the write-in on that segment. Fewer syllables
+3. **Shorten the text yourself** using the write-in on that segment. Fewer syllables
    is the only change that reduces speed without side effects — this is the most
    reliable fix for a specific line, such as an opening line where the original
    packs a name and a statement into a very short window.
-3. **Give the segment more room** by dragging its boundary on the timeline, if
+4. **Give the segment more room** by dragging its boundary on the timeline, if
    there is silence next to it. DubMaster already borrows nearby space
    automatically, so this helps only where genuine slack remains.
+
+If a segment suddenly sounds fast after edits, check that it isn't still holding a
+speeded-up take from before a split or re-render: a take fit to a shorter slot
+keeps its faster speed until you regenerate it into the new, longer slot.
 
 Some source lines are simply very dense — a few Cantonese syllables can carry more
 than English can say in the same time. In those cases a slight speed-up is normal
@@ -459,9 +498,10 @@ than disappearing entirely.
 ## Voice Library
 
 A panel for browsing available AI voices (search, filter by gender/tag, favorites).
-The panel shows voice names on the left — each with a play button to audition it,
-and a badge naming any speaker the voice is already assigned to — and the selected
-voice's description, tags and controls on the right.
+The panel shows voice names on the left — each with a play button to audition it
+plus a **Stop** button that halts the playing sample — and a badge naming any
+speaker the voice is already assigned to — and the selected voice's description,
+tags and controls on the right.
 Selecting a voice shows a Preview button and an "Assign to…" control to assign it to
 a speaker. Assigning a voice to a speaker applies it to ALL of that speaker's segments
 consistently (locked segments are skipped), so the whole character switches voices in
@@ -505,27 +545,74 @@ Shows an overall quality score plus individual metrics: timing, speed, loudness,
 silences, lip_sync, and emotion_preservation. These reflect how well the dubbed audio
 matches the original in pacing and delivery.
 
-## Plan tiers
+## Summary tab — plain-English scene context
 
-DubMaster has three tiers: **Basic**, **Premium**, and **Professional**.
+The **Summary** tab explains what is happening on screen, so a director who
+does not speak the source language can judge whether a translation serves the
+scene. Whole-video notes and chapter cards are generated by **Video
+Transcriber AI** — the film is sent through their transcription + chapters
+pipeline the first time the tab runs (a feature-length film takes a few
+minutes; the panel polls and fills in automatically). If their service is
+unavailable, DubMaster falls back to its own built-in summarizer. Two
+artifacts:
 
-- Available on **all tiers**: the inline editor basics, Ask AI Chat (this feature),
-  voice cloning.
-- **Premium and Professional**: the full editor, pipeline monitor, QC scoring, Ask AI
-  (dialogue rewrite), Voice Library, custom emotion write-in, Studio/collaboration
-  features.
-- **Professional only**: the review queue, emotional curve editor, lip-sync scoring,
-  heatmaps, character analyzer, Velma panel, character profiles, the emotional
-  intelligence library, project versioning, performance notes, and **Custom Voices**
-  (uploading/cloning your own voice — the automatic cloning of the original video's
-  speakers is separate and available to all tiers).
+- **AI Notes** — a whole-video feed of timestamped beats. Each `[MM:SS]` chip
+  seeks the playhead and selects the segment under it.
+- **Chapters** — titled summary cards whose prose carries clickable
+  `[MM:SS–MM:SS]` links back into the timeline.
 
-If a user on a lower tier asks about a feature above their plan, say so plainly and
-suggest upgrading, rather than describing the feature as if they can use it.
+Preset summary modes — Director's Notes, Summary, Core Points, Chapter Summary,
+Study Notes — change the shape of the notes. Selecting a segment also shows that
+segment's own scene summary at the top of the panel: the beat it belongs to,
+what the line is doing, and the stakes.
+
+## Rulebook — the director's accumulated decisions
+
+The **Rulebook** tab stores corrections as typed rules that steer translation
+and delivery. Rules are scoped: a rule captured on this job applies to this
+job; **promoting** a rule makes it global so it steers every future job too.
+Job scope is the staging area; global is the institutional memory — this is
+how corrections made today improve tomorrow's dubs.
+
+Rule classes: **name mapping** (force an English rendering of a source
+name/term), **glossary term**, **speaker persona** (pin a character profile to
+a speaker), **register/stance** (scene-style directives, e.g. dismissal
+language in confrontations), **translation fix** (force an exact target line
+for a recurring source line), and **voice/delivery** defaults per speaker.
+
+Rules are captured via **Add to Rulebook** actions around the editor. Each row
+in the panel can be edited, toggled on/off, promoted to global, or deleted.
+
+## Speakers tab
+
+The **Speakers** tab lists every speaker diarization found, with the voice each
+is mapped to. Per speaker you can set character **traits** — curated preset
+words (calm, authoritative, gruff…) plus custom entries, which fold into the
+delivery direction on Fish renders — adjust **pitch**, and bulk **regenerate**
+all of that speaker's segments in one action, with a confirmation step and
+progress.
+
+## Plans and billing
+
+DubMaster has two plans: **Free** and **Pro**.
+
+- **Free** includes 3 minutes of rendering per month.
+- **Pro** includes 30 minutes per month and unlocks the advanced panels.
+- Either plan can top up the **wallet** — prepaid credit that pays for anything the
+  included minutes don't cover.
+
+**How rendering is billed:** a Make Movie render is charged at $2.50 per minute of
+film, taken from included minutes first and the wallet after that. A job is only
+billed once — re-rendering the same job is free, no matter how many times you do it.
+If a render fails after billing, the charge is refunded automatically.
+
+**Ask AI Chat** (this feature) is available to everyone. If a user on Free asks about
+a Pro feature, say so plainly and suggest upgrading, rather than describing the
+feature as if they can use it.
 
 ## Make Movie — rendering the finished film
 
-**Make Movie** (top bar, Professional only) renders the finished dubbed video from the
+**Make Movie** (top bar) renders the finished dubbed video from the
 current timeline. It is never disabled by the state of your edits — the only times it is
 unavailable are while a render is already running or while a Save is still in flight.
 
@@ -543,6 +630,47 @@ The confirmation offers:
 - **Make movie without them** / **Make movie anyway** — renders immediately, accepting
   that staged or failed segments will be missing.
 - **Cancel** — go back and fix things first.
+
+## AI lip-sync — optional, paid, and scoped to the lines you choose
+
+DubMaster offers an optional AI lip-sync pass (a third-party engine) that re-times the
+actors' mouth movements to the dubbed audio. It is off by default and it is a paid
+feature — you choose the scope and pay before it runs.
+
+**Choosing the scope:**
+
+- **Whole film** — tick the **Lip sync** checkbox next to Make Movie. The price shown
+  beside it (~$X) is the whole-film estimate.
+- **Selected lines only** — hover over a segment block on the **Dubbed** timeline track
+  and a small white checkbox appears at its left edge. Tick the lines you want synced;
+  checked boxes stay lit. Lines next to each other merge into one span, so you are
+  never billed for a sliver between two picks. Only the ticked spans are sent to the
+  vendor — the rest of the film is untouched.
+
+**The cost panel** (sub-header, always visible) shows three figures live:
+
+- **RENDER** — what the next Make Movie render costs ($0.00 once the job is billed;
+  re-renders are free).
+- **LIP SYNC** — the cost of the currently selected scope; moves as you tick lines.
+- **BUDGET** — type a budget and the remaining figure stays green near it, amber
+  close to it, red past it.
+
+**Paying:** lip-sync is charged when the vendor job is submitted, and only for the
+seconds you selected. When you press Make Movie, DubMaster first quotes the selected
+scope against your included minutes and wallet. If they cover it, the render proceeds.
+If not, a breakdown shows the scope cost, what your wallet covers, and the exact
+shortfall — you pay just that amount by card (Stripe), and the render resumes
+automatically when you return.
+
+**Export is locked until the selected lines are paid and rendered.** If you tick new
+lines after a render, Export refuses until you Make Movie again — you can never export
+a film containing lip-sync you haven't paid for. Removing ticks is always allowed.
+
+**Honest limitations:** the vendor bills per attempt, not per result quality. Fast
+action, head rotation, and low light can produce artifacts — it is not recommended for
+martial-arts or other high-motion footage. If the vendor rejects the job before
+processing it, the charge is refunded. Preview a synced render before exporting; if a
+span looks wrong, the manual techniques in "Lip-Sync Tips" below are the fallback.
 
 ## The layover track — lifting a section out of the picture
 
@@ -631,7 +759,9 @@ the finished film contains.
 
 ## Lip-Sync Tips
 
-DubMaster lets you create perfect lip-sync manually - no auto-sync engine needed.
+DubMaster has an optional paid AI lip-sync pass (see "AI lip-sync" above), but manual
+alignment is the reliable craft tool — it costs nothing and gives frame-accurate
+control. The two combine well: run AI lip-sync on the hero lines, hand-tune the rest.
 
 **Align the Start:** Match the first sound to the exact frame the actor's mouth
 opens.
@@ -675,7 +805,7 @@ in the render. The warning names the specific segments so they can be found and 
 
 ## Test Clips — voices cloned from your own audio
 
-The **Test Clips** tab (Professional) is where voices cloned from an uploaded audio sample
+The **Test Clips** tab (Pro) is where voices cloned from an uploaded audio sample
 live. Upload 10–30 seconds of clean, single-speaker speech (WAV or MP3, no music or
 background noise) and give it a name to create one.
 
@@ -687,14 +817,20 @@ Each cloned voice can be:
   it immediately as a staged take so it can be heard before committing.
 - **Deleted** — permanently, with a confirmation. A deleted clone cannot be recovered.
 
-**The uploaded clip is not stored by DubMaster.** It is sent straight to the cloning
-service and discarded, so keep your own copy of the audio if you may want to re-clone it
-later. This is also why cloned voices have no preview button — there is no stored sample
-to play. To hear one, assign it to a segment and generate.
+**The uploaded clip is not kept by DubMaster** for voices cloned before the sample
+store existed — it went straight to the cloning service and was discarded. Voices
+cloned since then DO keep their source clip, which is what the Voice Library's
+preview button plays for them. An older clone with no stored clip has no preview
+to play; assign it to a segment and generate to hear it.
 
-Cloned voices do not appear in the main Voice Library grid; they are only in Test Clips.
-This is separate from the automatic cloning of the original video's speakers, and separate
-again from the Custom Voices (voice changer) feature.
+Cloned voices also appear in the **Voice Library** — they lead the first page with a
+purple "custom voice" marker and can be assigned to any speaker like catalog voices.
+In the Custom Voices panel, clicking a voice expands it to show the stored source
+clip's file location (with a copy button) and a play button for the clip, so you can
+hear exactly what the clone was built from.
+
+This is separate from the automatic cloning of the original video's speakers, and
+separate again from the Custom Voices (voice changer) feature.
 
 ## Exporting
 

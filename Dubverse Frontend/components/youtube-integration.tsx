@@ -2,7 +2,7 @@
 
 import React from "react"
 
-import { useState } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -11,38 +11,40 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { MAX_UPLOAD_BYTES, MAX_UPLOAD_GB } from "@/lib/plan-features"
-import { 
-  Youtube, 
-  Search, 
-  Clock, 
-  Eye, 
-  Languages, 
-  AlertCircle, 
-  Upload, 
-  FileText, 
-  Download, 
-  Link2, 
+import {
+  Youtube,
+  Clock,
+  Languages,
+  AlertCircle,
+  Upload,
+  FileText,
+  Download,
+  Link2,
   CheckCircle2,
   Info,
   Play,
-  Edit3
+  Edit3,
+  Loader2,
+  LogIn,
+  LogOut,
+  Import
 } from "lucide-react"
 import type { VideoSource } from "@/components/dashboard"
+import { apiClient } from "@/lib/api-client"
 import { useT } from '@/lib/use-t'
 
 interface YouTubeIntegrationProps {
   onVideoSelect: (video: VideoSource) => void
+  /** Deep-linked YouTube URL (extension/bookmarklet: ?yt_url=...). Imported once on mount. */
+  initialImportUrl?: string
 }
 
-type YouTubeVideo = {
+type ChannelVideo = {
   id: string
   title: string
-  channel: string
   thumbnail: string
   duration: string
-  views: string
-  hasCaptions: boolean
-  captionLanguages: string[]
+  publishedAt: string
 }
 
 type TranscriptLine = {
@@ -53,49 +55,14 @@ type TranscriptLine = {
   speaker?: string
 }
 
-const SAMPLE_VIDEOS: YouTubeVideo[] = [
-  {
-    id: "yt-1",
-    title: "Complete JavaScript Course 2024",
-    channel: "Code Academy",
-    thumbnail: "/javascript-programming-course-thumbnail.jpg",
-    duration: "1:45:30",
-    views: "2.5M",
-    hasCaptions: true,
-    captionLanguages: ["English", "Spanish", "French"],
-  },
-  {
-    id: "yt-2",
-    title: "Learn React in 30 Minutes",
-    channel: "Tech Tutorials",
-    thumbnail: "/react-tutorial-video-thumbnail.jpg",
-    duration: "32:15",
-    views: "890K",
-    hasCaptions: true,
-    captionLanguages: ["English", "German"],
-  },
-  {
-    id: "yt-3",
-    title: "AI and Machine Learning Explained",
-    channel: "Science Channel",
-    thumbnail: "/artificial-intelligence-explainer-video.jpg",
-    duration: "58:42",
-    views: "1.2M",
-    hasCaptions: true,
-    captionLanguages: ["English", "Japanese", "Korean", "Chinese"],
-  },
-]
+const YT_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
+const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || ""
 
-const SAMPLE_TRANSCRIPT: TranscriptLine[] = [
-  { id: "1", start: 0, end: 4.5, text: "Welcome to this comprehensive JavaScript course.", speaker: "Instructor" },
-  { id: "2", start: 4.5, end: 9.2, text: "In this video, we'll cover everything you need to know.", speaker: "Instructor" },
-  { id: "3", start: 9.2, end: 14.8, text: "Let's start with the basics of variables and data types.", speaker: "Instructor" },
-  { id: "4", start: 14.8, end: 20.1, text: "JavaScript has three ways to declare variables: var, let, and const.", speaker: "Instructor" },
-  { id: "5", start: 20.1, end: 26.5, text: "The let keyword was introduced in ES6 and is now the preferred way.", speaker: "Instructor" },
-  { id: "6", start: 26.5, end: 32.0, text: "Constants, declared with const, cannot be reassigned after initialization.", speaker: "Instructor" },
-  { id: "7", start: 32.0, end: 38.2, text: "Now let's look at some practical examples in our code editor.", speaker: "Instructor" },
-  { id: "8", start: 38.2, end: 44.5, text: "Here I'm creating a variable called userName and assigning it a string value.", speaker: "Instructor" },
-]
+declare global {
+  interface Window {
+    google?: any
+  }
+}
 
 function formatTime(seconds: number): string {
   const mins = Math.floor(seconds / 60)
@@ -103,83 +70,279 @@ function formatTime(seconds: number): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`
 }
 
-export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
+/** ISO 8601 (PT1H2M3S) → "1:02:03" / "2:03" */
+function formatIsoDuration(iso: string): string {
+  const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/)
+  if (!m) return ""
+  const h = parseInt(m[1] || "0"), min = parseInt(m[2] || "0"), s = parseInt(m[3] || "0")
+  const mm = String(min).padStart(2, "0"), ss = String(s).padStart(2, "0")
+  return h > 0 ? `${h}:${mm}:${ss}` : `${min}:${ss}`
+}
+
+function formatSrtTime(seconds: number): string {
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.floor(seconds % 60)
+  const ms = Math.floor((seconds % 1) * 1000)
+  return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")},${ms.toString().padStart(3, "0")}`
+}
+
+function formatVttTime(seconds: number): string {
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.floor(seconds % 60)
+  const ms = Math.floor((seconds % 1) * 1000)
+  return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`
+}
+
+/** Load the Google Identity Services script once. */
+function loadGis(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (window.google?.accounts?.oauth2) return resolve()
+    const existing = document.querySelector('script[src*="accounts.google.com/gsi/client"]')
+    if (existing) {
+      existing.addEventListener("load", () => resolve())
+      existing.addEventListener("error", () => reject(new Error("Failed to load Google sign-in")))
+      return
+    }
+    const s = document.createElement("script")
+    s.src = "https://accounts.google.com/gsi/client"
+    s.async = true
+    s.onload = () => resolve()
+    s.onerror = () => reject(new Error("Failed to load Google sign-in"))
+    document.head.appendChild(s)
+  })
+}
+
+export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeIntegrationProps) {
   const t = useT()
-  const [searchQuery, setSearchQuery] = useState("")
-  const [searchResults, setSearchResults] = useState<YouTubeVideo[]>([])
-  const [isSearching, setIsSearching] = useState(false)
+  // Import URL (sticky bar / extension deep-link) and caption-extract URL
+  // are separate fields — sharing one input confused the deep-link flow.
   const [youtubeUrl, setYoutubeUrl] = useState("")
+  const [extractUrl, setExtractUrl] = useState("")
   const [activeMode, setActiveMode] = useState("captions")
-  
+
+  // YouTube sign-in state
+  const [ytToken, setYtToken] = useState<string | null>(null)
+  const [ytChannel, setYtChannel] = useState<string | null>(null)
+  const [ytChannelUrl, setYtChannelUrl] = useState<string | null>(null)
+  const [channelVideos, setChannelVideos] = useState<ChannelVideo[]>([])
+  const [isSigningIn, setIsSigningIn] = useState(false)
+  const [isLoadingVideos, setIsLoadingVideos] = useState(false)
+  const [authError, setAuthError] = useState<string | null>(null)
+
   // Transcript extraction state
   const [extractedTranscript, setExtractedTranscript] = useState<TranscriptLine[] | null>(null)
+  const [extractedLang, setExtractedLang] = useState<string | null>(null)
+  const [extractedAuto, setExtractedAuto] = useState(false)
+  const [extractedTitle, setExtractedTitle] = useState<string | null>(null)
   const [isExtracting, setIsExtracting] = useState(false)
-  const [extractProgress, setExtractProgress] = useState(0)
-  const [selectedVideo, setSelectedVideo] = useState<YouTubeVideo | null>(null)
-  
+  const [extractError, setExtractError] = useState<string | null>(null)
+  const [captionSource, setCaptionSource] = useState<"youtube" | "upload" | null>(null)
+
+  // Import state
+  const [isImporting, setIsImporting] = useState(false)
+  const [importingVideoId, setImportingVideoId] = useState<string | null>(null)
+  const [importError, setImportError] = useState<string | null>(null)
+
   // Own video upload state
   const [ownVideoFile, setOwnVideoFile] = useState<File | null>(null)
   const [ownVideoError, setOwnVideoError] = useState<string | null>(null)
-  const [captionSource, setCaptionSource] = useState<"youtube" | "upload" | null>(null)
 
-  const handleSearch = () => {
-    if (!searchQuery.trim()) return
-    setIsSearching(true)
-    setTimeout(() => {
-      setSearchResults(SAMPLE_VIDEOS)
-      setIsSearching(false)
-    }, 1000)
-  }
+  // ── YouTube sign-in ──────────────────────────────────────────────────────
 
-  const handleVideoSelect = (video: YouTubeVideo) => {
-    onVideoSelect({
-      id: video.id,
-      title: video.title,
-      url: `https://www.youtube.com/watch?v=${video.id}`,
-      thumbnail: video.thumbnail,
-      duration: video.duration,
-      source: "youtube",
-    })
-  }
-
-  const handleUrlSubmit = () => {
-    if (!youtubeUrl.trim()) return
-    const videoId = youtubeUrl.split("v=")[1]?.split("&")[0] || "demo"
-    onVideoSelect({
-      id: videoId,
-      title: "YouTube Video",
-      url: youtubeUrl,
-      thumbnail: "/youtube-thumbnail.png",
-      duration: "Unknown",
-      source: "youtube",
-    })
-  }
-
-  const handleExtractTranscript = (video: YouTubeVideo) => {
-    setSelectedVideo(video)
-    setIsExtracting(true)
-    setExtractProgress(0)
-    
-    // Simulate transcript extraction with progress
-    const interval = setInterval(() => {
-      setExtractProgress(prev => {
-        if (prev >= 100) {
-          clearInterval(interval)
-          setIsExtracting(false)
-          setExtractedTranscript(SAMPLE_TRANSCRIPT)
-          return 100
+  const fetchChannelVideos = useCallback(async (token: string) => {
+    setIsLoadingVideos(true)
+    setAuthError(null)
+    try {
+      const headers = { Authorization: `Bearer ${token}` }
+      const chRes = await fetch(
+        "https://www.googleapis.com/youtube/v3/channels?part=snippet,contentDetails&mine=true",
+        { headers })
+      if (!chRes.ok) {
+        if (chRes.status === 401) {
+          setYtToken(null)
+          throw new Error("YouTube session expired — sign in again")
         }
-        return prev + 10
+        throw new Error(`YouTube API error ${chRes.status}`)
+      }
+      const chData = await chRes.json()
+      const channel = chData.items?.[0]
+      if (!channel) throw new Error("This Google account has no YouTube channel")
+      setYtChannel(channel.snippet?.title || "Your channel")
+      const handle = channel.snippet?.customUrl
+      setYtChannelUrl(
+        handle ? `https://www.youtube.com/${handle}`
+               : channel.id ? `https://www.youtube.com/channel/${channel.id}`
+               : null)
+      const uploadsId = channel.contentDetails?.relatedPlaylists?.uploads
+
+      if (!uploadsId) {
+        setChannelVideos([])
+        return
+      }
+      const plRes = await fetch(
+        `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails&playlistId=${uploadsId}&maxResults=50`,
+        { headers })
+      if (!plRes.ok) throw new Error(`YouTube API error ${plRes.status}`)
+      const plData = await plRes.json()
+      const videos: ChannelVideo[] = (plData.items || [])
+        .map((item: any) => ({
+          id: item.contentDetails?.videoId || item.snippet?.resourceId?.videoId,
+          title: item.snippet?.title || "Untitled",
+          thumbnail: item.snippet?.thumbnails?.medium?.url
+            || item.snippet?.thumbnails?.default?.url || "",
+          duration: formatIsoDuration(item.contentDetails?.duration || ""),
+          publishedAt: item.snippet?.publishedAt || "",
+        }))
+        .filter((v: ChannelVideo) => v.id && v.title !== "Private video" && v.title !== "Deleted video")
+      setChannelVideos(videos)
+    } catch (e: any) {
+      setAuthError(e.message || "Could not load your videos")
+      setChannelVideos([])
+    } finally {
+      setIsLoadingVideos(false)
+    }
+  }, [])
+
+  const handleYouTubeSignIn = async () => {
+    if (!GOOGLE_CLIENT_ID) {
+      setAuthError("YouTube sign-in isn't configured yet (missing NEXT_PUBLIC_GOOGLE_CLIENT_ID)")
+      return
+    }
+    setIsSigningIn(true)
+    setAuthError(null)
+    try {
+      await loadGis()
+      const client = window.google.accounts.oauth2.initTokenClient({
+        client_id: GOOGLE_CLIENT_ID,
+        scope: YT_SCOPE,
+        callback: async (resp: any) => {
+          setIsSigningIn(false)
+          if (resp.error) {
+            setAuthError(resp.error === "access_denied"
+              ? "YouTube access was denied"
+              : `Sign-in failed: ${resp.error}`)
+            return
+          }
+          setYtToken(resp.access_token)
+          fetchChannelVideos(resp.access_token)
+        },
       })
-    }, 200)
+      client.requestAccessToken({ prompt: "" })
+    } catch (e: any) {
+      setIsSigningIn(false)
+      setAuthError(e.message || "Sign-in failed")
+    }
   }
+
+  const handleYouTubeSignOut = () => {
+    if (ytToken && window.google?.accounts?.oauth2) {
+      window.google.accounts.oauth2.revoke(ytToken, () => {})
+    }
+    setYtToken(null)
+    setYtChannel(null)
+    setYtChannelUrl(null)
+    setChannelVideos([])
+  }
+
+  // ── Caption extraction ───────────────────────────────────────────────────
+
+  const handleExtractTranscript = async (url: string) => {
+    if (!url.trim()) return
+    setIsExtracting(true)
+    setExtractError(null)
+    setExtractedTranscript(null)
+    setExtractedTitle(null)
+    try {
+      // Info probe runs alongside — it's a slower yt-dlp call, so a failure
+      // there shouldn't block the captions themselves.
+      const [result, info] = await Promise.all([
+        apiClient.getYouTubeCaptions(url),
+        apiClient.getYouTubeInfo(url).catch(() => null),
+      ])
+      setExtractedTranscript(result.segments.map((s, i) => ({
+        id: String(i + 1),
+        start: s.start,
+        end: s.end,
+        text: s.text,
+      })))
+      setExtractedLang(result.language)
+      setExtractedAuto(result.is_generated)
+      setExtractedTitle(info?.title || null)
+      setCaptionSource("youtube")
+    } catch (e: any) {
+      setExtractError(e.message || "Caption extraction failed")
+    } finally {
+      setIsExtracting(false)
+    }
+  }
+
+  // ── Video import ─────────────────────────────────────────────────────────
+
+  const handleImportVideo = async (url: string, title?: string,
+                                   thumbnail?: string, duration?: string) => {
+    if (!url.trim() || isImporting) return
+    setIsImporting(true)
+    setImportError(null)
+    try {
+      const res = await apiClient.importYouTube(url)
+      // The import returns 'accepted' while yt-dlp downloads server-side —
+      // the media URL and segment manifest 404 until it lands, and the
+      // workspace loads data once. Poll until the download finishes (status
+      // leaves 'uploading') before handing the job over.
+      const deadline = Date.now() + 10 * 60 * 1000
+      let st = await apiClient.getJobStatus(res.job_id)
+      while (st.status === 'uploading' && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 2000))
+        st = await apiClient.getJobStatus(res.job_id)
+      }
+      if (st.status === 'failed')
+        throw new Error(st.error_message || 'YouTube download failed')
+      if (st.status === 'uploading')
+        throw new Error('The download is taking longer than expected — it will appear in your jobs when it finishes.')
+      const videoUrl = await apiClient.mediaUrl(`/api/media/${res.job_id}/video`)
+      onVideoSelect({
+        id: res.job_id,
+        jobId: res.job_id,
+        title: title || res.video_filename || "YouTube video",
+        url: videoUrl,
+        thumbnail: thumbnail || "",
+        duration: duration || "Unknown",
+        source: "youtube",
+      })
+    } catch (e: any) {
+      setImportError(e.message || "Import failed")
+    } finally {
+      setIsImporting(false)
+      setImportingVideoId(null)
+    }
+  }
+
+  // Extension/bookmarklet deep-link: ?yt_url=... prefills the field and
+  // starts the import immediately, then the param is stripped so a refresh
+  // doesn't re-import the same video.
+  const deepLinkConsumed = useRef(false)
+  useEffect(() => {
+    if (!initialImportUrl || deepLinkConsumed.current) return
+    deepLinkConsumed.current = true
+    setYoutubeUrl(initialImportUrl)
+    handleImportVideo(initialImportUrl)
+    const params = new URLSearchParams(window.location.search)
+    params.delete('yt_url')
+    const qs = params.toString()
+    window.history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : ''))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialImportUrl])
+
+  // ── Transcript download helpers ──────────────────────────────────────────
 
   const handleDownloadTranscript = (format: "srt" | "vtt" | "txt" | "json") => {
     if (!extractedTranscript) return
-    
+
     let content = ""
-    let filename = `transcript.${format}`
-    
+    const filename = `transcript.${format}`
+
     if (format === "srt") {
       content = extractedTranscript.map((line, i) => {
         const startTime = formatSrtTime(line.start)
@@ -197,7 +360,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
     } else if (format === "json") {
       content = JSON.stringify(extractedTranscript, null, 2)
     }
-    
+
     const blob = new Blob([content], { type: "text/plain" })
     const url = URL.createObjectURL(blob)
     const a = document.createElement("a")
@@ -205,22 +368,6 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
     a.download = filename
     a.click()
     URL.revokeObjectURL(url)
-  }
-
-  const formatSrtTime = (seconds: number): string => {
-    const h = Math.floor(seconds / 3600)
-    const m = Math.floor((seconds % 3600) / 60)
-    const s = Math.floor(seconds % 60)
-    const ms = Math.floor((seconds % 1) * 1000)
-    return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")},${ms.toString().padStart(3, "0")}`
-  }
-
-  const formatVttTime = (seconds: number): string => {
-    const h = Math.floor(seconds / 3600)
-    const m = Math.floor((seconds % 3600) / 60)
-    const s = Math.floor(seconds % 60)
-    const ms = Math.floor((seconds % 1) * 1000)
-    return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`
   }
 
   // Shared with the main uploader so the two can't drift; mirrors
@@ -241,17 +388,35 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
     setOwnVideoFile(file)
   }
 
-  const handleStartDubbingWithOwnVideo = () => {
-    if (!ownVideoFile || !extractedTranscript) return
-    
-    onVideoSelect({
-      id: `own-${Date.now()}`,
-      title: ownVideoFile.name,
-      url: URL.createObjectURL(ownVideoFile),
-      thumbnail: "/youtube-thumbnail.png",
-      duration: "Unknown",
-      source: "upload",
-    })
+  const handleStartDubbingWithOwnVideo = async () => {
+    if (!ownVideoFile || !extractedTranscript || isImporting) return
+    setIsImporting(true)
+    setImportError(null)
+    try {
+      // Upload the file WITH the extracted captions — the backend stores them
+      // as the job transcript and skips ASR entirely.
+      const res = await apiClient.uploadVideo(
+        ownVideoFile,
+        undefined, undefined, undefined, undefined, undefined,
+        extractedTranscript.map(l => ({
+          text: l.text, start: l.start, end: l.end, speaker: l.speaker,
+        })),
+      )
+      const videoUrl = await apiClient.mediaUrl(`/api/media/${res.job_id}/video`)
+      onVideoSelect({
+        id: res.job_id,
+        jobId: res.job_id,
+        title: ownVideoFile.name,
+        url: videoUrl,
+        thumbnail: "",
+        duration: "Unknown",
+        source: "upload",
+      })
+    } catch (e: any) {
+      setImportError(e.message || "Upload failed")
+    } finally {
+      setIsImporting(false)
+    }
   }
 
   return (
@@ -264,16 +429,18 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
             <div className="space-y-2">
               <p className="font-medium text-blue-400">{t('About YouTube Integration')}</p>
               <p className="text-sm text-blue-300/80">
-                {t("Due to YouTube's Terms of Service, we cannot directly download video files from YouTube. However, we CAN legally:")}
+                {t('Sign in with YouTube to browse your own channel, or paste a video URL directly. You can import any video you have the right to download:')}
               </p>
               <ul className="text-sm text-blue-300/80 list-disc list-inside space-y-1 ml-2">
-                <li>{t('Extract captions and transcripts with full timestamps for translation')}</li>
-                <li>{t('Embed YouTube videos for playback reference while dubbing')}</li>
-                <li>{t('Help you dub videos you already own or have downloaded yourself')}</li>
+                <li>{t('Videos you own and uploaded to your channel')}</li>
+                <li>{t('Public domain videos — freely downloadable, no permission needed')}</li>
+                <li>{t('Videos you have permission to download and dub')}</li>
               </ul>
               <p className="text-sm text-blue-300/80 mt-2">
-                <strong>{t('Tip:')}</strong> If you own a YouTube video or have legal download rights, upload your video file in the Upload tab, 
-                then use this section to extract the captions for perfect synchronization.
+                {t('You can also extract captions and transcripts with full timestamps, or pair YouTube captions with a video file you upload yourself.')}
+              </p>
+              <p className="text-sm text-blue-300/80 mt-2">
+                <strong>{t('Note:')}</strong> {t("You're responsible for having the rights to any video you import. Private and age-restricted videos are not supported.")}
               </p>
             </div>
           </div>
@@ -292,7 +459,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
             {t('Your Own Video')}
           </TabsTrigger>
           <TabsTrigger value="browse" className="flex items-center gap-2">
-            <Search className="h-4 w-4" />
+            <Youtube className="h-4 w-4" />
             {t('Browse Videos')}
           </TabsTrigger>
         </TabsList>
@@ -313,27 +480,25 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
               <div className="flex gap-3">
                 <Input
                   placeholder="https://www.youtube.com/watch?v=..."
-                  value={youtubeUrl}
-                  onChange={(e) => setYoutubeUrl(e.target.value)}
+                  value={extractUrl}
+                  onChange={(e) => setExtractUrl(e.target.value)}
                   className="flex-1"
                 />
-                <Button onClick={() => {
-                  if (youtubeUrl) {
-                    handleExtractTranscript(SAMPLE_VIDEOS[0])
-                  }
-                }}>
-                  <FileText className="mr-2 h-4 w-4" />
-                  {t('Extract Captions')}
+                <Button
+                  onClick={() => handleExtractTranscript(extractUrl)}
+                  disabled={isExtracting || !extractUrl.trim()}
+                >
+                  {isExtracting
+                    ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    : <FileText className="mr-2 h-4 w-4" />}
+                  {isExtracting ? t('Extracting...') : t('Extract Captions')}
                 </Button>
               </div>
-              
-              {isExtracting && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-muted-foreground">{t('Extracting transcript...')}</span>
-                    <span className="text-primary">{extractProgress}%</span>
-                  </div>
-                  <Progress value={extractProgress} className="h-2" />
+
+              {extractError && (
+                <div className="flex items-start gap-2 text-sm text-red-500">
+                  <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                  {extractError}
                 </div>
               )}
             </CardContent>
@@ -348,9 +513,16 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                     <CardTitle className="flex items-center gap-2">
                       <CheckCircle2 className="h-5 w-5 text-green-500" />
                       {t('Transcript Extracted')}
+                      {extractedAuto && (
+                        <Badge variant="secondary" className="text-xs">
+                          {t('auto-generated')}
+                        </Badge>
+                      )}
                     </CardTitle>
                     <CardDescription>
-                      {extractedTranscript.length} segments with timestamps
+                      {extractedTitle && <span className="block">{extractedTitle} — </span>}
+                      {extractedTranscript.length} segments
+                      {extractedLang && ` • ${extractedLang}`}
                     </CardDescription>
                   </div>
                   <div className="flex gap-2">
@@ -373,8 +545,8 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                 <ScrollArea className="h-[300px] rounded-lg border border-border/50 bg-background/30">
                   <div className="p-4 space-y-3">
                     {extractedTranscript.map((line) => (
-                      <div 
-                        key={line.id} 
+                      <div
+                        key={line.id}
                         className="flex gap-4 p-3 rounded-lg hover:bg-muted/30 transition-colors group"
                       >
                         <div className="flex flex-col items-center gap-1 text-xs text-muted-foreground min-w-[80px]">
@@ -394,9 +566,9 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                           )}
                           <p className="text-foreground">{line.text}</p>
                         </div>
-                        <Button 
-                          variant="ghost" 
-                          size="icon" 
+                        <Button
+                          variant="ghost"
+                          size="icon"
                           className="opacity-0 group-hover:opacity-100 transition-opacity"
                         >
                           <Edit3 className="h-4 w-4" />
@@ -405,13 +577,27 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                     ))}
                   </div>
                 </ScrollArea>
-                
+
                 <div className="mt-4 flex gap-3">
-                  <Button className="flex-1" onClick={handleUrlSubmit}>
-                    <Play className="mr-2 h-4 w-4" />
-                    {t('Start Dubbing with Embedded Video')}
+                  <Button
+                    className="flex-1"
+                    disabled={isImporting}
+                    onClick={() => handleImportVideo(
+                      extractUrl,
+                      extractedTitle || undefined)}
+                  >
+                    {isImporting
+                      ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      : <Play className="mr-2 h-4 w-4" />}
+                    {isImporting ? t('Importing...') : t('Import Video & Start Dubbing')}
                   </Button>
                 </div>
+                {importError && (
+                  <div className="mt-2 flex items-start gap-2 text-sm text-red-500">
+                    <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                    {importError}
+                  </div>
+                )}
               </CardContent>
             </Card>
           )}
@@ -439,7 +625,7 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                   <h4 className="font-medium">{t('Upload Your Video File')}</h4>
                 </div>
                 <div className="ml-8">
-                  <label 
+                  <label
                     className="flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-border/50 bg-background/30 p-6 transition-colors hover:border-primary/50 hover:bg-muted/20"
                   >
                     <Upload className="h-10 w-10 text-muted-foreground mb-3" />
@@ -449,10 +635,10 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                     <span className="text-xs text-muted-foreground mt-1">
                       {t('MP4, WebM, MOV up to 5GB')}
                     </span>
-                    <input 
-                      type="file" 
-                      accept="video/*" 
-                      className="hidden" 
+                    <input
+                      type="file"
+                      accept="video/*"
+                      className="hidden"
                       onChange={handleOwnVideoUpload}
                     />
                   </label>
@@ -486,24 +672,29 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                   <div className="flex gap-3">
                     <Input
                       placeholder="https://www.youtube.com/watch?v=..."
-                      value={youtubeUrl}
-                      onChange={(e) => setYoutubeUrl(e.target.value)}
+                      value={extractUrl}
+                      onChange={(e) => setExtractUrl(e.target.value)}
                       className="flex-1"
                     />
-                    <Button 
-                      variant="outline" 
-                      onClick={() => {
-                        if (youtubeUrl) {
-                          setCaptionSource("youtube")
-                          handleExtractTranscript(SAMPLE_VIDEOS[0])
-                        }
-                      }}
+                    <Button
+                      variant="outline"
+                      disabled={isExtracting || !extractUrl.trim()}
+                      onClick={() => handleExtractTranscript(extractUrl)}
                     >
-                      <Link2 className="mr-2 h-4 w-4" />
+                      {isExtracting
+                        ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        : <Link2 className="mr-2 h-4 w-4" />}
                       {t('Extract')}
                     </Button>
                   </div>
-                  
+
+                  {extractError && (
+                    <div className="flex items-start gap-2 text-sm text-red-500">
+                      <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                      {extractError}
+                    </div>
+                  )}
+
                   {extractedTranscript && captionSource === "youtube" && (
                     <div className="flex items-center gap-2 text-sm text-green-500">
                       <CheckCircle2 className="h-4 w-4" />
@@ -517,8 +708,8 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <div className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${
-                    ownVideoFile && extractedTranscript 
-                      ? "bg-primary text-primary-foreground" 
+                    ownVideoFile && extractedTranscript
+                      ? "bg-primary text-primary-foreground"
                       : "bg-muted text-muted-foreground"
                   }`}>
                     3
@@ -527,140 +718,200 @@ export function YouTubeIntegration({ onVideoSelect }: YouTubeIntegrationProps) {
                     {t('Start Dubbing')}
                   </h4>
                 </div>
-                <div className="ml-8">
-                  <Button 
-                    className="w-full" 
-                    disabled={!ownVideoFile || !extractedTranscript}
+                <div className="ml-8 space-y-2">
+                  <Button
+                    className="w-full"
+                    disabled={!ownVideoFile || !extractedTranscript || isImporting}
                     onClick={handleStartDubbingWithOwnVideo}
                   >
-                    <Languages className="mr-2 h-4 w-4" />
-                    {t('Start Dubbing Your Video')}
+                    {isImporting
+                      ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      : <Languages className="mr-2 h-4 w-4" />}
+                    {isImporting ? t('Uploading...') : t('Start Dubbing Your Video')}
                   </Button>
+                  {importError && (
+                    <div className="flex items-start gap-2 text-sm text-red-500">
+                      <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                      {importError}
+                    </div>
+                  )}
                 </div>
               </div>
             </CardContent>
           </Card>
         </TabsContent>
 
-        {/* Browse Videos Tab */}
+        {/* Browse Videos Tab — sign in to see your own channel uploads */}
         <TabsContent value="browse" className="space-y-6 mt-6">
-          {/* Search */}
-          <Card className="backdrop-blur-md bg-card/50 border-border/50">
-            <CardHeader>
-              <CardTitle>{t('Search YouTube Videos')}</CardTitle>
-              <CardDescription>{t('Find videos with available captions for dubbing practice')}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex gap-3">
-                <div className="relative flex-1">
-                  <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    placeholder={t('Search for videos...')}
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-                    className="pl-10"
-                  />
-                </div>
-                <Button onClick={handleSearch} disabled={isSearching}>
-                  {isSearching ? t('Searching...') : t('Search')}
+          {!ytToken ? (
+            <Card className="backdrop-blur-md bg-card/50 border-border/50">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Youtube className="h-5 w-5 text-red-500" />
+                  {t('Your YouTube Videos')}
+                </CardTitle>
+                <CardDescription>
+                  {t('Sign in with YouTube to browse and import videos from your own channel')}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <Button
+                  onClick={handleYouTubeSignIn}
+                  disabled={isSigningIn}
+                  className="w-full sm:w-auto"
+                >
+                  {isSigningIn
+                    ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    : <LogIn className="mr-2 h-4 w-4" />}
+                  {isSigningIn ? t('Signing in...') : t('Sign in with YouTube')}
                 </Button>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Search Results */}
-          {searchResults.length > 0 && (
-            <div className="space-y-4">
-              <h3 className="text-lg font-semibold text-foreground">{t('Search Results')}</h3>
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {searchResults.map((video) => (
-                  <Card
-                    key={video.id}
-                    className="cursor-pointer overflow-hidden transition-all hover:border-primary/50 hover:shadow-lg backdrop-blur-md bg-card/50 border-border/50"
-                    onClick={() => handleVideoSelect(video)}
-                  >
-                    <div className="relative aspect-video">
-                      <img
-                        src={video.thumbnail || "/placeholder.svg"}
-                        alt={video.title}
-                        className="h-full w-full object-cover"
-                      />
-                      <div className="absolute bottom-2 right-2 flex items-center gap-1 rounded bg-black/80 px-2 py-1 text-xs text-white">
-                        <Clock className="h-3 w-3" />
-                        {video.duration}
-                      </div>
-                      {video.hasCaptions && (
-                        <div className="absolute left-2 top-2 rounded bg-green-500/90 px-2 py-1 text-xs font-medium text-white">
-                          {t('CC Available')}
-                        </div>
-                      )}
+                {authError && (
+                  <div className="flex items-start gap-2 text-sm text-red-500">
+                    <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                    {authError}
+                  </div>
+                )}
+                {!GOOGLE_CLIENT_ID && (
+                  <p className="text-xs text-muted-foreground">
+                    {t('YouTube sign-in requires a Google OAuth client ID to be configured (NEXT_PUBLIC_GOOGLE_CLIENT_ID).')}
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="flex flex-col space-y-6">
+              <Card className="backdrop-blur-md bg-card/50 border-border/50">
+                <CardHeader>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <CardTitle className="flex items-center gap-2">
+                        <Youtube className="h-5 w-5 text-red-500" />
+                        {ytChannelUrl ? (
+                          <a
+                            href={ytChannelUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="hover:text-primary transition-colors"
+                          >
+                            {ytChannel}
+                          </a>
+                        ) : ytChannel}
+                      </CardTitle>
+                      <CardDescription>
+                        {channelVideos.length} {t('videos on your channel')}
+                      </CardDescription>
                     </div>
-                    <CardContent className="p-4">
-                      <h4 className="line-clamp-2 font-medium text-foreground">{video.title}</h4>
-                      <p className="mt-1 text-sm text-muted-foreground">{video.channel}</p>
-                      <div className="mt-2 flex items-center gap-3 text-xs text-muted-foreground">
-                        <span className="flex items-center gap-1">
-                          <Eye className="h-3 w-3" />
-                          {video.views}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Languages className="h-3 w-3" />
-                          {video.captionLanguages.length} languages
-                        </span>
-                      </div>
-                      <div className="mt-3 flex flex-wrap gap-1">
-                        {video.captionLanguages.slice(0, 3).map((lang) => (
-                          <Badge key={lang} variant="secondary" className="text-xs">
-                            {lang}
-                          </Badge>
-                        ))}
-                        {video.captionLanguages.length > 3 && (
-                          <Badge variant="secondary" className="text-xs">
-                            +{video.captionLanguages.length - 3}
-                          </Badge>
-                        )}
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
+                    <Button variant="outline" size="sm" onClick={handleYouTubeSignOut}>
+                      <LogOut className="mr-2 h-4 w-4" />
+                      {t('Sign out')}
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {isLoadingVideos ? (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      {t('Loading your videos...')}
+                    </div>
+                  ) : channelVideos.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4">
+                      {t('No public uploads found on this channel.')}
+                    </p>
+                  ) : (
+                    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                      {channelVideos.map((video) => (
+                        <Card
+                          key={video.id}
+                          className="overflow-hidden backdrop-blur-md bg-card/50 border-border/50"
+                        >
+                          <div className="relative aspect-video">
+                            <img
+                              src={video.thumbnail || "/placeholder.svg"}
+                              alt={video.title}
+                              className="h-full w-full object-cover"
+                            />
+                            {video.duration && (
+                              <div className="absolute bottom-2 right-2 flex items-center gap-1 rounded bg-black/80 px-2 py-1 text-xs text-white">
+                                <Clock className="h-3 w-3" />
+                                {video.duration}
+                              </div>
+                            )}
+                          </div>
+                          <CardContent className="p-4">
+                            <h4 className="line-clamp-2 font-medium text-foreground">{video.title}</h4>
+                            <Button
+                              className="mt-3 w-full"
+                              size="sm"
+                              disabled={isImporting}
+                              onClick={() => {
+                                setImportingVideoId(video.id)
+                                handleImportVideo(
+                                  `https://www.youtube.com/watch?v=${video.id}`,
+                                  video.title,
+                                  video.thumbnail,
+                                  video.duration)
+                              }}
+                            >
+                              {importingVideoId === video.id && isImporting
+                                ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                : <Import className="mr-2 h-4 w-4" />}
+                              {t('Import to Studio')}
+                            </Button>
+                          </CardContent>
+                        </Card>
+                      ))}
+                    </div>
+                  )}
+                  {authError && (
+                    <div className="mt-3 flex items-start gap-2 text-sm text-red-500">
+                      <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                      {authError}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
             </div>
           )}
-
-          {/* Popular for Practice */}
-          <Card className="backdrop-blur-md bg-card/50 border-border/50">
-            <CardHeader>
-              <CardTitle>{t('Popular for Translation Practice')}</CardTitle>
-              <CardDescription>{t('Educational content with professional captions')}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {SAMPLE_VIDEOS.map((video) => (
-                  <div
-                    key={video.id}
-                    className="group flex cursor-pointer gap-3 rounded-lg border border-border/50 p-3 transition-all hover:border-primary/50 hover:bg-muted/50 backdrop-blur-sm"
-                    onClick={() => handleVideoSelect(video)}
-                  >
-                    <img
-                      src={video.thumbnail || "/placeholder.svg"}
-                      alt={video.title}
-                      className="h-20 w-32 rounded-lg object-cover"
-                    />
-                    <div className="flex-1">
-                      <h4 className="line-clamp-2 text-sm font-medium text-foreground group-hover:text-primary">
-                        {video.title}
-                      </h4>
-                      <p className="mt-1 text-xs text-muted-foreground">{video.channel}</p>
-                      <p className="mt-1 text-xs text-muted-foreground">{video.duration}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
         </TabsContent>
       </Tabs>
+
+      {/* Direct URL import — pinned to the bottom of the YouTube tab on
+          every sub-tab and whether signed in or not, so it stays reachable
+          while scrolling the channel grid or after a deep-link import. */}
+      <div className="sticky bottom-4 z-10 mt-6">
+        <Card className="backdrop-blur-xl bg-card/90 border-border/50 shadow-lg">
+          <CardContent className="pt-4 pb-4">
+            <p className="mb-2 text-xs text-muted-foreground">
+              {t('Paste a video URL — your own, public domain, or one you have permission to use')}
+            </p>
+            <div className="flex gap-3">
+              <Input
+                placeholder="https://www.youtube.com/watch?v=..."
+                value={youtubeUrl}
+                onChange={(e) => setYoutubeUrl(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && youtubeUrl.trim() && !isImporting && handleImportVideo(youtubeUrl)}
+                className="flex-1"
+              />
+              <Button
+                variant="outline"
+                disabled={isImporting || !youtubeUrl.trim()}
+                onClick={() => handleImportVideo(youtubeUrl)}
+              >
+                {isImporting
+                  ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  : <Import className="mr-2 h-4 w-4" />}
+                {t('Import')}
+              </Button>
+            </div>
+            {importError && (
+              <div className="mt-3 flex items-start gap-2 text-sm text-red-500">
+                <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                {importError}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   )
 }

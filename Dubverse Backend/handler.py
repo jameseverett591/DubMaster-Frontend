@@ -10,6 +10,14 @@ import os
 import re
 import time
 
+# Image version stamp — confirms which Docker image the worker is running.
+# Updated on every build.  If the log doesn't show this version, the worker
+# is running a cached/old image.
+_WORKER_IMAGE_VERSION = "v87-thought-grouping-wenet"
+print(f"handler.py: IMAGE_VERSION={_WORKER_IMAGE_VERSION}", flush=True)
+print(f"handler.py: CANTONESE_ASR_ENGINES={os.getenv('CANTONESE_ASR_ENGINES', '(not set)')}", flush=True)
+print(f"handler.py: DEEPGRAM_API_KEY={'set' if os.getenv('DEEPGRAM_API_KEY') else 'NOT SET'}", flush=True)
+
 try:
     import runpod
     print(f"handler.py: runpod {getattr(runpod, '__version__', 'unknown')} OK", flush=True)
@@ -23,6 +31,7 @@ try:
     from app.pipeline.transcribe_audio import transcribe_audio
     from app.pipeline.transcribe_cantonese import transcribe_cantonese
     from app.pipeline.diarize_audio import diarize_audio
+    from app.pipeline.speechmatics_diarize import diarize_with_speechmatics
     print("handler.py: pipeline imports OK", flush=True)
 except Exception as _e:
     print(f"handler.py FATAL (pipeline import): {_e}", file=sys.stderr, flush=True)
@@ -268,6 +277,37 @@ def _split_segment_by_diarization(
     # Drop zero-length turns so we do not create empty output segments.
     intervals = [i for i in intervals if i[1] > i[0]]
 
+    # Filter out short diarization intervals that would over-split good
+    # segments. If an interval is shorter than the minimum fragment
+    # duration, merge it with the adjacent interval that has the longer
+    # duration (assigning it to that speaker). This prevents noisy
+    # diarization from creating tiny fragments like "I understand," /
+    # "Master Shin," from what should be one segment.
+    min_fragment_dur = float(os.getenv("DIARIZATION_MIN_FRAGMENT_DURATION", "1.5"))
+    if len(intervals) > 1:
+        filtered = [intervals[0]]
+        for inv in intervals[1:]:
+            prev = filtered[-1]
+            inv_dur = inv[1] - inv[0]
+            prev_dur = prev[1] - prev[0]
+            # If this interval is too short, merge it with the previous one.
+            if inv_dur < min_fragment_dur:
+                filtered[-1] = [prev[0], max(prev[1], inv[1]), prev[2]]
+            # If the previous interval is too short, merge it with this one.
+            elif prev_dur < min_fragment_dur:
+                filtered[-1] = [prev[0], inv[1], inv[2]]
+            else:
+                filtered.append(inv)
+        intervals = [i for i in filtered if i[1] > i[0]]
+        # Re-merge adjacent same-speaker intervals after filtering.
+        merged2 = []
+        for inv in intervals:
+            if merged2 and inv[2] == merged2[-1][2] and inv[0] <= merged2[-1][1] + 0.25:
+                merged2[-1][1] = max(merged2[-1][1], inv[1])
+            else:
+                merged2.append(inv)
+        intervals = merged2
+
     # No usable diarization: split long segments by punctuation, keep one speaker.
     if not intervals:
         return _split_long_segment(seg, _speaker_overlap(seg, diarization_segments), max_duration, max_chars)
@@ -276,15 +316,20 @@ def _split_segment_by_diarization(
     if len(intervals) == 1:
         return _split_long_segment(seg, intervals[0][2], max_duration, max_chars)
 
-    # Turns averaging under 0.8s are more likely diarization noise than real
-    # speaker changes — fall back to the dominant speaker rather than splitting
-    # on jitter. Time-based, not character-count-based: a character-count
-    # guard here (len(intervals) > chars_total) was language-biased — CJK text
-    # conveys a full exchange in far fewer characters than the English
-    # equivalent, so it tripped constantly on Cantonese/Chinese segments and
-    # almost never on English ones for the identical number of real speaker
-    # turns, silently collapsing real multi-speaker Cantonese dialogue into
-    # one dominant voice.
+    # Turns averaging under this floor are more likely diarization noise than
+    # real speaker changes — fall back to the dominant speaker rather than
+    # splitting on jitter. Time-based, not character-count-based: a
+    # character-count guard here (len(intervals) > chars_total) was
+    # language-biased — CJK text conveys a full exchange in far fewer
+    # characters than the English equivalent, so it tripped constantly on
+    # Cantonese/Chinese segments and almost never on English ones for the
+    # identical number of real speaker turns, silently collapsing real
+    # multi-speaker Cantonese dialogue into one dominant voice.
+    # Floor lowered from 0.8 to 0.3 (env-configurable): confirmed directly
+    # against a real transcript that rapid Cantonese back-and-forth (turn
+    # gaps under 0.8s) was landing below the old floor and collapsing to one
+    # speaker even after Deepgram itself produced separate diarization turns.
+    min_turn_duration = float(os.getenv("DIARIZATION_MIN_TURN_DURATION", "0.3"))
     avg_turn_duration = (t_end - t_start) / len(intervals)
     chars_total = max(len(text), 1)
     # Second guard, independent of the duration check above: the proportional
@@ -300,7 +345,7 @@ def _split_segment_by_diarization(
     # character per turn, which is rare for genuine multi-turn dialogue in any
     # script, unlike the old bug which fired on any Cantonese segment with
     # more turns than its (naturally low) character count.
-    if avg_turn_duration < 0.8 or len(intervals) > chars_total:
+    if avg_turn_duration < min_turn_duration or len(intervals) > chars_total:
         speakers = {}
         for s, e, sp in intervals:
             speakers[sp] = speakers.get(sp, 0.0) + (e - s)
@@ -428,81 +473,188 @@ def _assign_and_split_segments(
 _CJK_RE = re.compile(r"[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]")
 
 
-def _merge_overfragmented_segments(
-    segments: list[dict],
-    max_gap: float = 0.5,
-    max_duration: float = _MAX_SEGMENT_DURATION,
-    max_chars: int = _MAX_SEGMENT_CHARS,
-) -> list[dict]:
-    """Merge adjacent same-speaker fragments that were split by diarization noise.
+# Thought-grouping thresholds. Captions should contain complete thoughts, not
+# breath-length fragments. A bubble only closes at a sentence boundary or a
+# clear thought pause; short related sentences by one speaker share a bubble.
+_GROUP_MERGE_GAP = float(os.getenv("GROUP_MERGE_GAP_S", "1.2"))
+_GROUP_TARGET_S = float(os.getenv("GROUP_BUBBLE_TARGET_S", "5.0"))
+_GROUP_TARGET_CHARS = int(os.getenv("GROUP_BUBBLE_TARGET_CHARS", "60"))
+_PAUSE_SPLIT_S = float(os.getenv("GROUP_PAUSE_SPLIT_S", "0.45"))
 
-    WenetSpeech's VAD produces short chunks; when those chunks cross a pyannote
-    speaker-boundary jitter, the diarization rescue split can chop a single
-    sentence into tiny pieces (e.g. "Master Ip" / "haven't you taken any
-    disciples in today?"). This step rejoins adjacent fragments when:
-      - they have the same speaker,
-      - the gap/overlap is small,
-      - the previous fragment does not end with sentence-ending punctuation,
-      - the combined segment still fits the duration/char limits.
+_THOUGHT_ENDS = frozenset("。！？!?…")  # full sentence-ending punctuation
+
+
+def _join_texts(a: str, b: str) -> str:
+    a = (a or "").rstrip()
+    b = (b or "").lstrip()
+    if _CJK_RE.search(a) and _CJK_RE.search(b):
+        return (a + b).strip()
+    return (a + " " + b).strip()
+
+
+def _regroup_segments_by_thoughts(
+    segments: list[dict],
+    merge_gap: float = _GROUP_MERGE_GAP,
+    target_s: float = _GROUP_TARGET_S,
+    target_chars: int = _GROUP_TARGET_CHARS,
+) -> list[dict]:
+    """Group same-speaker segments into complete-thought bubbles.
+
+    Two phases:
+      1. MERGE adjacent same-speaker segments separated by small gaps (a
+         breath, not a turn) into one run, so sentences torn by VAD or
+         diarization jitter are made whole again. turn_split boundaries
+         (deliberate speaker-turn splits) are never crossed.
+      2. SPLIT a run only when it exceeds the bubble target, and only at
+         sentence-ending punctuation (。.!?) or — in unpunctuated runs —
+         at the largest intra-run pause. Mid-sentence splits are forbidden:
+         if no boundary exists, the oversized run stays whole rather than
+         truncating a sentence.
     """
     if not segments:
         return segments
 
-    _SENTENCE_ENDS = frozenset(".!?。！？")
+    ordered = sorted(segments, key=lambda s: float(s.get("start", 0)))
 
-    def _join_texts(a: str, b: str) -> str:
-        a = (a or "").rstrip()
-        b = (b or "").lstrip()
-        # If both sides are primarily CJK, do not insert a space.
-        if _CJK_RE.search(a) and _CJK_RE.search(b):
-            return (a + b).strip()
-        return (a + " " + b).strip()
-
-    merged: list[dict] = []
-    for seg in sorted(segments, key=lambda s: float(s.get("start", 0))):
-        if not merged:
-            merged.append(seg)
+    # Phase 1: merge same-speaker fragments into runs.
+    runs: list[list[dict]] = []
+    for seg in ordered:
+        text = (seg.get("text") or "").strip()
+        if not text:
             continue
+        if runs:
+            prev_seg = runs[-1][-1]
+            same_speaker = (
+                prev_seg.get("speaker", "SPEAKER_00") == seg.get("speaker", "SPEAKER_00")
+            )
+            gap = float(seg.get("start", 0)) - float(prev_seg.get("end", 0))
+            if (
+                same_speaker
+                and -0.05 <= gap <= merge_gap
+                and not prev_seg.get("turn_split")
+                and not seg.get("turn_split")
+            ):
+                runs[-1].append(seg)
+                continue
+        runs.append([seg])
 
-        prev = merged[-1]
-        prev_speaker = prev.get("speaker", "SPEAKER_00")
-        cur_speaker = seg.get("speaker", "SPEAKER_00")
-        gap = float(seg.get("start", 0)) - float(prev.get("end", 0))
-        prev_text = (prev.get("text") or "").strip()
-        cur_text = (seg.get("text") or "").strip()
-        joined_text = _join_texts(prev_text, cur_text)
-        joined_dur = float(seg.get("end", 0)) - float(prev.get("start", 0))
+    def _emit_run(run: list[dict]) -> list[dict]:
+        """Merge run into one dict, or split at sentence/pause boundaries
+        if oversized. Never splits mid-sentence."""
+        base = dict(run[0])
+        base["start"] = round(float(run[0].get("start", 0)), 3)
+        base["end"] = round(float(run[-1].get("end", 0)), 3)
+        text = base.get("text", "")
+        for seg in run[1:]:
+            text = _join_texts(text, seg.get("text", ""))
+        base["text"] = text
+        words: list = []
+        for seg in run:
+            words.extend(seg.get("words") or [])
+        base["words"] = words or None
+        confs = [float(s.get("confidence")) for s in run if s.get("confidence") is not None]
+        if confs:
+            base["confidence"] = min(confs)
+        if any(s.get("confidence_tier") == "low" for s in run):
+            base["confidence_tier"] = "low"
+        dur = base["end"] - base["start"]
+        if dur <= target_s and len(text) <= target_chars:
+            return [base]
 
-        can_merge = (
-            prev_speaker == cur_speaker
-            and prev_text
-            and cur_text
-            and gap >= -0.05
-            and gap <= max_gap
-            and prev_text[-1] not in _SENTENCE_ENDS
-            and joined_dur <= max_duration
-            and len(joined_text) <= max_chars
-        )
+        # Oversized run — find candidate split character positions.
+        candidates = [i + 1 for i, ch in enumerate(text[:-1]) if ch in _THOUGHT_ENDS]
 
-        if can_merge:
-            merged[-1] = dict(prev)
-            merged[-1]["text"] = joined_text
-            merged[-1]["end"] = float(seg.get("end", 0))
-            # Combine word alignments if both sides carry them.
-            if prev.get("words") or seg.get("words"):
-                merged[-1]["words"] = (prev.get("words") or []) + (seg.get("words") or [])
-            # Keep the lower (worse) confidence of the two fragments.
-            prev_conf = prev.get("confidence")
-            cur_conf = seg.get("confidence")
-            if prev_conf is not None and cur_conf is not None:
-                merged[-1]["confidence"] = min(prev_conf, cur_conf)
-            # If either fragment was flagged low-confidence, keep the flag.
-            if prev.get("confidence_tier") == "low" or seg.get("confidence_tier") == "low":
-                merged[-1]["confidence_tier"] = "low"
-        else:
-            merged.append(seg)
+        if not candidates and len(run) > 1:
+            # No sentence punctuation (common for Cantonese ASR): split at
+            # the largest inter-fragment gap, which marks a thought pause.
+            gaps = []
+            for k in range(1, len(run)):
+                g = float(run[k].get("start", 0)) - float(run[k - 1].get("end", 0))
+                # Char offset where fragment k begins in the joined text.
+                prefix = run[0].get("text", "")
+                for s2 in run[1:k]:
+                    prefix = _join_texts(prefix, s2.get("text", ""))
+                gaps.append((g, len(prefix)))
+            splits = [c for g, c in gaps if g >= _PAUSE_SPLIT_S and c > 0]
+            if splits:
+                candidates = splits
+            elif gaps:
+                largest = max(gaps)[1]
+                if largest > 0:
+                    candidates = [largest]
 
-    return merged
+        if not candidates:
+            # Last resort for words-carrying runs: largest word gap.
+            if words:
+                wgaps = sorted(
+                    (float(words[i + 1].get("start", 0)) - float(words[i].get("end", 0)), i)
+                    for i in range(len(words) - 1)
+                )
+                if wgaps and wgaps[-1][0] >= _PAUSE_SPLIT_S:
+                    cut_word = wgaps[-1][1] + 1
+                    cut_text = "".join(w.get("word", "") for w in words[:cut_word]).strip()
+                    if 0 < len(cut_text) < len(text):
+                        candidates = [len(cut_text)]
+            if not candidates:
+                # No safe boundary — keep the complete utterance whole.
+                return [base]
+
+        # Bucket candidates into bubbles near the target size.
+        bubbles: list[tuple[int, int]] = []
+        start_idx = 0
+        while start_idx < len(text):
+            limit_time = target_s if len(text[start_idx:]) > target_chars else _MAX_SEGMENT_DURATION
+            window_chars = target_chars if len(text[start_idx:]) > target_chars else _MAX_SEGMENT_CHARS
+            best_cut = None
+            best_score = None
+            for c in candidates:
+                if c <= start_idx or c >= len(text):
+                    continue
+                piece = text[start_idx:c]
+                if len(piece) > _MAX_SEGMENT_CHARS:
+                    continue
+                over_target = len(piece) > window_chars
+                score = (1 if over_target else 0, abs(len(piece) - window_chars))
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_cut = c
+            if best_cut is None:
+                break
+            bubbles.append((start_idx, best_cut))
+            start_idx = best_cut
+        if bubbles and bubbles[-1][1] < len(text):
+            bubbles.append((bubbles[-1][1], len(text)))
+        if not bubbles:
+            return [base]
+
+        # Timing: proportional by character fraction across the run.
+        out = []
+        total_chars = max(1, len(text))
+        run_start = float(run[0].get("start", 0))
+        run_end = float(run[-1].get("end", 0))
+        prev_end = run_start
+        for b0, b1 in bubbles:
+            piece_text = text[b0:b1].strip()
+            if not piece_text:
+                continue
+            frac_start = b0 / total_chars
+            frac_end = b1 / total_chars
+            t0 = run_start + frac_start * (run_end - run_start)
+            t1 = run_start + frac_end * (run_end - run_start)
+            t0 = max(t0, prev_end)
+            prev_end = t1
+            sub = dict(base)
+            sub["text"] = piece_text
+            sub["start"] = round(t0, 3)
+            sub["end"] = round(t1, 3)
+            sub.pop("words", None)
+            out.append(sub)
+        return out or [base]
+
+    regrouped: list[dict] = []
+    for run in runs:
+        regrouped.extend(_emit_run(run))
+    return regrouped
 
 
 def handler(event):
@@ -666,7 +818,7 @@ def handler(event):
     def _run_transcribe():
         t0 = time.time()
         if _lang_norm in _CHINESE_LANGS:
-            # Multi-engine pipeline: Deepgram → Tencent → Paraformer → Whisper
+            # Multi-engine pipeline: Deepgram → Paraformer → Whisper
             # Passes separated vocals so the engines get the cleanest signal.
             logger.info(f"[TRANSCRIBE] Chinese language '{language}' — using multi-engine Chinese pipeline")
             result = transcribe_cantonese(
@@ -684,7 +836,23 @@ def handler(event):
         if vocal_extract is not None:
             logger.info("[DIARIZE] Using separated vocals as diarization source")
         t0 = time.time()
-        result = diarize_audio(diarize_source, job_id=job_id, min_speakers=min_speakers, max_speakers=max_speakers)
+        # Cantonese/Mandarin: prefer Speechmatics' diarization over pyannote.
+        # Confirmed directly against the Ip Man 2 test clip that pyannote
+        # (and Deepgram's own diarization) collapse brief interjections
+        # inside a longer speaker's turn; Speechmatics' tunable
+        # speaker_sensitivity showed real separation on the same audio.
+        # Requires the real vocals WAV file (not just a decoded tensor) and
+        # falls back to pyannote on any failure or if unconfigured.
+        if _lang_norm in _CHINESE_LANGS and os.getenv("SPEECHMATICS_API_KEY") and vocals_audio_path:
+            logger.info(f"[DIARIZE] Chinese language '{language}' — using Speechmatics diarization instead of pyannote")
+            result = diarize_with_speechmatics(vocals_audio_path, job_id=job_id, source_language=language)
+            if result.get("status") != "ok":
+                logger.warning(
+                    f"[DIARIZE] Speechmatics diarization unavailable ({result.get('reason')}) — falling back to pyannote"
+                )
+                result = diarize_audio(diarize_source, job_id=job_id, min_speakers=min_speakers, max_speakers=max_speakers)
+        else:
+            result = diarize_audio(diarize_source, job_id=job_id, min_speakers=min_speakers, max_speakers=max_speakers)
         timings["diarize"] = round(time.time() - t0, 2)
         return result
 
@@ -716,7 +884,11 @@ def handler(event):
             transcript_data = json.load(f)
 
         segments = transcript_data.get("segments", [])
-        logger.info(f"Transcription complete in {timings.get('transcribe', 0)}s: {len(segments)} segments")
+        logger.info(
+            f"[STAGE] After transcription: {len(segments)} segments, "
+            f"sources={sorted(set(s.get('source','?') for s in segments))}, "
+            f"speakers={sorted(set(s.get('speaker','?') for s in segments))}"
+        )
     else:
         transcript_data = {}
         segments = []
@@ -743,7 +915,7 @@ def handler(event):
         segments = _assign_and_split_segments(segments, diarization_segments)
         unique = len(set(s.get("speaker") for s in segments))
         logger.info(
-            f"Speaker assignment complete: {unique} unique speaker(s) across "
+            f"[STAGE] After speaker assignment: {unique} unique speaker(s) across "
             f"{len(segments)} segments (before split: {before})"
         )
     else:
@@ -753,20 +925,21 @@ def handler(event):
         segments = _assign_and_split_segments(segments, [])
         unique = len(set(s.get("speaker") for s in segments))
         logger.info(
-            f"Speaker assignment (no diarization): {unique} default speaker(s) across "
+            f"[STAGE] After speaker assignment (no diarization): {unique} default speaker(s) across "
             f"{len(segments)} segments (before split: {before})"
         )
 
-    # ── Anti-fragmentation merge ───────────────────────────────────────────
-    # WenetSpeech's short VAD chunks can get chopped further by the diarization
-    # rescue split. Rejoin adjacent same-speaker fragments that do not end with
-    # sentence-ending punctuation so a single sentence isn't broken into pieces.
+    # ── Thought-grouping regroup ───────────────────────────────────────────
+    # Captions must contain complete thoughts, not breath-length fragments.
+    # Merge same-speaker fragments separated by pauses (healed torn sentences),
+    # then split oversized runs only at sentence boundaries or clear thought
+    # pauses — never mid-sentence.
     _before_merge = len(segments)
-    segments = _merge_overfragmented_segments(segments)
+    segments = _regroup_segments_by_thoughts(segments)
     if len(segments) != _before_merge:
         logger.info(
-            f"Merged {_before_merge - len(segments)} over-fragmented segment(s) "
-            f"back into sentence-level chunks"
+            f"[STAGE] After thought-grouping: {len(segments)} segments "
+            f"(was {_before_merge})"
         )
 
     # ── Confidence Tiering ────────────────────────────────────────────────

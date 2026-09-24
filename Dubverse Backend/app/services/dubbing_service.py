@@ -28,6 +28,12 @@ from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
 from app.services.respeecher_service import respeecher_tts, SEED_HISTORY_MAX
 from app.services import tts_usage
+from app.services.rulebook import (
+    apply_pronunciations,
+    load_global_rules,
+    load_job_rules,
+    resolve_rules,
+)
 from app.services.translation_service import (
     translation_service,
     natural_duration,
@@ -163,6 +169,48 @@ MEANING_DIVERGENCE_THRESHOLD = 0.7
 # keep their full music-and-effects bed. Remove this once the RunPod worker
 # returns the stems it already produces on GPU.
 ACCOMPANIMENT_MAX_DURATION_S = 600
+
+
+def _phonetic_respelling(
+    text: str,
+    pronunciations: Optional[Dict[str, str]] = None,
+    label: str = "",
+) -> str:
+    """Spoken-form respelling for TTS — the display/transcript text is never
+    touched. Built-in defaults (Ip Man → "Yip Man", stray Master Jin
+    romanisations → "Master Jin") apply first; rulebook `pronunciation` rules
+    then layer on top, so the director's explicit decision wins.
+    """
+    out = re.sub(r'\bIp Man\b', 'Yip Man', text, flags=re.IGNORECASE)
+    out = re.sub(
+        r'\bMaster (?:Shin|Sheen|Xin|Xing|Kin|Gam)\b',
+        'Master Jin', out, flags=re.IGNORECASE,
+    )
+    out = apply_pronunciations(out, pronunciations)
+    if out != text:
+        logger.info(f"[PHONETIC]{label}: {text!r} -> {out!r}")
+    return out
+
+
+def stamp_job_edited(data) -> None:
+    """Record, on the server's clock, that this job changed in a way the film
+    does not yet contain.
+
+    Export compares this against the rendered film's timestamp to refuse a stale
+    export. It has to be stamped here rather than trusted from the browser: the
+    editor stamps committed_at in its own store, but no route persists it, so a
+    reload or a direct call would find nothing and let a stale film through. A
+    server stamp also removes any dependence on the client's clock.
+
+    Nothing clears it: the comparison is by time, so the next render simply
+    writes a newer film and the job reads as current again.
+    """
+    # A legacy segments.json is a bare LIST of segments with nowhere to put a
+    # document field. Stamping one raised TypeError and lost the write, so skip
+    # it: those jobs fall back to the committed_at comparison in the guard.
+    if not isinstance(data, dict):
+        return
+    data["last_edit_at"] = datetime.utcnow().isoformat() + "Z"
 
 
 def atomic_write_json(path: str, data, indent: int = 2) -> None:
@@ -439,8 +487,20 @@ class DubbingService:
             return transcript
 
         MAX_MERGED_CHARS = 80  # hard cap on already-accumulated text before merging more
-        MAX_MERGE_COUNT = 2    # never chain more than 2 segments into one TTS call
+        MAX_MERGE_COUNT = 3    # a sentence torn into three fragments is common; four is not
         MAX_MERGED_DURATION = 8.0  # never create a merged segment longer than 8 seconds
+        # How far the next fragment may START BEFORE the previous one ENDS and
+        # still be the same utterance. The old rule was `gap >= 0.0`, which made
+        # overlapping same-speaker segments unmergeable — and overlap is exactly
+        # the signature of a sentence the ASR tore in two (word-level timestamps
+        # bleed across the cut: 看挺適|合你 came out as [27.88-31.08] and
+        # [30.62-32.22], gap -0.46s, and was translated as two separate lines).
+        # Bounded so genuine crosstalk between two utterances a second apart is
+        # still kept separate. Same-speaker only, as before.
+        MAX_OVERLAP = 0.6
+
+        def _is_cjk(s: str) -> bool:
+            return bool(re.search(r"[\u4e00-\u9fff]", s))
 
         merged: List[Dict] = [dict(transcript[0])]  # deep-ish copy
         merge_counts: List[int] = [1]
@@ -449,13 +509,26 @@ class DubbingService:
             prev = merged[-1]
             gap = float(seg.get("start", 0)) - float(prev.get("end", 0))
             same_speaker = (seg.get("speaker") or "speaker-1") == (prev.get("speaker") or "speaker-1")
-            merged_text = prev["text"].rstrip() + " " + seg.get("text", "").lstrip()
+            # CJK has no inter-word space; a space inserted at the join point
+            # looks like a word boundary to the translator and to the
+            # punctuation-snap splitter, right where the tear was.
+            joiner = "" if _is_cjk(prev["text"]) and _is_cjk(seg.get("text", "")) else " "
+            merged_text = prev["text"].rstrip() + joiner + seg.get("text", "").lstrip()
             merged_duration = float(seg.get("end", 0)) - float(prev.get("start", 0))
 
-            if same_speaker and gap >= 0.0 and gap < max_gap and len(merged_text) <= MAX_MERGED_CHARS and merge_counts[-1] < MAX_MERGE_COUNT and merged_duration <= MAX_MERGED_DURATION:
+            if same_speaker and -MAX_OVERLAP <= gap < max_gap and len(merged_text) <= MAX_MERGED_CHARS and merge_counts[-1] < MAX_MERGE_COUNT and merged_duration <= MAX_MERGED_DURATION:
                 # Merge: extend the previous segment
                 prev["text"]  = merged_text
-                prev["end"]   = seg.get("end", prev["end"])
+                prev["end"]   = max(float(prev["end"]), float(seg.get("end", prev["end"])))
+                # Carry word timing forward. split_translated_sentences uses
+                # the merged segment's `words` to hand each English sentence
+                # its own slice of source text by timestamp; with only the
+                # first fragment's words present it fell back to a raw
+                # character split and re-tore the source at the same place.
+                if prev.get("words") or seg.get("words"):
+                    prev["words"] = list(prev.get("words") or []) + list(seg.get("words") or [])
+                if seg.get("confidence") is not None and prev.get("confidence") is not None:
+                    prev["confidence"] = min(float(prev["confidence"]), float(seg["confidence"]))
                 merge_counts[-1] += 1
                 logger.info(
                     f"[MERGE] Merged segment into [{prev['start']:.2f}-{prev['end']:.2f}] "
@@ -1038,6 +1111,8 @@ class DubbingService:
         character_profiles: Optional[List[Dict]] = None,
         dubbing_style: Optional[str] = None,
         localized_aliases: Optional[Dict[str, str]] = None,
+        pronunciations: Optional[Dict[str, str]] = None,
+        user_id: Optional[str] = None,
     ) -> Optional[Dict[str, str]]:
         logger.info(f"Starting dubbing for job {job_id}")
         logger.info(f"Voice mapping received: {voice_mapping}")
@@ -1050,6 +1125,21 @@ class DubbingService:
 
             # Normalize source language early so pre-translation cleanup can use it.
             source_norm = normalize_language_code(source_language, allow_auto=True)
+
+            # Rulebook pronunciation rules — resolve here so every caller gets
+            # them (the rulebook kwargs helper is not wired to all call sites).
+            # An explicitly passed map wins over resolved rules of the same key.
+            try:
+                _rb = resolve_rules(
+                    job_rules=load_job_rules(job_id),
+                    global_rules=load_global_rules(user_id) if user_id else [],
+                    source_language=source_norm,
+                )
+                pronunciations = {**(_rb.get("pronunciations") or {}), **(pronunciations or {})}
+                if pronunciations:
+                    logger.info(f"[PHONETIC] {len(pronunciations)} pronunciation rule(s) active")
+            except Exception as _rb_err:
+                logger.warning(f"[PHONETIC] rulebook resolve failed: {_rb_err}")
 
             # --- Recover per-segment voice assignments from a previous dub ---
             # This makes the speaker->voice mapping survive re-diarization or
@@ -1157,6 +1247,43 @@ class DubbingService:
             # Stabilize speaker assignments to prevent voice jumping.
             transcript = self._stabilize_speakers(transcript)
 
+            # Dedupe BEFORE merging. Transcription runs on the GPU worker, whose
+            # image may lag this code, so the same pass also lives here where
+            # the transcript lands: a repeated phrase at an utterance join, or
+            # one line emitted twice, would otherwise be concatenated by the
+            # merge below and then translated — and voiced — twice.
+            try:
+                from app.pipeline.asr_merge import deduplicate_segments
+                transcript = deduplicate_segments(transcript)
+            except Exception as _dd_err:
+                logger.warning(f"[DEDUP] skipped: {_dd_err}")
+
+            # Known ASR mishearings — backend copy of the worker's
+            # _ASR_CORRECTIONS map. The GPU image lags this code, and even a
+            # rebuilt worker can't catch a substitution like 收聲-for-打得 via
+            # keyterms: 收聲 is itself legitimate vocabulary, so boosting it
+            # helps one line and hurts another. Phrase-level corrections are
+            # context-bearing enough to be safe.
+            if source_norm.lower() in ("yue", "zh", "cmn", "zh-cn", "zh-hk", "zh-yue"):
+                _ASR_CORRECTIONS = {
+                    # Deepgram hears 收聲 for 打得 at this collocation; the two
+                    # are near-homophonic and both plausible alone. Boosting
+                    # both already happened via keyterms — the model still
+                    # picked the wrong one, so correct the phrase, not the word.
+                    "居然沒有收聲": "居然沒有一個打得",
+                    "居然沒收聲": "居然沒有一個打得",
+                    "沒有收聲": "沒有一個打得",
+                }
+                for _seg in transcript:
+                    _txt = _seg.get("text", "")
+                    for _wrong, _right in _ASR_CORRECTIONS.items():
+                        if _wrong in _txt:
+                            _seg["text"] = _txt.replace(_wrong, _right)
+                            logger.info(
+                                f"[ASR-CORRECT] '{_wrong}' -> '{_right}' at {_seg.get('start', 0):.2f}s"
+                            )
+                            _txt = _seg["text"]
+
             # Merge consecutive same-speaker segments with small gaps to produce
             # longer, more natural TTS calls and uniform pacing.
             transcript = self._merge_close_segments(transcript, max_gap=0.3)
@@ -1228,6 +1355,7 @@ class DubbingService:
                     velma_context=_velma_context,
                     dubbing_style=dubbing_style,
                     localized_aliases=localized_aliases,
+                    job_id=job_id,
                 )
                 logger.info(f"Translation complete for {len(transcript)} segments")
                 if transcript:
@@ -1450,15 +1578,10 @@ class DubbingService:
                         logger.warning(f"[TTS] Segment {i}: text was entirely a placeholder — skipping")
                         return {"index": i, "skipped": True, "reason": "unresolved_placeholder"}
 
-                # TTS-only phonetic substitutions — display/transcript text unchanged
-                tts_text = re.sub(r'\bIp Man\b', 'Yip Man', text, flags=re.IGNORECASE)
-                tts_text = re.sub(r'\bMaster Shin\b', 'Master Sheen', tts_text, flags=re.IGNORECASE)
-                tts_text = re.sub(r'\bMaster Xin\b', 'Master Sheen', tts_text, flags=re.IGNORECASE)
-                tts_text = re.sub(r'\bMaster Jin\b', 'Master Sheen', tts_text, flags=re.IGNORECASE)
-                tts_text = re.sub(r'\bMaster Xing\b', 'Master Sheen', tts_text, flags=re.IGNORECASE)
-                tts_text = re.sub(r'\bWing Chun\b', 'Wing Chun', tts_text)  # already correct
-                if tts_text != text:
-                    logger.info(f"[PHONETIC] seg {i}: {text!r} -> {tts_text!r}")
+                # TTS-only phonetic substitutions — display/transcript text
+                # unchanged. Built-in respellings first, then any rulebook
+                # `pronunciation` rules for this job.
+                tts_text = _phonetic_respelling(text, pronunciations, f" seg {i}")
 
                 tts_provider, provider_name = self._get_tts_provider(target_norm)
                 voice_key = _voice_key
@@ -1839,7 +1962,8 @@ class DubbingService:
                     trimmed_dur = await asyncio.to_thread(self._get_audio_duration, silence_trimmed_path)
                     orig_dur = await asyncio.to_thread(self._get_audio_duration, final_path)
                     silence_removed = orig_dur - trimmed_dur
-                    if silence_removed > 0.08:  # only swap if >80ms was trimmed
+                    if silence_removed > 0.02:  # keep trims down to ~20ms — residual
+                        # lead-ins under 80ms still show up in lip-sync
                         logger.info(f"[SILENCE-TRIM] seg {i}: removed {silence_removed:.3f}s leading silence")
                         final_path = silence_trimmed_path
 
@@ -1931,11 +2055,27 @@ class DubbingService:
                             f"(needed {_speed_applied:.2f}x — tail may be cut)"
                         )
 
+                # Borrowed room is for SIZING only — it told the fit loop how
+                # much space the line could use. PLACEMENT should move earlier
+                # only when the fitted audio actually needs the room: the old
+                # unconditional start_time - _borrow put every segment with a
+                # >50ms leading gap up to _MAX_BORROW early — the systematic
+                # lip-sync lead users kept dragging back by hand. Now: place at
+                # start_time unless the audio's tail would overflow the next
+                # segment's start, in which case sit just early enough to fit.
+                if next_start is not None:
+                    _final_start = max(
+                        _window_start,
+                        min(start_time, next_start - 0.05 - actual_duration),
+                    )
+                else:
+                    _final_start = start_time
+
                 overlap_with_prev = ""
                 if audio_segments:
                     prev_end = audio_segments[-1]["end"]
-                    if _placed_start < prev_end:
-                        overlap_with_prev = f" OVERLAP={prev_end - _placed_start:.3f}s with seg {len(audio_segments)-1}"
+                    if _final_start < prev_end:
+                        overlap_with_prev = f" OVERLAP={prev_end - _final_start:.3f}s with seg {len(audio_segments)-1}"
 
                 logger.info(
                     f"[TIMING] seg={i} speaker={speaker} "
@@ -1947,13 +2087,25 @@ class DubbingService:
                     f"slot={_fit_target:.3f}s "
                     f"tts_dur={actual_duration:.3f}s "
                     f"delta={actual_duration - _fit_target:+.3f}s "
-                    f"borrow={start_time - _placed_start:.3f}s "
-                    f"placed_at=[{_placed_start:.3f}-{_placed_start + actual_duration:.3f}]"
+                    f"borrow={start_time - _final_start:.3f}s "
+                    f"placed_at=[{_final_start:.3f}-{_final_start + actual_duration:.3f}]"
                     f"{overlap_with_prev}"
                 )
 
                 # --- Flag generation ---
-                _flags = []
+                _flags = list(segment.get("flags") or [])
+                # Translation-stage flags (provider_failed, untranslated_source,
+                # empty_source) must reach the review queue — they only
+                # propagate as fields otherwise.
+                if segment.get("translation_flagged"):
+                    _flags.append({
+                        "code": segment.get("flag_reason") or "translation_flagged",
+                        "reason": next(
+                            (f.get("reason") for f in (segment.get("qc_findings") or [])
+                             if isinstance(f, dict)),
+                            "Translation flagged for human review",
+                        ),
+                    })
                 _adapted = segment.get("adapted_text") or text
                 if len(_adapted.split()) >= 2:
                     _conf = segment.get("confidence")
@@ -1992,8 +2144,8 @@ class DubbingService:
                     "path": final_path,
                     "audio_url": _audio_filename,
                     "committed_audio_url": _audio_filename,
-                    "start": _placed_start,
-                    "end": _placed_start + actual_duration,
+                    "start": _final_start,
+                    "end": _final_start + actual_duration,
                     "duration": actual_duration,
                     # The ORIGINAL transcript window, before any borrow or fit.
                     # timing_diagnostics used to write the placed position as
@@ -2077,11 +2229,23 @@ class DubbingService:
                 f"[STAGE] fit/trim (sequential): {_stage_t['fit'] - _stage_t['tts']:.1f}s"
             )
 
+            # Cross-layer regions are editor intent saved on segments.json —
+            # absent on a first dub (file not written yet), present on re-renders.
+            _cl_path = os.path.join(output_dir, "segments.json")
+            _cl_ranges: List[Dict] = []
+            try:
+                if os.path.exists(_cl_path):
+                    with open(_cl_path, "r", encoding="utf-8") as _clf:
+                        _cl_ranges = json.load(_clf).get("crosslayer_ranges") or []
+            except Exception:
+                pass
+
             success = await asyncio.to_thread(
                 self._merge_audio_segments,
                 audio_segments,
                 merged_audio,
                 video_duration,
+                _cl_ranges,
             )
             _stage_t["merge"] = time.monotonic()
             logger.info(
@@ -2562,16 +2726,28 @@ class DubbingService:
         if cur_i >= floor:
             return False
 
-        gain_db = min(floor - cur_i, tp_ceiling - cur_tp)
-        if gain_db <= 0.1:  # nothing meaningful left after the peak cap
+        # Boost to the floor unconditionally, then hard-limit peaks to the
+        # ceiling. The old min() gate let TP headroom veto the whole boost,
+        # which left peaky TTS quiet forever — measured on a real job: every
+        # fit-stretched segment sat at -25..-33 LUFS because their true peaks
+        # (up to +6 dBTP, already clipped) offered zero or negative headroom.
+        # alimiter only engages where the gain would overshoot the ceiling.
+        gain_db = floor - cur_i
+        if gain_db <= 0.1:
             return False
+
+        af = f"volume={gain_db:.2f}dB"
+        limited = cur_tp + gain_db > tp_ceiling
+        if limited:
+            lin_ceiling = 10.0 ** (tp_ceiling / 20.0)
+            af += f",alimiter=limit={lin_ceiling:.4f}:level=false"
 
         tmp = audio_path + ".gain.mp3"
         try:
             res = subprocess.run(
                 [
                     "ffmpeg", "-y", "-hide_banner", "-nostats", "-i", audio_path,
-                    "-filter:a", f"volume={gain_db:.2f}dB",
+                    "-filter:a", af,
                     "-c:a", "libmp3lame", "-b:a", "192k", tmp,
                 ],
                 capture_output=True, text=True,
@@ -2583,6 +2759,7 @@ class DubbingService:
             logger.info(
                 f"[GAIN] {os.path.basename(audio_path)}: {cur_i:.2f} LUFS "
                 f"(TP {cur_tp:.2f}) +{gain_db:.2f} dB -> ~{cur_i + gain_db:.2f} LUFS"
+                + (" [limited]" if limited else "")
             )
             return True
         except Exception as exc:
@@ -2898,22 +3075,54 @@ class DubbingService:
         self,
         input_path: str,
         output_path: str,
-        silence_threshold_db: float = -40.0,
-        min_silence_duration: float = 0.1,
+        silence_threshold_db: float = -50.0,
+        min_silence_duration: float = 0.03,
+        pre_roll: float = 0.04,
     ) -> bool:
-        """Remove leading silence from a TTS audio file.
-        Fish Audio inline cloning often prepends 0.5-2s of silence before speech.
-        Only trims if >100ms of silence is detected so normal attack isn't clipped.
+        """Remove leading silence from a TTS audio file, preserving the onset.
+
+        Fish Audio inline cloning often prepends silence before speech, and
+        residual lead-ins of 30-100ms are audible in lip-sync — hence the tight
+        floor. But the old silenceremove at -40dB cut at the -40dB CROSSING,
+        which sits inside the attack ramp of a soft first phoneme (a vowel or
+        nasal rises from ~-55dB over 30-80ms). The first word lost its attack
+        and sounded half-uttered on every segment.
+
+        Detect the onset at -50dB instead — low enough to catch the foot of
+        that ramp — then cut pre_roll ms BEFORE it, so the whole attack is
+        kept and the line still lands on time.
         """
         try:
+            # Locate the end of the leading silence run, if there is one.
+            detect = subprocess.run(
+                [
+                    "ffmpeg", "-i", input_path,
+                    "-af", (
+                        f"silencedetect=noise={silence_threshold_db}dB"
+                        f":d={min_silence_duration}"
+                    ),
+                    "-f", "null", "-",
+                ],
+                capture_output=True, text=True,
+            )
+            m_start = re.search(r"silence_start:\s*([\d.]+)", detect.stderr or "")
+            m_end = re.search(r"silence_end:\s*([\d.]+)", detect.stderr or "")
+            # Only trim when the head actually IS silent: the first silence run
+            # must begin at the very first sample. A 50ms allowance here was
+            # enough to misread a real opening — a plosive burst or short
+            # consonant of under 50ms followed by its closure gap — as leading
+            # silence, and the cut then landed after the burst and discarded the
+            # sound. A genuinely silent head is reported as starting at 0.
+            if not m_start or not m_end or float(m_start.group(1)) > 0.005:
+                return False
+            onset = float(m_end.group(1))
+            start = max(0.0, onset - pre_roll)
+            if start < 0.01:
+                return False  # nothing worth removing
             cmd = [
                 "ffmpeg", "-y",
+                "-ss", f"{start:.3f}",
                 "-i", input_path,
-                "-af", (
-                    f"silenceremove=start_periods=1"
-                    f":start_silence={min_silence_duration}"
-                    f":start_threshold={silence_threshold_db}dB"
-                ),
                 "-ar", "44100",
                 "-ac", "2",
                 output_path
@@ -2921,7 +3130,6 @@ class DubbingService:
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 return False
-            # Sanity: if output is empty or shorter than 0.1s, keep original
             if not os.path.exists(output_path):
                 return False
             return True
@@ -2960,6 +3168,7 @@ class DubbingService:
         segments: List[Dict],
         output_path: str,
         total_duration: float,
+        crosslayer_ranges: Optional[List[Dict]] = None,
     ) -> bool:
         """Linear-time mixdown: decode each segment to PCM and sum it into a
         preallocated buffer at its placed offset, then one loudnorm pass.
@@ -3034,12 +3243,38 @@ class DubbingService:
             _extents.append((_i, _st, _st + (_en - _off) / sr))
         _extents.sort(key=lambda e: e[1])
 
+        # Cross-layer regions: inside one, an overlap is an intentional
+        # interruption, not a join — BOTH lines hold full level through the
+        # overlap, so neither side gets an auto-fade. Mirrors computeFades in
+        # lib/rpt-engine.ts so the export sounds like the preview the user
+        # approved.
+        # Parsed defensively: segments.json can predate endpoint validation or be
+        # hand-edited, and one bad entry must not crash the mix — that would fail
+        # the scene preview and silently push Make Movie onto the fallback mixer,
+        # which ignores fades and regions. Invalid entries are skipped and logged.
+        _cl_ranges = []
+        for _r in (crosslayer_ranges or []):
+            try:
+                _lo, _hi = float(_r.get("start")), float(_r.get("end"))
+                # Same bounds the route enforces. A legacy or hand-edited
+                # {"start": -1, "end": 60} would otherwise suppress fades for
+                # every line starting before 60s.
+                if math.isfinite(_lo) and math.isfinite(_hi) and _lo >= 0 and _hi > _lo:
+                    _cl_ranges.append((_lo, _hi))
+                    continue
+            except (AttributeError, TypeError, ValueError):
+                pass
+            logger.warning(f"[MIX] ignoring malformed crosslayer range: {_r!r}")
+
         _auto_fade: Dict[int, List[float]] = {}
         for _k in range(len(_extents) - 1):
             _ai, _a_start, _a_end = _extents[_k]
             _bi, _b_start, _b_end = _extents[_k + 1]
             _overlap = _a_end - _b_start
             if _overlap <= 0.001:
+                continue
+            # Judged by where the interruption LANDS, same as the frontend.
+            if any(lo - 0.0001 <= _b_start <= hi + 0.0001 for lo, hi in _cl_ranges):
                 continue
             # Both sides of one overlap must use the SAME length, or the curves stop
             # being complementary and their sum dips or peaks in the middle. Capped
@@ -3069,6 +3304,15 @@ class DubbingService:
 
             copy_len = end - offset
             seg_data = data[:copy_len].copy()
+
+            # Clip gain from the block's top-edge drag. A plain multiplier, not
+            # an envelope — composes with the fades below exactly as the browser
+            # stitch does, and unlike a fade it leaves the level flat across the
+            # whole take.
+            _vol = float(seg.get("volume") or 1.0)
+            _vol = max(0.0, min(1.0, _vol))
+            if _vol < 1.0:
+                seg_data *= _vol
 
             # Apply per-segment fade handles. fade_in/fade_out are seconds, stored
             # in segments.json by the editor. They are independent of overlap — a
@@ -3128,12 +3372,13 @@ class DubbingService:
         segments: List[Dict],
         output_path: str,
         total_duration: float,
+        crosslayer_ranges: Optional[List[Dict]] = None,
     ) -> bool:
         # Fast path first: linear-time numpy mixdown. The ffmpeg amix graph
         # below is superlinear in input count — 840 segments took ~40 minutes
         # on a 105-minute film. The mixdown is linear in total audio size.
         try:
-            if self._merge_audio_segments_mixdown(segments, output_path, total_duration):
+            if self._merge_audio_segments_mixdown(segments, output_path, total_duration, crosslayer_ranges):
                 return True
             logger.warning("[MERGE] numpy mixdown unavailable/failed — falling back to ffmpeg amix")
         except Exception as e:
@@ -3164,6 +3409,11 @@ class DubbingService:
             sample_rate = 44100
             pad_samples = max(1, int(float(total_duration) * sample_rate))
 
+            # Cross-layer regions — inside one, an overlap is an intentional
+            # talk-over: both lines hold full level, so this path needs no
+            # special handling at all (it only ever applied manual fades).
+            # The parameter is accepted for signature parity with the mixdown.
+
             # Delay each segment to its correct position.
             # normalize=0 means amix sums without dividing — correct here because
             # segments are non-overlapping so at most one is non-silent at any
@@ -3177,6 +3427,11 @@ class DubbingService:
                 fade_in = float(seg.get("fade_in") or 0)
                 fade_out = float(seg.get("fade_out") or 0)
                 fade_filters = []
+                # Clip gain from the top-edge drag — a level, not an envelope,
+                # so it orders before the fades and multiplies through them.
+                _vol = float(seg.get("volume") or 1.0)
+                if 0.0 <= _vol < 1.0:
+                    fade_filters.append(f"volume={_vol:.3f}")
                 if fade_in > 0:
                     fade_filters.append(f"afade=t=in:st=0:d={fade_in:.3f}:curve=qsin")
                 if fade_out > 0 and fade_out < slot_dur:
@@ -3668,7 +3923,7 @@ class DubbingService:
 
         total_duration = max(end, max((s.get("end") or 0 for s in merge_segments), default=0))
         mixed_audio = output_path + ".audio.wav"
-        if not self._merge_audio_segments_mixdown(merge_segments, mixed_audio, total_duration):
+        if not self._merge_audio_segments_mixdown(merge_segments, mixed_audio, total_duration, data.get("crosslayer_ranges") or []):
             raise RuntimeError("Audio mix failed for scene preview")
 
         # Video fades are measured from the start of the scene cut.
@@ -3762,6 +4017,17 @@ class DubbingService:
         }
         if scenes is not None:
             payload["scenes"] = scenes
+        # Cross-layer regions survive a re-render the same way scenes do — they
+        # are editor intent, not pipeline output. Read from the file we're
+        # about to replace; the caller holds the job lock so this is atomic.
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    _existing_ranges = json.load(f).get("crosslayer_ranges")
+                if _existing_ranges is not None:
+                    payload["crosslayer_ranges"] = _existing_ranges
+        except Exception:
+            pass
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
         shutil.copy2(path, snapshot_path)
@@ -4038,6 +4304,8 @@ class DubbingService:
         live_prev_segment_end: Optional[float] = None,
         stage: bool = False,
         text: Optional[str] = None,
+        allow_adapt_fit: bool = False,
+        user_id: Optional[str] = None,
     ) -> Dict:
         output_dir = os.path.join(self.dubbed_dir, job_id)
         segments_path = os.path.join(output_dir, "segments.json")
@@ -4116,6 +4384,83 @@ class DubbingService:
         if text and text.strip():
             use_text = text.strip()
 
+        # Fit-to-slot shortening — the regen counterpart of the pipeline's
+        # ADAPT-FIT step. Without it, a regen whose line overruns the window
+        # has exactly one lever: time-stretch to 1.5x (chipmunk) or hard-trim.
+        # When the committed line is predicted >15% over its window, ask the
+        # adaptation engine for this segment's sync_fit rewrite and take it if
+        # it is genuinely shorter. One haiku call, only on predicted overflow —
+        # cheaper than a re-render, far better than shipping a fast take.
+        #
+        # Two hard rules learned from real use:
+        #  - NEVER touch text the user explicitly typed (a `text` override) —
+        #    the variant is a paraphrase that drifts back toward the old line,
+        #    so the take "plays something close to what was already written".
+        #    The single exception is allow_adapt_fit: Commit is a toggle, and a
+        #    recommit RELEASES the text for alteration — the caller then opts in
+        #    to sync_fit on the next take so an over-long line can be shortened
+        #    to its window instead of time-stretched into a chipmunk take.
+        #  - NEVER touch a text_locked line regardless of path — bulk regen
+        #    sends no `text`, so without this guard a locked committed line
+        #    could still be paraphrased from below.
+        #  - Predict against the APPLIED speed: at use_speed=0.65 the take runs
+        #    ~50% longer than the natural estimate, and shortening to fit the
+        #    natural window still overflows into a 2x squash.
+        _explicit_text = bool(text and text.strip()) and not allow_adapt_fit
+        try:
+            _cs = seg.get("committed_start_time")
+            _ce = seg.get("committed_end_time")
+            _s0 = float(_cs) if _cs is not None else float(seg.get("start", 0) or 0)
+            _e0 = float(_ce) if _ce is not None else float(seg.get("end", 0) or 0)
+            if (
+                isinstance(live_segment_start, (int, float)) and math.isfinite(live_segment_start)
+                and isinstance(live_segment_end, (int, float)) and math.isfinite(live_segment_end)
+                and live_segment_start >= 0 and live_segment_end > live_segment_start
+            ):
+                _s0, _e0 = float(live_segment_start), float(live_segment_end)
+
+            def _eff_start_for(x: Dict) -> float:
+                v = x.get("committed_start_time")
+                return float(v) if v is not None else float(x.get("start", 0) or 0)
+
+            _nxt = min(
+                (_eff_start_for(s) for s in segments if _eff_start_for(s) > _e0 + 0.01),
+                default=None,
+            )
+            _window = (_nxt - _s0) if _nxt is not None else (_e0 - _s0)
+            _pred = (
+                natural_duration(use_text, use_voice_id) / max(use_speed, 0.01)
+                if use_text.strip() else 0.0
+            )
+            if _window > 0.2 and not _explicit_text and not seg.get("text_locked") and _pred > _window * 1.15:
+                from app.services.adaptation_engine import adapt_batch
+                _adapted = await adapt_batch(
+                    segments=[{
+                        "segment_id": seg.get("segment_id", str(segment_index)),
+                        "source_text": seg.get("source_text", ""),
+                        "target_text": use_text,
+                        "source_language": data.get("source_language", "zh"),
+                        "target_language": data.get("target_language", "en"),
+                        "source_duration": max(0.3, _window),
+                        "speaker_id": seg.get("speaker", "speaker-1"),
+                        "speaker_gender": seg.get("speaker_gender", "male"),
+                    }],
+                    target_language=data.get("target_language", "en"),
+                    scene_context=None,
+                )
+                if _adapted:
+                    _sync = (_adapted[0].get_variant("sync_fit").text or "").strip()
+                    if _sync and natural_duration(_sync, use_voice_id) < _pred:
+                        logger.info(
+                            f"[REGEN-ADAPT-FIT] seg {segment_index}: predicted "
+                            f"{_pred:.1f}s vs {_window:.1f}s window — using sync_fit "
+                            f"~{natural_duration(_sync, use_voice_id):.1f}s: {_sync!r}"
+                        )
+                        use_text = _sync
+        except Exception as _fit_err:
+            # Never let the shortener kill a regen — stretch/trim still applies.
+            logger.warning(f"[REGEN-ADAPT-FIT] seg {segment_index} skipped: {_fit_err}")
+
         previous_text = seg.get("text", "")
         previous_path = seg.get("path", "")
 
@@ -4143,6 +4488,23 @@ class DubbingService:
             tts_text_processed = self._nuance_translator.apply_markers_to_text(
                 tts_text_processed, nuance_markers, engine="fish_audio"
             )
+        # Rulebook pronunciation rules resolve once, before the verbatim fork —
+        # Respeecher sources its text from tts_text_processed (not speak_text),
+        # so the map must be in scope on both sides. Built-in respellings
+        # (Ip Man → "Yip Man") plus job/global rules; applied after marker/pause
+        # processing so marker char offsets stay valid against the displayed
+        # text. use_text is never touched, so the seg["text"] write-back keeps
+        # the canonical spelling.
+        _pron: Dict[str, str] = {}
+        try:
+            _rb = resolve_rules(
+                job_rules=load_job_rules(job_id),
+                global_rules=load_global_rules(user_id) if user_id else [],
+            )
+            _pron = _rb.get("pronunciations") or {}
+        except Exception as _pron_err:
+            logger.warning(f"[PHONETIC] seg {segment_index}: rulebook resolve failed: {_pron_err}")
+
         # Verbatim override: the user authored the exact line to synthesise, so the
         # composed directive is skipped. Engine-agnostic — Fish parses [tags] in it,
         # Respeecher reads the punctuation and structure as written.
@@ -4150,7 +4512,9 @@ class DubbingService:
             speak_text = tts_text
             directive = ""
         else:
-            speak_text = tts_text_processed
+            speak_text = _phonetic_respelling(
+                tts_text_processed, _pron, f" seg {segment_index}"
+            )
             # One composed S2 directive: traits + emotion + nuance delivery/cadence
             # clauses + the free-text write-in from the Nuances panel (last).
             directive = compose_fish_directive(
@@ -4322,6 +4686,9 @@ class DubbingService:
             # marker pass, which Respeecher would otherwise read aloud.
             resp_text = re.sub(r"\[[^\]]*\]", " ", tts_text_processed)
             resp_text = re.sub(r"\s+", " ", resp_text).strip() or tts_text_processed
+            # Pronunciation rules apply to every engine, not just Fish —
+            # Respeecher voices "Ip Man" as "eye-pee" just the same.
+            resp_text = _phonetic_respelling(resp_text, _pron, f" seg {segment_index} (resp)")
             # Respeecher exposes no directive, speed or pitch parameters. Its only
             # lever on duration is which take we keep, so hand it the slot and let
             # it choose; staged speed is applied separately below.
@@ -4461,7 +4828,7 @@ class DubbingService:
                     await asyncio.to_thread(self._get_audio_duration, final_path)
                     - await asyncio.to_thread(self._get_audio_duration, trimmed_path)
                 )
-                if silence_removed > 0.08:
+                if silence_removed > 0.02:
                     final_path = trimmed_path
 
             actual_dur = await asyncio.to_thread(self._get_audio_duration, final_path)
@@ -4837,6 +5204,7 @@ class DubbingService:
 
         if not stage:
             data["regenerated_at"] = datetime.utcnow().isoformat() + "Z"
+            stamp_job_edited(data)  # a new take means the rendered film is out of date
             atomic_write_json(segments_path, data)
 
             try:
@@ -4903,14 +5271,59 @@ class DubbingService:
         if not video_duration:
             video_duration = await asyncio.to_thread(self._get_video_duration, video_path)
 
-        merge_segments = [
-            {"path": seg["path"], "start": seg["start"], "end": seg["end"]}
-            for seg in segments
-        ]
+        # A segment with no renderable audio must not kill the film. Rows reach
+        # segments.json without a usable path — a staged text edit synced before
+        # TTS ran, or a commit that carried committed_audio_url but never
+        # stamped path back. Recover the file from the media URL first; when
+        # nothing points at a real file, the line renders as silence and the
+        # build carries on — a missing line is fixable in the editor, a dead
+        # render is not.
+        def _resolve_segment_audio(seg: Dict) -> Optional[str]:
+            p = seg.get("path")
+            if p and os.path.exists(p):
+                return p
+            for key in ("committed_audio_url", "audio_url"):
+                url = seg.get(key) or ""
+                if "/audio/" not in url:
+                    continue
+                fname = url.split("/audio/", 1)[1].split("?", 1)[0]
+                if not fname:
+                    continue
+                cand = os.path.join(output_dir, fname)
+                if os.path.exists(cand):
+                    return cand
+            return None
+
+        merge_segments = []
+        silent_indices = []
+        for seg in segments:
+            p = _resolve_segment_audio(seg)
+            if p is None:
+                silent_indices.append(seg.get("transcript_index"))
+                continue
+            merge_segments.append({
+                "path": p,
+                "start": seg.get("start") or seg.get("start_time") or 0,
+                "end": seg.get("end") or seg.get("end_time") or 0,
+                # Fades and clip gain are part of the mix the director approved.
+                # The mixdown reads them — dropping them here made the export
+                # ignore what the preview played.
+                "fade_in": seg.get("fade_in"),
+                "fade_out": seg.get("fade_out"),
+                "volume": seg.get("volume"),
+            })
+        if silent_indices:
+            logger.warning(
+                f"[REMIX] job={job_id}: {len(silent_indices)} segment(s) have no audio — "
+                f"rendered silent (transcript_index={silent_indices})"
+            )
+        if not merge_segments:
+            raise RuntimeError(f"Remix failed: no segments have audio for job {job_id}")
 
         merged_audio = os.path.join(output_dir, "dubbed_audio.wav")
         ok = await asyncio.to_thread(
-            self._merge_audio_segments, merge_segments, merged_audio, video_duration
+            self._merge_audio_segments, merge_segments, merged_audio, video_duration,
+            data.get("crosslayer_ranges") or [],
         )
         if not ok:
             raise RuntimeError(f"Remix failed: could not merge {len(merge_segments)} segments for job {job_id}")
@@ -4979,6 +5392,10 @@ class DubbingService:
             "status": "ok",
             "remix_duration_ms": elapsed_ms,
             "segments_used": len(merge_segments),
+            # Lines that had no audio to mix — rendered silent. The frontend
+            # surfaces this so "the film rendered" does not read as "every
+            # line made it in".
+            "segments_silent": silent_indices,
         }
 
 

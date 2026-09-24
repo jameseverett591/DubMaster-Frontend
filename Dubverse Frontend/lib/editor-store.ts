@@ -384,9 +384,19 @@ export const useEditorStore = create<EditorState>(
       i === index ? { ...seg, rpt_dirty: true } : seg
     ),
   })),
-  clearAllDirty: () => set((state) => ({
-    segments: state.segments.map((seg) => ({ ...seg, rpt_dirty: false })),
-  })),
+  // BOTH arrays. displaySegments prefers importedSegments whenever it is
+  // seeded, so clearing only `segments` left the flags the editor actually reads
+  // untouched — after a rebuild the export gate would stay shut for good.
+  clearAllDirty: () => set((state) => {
+    const clear = (list: Segment[]): Segment[] => list.map((seg) => ({ ...seg, rpt_dirty: false }))
+    return {
+      segments: clear(state.segments),
+      // Only when seeded: displaySegments prefers importedSegments, so leaving
+      // it untouched kept the flags the editor actually reads and held the
+      // export gate shut after a successful rebuild.
+      ...(state.importedSegments ? { importedSegments: clear(state.importedSegments) } : {}),
+    }
+  }),
 
   // Scene actions
   setScenes: (scenes) => set({ scenes }),
@@ -570,7 +580,7 @@ export const useEditorStore = create<EditorState>(
   })),
 
   // Timeline
-  setZoomLevel: (zoom) => set({ zoomLevel: Math.max(0.25, Math.min(4, zoom)) }),
+  setZoomLevel: (zoom) => set({ zoomLevel: Math.max(0.05, Math.min(4, zoom)) }),
   setScrollPosition: (position) => set({ scrollPosition: position }),
   
   // Selection
@@ -649,6 +659,12 @@ export const useEditorStore = create<EditorState>(
   })),
   
   updateSegmentText: (index, text) => set((state) => {
+    // Text-edit lock: a sealed line refuses the write entirely — the funnel
+    // guard, so suggestion drops, bulk applies, and any future caller can't
+    // bypass the padlock by skipping the UI-level checks. The flag is toggled
+    // through importedSegments, so check both arrays.
+    if (state.segments[index]?.text_edit_locked
+        || state.importedSegments?.[index]?.text_edit_locked) return {}
     const patchFor = (seg: Segment): Partial<Segment> => ({
       target_text: text,
       active_text: text,

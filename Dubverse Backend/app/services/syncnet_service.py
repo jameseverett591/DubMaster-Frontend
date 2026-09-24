@@ -196,9 +196,10 @@ def analyze_segment_lip_sync(
         if audio_energy is None:
             return {"status": "error", "reason": "audio extraction failed"}
 
-        mouth_movement = _extract_mouth_movement_window(original_video_path, seg_start, seg_end)
-        if mouth_movement is None:
-            return {"status": "error", "reason": "face detection unavailable or window too short"}
+        mm = _extract_mouth_movement_window(original_video_path, seg_start, seg_end)
+        if "error" in mm:
+            return {"status": "error", "reason": mm["error"]}
+        mouth_movement = mm["signal"]
 
         min_len = min(len(audio_energy), len(mouth_movement))
         if min_len < 5:
@@ -210,6 +211,11 @@ def analyze_segment_lip_sync(
         fps = 25
         max_offset_frames = int(0.5 * fps)
         corr, offset = _cross_correlate(audio_energy, mouth_movement, max_offset_frames)
+        if corr <= -1.0:
+            # No offset produced a valid correlation — a constant (all-zero or
+            # all-NaN) signal is the usual cause. A 0 score would read as "bad
+            # sync"; the honest answer is "couldn't measure".
+            return {"status": "error", "reason": "could not correlate mouth movement with audio"}
         score = max(0, min(100, int((corr + 0.2) / 0.8 * 100)))
         offset_ms = round(offset / fps * 1000)
 
@@ -218,6 +224,7 @@ def analyze_segment_lip_sync(
             "sync_score": score,
             "correlation": round(corr, 3),
             "offset_ms": offset_ms,
+            "face_coverage": round(mm["face_ratio"], 2),
             "severity": "good" if score >= 70 else "fair" if score >= 40 else "poor",
         }
     except Exception as e:
@@ -225,50 +232,472 @@ def analyze_segment_lip_sync(
         return {"status": "error", "reason": str(e)}
 
 
-def _extract_mouth_movement_window(video_path: str, start_s: float, end_s: float) -> Optional[Any]:
+def _seg_dir_hints(segments: List[Dict]) -> List[str]:
+    """Directories worth trying for a segment file whose stored path no longer
+    resolves — sibling dirs of paths that DO exist, plus the projects-layout
+    twin of any old `data/dubbed/<job>/` path."""
+    hints: List[str] = []
+    for seg in segments or []:
+        p = seg.get("path")
+        if not p:
+            continue
+        d = os.path.dirname(p)
+        if d and os.path.isdir(d):
+            hints.append(d)
+        parts = p.replace("\\", "/").split("/")
+        if "projects" in parts:
+            i = parts.index("projects")
+            if i + 2 < len(parts):
+                hints.append("/".join(parts[: i + 2]) + "/dubbed")
+        elif "dubbed" in parts:
+            i = parts.index("dubbed")
+            if i + 2 <= len(parts) - 1:
+                hints.append(os.path.join("data", "projects", parts[i + 1], "dubbed"))
+    return [d for d in dict.fromkeys(hints) if os.path.isdir(d)]
+
+
+def _resolve_seg_audio(seg: Dict, dir_hints: List[str]) -> Optional[str]:
+    """The segment's audio file on disk: seg['path'] when it exists, else the
+    committed/audio URL's basename inside a directory that does."""
+    p = seg.get("path")
+    if p and os.path.exists(p):
+        return p
+    for key in ("committed_audio_url", "audio_url"):
+        u = seg.get(key)
+        if not u:
+            continue
+        rel = str(u).split("?", 1)[0]
+        if os.path.exists(rel):
+            return rel
+        base = os.path.basename(rel)
+        for d in dir_hints:
+            cand = os.path.join(d, base)
+            if os.path.exists(cand):
+                return cand
+    return None
+
+
+def _first_onset_frame(energy, lo: int, hi: int) -> Optional[int]:
+    """First frame in energy[lo:hi] where the envelope rises clearly above the
+    LOCAL floor — the moment a line actually starts sounding. Span-local stats,
+    so dialogue under a ducked music bed still registers."""
+    import numpy as np
+    if hi - lo < 5:
+        return None
+    seg = energy[lo:hi]
+    fl = float(np.percentile(seg, 40))
+    pk = float(seg.max())
+    if pk < fl * 1.25 + 1e-4:
+        return None
+    thr = fl + (pk - fl) * 0.35
+    return lo + int(np.argmax(seg > thr))
+
+
+def _onset_deltas(segments: List[Dict], w0: float, w1: float, source_energy, fps: int) -> List[float]:
+    """Per-line sync error in ms: where the dubbed audio actually STARTS
+    (committed position + the file's own lead-in) minus the source onset near
+    the original line's start. Robust where envelope correlation is not —
+    sparse dialogue under a music bed."""
+    hints = _seg_dir_hints(segments)
+    deltas: List[float] = []
+    for seg in segments or []:
+        o = seg.get("start_time")
+        o = float(o) if o is not None else float(seg.get("start") or 0)
+        oe = float(seg.get("end_time") or seg.get("end") or o + 1)
+        c = seg.get("committed_start_time")
+        c = float(c) if c is not None else o
+        _ce = seg.get("committed_end_time")
+        ce = float(_ce) if _ce is not None else oe
+        if not (o < w1 and oe > w0) and not (c < w1 and ce > w0):
+            continue
+        p = _resolve_seg_audio(seg, hints)
+        if not p:
+            continue
+        lo = max(0, int((o - 0.4) * fps))
+        hi = min(len(source_energy), int(min(oe + 0.4, o + 1.5) * fps))
+        s_on = _first_onset_frame(source_energy, lo, hi)
+        if s_on is None:
+            continue
+        e = _extract_audio_energy(p)
+        if e is None or len(e) < 5:
+            continue
+        d_on = _first_onset_frame(e, 0, len(e))
+        if d_on is None:
+            continue
+        deltas.append(((c + d_on / fps) - s_on / fps) * 1000.0)
+    return deltas
+
+
+def _dubbed_energy_window(segments: List[Dict], w0: float, w1: float, fps: int = 25) -> Optional[Any]:
+    """Per-frame audio energy of the DUBBED track inside [w0, w1].
+
+    There is no rendered dub to measure against pre-render — so the signal is
+    built from each segment's current audio file (seg["path"], which committed
+    takes and regenerations both update) laid down at its committed start time.
+    That is exactly "what's on the timeline now": timing edits shift a
+    segment's energy; regenerated audio swaps its content. max() over overlaps
+    keeps the louder of two stacked takes."""
+    import numpy as np
+
+    n = max(1, int(round((w1 - w0) * fps)))
+    out = np.zeros(n, dtype=np.float32)
+    any_audio = False
+    hints = _seg_dir_hints(segments)
+
+    for seg in segments or []:
+        p = _resolve_seg_audio(seg, hints)
+        if not p:
+            continue
+        s = seg.get("committed_start_time")
+        s = float(s) if s is not None else float(seg.get("start_time") or seg.get("start") or 0)
+
+        energy = _extract_audio_energy(p)
+        if energy is None or len(energy) == 0:
+            continue
+
+        # Overlap check against the window before touching the array.
+        if s + len(energy) / fps <= w0 or s >= w1:
+            continue
+
+        off = int(round((s - w0) * fps))
+        lo = max(0, -off)
+        hi = min(len(energy), n - off)
+        if hi > lo:
+            out[off + lo: off + hi] = np.maximum(out[off + lo: off + hi], energy[lo:hi])
+        any_audio = True
+
+    return out if any_audio else None
+
+
+def score_lipsync_range(
+    video_path: str,
+    segments: List[Dict],
+    start_s: float,
+    end_s: float,
+) -> Dict[str, Any]:
+    """Lip-sync score for one span of the timeline: mouth movement from the
+    original video in [start_s, end_s] vs the dubbed track built from the
+    segments' current audio at committed times. Works per-minute upfront and
+    on an edited span after fixes — no rebuild needed either way."""
+    if end_s - start_s < 0.2:
+        return {"start": round(start_s, 2), "end": round(end_s, 2),
+                "status": "error", "reason": "span too short to score"}
+
+    mm = _extract_mouth_movement_window(video_path, start_s, end_s)
+    energy = _dubbed_energy_window(segments, start_s, end_s)
+    return _score_span(video_path, energy, mm, start_s, end_s)
+
+
+def _score_span(video_path: str, energy: Any, mouth: Dict[str, Any], w0: float, w1: float) -> Dict[str, Any]:
+    """Shared scorer: dubbed energy envelope + extracted mouth movement for
+    one span -> score dict."""
+    base = {"start": round(w0, 2), "end": round(w1, 2)}
+    if "error" in mouth:
+        return {**base, "status": "error", "reason": mouth["error"]}
+    if energy is None:
+        return {**base, "status": "error",
+                "reason": "no segment audio in this window — generate the dub first"}
+
+    min_len = min(len(energy), len(mouth["signal"]))
+    if min_len < 5:
+        return {**base, "status": "error", "reason": "insufficient data"}
+
+    a = _normalize(energy[:min_len])
+    b = _normalize(mouth["signal"][:min_len])
+
+    fps = 25
+    corr, offset = _cross_correlate(a, b, int(0.5 * fps))
+    if corr <= -1.0:
+        return {**base, "status": "error",
+                "reason": "could not correlate mouth movement with audio"}
+
+    score = max(0, min(100, int((corr + 0.2) / 0.8 * 100)))
+    return {
+        **base,
+        "status": "ok",
+        "sync_score": score,
+        "correlation": round(corr, 3),
+        "offset_ms": round(offset / fps * 1000),
+        "face_coverage": round(mouth["face_ratio"], 2),
+        "severity": "good" if score >= 70 else "fair" if score >= 40 else "poor",
+    }
+
+
+def score_lipsync_windows(
+    video_path: str,
+    segments: List[Dict],
+    duration_s: float,
+    window_s: float = 60.0,
+) -> List[Dict[str, Any]]:
+    """Minute-by-minute lip-sync scores across the whole timeline — the
+    upfront pass the QC monitor shows on entry.
+
+    The dubbed energy track is built ONCE for the full duration and sliced
+    per window — rebuilding per window would re-run ffmpeg on the same segment
+    files for every overlapping window."""
+    import numpy as np
+
+    fps = 25
+    track = _dubbed_energy_window(segments, 0.0, duration_s, fps)
+
+    out = []
+    t = 0.0
+    while t < duration_s - 0.5:
+        w1 = min(t + window_s, duration_s)
+        mouth = _extract_mouth_movement_window(video_path, t, w1)
+        energy = None
+        if track is not None:
+            lo = int(t * fps)
+            hi = int(w1 * fps)
+            energy = track[lo:hi]
+            if not np.any(energy):
+                energy = None
+        out.append(_score_span(video_path, energy, mouth, t, w1))
+        t += window_s
+    return out
+
+
+# ── Face detection ────────────────────────────────────────────────────────
+# OpenCV 5.x removed CascadeClassifier AND the bundled Haar cascades entirely
+# (cv2.data is an empty package there). The replacement is YuNet
+# (cv2.FaceDetectorYN), but its ONNX model isn't shipped in the wheel either —
+# fetch it once into the bind-mounted data dir so restarts don't re-download.
+_YUNET_MODEL = "/app/data/models/face_detection_yunet_2023mar.onnx"
+_YUNET_URL = (
+    "https://github.com/opencv/opencv_zoo/raw/main/models/"
+    "face_detection_yunet/face_detection_yunet_2023mar.onnx"
+)
+
+
+def _ensure_yunet_model() -> Optional[str]:
+    if os.path.exists(_YUNET_MODEL):
+        return _YUNET_MODEL
+    try:
+        import urllib.request
+        os.makedirs(os.path.dirname(_YUNET_MODEL), exist_ok=True)
+        urllib.request.urlretrieve(_YUNET_URL, _YUNET_MODEL)
+        return _YUNET_MODEL
+    except Exception as e:
+        logger.warning(f"[SYNCNET] Could not fetch YuNet model: {e}")
+        return None
+
+
+def _make_face_detector():
+    """(kind, detector) — 'haar' + CascadeClassifier (OpenCV 4.x), or
+    'yunet' + FaceDetectorYN (5.x). None when neither can be built."""
+    import cv2
+
+    if hasattr(cv2, "CascadeClassifier"):
+        cc = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        if not cc.empty():
+            return ("haar", cc)
+
+    if hasattr(cv2, "FaceDetectorYN_create"):
+        model = _ensure_yunet_model()
+        if model:
+            try:
+                det = cv2.FaceDetectorYN_create(model, "", (320, 320), score_threshold=0.6)
+                return ("yunet", det)
+            except Exception as e:
+                logger.warning(f"[SYNCNET] YuNet init failed: {e}")
+
+    return None
+
+
+def _detect_faces(det, gray) -> list:
+    """[x, y, w, h] boxes for the largest faces in a grayscale frame."""
+    import cv2
+    import numpy as np
+
+    kind, d = det
+    if kind == "haar":
+        return d.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+
+    h, w = gray.shape[:2]
+    d.setInputSize((w, h))
+    _, faces = d.detect(gray)
+    if faces is None:
+        return []
+    return [tuple(map(int, f[:4])) for f in faces if f[4] >= 0.6]
+
+
+def score_lipsync_audio_range(
+    video_path: str,
+    segments: List[Dict],
+    start_s: float,
+    end_s: float,
+    source_energy: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Audio-vs-audio timing: source speech vs the dubbed track in
+    [start_s, end_s]. No face needed — the trusted timing metric; the visual
+    scorer stays for footage where face detection works.
+
+    Two methods, tried in order:
+    1. ONSET DELTA — per segment, when the dub actually starts sounding vs when
+       the source line started. Works on sparse dialogue under a music bed,
+       where the envelope mix can't see speech at all.
+    2. ENVELOPE CORRELATION — whole-window cross-correlation, the original
+       metric; still the fallback for ranges with too few scored lines."""
+    base = {"start": round(start_s, 2), "end": round(end_s, 2)}
+    if end_s - start_s < 0.2:
+        return {**base, "status": "error", "reason": "span too short to score"}
+
+    fps = 25
+    if source_energy is None:
+        source_energy = _extract_audio_energy(video_path)
+        if source_energy is None:
+            return {**base, "status": "error", "reason": "source audio extraction failed"}
+
+    deltas = _onset_deltas(segments, start_s, end_s, source_energy, fps)
+
+    def _seg_time(seg, *keys):
+        # `or` chains would skip a legitimately committed 0.0 and fall through
+        # to a stale pre-drag value — pick the first present field instead.
+        for k in keys:
+            v = seg.get(k)
+            if v is not None:
+                return float(v)
+        return 0.0
+
+    total_in_range = sum(
+        1 for seg in segments or []
+        if _seg_time(seg, "committed_start_time", "start_time", "start") < end_s
+        and _seg_time(seg, "committed_end_time", "end_time", "end") > start_s
+    )
+    if deltas:
+        import numpy as np
+        med = float(np.median(deltas))
+        med_abs = float(np.median(np.abs(deltas)))
+        return {
+            **base, "status": "ok",
+            "offset_ms": int(round(med)),
+            # The honest per-line magnitude: errors scatter both directions, so
+            # the signed median can sit near zero while lines are wildly off.
+            "abs_offset_ms": int(round(med_abs)),
+            "score": max(0, min(100, int(100 - med_abs / 8))),   # 0ms=100, 800ms+=0
+            "severity": "good" if med_abs <= 40 else "fair" if med_abs <= 150 else "poor",
+            "method": "onset",
+            "scored": len(deltas),
+            "total": total_in_range,
+        }
+
+    src = source_energy[int(start_s * fps): int(end_s * fps)]
+    dub = _dubbed_energy_window(segments, start_s, end_s, fps)
+    if dub is None:
+        return {**base, "status": "error",
+                "reason": "no segment audio in this window — generate the dub first"}
+
+    min_len = min(len(src), len(dub))
+    if min_len < 10:
+        return {**base, "status": "error", "reason": "insufficient audio"}
+
+    a = _normalize(src[:min_len])
+    b = _normalize(dub[:min_len])
+
+    # +/-1.5s search — the systematic placement lead ran ~400ms; the window
+    # needs headroom to prove a corrected offset actually moved to ~0.
+    corr, off = _cross_correlate(a, b, int(1.5 * fps))
+    if corr <= -1.0 or corr < 0.15:
+        return {**base, "status": "error",
+                "reason": "dub rhythm doesn't track the source — correlation too weak"}
+
+    offset_ms = round(off / fps * 1000)
+    abs_off = abs(offset_ms)
+    return {
+        **base, "status": "ok",
+        "offset_ms": offset_ms,
+        "correlation": round(corr, 3),
+        "score": max(0, min(100, int(100 - abs_off / 8))),   # 0ms=100, 800ms+=0
+        "severity": "good" if abs_off <= 40 else "fair" if abs_off <= 150 else "poor",
+    }
+
+
+def score_lipsync_audio_windows(
+    video_path: str,
+    segments: List[Dict],
+    duration_s: float,
+    window_s: float = 60.0,
+) -> List[Dict[str, Any]]:
+    """Minute-by-minute audio-vs-audio offsets. Source envelope is extracted
+    ONCE and sliced per window — same cost discipline as the visual pass."""
+    source = _extract_audio_energy(video_path)
+    out = []
+    t = 0.0
+    while t < duration_s - 0.5:
+        w1 = min(t + window_s, duration_s)
+        out.append(score_lipsync_audio_range(video_path, segments, t, w1, source))
+        t += window_s
+    return out
+
+
+def _extract_mouth_movement_window(video_path: str, start_s: float, end_s: float) -> Dict[str, Any]:
     """Same approach as _extract_mouth_movement, but seeks straight to [start_s, end_s]
     instead of decoding the whole file — a single-segment check shouldn't have to walk
-    frames it doesn't need, especially since this may run once per Fix click."""
+    frames it doesn't need, especially since this may run once per Fix click.
+
+    Returns a dict: {"signal": np.array, "face_ratio": float} on success, or
+    {"error": <reason>}. No-face frames interpolate instead of emitting 0.0 —
+    a zero at a dropped detection injects a false 'mouth stopped' sample and
+    corrupts the correlation. """
     try:
         import cv2
         import numpy as np
 
-        face_cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        face_cascade = cv2.CascadeClassifier(face_cascade_path)
-        if face_cascade.empty():
-            logger.warning("[SYNCNET-SEGMENT] Face cascade not available")
-            return None
+        det = _make_face_detector()
+        if det is None:
+            logger.warning("[SYNCNET-SEGMENT] No face detector available (no Haar on cv2 5.x, YuNet model fetch failed)")
+            return {"error": "face detection model unavailable"}
 
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return None
-
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25
-        start_frame = max(0, int(start_s * fps))
-        end_frame = int(end_s * fps)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-
-        sample_interval = max(1, int(fps / 25))
-        mouth_signal = []
-        prev_mouth_region = None
-        frame_idx = start_frame
-
-        while frame_idx < end_frame:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            if (frame_idx - start_frame) % sample_interval != 0:
-                frame_idx += 1
-                continue
-
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = face_cascade.detectMultiScale(
-                gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)
+        # cv2.VideoCapture + cap.read() decodes every frame through Python on
+        # the Windows bind mount — ~220s per minute of video, unusable. ffmpeg
+        # pipes pre-scaled grayscale frames instead: fast seek, raw stream.
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "csv=p=0",
+                 video_path],
+                capture_output=True, text=True, timeout=30,
             )
+            vw, vh = [int(x) for x in probe.stdout.strip().split(",")[:2]]
+        except Exception:
+            return {"error": "could not read video stream info"}
 
-            if len(faces) > 0:
-                x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+        tw = min(480, vw)
+        th = max(2, int(round(vh * tw / vw / 2)) * 2)
+        frame_bytes = tw * th
+
+        proc = subprocess.Popen(
+            ["ffmpeg", "-v", "error",
+             "-ss", str(start_s), "-to", str(end_s), "-i", video_path,
+             "-vf", f"fps=25,scale={tw}:{th},format=gray",
+             "-f", "rawvideo", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+
+        mouth_signal = []
+        face_frames = 0
+        prev_mouth_region = None
+        last_box = None
+        idx = 0
+        # YuNet on a 480px frame is still the slowest per-frame step — run it
+        # every 3rd frame and reuse the last box between detects.
+        detect_every = 3
+
+        while True:
+            buf = proc.stdout.read(frame_bytes)
+            if not buf or len(buf) < frame_bytes:
+                break
+            gray = np.frombuffer(buf, dtype=np.uint8).reshape(th, tw)
+
+            if last_box is None or idx % detect_every == 0:
+                faces = _detect_faces(det, gray)
+                last_box = max(faces, key=lambda f: f[2] * f[3]) if len(faces) else None
+
+            if last_box is not None:
+                face_frames += 1
+                x, y, w, h = last_box
                 mouth_y = y + int(h * 0.65)
                 mouth_h = int(h * 0.35)
                 mouth_region = gray[mouth_y:mouth_y + mouth_h, x:x + w]
@@ -283,21 +712,40 @@ def _extract_mouth_movement_window(video_path: str, start_s: float, end_s: float
 
                 prev_mouth_region = mouth_region.copy()
             else:
-                mouth_signal.append(0.0)
+                mouth_signal.append(None)
                 prev_mouth_region = None
 
-            frame_idx += 1
+            idx += 1
 
-        cap.release()
+        proc.stdout.close()
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            proc.kill()
 
-        if len(mouth_signal) < 5:
-            return None
+        n = len(mouth_signal)
+        if n < 5:
+            return {"error": "window too short or outside the video"}
+        if face_frames == 0:
+            return {"error": "no face detected in this segment's window"}
 
-        return np.array(mouth_signal, dtype=np.float32)
+        # Fill detection gaps by interpolation; zero-filling fabricates a
+        # 'mouth stopped moving' sample and poisons the correlation.
+        known = [i for i, v in enumerate(mouth_signal) if v is not None]
+        if len(known) < 5:
+            return {"error": "face visible in too few frames to score"}
+        filled = np.interp(
+            np.arange(n), known, [mouth_signal[i] for i in known]
+        )
+
+        return {
+            "signal": filled.astype(np.float32),
+            "face_ratio": face_frames / n,
+        }
 
     except Exception as e:
         logger.warning(f"[SYNCNET-SEGMENT] Mouth movement window extraction failed: {e}")
-        return None
+        return {"error": f"extraction failed: {e}"}
 
 
 def _extract_audio_energy(video_path: str) -> Optional[Any]:
@@ -352,12 +800,9 @@ def _extract_mouth_movement(video_path: str) -> Optional[Any]:
         import cv2
         import numpy as np
 
-        # Use OpenCV's built-in Haar cascade for face detection
-        face_cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        face_cascade = cv2.CascadeClassifier(face_cascade_path)
-
-        if face_cascade.empty():
-            logger.warning("[SYNCNET] Face cascade not available")
+        det = _make_face_detector()
+        if det is None:
+            logger.warning("[SYNCNET] No face detector available (no Haar on cv2 5.x, YuNet model fetch failed)")
             return None
 
         cap = cv2.VideoCapture(video_path)
@@ -383,9 +828,7 @@ def _extract_mouth_movement(video_path: str) -> Optional[Any]:
                 continue
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = face_cascade.detectMultiScale(
-                gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)
-            )
+            faces = _detect_faces(det, gray)
 
             if len(faces) > 0:
                 # Take the largest face

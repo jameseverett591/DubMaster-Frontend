@@ -26,12 +26,14 @@ soundfile>=0.12.1
 pydub>=0.25.1
 
 # ============================================
-# AI/ML MODELS — GPU (CUDA 12.6 — Blackwell sm_120 support)
+# AI/ML MODELS — GPU (CUDA 12.8 — Blackwell sm_120 support)
 # ============================================
 # PyTorch GPU build — must install before other ML packages
---extra-index-url https://download.pytorch.org/whl/cu126
-torch==2.6.0+cu126
-torchaudio==2.6.0+cu126
+# PyTorch 2.7+ with CUDA 12.8 is required for Blackwell (sm_120) support.
+# Earlier versions (2.6 + cu126) only support up to sm_90 and crash on Blackwell.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.7.0+cu128
+torchaudio==2.7.0+cu128
 
 # Speaker Diarization
 pyannote.audio>=3.1.0
@@ -50,8 +52,6 @@ openai-whisper>=20231117
 funasr>=1.0.0
 modelscope>=1.9.0
 
-# WenetSpeech-Yue INT8 CTC — runs on CPU, no GPU needed
-sherpa-onnx>=1.11.1
 
 # ============================================
 # TEXT-TO-SPEECH

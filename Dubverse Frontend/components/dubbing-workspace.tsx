@@ -57,7 +57,7 @@ import {
   type JobStatus,
 } from "@/lib/api-client"
 import { useEditorStore } from "@/lib/editor-store"
-import { usePlan } from "@/lib/use-plan"
+
 import { useT } from '@/lib/use-t'
 
 interface DubbingWorkspaceProps {
@@ -172,7 +172,6 @@ function buildDetectedVoices(
 
 export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
   const t = useT()
-  const { hasFeature } = usePlan()
   const [targetLanguage, setTargetLanguage] = useState("en")
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
@@ -223,15 +222,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
       .catch(() => {})
   }, [])
 
-  // ── Load dubbing engines from backend ────────────────────────────────────
-  const [dubbingEngine, setDubbingEngine] = useState<'dubmaster' | 'vozo'>('dubmaster')
-  const [engineInfo, setEngineInfo] = useState<Record<string, { available: boolean; description: string; features: string[] }>>({})
 
-  useEffect(() => {
-    apiClient.getDubbingEngines()
-      .then(({ engines }) => setEngineInfo(engines))
-      .catch(() => {})
-  }, [])
 
   const handleSwitchProvider = async (provider: string) => {
     if (provider === ttsProvider || switchingProvider) return
@@ -609,7 +600,6 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
         target_language: targetLanguage,
         transcript: transcriptSegments,
         voice_mapping: voiceMapping,
-        dubbing_engine: dubbingEngine,
         ...(Object.keys(voiceSettings).length > 0 && { voice_settings: voiceSettings }),
       })
 
@@ -696,42 +686,37 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
-              <DropdownMenuLabel>{t('Dubbing Engine')}</DropdownMenuLabel>
+              <DropdownMenuLabel>{t('TTS Engine')}</DropdownMenuLabel>
               <DropdownMenuSeparator />
-              <DropdownMenuRadioGroup value={dubbingEngine} onValueChange={(v) => setDubbingEngine(v as 'dubmaster' | 'vozo')}>
-                <DropdownMenuRadioItem value="dubmaster">
-                  DubMaster (Local)
+              <DropdownMenuRadioGroup value={ttsProvider} onValueChange={handleSwitchProvider}>
+                <DropdownMenuRadioItem value="elevenlabs" disabled={!providerInfo.elevenlabs?.available}>
+                  {t('ElevenLabs')}
                 </DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="vozo" disabled={!engineInfo.vozo?.available}>
-                  Vozo AI (Cloud)
+                <DropdownMenuRadioItem value="fish-audio" disabled={!providerInfo["fish-audio"]?.available}>
+                  Fish Audio S1 {providerInfo["fish-audio"]?.voice_cloning && "(Voice Clone)"}
                 </DropdownMenuRadioItem>
               </DropdownMenuRadioGroup>
-              {dubbingEngine === "dubmaster" && (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuLabel>{t('TTS Engine')}</DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuRadioGroup value={ttsProvider} onValueChange={handleSwitchProvider}>
-                    <DropdownMenuRadioItem value="elevenlabs" disabled={!providerInfo.elevenlabs?.available}>
-                      {t('ElevenLabs')}
-                    </DropdownMenuRadioItem>
-                    <DropdownMenuRadioItem value="fish-audio" disabled={!providerInfo["fish-audio"]?.available}>
-                      Fish Audio S1 {providerInfo["fish-audio"]?.voice_cloning && "(Voice Clone)"}
-                    </DropdownMenuRadioItem>
-                  </DropdownMenuRadioGroup>
-                </>
-              )}
             </DropdownMenuContent>
           </DropdownMenu>
           <Badge variant="outline" className={`text-xs h-6 font-normal ${switchingProvider ? "animate-pulse" : ""}`}>
-            {dubbingEngine === "vozo"
-              ? "Vozo AI"
-              : ttsProvider === "fish-audio" ? t('Fish Audio S1') : t('ElevenLabs')}
+            {ttsProvider === "fish-audio" ? t('Fish Audio S1') : t('ElevenLabs')}
           </Badge>
           <Button
             onClick={handleStartDubbing}
             disabled={isAnalyzing || isDubbing}
-            className="gap-2 h-8 text-sm"
+            // Teal pulsing outline marks this as the next step: analysis is
+            // done, nothing is dubbing, and this job has no dubbed video yet.
+            //
+            // Do NOT gate on dubbingComplete. It is set as soon as the job's
+            // status reads "completed", which happens when the ANALYSIS pipeline
+            // finishes — exactly the moment this button becomes the next step.
+            // Gating on it switched the pulse off permanently. The existence of
+            // a dubbed video is the real "already dubbed" signal.
+            className={`gap-2 h-8 text-sm ${
+              !isAnalyzing && !isDubbing && !dubbedVideoUrl
+                ? "generate-dub-cta"
+                : ""
+            }`}
             variant={dubbingComplete ? "outline" : "default"}
           >
             {/* Always reads "Generate Dub" when idle, including after a
@@ -895,8 +880,8 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
           </div>
         </div>
 
-        {/* Sidebar Panel — editor feature (Premium+) */}
-        {hasFeature('editor') && <div className="w-80 shrink-0 border-l border-border/50 bg-card/50 backdrop-blur-md flex flex-col min-h-0">
+        {/* Sidebar Panel */}
+        <div className="w-80 shrink-0 border-l border-border/50 bg-card/50 backdrop-blur-md flex flex-col min-h-0">
           <Tabs value={activeTab} onValueChange={setActiveTab} className="flex h-full flex-col min-h-0">
             <div className="mx-3 mt-3 shrink-0 space-y-1">
               <TabsList className="grid w-full grid-cols-4">
@@ -1080,17 +1065,11 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
                     </div>
                   )}
 
-                  {/* Subscription CTA */}
-                  <div className="rounded-lg bg-muted/50 p-3 text-center">
-                    <p className="text-[10px] text-muted-foreground">
-                      {t('Studio Editor is available on')} <span className="text-amber-400 font-medium">{t('Professional')}</span> and <span className="text-amber-400 font-medium">{t('Enterprise')}</span> plans.
-                    </p>
-                  </div>
                 </div>
               </ScrollArea>
             </TabsContent>
           </Tabs>
-        </div>}
+        </div>
       </div>
     </div>
   )

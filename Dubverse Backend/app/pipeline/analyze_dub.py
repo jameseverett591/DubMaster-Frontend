@@ -46,7 +46,7 @@ def analyze_dub(
     below need. This is what lets the existing automatic trigger-on-editor-
     open (page.tsx) succeed instead of permanently 404ing until Export runs.
 
-    lip_sync/emotion_preservation/pronunciation/screenapp_dubbed/gemini_review
+    lip_sync/emotion_preservation/pronunciation/gemini_review
     all need real video frames or are otherwise video-dependent -- they report
     "skipped" (same graceful pattern already used for a missing API key) until
     an export exists. A proper no-export lip-sync path via
@@ -142,16 +142,6 @@ def analyze_dub(
         analysis["speed"] = _detect_speed_anomalies(timing_data)
         analysis["loudness"] = _analyze_loudness(audio_source)
 
-        # ScreenApp analyses (optional — graceful skip if not configured, or if
-        # no export exists yet: screenapp_dubbed needs real video frames)
-        analysis["screenapp_original"] = _screenapp_analyze(
-            original_video_path, "original"
-        )
-        analysis["screenapp_dubbed"] = (
-            _screenapp_analyze(str(dubbed_video), "dubbed") if has_export
-            else {"status": "skipped", "reason": "video not yet exported"}
-        )
-
         # --- New AI-powered analyses (optional — graceful skip) ---
         # Get original segments and dubbed transcript for the new analyses
         orig_segments = []
@@ -175,9 +165,9 @@ def analyze_dub(
             _assess_pronunciation(str(dubbed_video), dubbed_text) if has_export
             else {"status": "skipped", "reason": "video not yet exported"}
         )
-        analysis["translation"] = _evaluate_translation(
-            orig_segments, dubbed_segments, source_lang, lang_norm
-        )
+        # Translation-quality evaluation used to run via Azure OpenAI — vendor
+        # cut as redundant spend. Slot stays so the report schema is stable.
+        analysis["translation"] = {"status": "skipped", "reason": "eval provider removed"}
 
         # --- New QC Stack analyses ---
         # SyncNet lip-sync scoring (local, free) -- no-export path is a
@@ -212,7 +202,7 @@ def analyze_dub(
             }
         # emotion2vec emotion preservation (local, free) -- needs real video
         # frames for its dubbed-side extraction as currently implemented;
-        # skipped until export exists, same as pronunciation/screenapp above.
+        # skipped until export exists, same as pronunciation above.
         analysis["emotion_preservation"] = (
             _analyze_emotion_preservation(original_video_path, str(dubbed_video), timing_data)
             if has_export else {"status": "skipped", "reason": "video not yet exported"}
@@ -616,32 +606,8 @@ def _analyze_loudness(dubbed_video: Path) -> Dict[str, Any]:
         return {"status": "error", "reason": str(e)}
 
 
-def _screenapp_analyze(video_path: str, label: str) -> Optional[Dict[str, Any]]:
-    """Run ScreenApp analysis on a video (original or dubbed)."""
-    try:
-        from app.services.screenapp_service import is_enabled, analyze_video
-
-        if not is_enabled():
-            return {"status": "skipped", "reason": "ScreenApp not configured"}
-
-        if not Path(video_path).exists():
-            return {"status": "skipped", "reason": f"Video not found: {video_path}"}
-
-        logger.info(f"[ANALYSIS] Running ScreenApp analysis on {label} video")
-        result = analyze_video(video_path, summary_length="detailed")
-        if result is None:
-            return {"status": "error", "reason": "ScreenApp returned no results"}
-
-        return {"status": "ok", "label": label, **result}
-    except ImportError:
-        return {"status": "skipped", "reason": "screenapp_service not available"}
-    except Exception as e:
-        logger.warning(f"[ANALYSIS] ScreenApp {label} failed: {e}")
-        return {"status": "error", "reason": str(e)}
-
-
 # ---------------------------------------------------------------------------
-# AI-powered analyses (Azure Speech, Azure OpenAI)
+# AI-powered analyses (Azure Speech)
 # ---------------------------------------------------------------------------
 
 
@@ -669,37 +635,6 @@ def _assess_pronunciation(
         return {"status": "skipped", "reason": "azure_speech_service not available"}
     except Exception as e:
         logger.warning(f"[ANALYSIS] Pronunciation assessment failed: {e}")
-        return {"status": "error", "reason": str(e)}
-
-
-def _evaluate_translation(
-    original_segments: list,
-    dubbed_segments: list,
-    source_lang: str,
-    target_lang: str,
-) -> Dict[str, Any]:
-    """Evaluate translation quality using Azure OpenAI GPT-4."""
-    try:
-        from app.services.azure_openai_service import is_enabled, evaluate_translation
-
-        if not is_enabled():
-            return {"status": "skipped", "reason": "Azure OpenAI not configured"}
-
-        if not original_segments or not dubbed_segments:
-            return {"status": "skipped", "reason": "Missing original or dubbed segments"}
-
-        logger.info("[ANALYSIS] Running Azure OpenAI translation evaluation")
-        result = evaluate_translation(
-            original_segments, dubbed_segments, source_lang, target_lang
-        )
-        if result is None:
-            return {"status": "error", "reason": "Azure OpenAI returned no results"}
-
-        return {"status": "ok", **result}
-    except ImportError:
-        return {"status": "skipped", "reason": "azure_openai_service not available"}
-    except Exception as e:
-        logger.warning(f"[ANALYSIS] Translation evaluation failed: {e}")
         return {"status": "error", "reason": str(e)}
 
 
@@ -916,8 +851,8 @@ def _compute_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
     # Track which AI services contributed
     services_available = {
         "azure_speech": pronunciation.get("status") == "ok",
-        "azure_openai": translation.get("status") == "ok",
-        "screenapp": (analysis.get("screenapp_dubbed") or {}).get("status") == "ok",
+        "translation_eval": translation.get("status") == "ok",
+
         "retranscription": retrans.get("status") == "ok",
         "syncnet": lip_sync.get("status") == "ok",
         "emotion2vec": emotion_pres.get("status") == "ok",
@@ -925,22 +860,51 @@ def _compute_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
         "claude_report": (analysis.get("qc_report") or {}).get("status") == "ok",
     }
 
-    # Use Claude's holistic synthesis score as authoritative when available — but only
-    # the genuine Claude synthesis, not the template fallback. The template only averages
-    # whichever raw sub-scores happen to be available at this point (missing timing/speed/
-    # silences, and giving lip_sync equal weight to emotion), which is cruder than the
+    # Authoritative-score priority: Gemini (watches the actual video+audio) >
+    # Claude holistic synthesis (transcript-level) > weighted pipeline score.
+    # Claude's template fallback is never accepted — it only averages whichever
+    # raw sub-scores happen to be available (missing timing/speed/silences, and
+    # giving lip_sync equal weight to emotion), which is cruder than the
     # properly-weighted pipeline score above and must never override it.
     qc_report = analysis.get("qc_report") or {}
     is_claude_synthesis = qc_report.get("status") == "ok" and qc_report.get("method") == "claude"
     synthesis_score = qc_report.get("overall_score") if is_claude_synthesis else None
     synthesis_grade = qc_report.get("overall_grade") if is_claude_synthesis else None
-    score_source = "synthesis" if synthesis_score is not None else "pipeline"
+
+    gemini_score = gemini.get("overall_score") if gemini.get("status") == "ok" else None
+    gemini_grade = gemini.get("overall_grade") if gemini.get("status") == "ok" else None
+    # Normalize a Gemini letter grade the parser couldn't produce ("?" default)
+    if gemini_grade in ("", "?", None):
+        gemini_grade = None
+    if gemini_score is not None and gemini_grade is None:
+        if gemini_score >= 90:
+            gemini_grade = "A"
+        elif gemini_score >= 80:
+            gemini_grade = "B"
+        elif gemini_score >= 70:
+            gemini_grade = "C"
+        elif gemini_score >= 60:
+            gemini_grade = "D"
+        else:
+            gemini_grade = "F"
+
+    if gemini_score is not None:
+        score_source = "gemini"
+        final_score, final_grade = gemini_score, gemini_grade
+    elif synthesis_score is not None:
+        score_source = "synthesis"
+        final_score, final_grade = synthesis_score, synthesis_grade
+    else:
+        score_source = "pipeline"
+        final_score, final_grade = score, grade
 
     return {
-        "score": synthesis_score if synthesis_score is not None else score,
-        "grade": synthesis_grade if synthesis_grade is not None else grade,
+        "score": final_score,
+        "grade": final_grade,
         "pipeline_score": score,
         "pipeline_grade": grade,
+        "gemini_score": gemini_score,
+        "gemini_grade": gemini_grade,
         "synthesis_score": synthesis_score,
         "synthesis_grade": synthesis_grade,
         "score_source": score_source,

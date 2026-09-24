@@ -1,27 +1,36 @@
 """
 Unified Chinese (Cantonese + Mandarin) transcription pipeline.
 
-Deepgram Nova-3 is the primary ASR for Cantonese and Mandarin. It is
-supported by the other engines as fallbacks / gap-fillers:
-  1. Deepgram    (cloud) — primary for Cantonese and Mandarin
-  2. Tencent ASR  (cloud) — high recall, catches speech in noise
-  3. Paraformer   (local) — high precision for Mandarin tones/characters
-  4. Whisper      (local) — fallback gap fill
-  5. Merge engine          — combines the best of each
+Deepgram Nova-3 is the primary ASR for Cantonese and Mandarin. The rest
+act as fallbacks / gap-fillers:
+  1. Deepgram      (cloud) — primary for Cantonese and Mandarin
+  2. Paraformer    (local) — high precision for Mandarin tones/characters
+  3. Whisper       (local) — fallback gap fill
+  4. Merge engine           — combines the best of each
+
+(WenetSpeech-Yue was tried twice as a second ASR and removed both times,
+2026-09-11 -- Deepgram alone outperforms it and it never contributed
+outside silent gaps anyway. See git history for app/pipeline/wenetspeech_yue_asr.py
+if it's ever worth revisiting.)
+
+Speaker diarization is handled separately in handler.py, which uses
+Speechmatics (speechmatics_diarize.py) for Cantonese/Mandarin jobs when
+SPEECHMATICS_API_KEY is set, falling back to pyannote. Speechmatics'
+diarization signal (speaker turns) feeds into the same downstream
+reconciliation path as pyannote. Speechmatics' own transcribed text is
+NOT used — Deepgram's Cantonese transcription is noticeably more accurate.
 
 The pipeline gracefully degrades:
-  - If Deepgram is not configured → Tencent + Paraformer + Whisper
-  - If Tencent is not configured → Deepgram + Paraformer + Whisper
-  - If Paraformer is not installed → Deepgram + Tencent + Whisper
+  - If Deepgram is not configured → Paraformer + Whisper
+  - If Paraformer is not installed → Deepgram + Whisper
   - If all unavailable → Whisper only (existing behavior)
 
 Environment variables:
-  CANTONESE_ASR_ENGINES  — Comma-separated engine priority
-                           (default: "deepgram,tencent,paraformer,whisper")
+  CANTONESE_ASR_ENGINES  — Comma-separated engine list
+                           (default: "deepgram,whisper")
   CANTONESE_ASR_WHISPER_GAP_FILL — "1" to fill gaps with Whisper (default: "1")
 """
 
-import concurrent.futures
 import logging
 import os
 import tempfile
@@ -122,10 +131,8 @@ def transcribe_cantonese(
     env_engines = os.getenv("CANTONESE_ASR_ENGINES", "").strip()
     if env_engines:
         engines_str = env_engines
-    elif _is_chinese(source_language):
-        engines_str = "deepgram,tencent,paraformer,whisper"
     else:
-        engines_str = "tencent,paraformer,whisper"
+        engines_str = "deepgram,whisper"
     engines = [e.strip().lower() for e in engines_str.split(",") if e.strip()]
     whisper_gap_fill = os.getenv("CANTONESE_ASR_WHISPER_GAP_FILL", "1") == "1"
 
@@ -154,7 +161,6 @@ def transcribe_cantonese(
             "engines_used": [],
         }
 
-    tencent_segments: List[Dict] = []
     paraformer_segments: List[Dict] = []
     whisper_segments: List[Dict] = []
     deepgram_segments: List[Dict] = []
@@ -162,6 +168,10 @@ def transcribe_cantonese(
 
     try:
         # ── Engine 0: Deepgram Nova-3 (primary for Cantonese/Mandarin) ──
+        # Deepgram produces accurate Cantonese transcription. Speaker
+        # diarization is handled separately by Speechmatics in handler.py
+        # (speechmatics_diarize.py), which has better speaker separation
+        # than Deepgram's own diarization.
         if "deepgram" in engines:
             try:
                 from app.pipeline.deepgram_asr import transcribe_with_deepgram
@@ -186,34 +196,7 @@ def transcribe_cantonese(
             except Exception as e:
                 logger.warning(f"[CANTONESE-ASR] Deepgram failed: {e}")
 
-        # ── Engine 1 + 2: Tencent ASR and Paraformer in parallel ──
-        # Tencent is a cloud API call; Paraformer is a local model. They are
-        # independent, so run them concurrently to avoid waiting for the slower
-        # one before starting the next.
-        def _run_tencent():
-            if "tencent" not in engines:
-                return (False, [])
-            try:
-                from app.pipeline.tencent_asr import transcribe_with_tencent
-
-                tencent_result = transcribe_with_tencent(
-                    audio_path=audio_file,
-                    language=language,
-                    job_id=job_id,
-                )
-                if tencent_result.get("status") == "ok":
-                    segs = tencent_result.get("segments", [])
-                    logger.info(f"[CANTONESE-ASR] Tencent: {len(segs)} segments")
-                    return (True, segs)
-                else:
-                    logger.info(
-                        f"[CANTONESE-ASR] Tencent skipped: "
-                        f"{tencent_result.get('reason', 'unknown')}"
-                    )
-            except Exception as e:
-                logger.warning(f"[CANTONESE-ASR] Tencent failed: {e}")
-            return (False, [])
-
+        # ── Engine 2: Paraformer (local model, Mandarin tone precision) ──
         def _run_paraformer():
             if "paraformer" not in engines:
                 return (False, [])
@@ -238,32 +221,24 @@ def transcribe_cantonese(
                 logger.warning(f"[CANTONESE-ASR] Paraformer failed: {e}")
             return (False, [])
 
-        tencent_ok = False
         paraformer_ok = False
-        if "tencent" in engines or "paraformer" in engines:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                t_future = pool.submit(_run_tencent) if "tencent" in engines else None
-                p_future = pool.submit(_run_paraformer) if "paraformer" in engines else None
-                tencent_ok, tencent_segments = t_future.result() if t_future else (False, [])
-                paraformer_ok, paraformer_segments = p_future.result() if p_future else (False, [])
-            if tencent_ok:
-                engines_used.append("tencent")
+        if "paraformer" in engines:
+            paraformer_ok, paraformer_segments = _run_paraformer()
             if paraformer_ok:
                 engines_used.append("paraformer")
         else:
-            logger.info("[CANTONESE-ASR] Skipping Tencent and Paraformer (not in engine list)")
+            logger.info("[CANTONESE-ASR] Skipping Paraformer (not in engine list)")
 
         # ── Engine 3: Whisper (fallback / gap fill) ──
         run_whisper_full = (
             "whisper" in engines
             and not deepgram_segments
-            and not tencent_segments
             and not paraformer_segments
         )
         run_whisper_gaps = (
             whisper_gap_fill
             and "whisper" in engines
-            and (deepgram_segments or tencent_segments or paraformer_segments)
+            and (deepgram_segments or paraformer_segments)
         )
 
         if run_whisper_full or run_whisper_gaps:
@@ -290,6 +265,8 @@ def transcribe_cantonese(
                 logger.warning(f"[CANTONESE-ASR] Whisper failed: {e}")
 
         # ── Merge results ──
+        # Deepgram is primary for transcription. Speechmatics handles
+        # diarization separately in handler.py (not here).
         from app.pipeline.asr_merge import (
             fill_gaps_with_fallbacks,
             merge_asr_results,
@@ -297,14 +274,64 @@ def transcribe_cantonese(
         )
 
         if deepgram_segments:
-            # Deepgram is the primary Chinese (Cantonese/Mandarin) transcript.
-            # Tencent/Paraformer/Whisper are only added where Deepgram left
+            # Primary Chinese (Cantonese/Mandarin) transcript: Deepgram Nova-3.
+            # Paraformer/Whisper are only added where the primary left
             # non-overlapping gaps, so they never overwrite the primary text.
             merged = deepgram_segments
 
+            # Text-based turn detection: split long single-speaker segments
+            # at clear conversational markers (Q&A, gratitude, address
+            # terms) where acoustic diarization failed to separate two
+            # speakers trading lines with very short gaps. Runs BEFORE
+            # rescoring so the rescoring pass sees correctly-split segments.
+            try:
+                from app.pipeline.turn_detection import detect_turn_splits
+                merged = detect_turn_splits(merged, job_id=job_id, source_language=source_language)
+            except Exception as e:
+                logger.warning(f"[CANTONESE-ASR] Turn detection failed: {e}")
+
+            # Post-ASR correction for known Deepgram Cantonese mishearings.
+            # Deepgram's zh-HK model consistently misrecognizes certain
+            # words in martial-arts film dialogue. Keyterm boosting did
+            # not fix these, so apply text-level corrections after ASR.
+            _ASR_CORRECTIONS = {
+                "推搪祖師": "行開",
+                "推3祖師": "行開",
+                "別推搪": "別行開",
+                "別推3": "別行開",
+                "打打殺散": "打打殺殺",
+                "創我": "女人創的",
+                "打不了我": "打不死",
+                "收水": "收手",
+            }
+            for seg in merged:
+                txt = seg.get("text", "")
+                for wrong, right in _ASR_CORRECTIONS.items():
+                    if wrong in txt:
+                        seg["text"] = txt.replace(wrong, right)
+                        logger.info(
+                            f"[CANTONESE-ASR] Corrected ASR mishearing: "
+                            f"'{wrong}' -> '{right}'"
+                        )
+
+            # Verify + repair low-confidence segments (homophone/garbled-
+            # character errors, fabricated credits) BEFORE gap-fill, so the
+            # two correction mechanisms stay orthogonal: rescoring fixes
+            # WRONG text on segments Deepgram produced, gap-fill covers
+            # MISSING text where Deepgram produced nothing at all.
+            # extract_result gives the stage the raw audio so suspect ranges
+            # get a second acoustic opinion (Whisper) instead of a blind
+            # text guess.
+            try:
+                from app.pipeline.asr_rescore import rescore_segments
+                merged = rescore_segments(
+                    merged, job_id=job_id, source_language=source_language,
+                    extract_result=extract_result,
+                )
+            except Exception as e:
+                logger.warning(f"[CANTONESE-ASR] ASR rescoring failed: {e} — using unrescored text")
+
             fallback_segments = []
-            if tencent_segments:
-                fallback_segments.extend(tencent_segments)
             if paraformer_segments:
                 fallback_segments.extend(paraformer_segments)
             if whisper_segments and run_whisper_gaps:
@@ -316,10 +343,12 @@ def transcribe_cantonese(
                     fallback_segments=fallback_segments,
                     job_id=job_id,
                 )
-        elif tencent_segments or paraformer_segments:
-            # Primary merge: Tencent + Paraformer
+        elif paraformer_segments:
+            # Deepgram unavailable: Paraformer carries the transcript alone.
+            # (merge_asr_results is kept for its garbage filtering; the Tencent
+            # input is gone.)
             merged = merge_asr_results(
-                tencent_segments=tencent_segments,
+                tencent_segments=[],
                 paraformer_segments=paraformer_segments,
                 source_language=language,
                 job_id=job_id,
@@ -337,6 +366,15 @@ def transcribe_cantonese(
             merged = whisper_segments
         else:
             merged = []
+
+        # ── Dedupe ──
+        # The Deepgram path never ran this: dedupe lived only inside the legacy
+        # Tencent+Paraformer merge. Deepgram utterances plus the diarization
+        # re-split leave the same line twice — identical start times, or two
+        # overlapping utterances that both transcribed the same phrase — and
+        # each copy went on to be translated and voiced. See _deduplicate_segments.
+        from app.pipeline.asr_merge import deduplicate_segments
+        merged = deduplicate_segments(merged)
 
         # ── Filter repetition loops in merged output ──
         from app.pipeline.transcribe_audio import _filter_repetition_loops, _filter_hallucinations

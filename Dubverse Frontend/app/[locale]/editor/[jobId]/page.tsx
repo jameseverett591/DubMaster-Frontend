@@ -32,6 +32,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   const [segments, setSegments] = useState<Segment[]>([])
   const [snapshotSegments, setSnapshotSegments] = useState<Segment[]>([])
   const [scenes, setScenes] = useState<Scene[]>([])
+  const [crosslayerRanges, setCrosslayerRanges] = useState<{ start: number; end: number }[]>([])
   // Chunk-lens state and the deletion countdown both ride along on the segments
   // response. Without forwarding them the countdown card can never appear.
   const [chunkStatus, setChunkStatus] = useState<Record<string, string> | undefined>(undefined)
@@ -167,7 +168,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             preview_text: seg.committed_adapted_text ?? null,
             isPreviewing: false,
             speaker_id: speakerId,
-            speaker_label: seg.speaker ?? 'Speaker 1',
+            // A user rename persists as speaker_label through the sync path;
+            // seg.speaker stays the canonical speaker-N id. Without preferring
+            // it, every rename reverted on reload.
+            speaker_label: seg.speaker_label ?? seg.speaker ?? 'Speaker 1',
             speaker_gender: gender,
             audio_url: seg.path ? `${seg.path}?ts=${cacheBustTs}` : undefined,
             committed_audio_url: seg.committed_audio_url ? `${seg.committed_audio_url}?ts=${cacheBustTs}` : undefined,
@@ -177,6 +181,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             committed_end_time: seg.committed_end_time ?? undefined,
             fade_in: seg.fade_in ?? undefined,
             fade_out: seg.fade_out ?? undefined,
+            volume: seg.volume ?? undefined,
             // Casting and pacing. Absent here, the editor's restore had nothing
             // to read and every per-segment voice override vanished on reload.
             committed_voice_id: seg.committed_voice_id ?? undefined,
@@ -267,6 +272,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         })
         setSegments(editorSegments)
         setScenes((segmentsData?.scenes as Scene[] | undefined) || [])
+        setCrosslayerRanges(segmentsData?.crosslayer_ranges || [])
         setChunkStatus(segmentsData?.chunk_status)
         setRetention(segmentsData?.retention)
         setSnapshotSegments(mappedSnapshotSegments)
@@ -432,6 +438,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         videoDuration={editorProps.videoDuration}
         segments={segments}
         scenes={scenes}
+        crosslayerRanges={crosslayerRanges}
         snapshotSegments={snapshotSegments}
         chunkStatus={chunkStatus}
         retention={retention}

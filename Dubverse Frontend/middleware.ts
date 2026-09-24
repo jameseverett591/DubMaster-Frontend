@@ -1,13 +1,10 @@
 import { createServerClient } from "@supabase/ssr"
-import { createClient } from "@supabase/supabase-js"
 import { NextResponse, type NextRequest } from "next/server"
 import createMiddleware from 'next-intl/middleware'
 import { locales } from './i18n'
 
 // Routes that require authentication (WITHOUT locale prefix)
 const PROTECTED_ROUTES = ["/studio", "/editor", "/dashboard", "/account"]
-// Routes that require an active subscription
-const SUBSCRIPTION_ROUTES = ["/studio", "/editor", "/dashboard"]
 // Routes only for unauthenticated users
 const AUTH_ROUTES = ["/signin", "/signup"]
 
@@ -97,19 +94,9 @@ export async function middleware(request: NextRequest) {
   // Redirect authenticated users away from auth pages
   if (user && AUTH_ROUTES.some((route) => currentPath.startsWith(route))) {
     const url = request.nextUrl.clone()
-    // Only redirect to /studio if user has an active subscription, otherwise go home
-    const serviceClientForAuth = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SECRET_KEY!
-    )
-    const { data: authSub } = await serviceClientForAuth
-      .from("subscriptions")
-      .select("status")
-      .eq("user_id", user.id)
-      .in("status", ["active", "trialing"])
-      .limit(1)
-      .single()
-    url.pathname = authSub ? "/studio" : "/"
+    // Every signed-in user owns the studio — free tier renders 3 min/month
+    // plus the wallet, so there is no "subscribed or not" fork anymore.
+    url.pathname = "/studio"
     return NextResponse.redirect(url)
   }
 
@@ -122,50 +109,6 @@ export async function middleware(request: NextRequest) {
     url.pathname = `${localePrefix}/signin`
     url.searchParams.set("redirect", pathname)
     return NextResponse.redirect(url)
-  }
-
-  // Check subscription for protected routes (use service role to bypass RLS)
-  // Development convenience only. Gated on NODE_ENV so that setting this
-  // variable in a production environment — by copy-pasted .env, a stale Vercel
-  // setting, or habit — cannot disable the paywall for every user. A flag that
-  // grants paid access must be impossible to enable by accident.
-  const skipSubscriptionCheck =
-    process.env.NODE_ENV !== 'production' &&
-    process.env.NEXT_PUBLIC_SKIP_SUBSCRIPTION_CHECK === 'true'
-  if (!skipSubscriptionCheck && user && SUBSCRIPTION_ROUTES.some((route) => currentPath.startsWith(route))) {
-    try {
-      const serviceClient = createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.SUPABASE_SECRET_KEY!
-      )
-      const { data: subscription } = await serviceClient
-        .from("subscriptions")
-        .select("plan_type, status")
-        .eq("user_id", user.id)
-        .in("status", ["active", "trialing"])
-        .limit(1)
-        .single()
-
-      if (!subscription) {
-        const url = request.nextUrl.clone()
-        url.pathname = "/subscribe"
-        return NextResponse.redirect(url)
-      }
-
-      // Editor requires Premium or Professional
-      if (currentPath.startsWith("/editor") && subscription.plan_type === "basic") {
-        const url = request.nextUrl.clone()
-        // Preserve locale in redirect
-        const locale = pathname.split('/')[1]
-        const localePrefix = locales.includes(locale as any) && locale !== 'en' ? `/${locale}` : ''
-        url.pathname = `${localePrefix}/subscribe`
-        url.searchParams.set("upgrade", "true")
-        return NextResponse.redirect(url)
-      }
-    } catch {
-      // Subscription check failed (network/key error) — allow through in production
-      // rather than blocking authenticated users with a 404
-    }
   }
 
   // Return the i18n response with Supabase cookies

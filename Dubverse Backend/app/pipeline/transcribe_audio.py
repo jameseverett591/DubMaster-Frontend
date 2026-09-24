@@ -71,6 +71,41 @@ _HALLUCINATION_PHRASES = {
     "assalamu alaikum",
     "alhamdulillah",
     "la ilaha illallah",
+    # Cantonese/Mandarin short phrases Whisper hallucinates from silence
+    # at the end of clips (often after the dialogue has ended).
+    "走呀",
+    "走呀 走呀",
+    "走開",
+    "打不死",
+}
+
+# Credit and sign-off markers, kept SEPARATE from the list above because they
+# are matched differently. Nothing here is ever dialogue, so containment is
+# safe and necessary: Whisper appends a volunteer's name to the credit
+# ("中文字幕志愿者:小明"), which a dominance test would let through. The list
+# above is matched on dominance instead, since several of its entries ARE
+# ordinary dialogue — "走開" is "go away" — and containment would delete a real
+# line that happened to include one.
+#
+# Both script variants are listed because matching runs on the raw text, before
+# any traditional-to-simplified conversion.
+_CREDIT_PHRASES = {
+    "中文字幕",
+    "字幕志愿者",
+    "字幕志願者",
+    "字幕組",
+    "字幕组",
+    "字幕製作",
+    "字幕制作",
+    "本字幕",
+    "聽譯",
+    "听译",
+    "請訂閱",
+    "请订阅",
+    "別忘了訂閱",
+    "别忘了订阅",
+    "感謝收看",
+    "感谢收看",
 }
 
 _WHISPER_MODELS: Dict[Tuple[str, str, str], Any] = {}
@@ -222,6 +257,31 @@ def _filter_hallucinations(
                     )
                     continue
 
+            # Reject repeated short phrases (e.g., "結婚了﹗結婚了﹗" = "got married!
+            # got married!"). Whisper sometimes loops a short phrase when it
+            # can't decode the actual audio. A real short phrase won't repeat
+            # itself verbatim in the same segment.
+            cleaned = _re.sub(r'[﹗！!。.？?，,；;]', '', text).strip()
+            if len(cleaned) >= 3 and len(cleaned) <= 20:
+                half = len(cleaned) // 2
+                if half >= 2 and cleaned[:half] == cleaned[half:half*2]:
+                    logger.info(
+                        f"[HALLUCINATION] Rejected repeated-phrase segment: "
+                        f"'{text[:40]}' at {seg.get('start', '?')}-{seg.get('end', '?')}"
+                    )
+                    continue
+
+            # Reject extremely low-confidence Whisper segments (< 0.2).
+            # These are almost always hallucinations on noise/silence.
+            conf = seg.get("confidence")
+            if conf is not None and float(conf) < 0.2:
+                logger.info(
+                    f"[HALLUCINATION] Rejected very-low-confidence Whisper segment "
+                    f"(conf={conf:.2f}): '{text[:40]}' "
+                    f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
+                )
+                continue
+
             # Reject short single-word Latin-script hallucinations.
             # Whisper often produces nonsense English words during fight scenes
             # or silent moments (e.g. "pave", "the", "you").  This must not
@@ -265,13 +325,49 @@ def _filter_hallucinations(
         # have a suspicious ASR signal, so a non-Whisper engine returning dialogue that
         # happens to contain one of these phrases is not dropped.
         _norm_text = text.lower().rstrip('!.，。,')
-        if (
-            _norm_text in _HALLUCINATION_PHRASES
-            or any(ph in _norm_text for ph in _HALLUCINATION_PHRASES)
-        ) and (_is_whisper or _suspicious):
+        # DOMINANCE, NOT MERE PRESENCE. A bare substring test discards the whole
+        # segment when a denied phrase appears anywhere in it, so real dialogue
+        # sharing a line with a hallucinated credit went with it. Several entries
+        # are also ordinary dialogue in their own right — "走開" is "go away" —
+        # so a containment test can delete a legitimate line outright.
+        #
+        # Reject only when the phrase IS the segment: an exact match, or enough
+        # of it that what remains is not a sentence. A hallucinated credit or
+        # sign-off occupies the whole segment, so this still catches every case
+        # the list was written for.
+        def _dominates(ph: str) -> bool:
+            """True when the phrase IS the segment, not merely inside it."""
+            # The remainder allowance is deliberately one character. In Chinese
+            # three characters is a whole word, so a looser limit swallowed real
+            # lines: "把中文字幕打开" ("turn on the Chinese subtitles") left a
+            # 3-character remainder and was treated as if the credit filled it.
+            return ph == _norm_text or (
+                ph in _norm_text
+                and (len(ph) >= 0.6 * len(_norm_text) or len(_norm_text) - len(ph) < 2)
+            )
+
+        # A phrase that fills its segment is a hallucination on the usual gate.
+        _matched_ph = next(
+            (ph for ph in (*_CREDIT_PHRASES, *_HALLUCINATION_PHRASES) if _dominates(ph)),
+            None,
+        )
+        _gate = _is_whisper or _suspicious
+
+        if _matched_ph is None:
+            # A credit phrase can also sit INSIDE a longer segment, because
+            # Whisper appends a volunteer's name ("中文字幕志愿者:小明"). But so
+            # can real speech: "把中文字幕打开" is "turn on the Chinese
+            # subtitles", and "感谢收看本期节目" is a genuine sign-off line.
+            # Containment alone cannot tell those apart, so require evidence the
+            # audio was silence or background — a hallucination has a poor
+            # logprob or a high no-speech probability, and real speech does not.
+            _matched_ph = next((ph for ph in _CREDIT_PHRASES if ph in _norm_text), None)
+            _gate = _suspicious
+
+        if _matched_ph is not None and _gate:
             logger.info(
                 f"[HALLUCINATION] Rejected known hallucination phrase: '{text}' "
-                f"at {seg.get('start', '?')}-{seg.get('end', '?')}"
+                f"(matched {_matched_ph!r}) at {seg.get('start', '?')}-{seg.get('end', '?')}"
             )
             continue
 

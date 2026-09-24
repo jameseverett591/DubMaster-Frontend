@@ -7,18 +7,19 @@ import { VideoUpload } from "@/components/video-upload"
 import { YouTubeIntegration } from "@/components/youtube-integration"
 import { PublicDomainLibrary } from "@/components/public-domain-library"
 import { CreatorCollaboration } from "@/components/creator-collaboration"
-import { UpgradePanel } from "@/components/upgrade-panel"
+import { FaqPanel } from "@/components/faq-panel"
 import { DubbingWorkspace } from "@/components/dubbing-workspace"
 import { AdvancedDubbingEditor } from "@/components/advanced-dubbing-editor"
 import { Header } from "@/components/header"
-import { Upload, Youtube, Film, Sparkles, Mic2, AlertTriangle } from "lucide-react"
+import { Upload, Youtube, Film, Mic2, AlertTriangle, HelpCircle } from "lucide-react"
 import { RecentProjects } from "@/components/recent-projects"
-import { BonusMinutesDialog } from "@/components/bonus-minutes-dialog"
+
 import { createClient } from "@/lib/supabase/client"
 import { apiClient } from "@/lib/api-client"
 import { usePlan } from "@/lib/use-plan"
-import { PLAN_MINUTES, PLAN_MINUTES_DEFAULT, type PlanType } from "@/lib/plan-features"
+import { useUsage } from "@/hooks/use-usage"
 import { useT } from '@/lib/use-t'
+import { useTranslations } from "next-intl"
 
 export type VideoSource = {
   id: string
@@ -46,12 +47,14 @@ const tabBackgrounds: Record<string, string> = {
   youtube: "/backgrounds/ipman-kungfu.jpg",
   library: "/backgrounds/streaming-library.jpg",
   studio: "/backgrounds/anime-motion-teal.jpg",
+  faq: "/backgrounds/anime-motion-teal.jpg",
   collaborate: "/backgrounds/anime-motion-teal.jpg",
   projects: "/backgrounds/anime-dark-collage.jpg",
 }
 
 export function Dashboard() {
   const t = useT()
+  const tLanding = useTranslations('landing')
   const router = useRouter()
   const searchParams = useSearchParams()
   const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') ?? "upload")
@@ -66,58 +69,29 @@ export function Dashboard() {
 
   // Usage tracking state
   const { plan } = usePlan()
-  const [minutesUsed, setMinutesUsed] = useState<number>(0)
-  const [bonusBalance, setBonusBalance] = useState<number>(0)
-  const [bonusDialogOpen, setBonusDialogOpen] = useState(false)
-  const [loadingUsage, setLoadingUsage] = useState(true)
-
-  const planLimit = PLAN_MINUTES[(plan ?? 'basic') as PlanType] ?? PLAN_MINUTES_DEFAULT
+  const usage = useUsage()
+  const loadingUsage = usage.loading
+  const minutesUsed = usage.minutesUsed
+  const bonusBalance = usage.bonusBalance
+  // Included allowance from the quota row — 30 pro / 3 free. Always > 0 for a
+  // signed-in user, which is the only state this page renders in.
+  const planLimit = usage.planLimit
 
   const supabase = createClient()
 
-  // Fetch usage data on component mount
-  useEffect(() => {
-    async function fetchUsageData() {
-      setLoadingUsage(true)
-      try {
-        const { data: { session } } = await supabase.auth.getSession()
-        if (!session) return
-        const user = session.user
-        apiClient.setToken(session.access_token)
-
-        // Fetch current month usage
-        const { data: usageData } = await supabase
-          .from("usage")
-          .select("minutes_used")
-          .eq("user_id", user.id)
-          .order("month", { ascending: false })
-          .limit(1)
-          .single()
-
-        // Fetch bonus minutes (use maybeSingle to avoid error if no record exists)
-        const { data: bonusData } = await supabase
-          .from("bonus_minutes")
-          .select("balance")
-          .eq("user_id", user.id)
-          .maybeSingle()
-
-        const used = usageData?.minutes_used || 0
-        const bonus = bonusData?.balance || 0
-
-        setMinutesUsed(used)
-        setBonusBalance(bonus)
-      } catch (error) {
-        console.error("Failed to fetch usage data:", error)
-        // Set defaults on error to prevent blank UI
-        setMinutesUsed(0)
-        setBonusBalance(0)
-      } finally {
-        setLoadingUsage(false)
-      }
-    }
-
-    fetchUsageData()
-  }, [])
+  // One-click wallet top-up — replaces the bonus-minutes pack dialog. Stripe's
+  // hosted page collects the amount ($10 floor, $2.50/min).
+  const handleTopUp = async () => {
+    const { data: { session } } = await supabase.auth.getSession()
+    if (!session) return
+    const res = await fetch('/api/create-wallet-checkout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: session.user.id, email: session.user.email }),
+    })
+    const { url } = await res.json()
+    if (url) window.location.href = url
+  }
 
   // Keep API client token in sync with Supabase auth state
   useEffect(() => {
@@ -198,18 +172,17 @@ export function Dashboard() {
                     <div>
                       <p className="text-[#94A3B8] text-xs mb-1">{t('Your Plan')}</p>
                       <p className="text-white text-xl font-bold bg-gradient-to-r from-[#A855F7] to-[#FDB022] bg-clip-text text-transparent capitalize">
-                        {loadingUsage ? "..." : (plan ?? 'basic')}
+                        {loadingUsage ? "..." : (plan ?? 'free')}
                       </p>
                     </div>
 
                     {/* Usage Stats */}
                     <div className="md:col-span-2">
                       {!loadingUsage && (() => {
-                        const planRemaining = planLimit > 0 ? Math.max(0, planLimit - minutesUsed) : Infinity
-                        const totalRemaining = planRemaining === Infinity ? Infinity : planRemaining + bonusBalance
-                        const usagePercent = planLimit > 0 ? Math.min((minutesUsed / planLimit) * 100, 100) : 0
-                        const isLowUsage = totalRemaining !== Infinity && totalRemaining < 10
-                        const isExhausted = totalRemaining === 0
+                        const totalRemaining = usage.minutesRemaining
+                        const usagePercent = Math.min((minutesUsed / planLimit) * 100, 100)
+                        const isLowUsage = usage.lowBalance
+                        const isExhausted = totalRemaining <= 0
 
                         return (
                           <>
@@ -217,19 +190,14 @@ export function Dashboard() {
                               <p className="text-[#94A3B8] text-xs">{t('Monthly Usage')}</p>
                               <p className="text-white text-sm font-bold">
                                 <span className={isExhausted ? "text-red-400" : isLowUsage ? "text-[#FDB022]" : "text-[#22D3EE]"}>
-                                  {planLimit > 0 ? minutesUsed : "Unlimited"}
+                                  {minutesUsed}
                                 </span>
-                                {planLimit > 0 && (
-                                  <>
-                                    <span className="text-[#64748B]"> / </span>
-                                    <span className="text-[#94A3B8]">{planLimit} min</span>
-                                  </>
-                                )}
+                                <span className="text-[#64748B]"> / </span>
+                                <span className="text-[#94A3B8]">{planLimit} min</span>
                               </p>
                             </div>
 
-                            {planLimit > 0 && (
-                              <>
+                            <>
                                 {/* Progress Bar */}
                                 <div className="relative h-2 bg-[#0F172A] rounded-full overflow-hidden border border-[#334155]">
                                   <div
@@ -258,20 +226,19 @@ export function Dashboard() {
                                       </span>
                                     ) : (
                                       <span className="text-[#64748B]">
-                                        <span className="text-[#22D3EE] font-semibold">{Math.floor(planRemaining)} min</span> plan
-                                        {bonusBalance > 0 && <span className="text-[#22D3EE] font-semibold"> + {bonusBalance} bonus</span>}
+                                        <span className="text-[#22D3EE] font-semibold">{Math.max(0, Math.floor(planLimit - minutesUsed))} min</span> included
+                                        {bonusBalance > 0 && <span className="text-[#22D3EE] font-semibold"> + {Math.floor(bonusBalance)} wallet</span>}
                                       </span>
                                     )}
                                   </div>
                                   <button
-                                    onClick={() => setBonusDialogOpen(true)}
+                                    onClick={handleTopUp}
                                     className="text-[#FDB022] text-[10px] font-semibold hover:text-[#FDB022]/80 transition-colors"
                                   >
-                                    Buy More →
+                                    Top up →
                                   </button>
                                 </div>
-                              </>
-                            )}
+                            </>
                           </>
                         )
                       })()}
@@ -285,9 +252,9 @@ export function Dashboard() {
                 <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-[#A855F7] via-[#FDB022] to-[#22D3EE] bg-clip-text text-transparent drop-shadow-[0_0_30px_rgba(168,85,247,0.8)] mb-2">
                   {t('DubMaster Studio')}
                 </h1>
-                {plan === 'basic' && (
+                {plan === 'free' && (
                   <span className="inline-block text-xs font-semibold uppercase tracking-wide text-[#22D3EE] border border-[#22D3EE]/40 rounded-full px-2 py-0.5 mb-2">
-                    {t('Basic')}
+                    Free
                   </span>
                 )}
                 <p className="text-[#94A3B8] text-base md:text-lg italic">
@@ -320,11 +287,11 @@ export function Dashboard() {
                     <span className="hidden sm:inline">{t('Library')}</span>
                   </TabsTrigger>
                   <TabsTrigger
-                    value="studio"
+                    value="faq"
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
                   >
-                    <Sparkles className="h-4 w-4" />
-                    <span className="hidden sm:inline">{t('Upgrade')}</span>
+                    <HelpCircle className="h-4 w-4" />
+                    <span className="hidden sm:inline">{tLanding('navFaq')}</span>
                   </TabsTrigger>
                   <TabsTrigger
                     value="projects"
@@ -345,22 +312,22 @@ export function Dashboard() {
                     <div className="relative bg-gradient-to-br from-[#0F172A]/60 to-[#1E293B]/60 backdrop-blur-2xl border-2 border-[#A855F7]/40 rounded-2xl p-8 shadow-[0_0_60px_rgba(168,85,247,0.3)] group-hover:shadow-[0_0_80px_rgba(168,85,247,0.5)] group-hover:border-[#A855F7]/60 transition-all duration-500">
                       <VideoUpload
                         onVideoSelect={handleVideoSelect}
-                        quotaExceeded={!loadingUsage && planLimit > 0 && (planLimit - minutesUsed + bonusBalance) <= 0}
-                        remainingMinutes={planLimit > 0 ? Math.max(0, planLimit - minutesUsed + bonusBalance) : Infinity}
-                        onBuyMore={() => setBonusDialogOpen(true)}
                       />
                     </div>
                   </div>
                 </TabsContent>
 
                 <TabsContent value="youtube">
-                  <YouTubeIntegration onVideoSelect={handleVideoSelect} />
+                  <YouTubeIntegration
+                    onVideoSelect={handleVideoSelect}
+                    initialImportUrl={searchParams.get('yt_url') ?? undefined}
+                  />
                 </TabsContent>
                 <TabsContent value="library">
                   <PublicDomainLibrary onVideoSelect={handleVideoSelect} />
                 </TabsContent>
-                <TabsContent value="studio">
-                  <UpgradePanel />
+                <TabsContent value="faq">
+                  <FaqPanel />
                 </TabsContent>
                 <TabsContent value="projects">
                   <RecentProjects onVideoSelect={handleVideoSelect} />
@@ -371,15 +338,7 @@ export function Dashboard() {
         )}
       </div>
 
-      {/* Bonus Minutes Dialog */}
-      <BonusMinutesDialog
-        open={bonusDialogOpen}
-        onOpenChange={setBonusDialogOpen}
-        planMinutesUsed={minutesUsed}
-        planMinutesLimit={planLimit}
-        bonusBalance={bonusBalance}
-        planType={plan ?? 'basic'}
-      />
+
     </div>
   )
 }
