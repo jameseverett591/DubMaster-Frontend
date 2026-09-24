@@ -1073,14 +1073,18 @@ def _velma_source_audio(video_path: str, job_id: str, vocals_path: str | None = 
     src = _vocals_or_video(video_path, job_id)
     if src == video_path:
         try:
+            # MP3, not m4a: Velma's accepted-format list (see the Triage 400
+            # body) has no .m4a — an m4a here silently killed diarization on
+            # every job without a caller-supplied vocals stem. Same 16kHz mono
+            # speech profile _velma_fit_upload already ships successfully.
             audio_only = os.path.join(
-                settings.DUBBED_DIR, job_id, f"velma_audio_{job_id}.m4a"
+                settings.DUBBED_DIR, job_id, f"velma_audio_{job_id}.mp3"
             )
             os.makedirs(os.path.dirname(audio_only), exist_ok=True)
             if not os.path.exists(audio_only):
                 result = subprocess.run(
                     ["ffmpeg", "-y", "-i", video_path, "-vn", "-ac", "1",
-                     "-ar", "16000", "-c:a", "aac", "-b:a", "48k", audio_only],
+                     "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "48k", audio_only],
                     capture_output=True, text=True,
                 )
                 if result.returncode != 0:
@@ -5830,8 +5834,38 @@ async def render_dubbed_video(request: DubRequest, http_request: Request, backgr
     )
 
 
+async def _job_share_unlocked(job_id: str, caller: str, job) -> bool:
+    """Sharing/downloading a finished dub requires payment in full.
+
+    Unlocked by ANY of: no owner recorded (pre-ownership rows stay open,
+    mirroring _require_job), a billing-bypassed (owner/test) caller, an
+    active/trialing subscription (Pro), or the job's render already billed
+    with a lip-sync selection no wider than the paid-and-synced set (the same
+    rule the export gate applies below).
+    """
+    from app.services import quota_service
+    if not getattr(job, "user_id", None):
+        return True
+    if quota_service.is_billing_bypassed(caller):
+        return True
+    if await asyncio.to_thread(quota_service.tier_for, caller) == quota_service.TIER_PRO:
+        return True
+    if not getattr(job, "billed_seconds", None):
+        return False
+    sel = set(_load_lipsync_selection(job_id))
+    if sel:
+        try:
+            with open(os.path.join(settings.DUBBED_DIR, job_id, "segments.json"), "r", encoding="utf-8") as _jf:
+                synced = set((_json.load(_jf) or {}).get("lipsync_synced_selection") or [])
+        except Exception:
+            synced = set()
+        if not sel.issubset(synced):
+            return False
+    return True
+
+
 @router.get("/download/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
-async def download_dubbed_video(job_id: str, language: str, attachment: bool = False):
+async def download_dubbed_video(job_id: str, language: str, request: Request, attachment: bool = False):
     """Serve the finished dub.
 
     Defaults to `inline` because the same URL backs the <video> player. Pass
@@ -5839,13 +5873,21 @@ async def download_dubbed_video(job_id: str, language: str, attachment: bool = F
     IGNORED for cross-origin URLs, and the app runs on a different port from
     the API, so a plain link only ever played the file. Content-Disposition is
     the only thing that actually makes the browser save it.
-    """
+
+    attachment=1 is also the paywall boundary: taking the film OUT of the app
+    requires the job to be paid in full (see _job_share_unlocked)."""
     dubbed_path = os.path.join(settings.DUBBED_DIR, job_id, f"dubbed_{language}.mp4")
 
     if not os.path.exists(dubbed_path):
         raise HTTPException(status_code=404, detail="Dubbed video not found")
 
     if attachment:
+        job = await _get_or_rehydrate_job(job_id)
+        if job and not await _job_share_unlocked(job_id, _caller(request), job):
+            raise HTTPException(
+                status_code=402,
+                detail="Download unlocks when this job is paid in full.",
+            )
         filename = f"dubbed_{language}_{job_id[:8]}.mp4"
         return FileResponse(
             dubbed_path,
@@ -6853,6 +6895,23 @@ async def clone_voice(
 # Quality Analysis endpoints
 # ---------------------------------------------------------------------------
 
+# A sentinel older than this with no result file means the analysis task died
+# or wedged (observed: first-run emotion2vec model download) — without age
+# expiry the QC monitor sits on 202 "running" forever.
+_ANALYSIS_SENTINEL_MAX_AGE_S = 20 * 60
+
+
+def _clear_stale_analysis_sentinel(sentinel: Path) -> bool:
+    """Delete the sentinel if it is older than _ANALYSIS_SENTINEL_MAX_AGE_S."""
+    try:
+        if time.time() - sentinel.stat().st_mtime <= _ANALYSIS_SENTINEL_MAX_AGE_S:
+            return False
+        sentinel.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 @router.post("/analyze/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
 async def trigger_analysis(job_id: str, language: str, background_tasks: BackgroundTasks):
     """Trigger post-dub quality analysis. Returns 202 immediately."""
@@ -6869,13 +6928,17 @@ async def trigger_analysis(job_id: str, language: str, background_tasks: Backgro
             detail=f"No dubbed video found for language '{lang_norm}'"
         )
 
-    # Check if already running
+    # Check if already running — but a wedged/crashed task leaves the
+    # sentinel behind; clear it and allow a fresh run instead of 202'ing forever.
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
     if sentinel.exists():
-        return JSONResponse(
-            status_code=202,
-            content={"status": "running", "message": "Analysis already in progress"}
-        )
+        if _clear_stale_analysis_sentinel(sentinel):
+            logger.warning(f"Job {job_id}: cleared stale analysis sentinel for {lang_norm}")
+        else:
+            return JSONResponse(
+                status_code=202,
+                content={"status": "running", "message": "Analysis already in progress"}
+            )
 
     from app.pipeline.analyze_dub import analyze_dub
 
@@ -7036,13 +7099,14 @@ async def get_analysis(job_id: str, language: str):
     lang_norm = language.lower().strip()
     dubbed_dir = Path(settings.DUBBED_DIR) / job_id
 
-    # Check sentinel first — but also detect stale sentinels (result file
-    # already exists means the analysis finished but sentinel wasn't cleaned up).
+    # Check sentinel first — but also detect stale sentinels. Two stale
+    # flavours: the result file already exists (analysis finished but cleanup
+    # didn't fire), or the sentinel is older than any legitimate run (task
+    # died/wedged) — fall through so the caller re-triggers.
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
     result_file = dubbed_dir / f"analysis_{lang_norm}.json"
     if sentinel.exists():
-        if result_file.exists():
-            # Stale sentinel — analysis completed but cleanup didn't fire.
+        if result_file.exists() or _clear_stale_analysis_sentinel(sentinel):
             try:
                 sentinel.unlink(missing_ok=True)
             except Exception:

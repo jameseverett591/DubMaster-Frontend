@@ -17,9 +17,27 @@ import {
   AlertCircle,
   Pencil,
 } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import type { VideoSource, DetectedVoice } from "@/components/dashboard"
+import { apiClient } from "@/lib/api-client"
+import { usePlan } from "@/lib/use-plan"
 import { useT } from '@/lib/use-t'
+
+// Paywall basis for sharing/downloading a finished dub: active subscription
+// unlocks outright; otherwise the job's render must already be billed (or the
+// caller is a bypassed test account). Mirrors the editor gate and the
+// backend's /download attachment 402.
+function useShareUnlocked(jobId?: string): boolean {
+  const { isPro } = usePlan()
+  const [jobPaid, setJobPaid] = useState(false)
+  useEffect(() => {
+    if (!jobId) return
+    apiClient.getQuotaEstimate(jobId)
+      .then(q => setJobPaid(!!q && (q.bypassed === true || q.already_billed === true)))
+      .catch(() => {})
+  }, [jobId])
+  return isPro || jobPaid
+}
 
 interface DubbedVideoResultProps {
   originalVideo: VideoSource
@@ -62,9 +80,18 @@ export function DubbedVideoResult({
   const t = useT()
   const isComplete = !isDubbing && dubbingProgress >= 100
   const [linkCopied, setLinkCopied] = useState(false)
+  const [isSharing, setIsSharing] = useState(false)
+  const shareUnlocked = useShareUnlocked(originalVideo.jobId)
+  const lockedTitle = t('Available after payment')
 
   const handleDownload = () => {
-    const url = dubbedVideoUrl ?? originalVideo.url
+    let url = dubbedVideoUrl ?? originalVideo.url
+    // Cross-origin (UI :3001 → API :8000) ignores the `download` attribute and
+    // plays the file inline; the API's attachment=1 switch answers
+    // Content-Disposition: attachment, which is what actually saves the file.
+    if (url.includes("/api/download/")) {
+      url += `${url.includes("?") ? "&" : "?"}attachment=1`
+    }
     const link = document.createElement("a")
     link.href = url
     link.download = `${originalVideo.title}_dubbed_${targetLanguage}.mp4`
@@ -73,13 +100,46 @@ export function DubbedVideoResult({
     link.click()
   }
 
+  // Fetch-into-memory cap: above this we share the authenticated link
+  // instead of materialising the file.
+  const SHARE_FILE_MAX_BYTES = 250 * 1024 * 1024
+
   const handleShare = async () => {
+    const fileName = `${originalVideo.title}_dubbed_${targetLanguage}.mp4`
+
+    // Prefer Web Share Level 2: hand the OS the actual video FILE so share
+    // targets (Save, Mail, Nearby Share, installed apps) receive the video
+    // itself. The old code shared window.location.href — a link back into
+    // DubMaster — so the video never left the app.
+    if (dubbedVideoUrl && navigator.canShare) {
+      setIsSharing(true)
+      try {
+        const resp = await fetch(dubbedVideoUrl)
+        if (resp.ok) {
+          const blob = await resp.blob()
+          if (blob.size <= SHARE_FILE_MAX_BYTES) {
+            const file = new File([blob], fileName, { type: blob.type || "video/mp4" })
+            if (navigator.canShare({ files: [file] })) {
+              await navigator.share({ files: [file], title: fileName })
+              return
+            }
+          }
+        }
+      } catch {
+        // File fetch/share failed or was cancelled — fall through to link share.
+      } finally {
+        setIsSharing(false)
+      }
+    }
+
+    // Fallback: share the direct video URL (never the DubMaster page URL).
+    const shareUrl = dubbedVideoUrl ?? window.location.href
     if (navigator.share) {
       try {
         await navigator.share({
           title: `${originalVideo.title} - Dubbed in ${LANGUAGE_NAMES[targetLanguage]}`,
           text: "Check out this dubbed video!",
-          url: window.location.href,
+          url: shareUrl,
         })
       } catch {
         // User cancelled share
@@ -87,7 +147,7 @@ export function DubbedVideoResult({
       return
     }
     try {
-      await navigator.clipboard.writeText(window.location.href)
+      await navigator.clipboard.writeText(shareUrl)
       setLinkCopied(true)
       setTimeout(() => setLinkCopied(false), 2000)
     } catch {
@@ -245,12 +305,12 @@ export function DubbedVideoResult({
           </Button>
         )}
         <div className="flex gap-2">
-          <Button className="flex-1 gap-1.5 h-8 text-xs" onClick={handleDownload} disabled={!dubbedVideoUrl}>
+          <Button className="flex-1 gap-1.5 h-8 text-xs" onClick={handleDownload} disabled={!dubbedVideoUrl || !shareUnlocked} title={shareUnlocked ? undefined : lockedTitle}>
             <Download className="h-3.5 w-3.5" />
             {t('Download')}
           </Button>
-          <Button variant="outline" className="gap-1.5 h-8 text-xs bg-transparent" onClick={handleShare} title={linkCopied ? t('Link copied!') : t('Share')}>
-            {linkCopied ? <CheckCircle2 className="h-3.5 w-3.5 text-green-500" /> : <Share2 className="h-3.5 w-3.5" />}
+          <Button variant="outline" className="gap-1.5 h-8 text-xs bg-transparent" onClick={handleShare} disabled={isSharing || !shareUnlocked} title={shareUnlocked ? (linkCopied ? t('Link copied!') : t('Share')) : lockedTitle}>
+            {isSharing ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : linkCopied ? <CheckCircle2 className="h-3.5 w-3.5 text-green-500" /> : <Share2 className="h-3.5 w-3.5" />}
           </Button>
           <Button variant="outline" className="gap-1.5 h-8 text-xs bg-transparent" onClick={onRegenerate}>
             <RefreshCw className="h-3.5 w-3.5" />
@@ -261,7 +321,7 @@ export function DubbedVideoResult({
         <div className="rounded-lg bg-muted/50 p-3">
           <h4 className="text-xs font-medium text-foreground">{t('Export Formats')}</h4>
           <div className="mt-2 flex flex-wrap gap-1.5">
-            <Button variant="outline" size="sm" className="gap-1 text-[10px] h-6 bg-transparent" onClick={handleDownload} disabled={!dubbedVideoUrl}>
+            <Button variant="outline" size="sm" className="gap-1 text-[10px] h-6 bg-transparent" onClick={handleDownload} disabled={!dubbedVideoUrl || !shareUnlocked} title={shareUnlocked ? undefined : lockedTitle}>
               <FileVideo className="h-3 w-3" />
               MP4
             </Button>

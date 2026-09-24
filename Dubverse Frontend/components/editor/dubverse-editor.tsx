@@ -1542,6 +1542,15 @@ export function DubVerseEditor({
   } | null>(null)
   const [addSegmentFeedback, setAddSegmentFeedback] = useState<'success' | 'error' | null>(null)
   const [shareCopied, setShareCopied] = useState<'link' | 'video' | null>(null)
+  // The HTML `download` attribute is IGNORED for cross-origin URLs (UI on
+  // :3001, API on :8000), so `<a download href=activeDubbedVideoUrl>` just
+  // navigated and PLAYED the film inline instead of saving it. The backend's
+  // /api/download route takes ?attachment=1 to answer Content-Disposition:
+  // attachment — the only thing that reliably triggers Save-As cross-origin.
+  const withAttachment = (url: string) =>
+    url.includes('/api/download/')
+      ? `${url}${url.includes('?') ? '&' : '?'}attachment=1`
+      : url
   const [askAiOpen, setAskAiOpen] = useState(false)
   const [askAiModel, setAskAiModel] = useState<'haiku' | 'sonnet' | 'opus'>('sonnet')
   const [characterProfileOpen, setCharacterProfileOpen] = useState<{
@@ -6900,6 +6909,15 @@ export function DubVerseEditor({
   const budgetNum = parseFloat(budgetUsd)
   const budgetRemaining = Number.isFinite(budgetNum) ? budgetNum - estCostUsd : null
 
+  // Share/download paywall for the finished film. Unlocked by an active
+  // subscription (Pro), a bypassed test account, or this job owing nothing:
+  // render already billed AND any lip-sync scope covered by the paid render
+  // (mirrors the export gate and the backend's /download attachment 402).
+  const renderSettled = !!renderQuote?.bypassed || !!renderQuote?.already_billed
+  const lipSyncSettled = !!lipQuote?.bypassed ||
+    (lipQuote?.current_selection ?? []).every(id => (lipQuote?.synced_selection ?? []).includes(id))
+  const shareUnlocked = isPro || (renderQuote !== null && renderSettled && lipSyncSettled)
+
   const handleRebuildVideo = useCallback(async () => {
     // Lip-sync is paid BEFORE the vendor runs — if the wallet can't cover the
     // selected scope, stop here and hand off to the checkout modal instead of
@@ -8529,7 +8547,11 @@ export function DubVerseEditor({
                 {t('Share Project')}
               </p>
 
-              {/* Editor link */}
+              {shareUnlocked ? (
+              <>
+              {/* Editor link — collaboration access rides the same payment
+                  gate as video sharing: an unpaid job's edit page (which plays
+                  the dub) does not leave the app either. */}
               <div className="space-y-1.5">
                 <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Editor link')}</p>
                 <div className="flex gap-2">
@@ -8589,7 +8611,7 @@ export function DubVerseEditor({
                       className="h-7 px-2 text-xs border-slate-700 text-slate-300 shrink-0"
                       asChild
                     >
-                      <a href={activeDubbedVideoUrl} download title={t('Download dubbed video')} target="_blank" rel="noreferrer">
+                      <a href={withAttachment(apiClient.refreshMediaUrl(activeDubbedVideoUrl))} title={t('Download dubbed video')}>
                         <Download className="h-3 w-3" />
                       </a>
                     </Button>
@@ -8631,8 +8653,7 @@ export function DubVerseEditor({
                     onClick={() => {
                       if (activeDubbedVideoUrl) {
                         const a = document.createElement('a')
-                        a.href = activeDubbedVideoUrl
-                        a.download = `${title || 'dubbed_video'}.mp4`
+                        a.href = withAttachment(apiClient.refreshMediaUrl(activeDubbedVideoUrl))
                         a.click()
                       }
                       window.open('https://studio.youtube.com/channel/upload', '_blank')
@@ -8649,8 +8670,7 @@ export function DubVerseEditor({
                     onClick={() => {
                       if (activeDubbedVideoUrl) {
                         const a = document.createElement('a')
-                        a.href = activeDubbedVideoUrl
-                        a.download = `${title || 'dubbed_video'}.mp4`
+                        a.href = withAttachment(apiClient.refreshMediaUrl(activeDubbedVideoUrl))
                         a.click()
                       }
                     }}
@@ -8660,6 +8680,18 @@ export function DubVerseEditor({
                   </button>
                 </div>
               </div>
+              </>
+              ) : (
+                <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
+                  <Lock className="h-4 w-4 shrink-0 mt-0.5 text-amber-400" />
+                  <div className="text-xs">
+                    <p className="font-medium text-amber-200">{t('Available after payment')}</p>
+                    <p className="text-amber-200/70 mt-0.5">
+                      {t('Sharing and downloads unlock once this job is paid in full — see the Render / Lip sync totals in the budget tracker above.')}
+                    </p>
+                  </div>
+                </div>
+              )}
             </PopoverContent>
           </Popover>
           <Button
@@ -12462,29 +12494,6 @@ export function DubVerseEditor({
                 {tab.icon} {t(tab.label)}
               </button>
             ))}
-            <div className="w-px h-5 bg-white/10 mx-1" />
-            <button
-              type="button"
-              onClick={() => {
-                const url = activeDubbedVideoUrl ?? dubbedVideoUrl
-                if (!url) return
-                const a = document.createElement('a')
-                a.href = url
-                a.download = `${title || jobId}_dubbed.mp4`
-                a.click()
-              }}
-              title={activeDubbedVideoUrl ?? dubbedVideoUrl ? t('Download dubbed video') : t('No dubbed video yet')}
-              className="text-xs px-2.5 py-1 rounded-md transition-all font-medium flex items-center gap-1.5"
-              style={{
-                background: 'transparent',
-                color: (activeDubbedVideoUrl ?? dubbedVideoUrl) ? '#34d399' : '#475569',
-                border: '1px solid transparent',
-                cursor: (activeDubbedVideoUrl ?? dubbedVideoUrl) ? 'pointer' : 'not-allowed',
-                opacity: (activeDubbedVideoUrl ?? dubbedVideoUrl) ? 1 : 0.45,
-              }}
-            >
-              ⬇ {t('Download')}
-            </button>
           </div>
         </div>
         
