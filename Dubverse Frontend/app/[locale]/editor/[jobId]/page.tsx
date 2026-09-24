@@ -354,15 +354,12 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
               }
             }
           } else if (data.status === 'failed') {
-            // During a manual re-analyze, a 'failed' here can still be the OLD
-            // run's error file — the backend clears it when the new run claims,
-            // so until the new sentinel/result appears, keep watching.
-            if (reanalyzePendingRef.current) {
-              if (!cancelled) setQcLoading(true)
-              return
-            }
-            // Terminal state — the run wrote its reason to disk. Stop polling
-            // and show it; infinite retries here were the old wedge.
+            // Terminal state — the run wrote its reason to disk. During a
+            // manual re-analyze this can only be the NEW run's failure: the
+            // POST handler clears the old error file synchronously before it
+            // responds, so no stale error can outlive reanalyzePendingRef.
+            // Stop polling and show it; infinite retries here were the old
+            // wedge.
             if (!cancelled) {
               setQcError(data.reason || 'QC analysis failed')
               setQcLoading(false)
@@ -373,10 +370,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
               }
             }
           } else if (data.status === 'running') {
-            if (!cancelled) setQcLoading(true)
+            if (!cancelled) { setQcLoading(true); setQcError(null) }
           }
         } else if (res.status === 202) {
-          if (!cancelled) setQcLoading(true)
+          if (!cancelled) { setQcLoading(true); setQcError(null) }
         } else if (res.status === 404) {
           // Not yet triggered — kick it off
           try {

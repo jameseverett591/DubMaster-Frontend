@@ -6164,28 +6164,86 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
+def _process_token(pid: int) -> Optional[str]:
+    """Opaque identity for a live process, or None if `pid` is dead.
+
+    A bare PID liveness check lies after a crash: the OS recycles PIDs, so a
+    dead run's recorded PID can now belong to an unrelated process and QC
+    would wedge again. The token pairs the PID with that process's start
+    time — 'alive' then means 'alive AND the same process that wrote it'.
+    """
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            create = wintypes.FILETIME()
+            exit_ = wintypes.FILETIME()
+            kern = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            ok = kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(create), ctypes.byref(exit_),
+                ctypes.byref(kern), ctypes.byref(user),
+            )
+            if not ok:
+                return None
+            return str((create.dwHighDateTime << 32) | create.dwLowDateTime)
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            # starttime (field 22): clock ticks since boot — used as an
+            # equality token, so no unit conversion is needed.
+            return f.read().rsplit(b")", 1)[1].split()[19].decode()
+    except FileNotFoundError:
+        return None
+    except Exception:
+        pass
+    if _pid_is_alive(pid):
+        return "?"  # alive but identity unverifiable (no /proc, e.g. macOS)
+    return None
+
+
 def _clear_stale_analysis_sentinel(sentinel: Path) -> bool:
     """Remove a .running sentinel whose owning run can no longer finish.
 
-    Sentinels record their creator's PID: a run whose process is dead can
-    never complete, and a live PID means a live run — including one owned by
-    a different uvicorn worker, which must not be touched. Sentinels written
-    before the PID field existed fall back to the process-boot check.
+    Sentinels record `pid:token` — the PID plus the process's start time, so
+    a run is live only when a process still owns that exact identity. A dead
+    or recycled PID means the run is gone; a live sentinel owned by a
+    different uvicorn worker is never touched. Older pid-only sentinels and
+    platforms without process start times fall back to a liveness check.
     Returns True when the sentinel is gone and the caller may proceed.
     """
     try:
-        pid_text = sentinel.read_text(encoding="utf-8").strip()
+        pid_text, _, token = sentinel.read_text(encoding="utf-8").strip().partition(":")
         pid = int(pid_text) if pid_text else None
+        token = token or None
     except FileNotFoundError:
         return True
     except Exception:
-        pid = None
+        pid, token = None, None
 
     try:
         if pid is not None:
-            if not _pid_is_alive(pid):
+            current = _process_token(pid)
+            if token:
+                # Identity check: equal tokens mean the same live process;
+                # anything else (dead PID, recycled PID) means the run died.
+                if current == token:
+                    return False
                 sentinel.unlink(missing_ok=True)
                 return True
+            if current is None:
+                sentinel.unlink(missing_ok=True)
+                return True
+            # Identity unverifiable (legacy format or no /proc): fall back to
+            # plain liveness — accepting the rare recycled-PID false-live is
+            # safer than deleting a live worker's sentinel on mtime alone.
             return False
         if sentinel.stat().st_mtime < _PROCESS_STARTED_AT:
             sentinel.unlink(missing_ok=True)
@@ -6193,6 +6251,21 @@ def _clear_stale_analysis_sentinel(sentinel: Path) -> bool:
     except FileNotFoundError:
         return True
     return False
+
+
+def _claim_analysis_sentinel(sentinel: Path) -> bool:
+    """Atomically create the .running sentinel for this process.
+
+    O_EXCL fails if the file exists at all — unlike check-then-write, two
+    POSTs racing on different workers cannot both claim the run.
+    """
+    try:
+        fd = os.open(str(sentinel), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(f"{os.getpid()}:{_process_token(os.getpid()) or ''}")
+    return True
 
 
 @router.post("/analyze/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
@@ -6211,23 +6284,28 @@ async def trigger_analysis(job_id: str, language: str, background_tasks: Backgro
             detail=f"No dubbed video found for language '{lang_norm}'"
         )
 
-    # Check if already running (stale sentinels cleared — see helper)
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
     error_file = dubbed_dir / f"analysis_{lang_norm}.error"
-    if sentinel.exists() and not _clear_stale_analysis_sentinel(sentinel):
+
+    from app.pipeline.analyze_dub import analyze_dub
+
+    # Claim the run atomically before scheduling: the O_EXCL write fails if
+    # any worker already holds the sentinel, so racing POSTs can't both pass
+    # a check-then-write and duplicate the analysis. When the claim loses to
+    # an existing sentinel it may still be stale — recheck once, then either
+    # take it over or report the live run. Clearing the recorded failure up
+    # front also stops a retry from reading the old error before the new
+    # task even starts.
+    claimed = _claim_analysis_sentinel(sentinel)
+    if not claimed and _clear_stale_analysis_sentinel(sentinel):
+        claimed = _claim_analysis_sentinel(sentinel)
+    if not claimed:
         return JSONResponse(
             status_code=202,
             content={"status": "running", "message": "Analysis already in progress"}
         )
 
-    from app.pipeline.analyze_dub import analyze_dub
-
-    # Claim the run before scheduling: writing the sentinel here closes the
-    # gap where a GET or a second POST would otherwise see "no run" and
-    # duplicate it, and clearing the recorded failure up front stops a retry
-    # from reading the old error before the new task even starts.
     try:
-        sentinel.write_text(str(os.getpid()), encoding="utf-8")
         error_file.unlink(missing_ok=True)
         background_tasks.add_task(
             asyncio.to_thread, analyze_dub, job_id, lang_norm, job.video_path
@@ -6386,14 +6464,21 @@ async def get_analysis(job_id: str, language: str):
     lang_norm = language.lower().strip()
     dubbed_dir = Path(settings.DUBBED_DIR) / job_id
 
-    # Check sentinel first — but also detect stale sentinels (result file
-    # already exists means the analysis finished but sentinel wasn't cleaned up;
-    # a sentinel older than this process means the run died with the last boot).
+    # Check sentinel first — but also detect stale sentinels. A result file
+    # NEWER than the sentinel means a finished run's cleanup didn't fire —
+    # during a re-run the old result and the new sentinel coexist, so only
+    # that ordering proves the sentinel is leftover.
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
     result_file = dubbed_dir / f"analysis_{lang_norm}.json"
     if sentinel.exists():
-        if result_file.exists():
-            # Stale sentinel — analysis completed but cleanup didn't fire.
+        try:
+            result_newer = (
+                result_file.exists()
+                and result_file.stat().st_mtime >= sentinel.stat().st_mtime
+            )
+        except FileNotFoundError:
+            result_newer = False
+        if result_newer:
             try:
                 sentinel.unlink(missing_ok=True)
             except Exception:

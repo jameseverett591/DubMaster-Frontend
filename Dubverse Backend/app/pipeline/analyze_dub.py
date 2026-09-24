@@ -72,10 +72,15 @@ def analyze_dub(
 
     # Create sentinel to indicate analysis in progress, and clear any failure
     # recorded by a previous run — this run supersedes it. The sentinel holds
-    # the owning PID so the API can tell a crashed run (dead PID) from a live
-    # one without trusting file timestamps across restarts.
+    # the owning `pid:token` (PID + process start time) so the API can tell a
+    # crashed run from a live one without trusting timestamps across restarts
+    # or tripping on recycled PIDs.
     try:
-        sentinel.write_text(str(os.getpid()), encoding="utf-8")
+        from app.api.routes import _process_token
+        sentinel.write_text(
+            f"{os.getpid()}:{_process_token(os.getpid()) or ''}",
+            encoding="utf-8",
+        )
         error_file.unlink(missing_ok=True)
     except Exception:
         pass
