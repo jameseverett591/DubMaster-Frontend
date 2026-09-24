@@ -354,6 +354,13 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
               }
             }
           } else if (data.status === 'failed') {
+            // During a manual re-analyze, a 'failed' here can still be the OLD
+            // run's error file — the backend clears it when the new run claims,
+            // so until the new sentinel/result appears, keep watching.
+            if (reanalyzePendingRef.current) {
+              if (!cancelled) setQcLoading(true)
+              return
+            }
             // Terminal state — the run wrote its reason to disk. Stop polling
             // and show it; infinite retries here were the old wedge.
             if (!cancelled) {

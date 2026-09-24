@@ -71,12 +71,28 @@ def analyze_dub(
     error_file = dubbed_dir / f"analysis_{lang_norm}.error"
 
     # Create sentinel to indicate analysis in progress, and clear any failure
-    # recorded by a previous run — this run supersedes it.
+    # recorded by a previous run — this run supersedes it. The sentinel holds
+    # the owning PID so the API can tell a crashed run (dead PID) from a live
+    # one without trusting file timestamps across restarts.
     try:
-        sentinel.touch()
+        sentinel.write_text(str(os.getpid()), encoding="utf-8")
         error_file.unlink(missing_ok=True)
     except Exception:
         pass
+
+    def _fail(reason: str) -> Dict[str, Any]:
+        """Persist a failure reason for the GET endpoint, then return error."""
+        try:
+            error_file.write_text(
+                json.dumps({
+                    "reason": reason,
+                    "failed_at": datetime.utcnow().isoformat() + "Z",
+                }),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+        return {"status": "error", "reason": reason}
 
     try:
         has_export = dubbed_video.exists()
@@ -91,7 +107,7 @@ def analyze_dub(
             # its qc_preview_ prefix keeps it unambiguous against the real
             # export artifacts (dubbed_{lang}.mp4, dubbed_audio.wav).
             if not segments_file.exists():
-                return {"status": "error", "reason": "No segments available yet"}
+                return _fail("No segments available yet")
             with open(segments_file, "r", encoding="utf-8") as f:
                 seg_data = json.load(f)
             segs = seg_data.get("segments", [])
@@ -100,7 +116,7 @@ def analyze_dub(
                 for s in segs if s.get("path")
             ]
             if not merge_segments:
-                return {"status": "error", "reason": "No generated audio yet"}
+                return _fail("No generated audio yet")
 
             from app.services.dubbing_service import dubbing_service
             video_duration = seg_data.get("video_duration") or 0.0
@@ -112,7 +128,7 @@ def analyze_dub(
                 merge_segments, str(stitched_audio), video_duration
             )
             if not ok:
-                return {"status": "error", "reason": "Could not build preview audio for QC"}
+                return _fail("Could not build preview audio for QC")
             audio_source = stitched_audio
 
         analysis: Dict[str, Any] = {
@@ -252,17 +268,7 @@ def analyze_dub(
         logger.error(f"[ANALYSIS] Failed for job {job_id}: {e}", exc_info=True)
         # Persist the failure — the GET endpoint surfaces it as status "failed"
         # so the QC monitor shows a real error instead of polling forever.
-        try:
-            error_file.write_text(
-                json.dumps({
-                    "reason": str(e),
-                    "failed_at": datetime.utcnow().isoformat() + "Z",
-                }),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
-        return {"status": "error", "reason": str(e)}
+        return _fail(str(e))
     finally:
         # Remove sentinel
         try:

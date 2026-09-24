@@ -6142,13 +6142,51 @@ async def clone_voice(
 _PROCESS_STARTED_AT = time.time()
 
 
-def _clear_stale_analysis_sentinel(sentinel: Path) -> bool:
-    """Remove a .running sentinel left by a crashed/restarted process.
+def _pid_is_alive(pid: int) -> bool:
+    """True if a process with this PID currently exists."""
+    if os.name == "nt":
+        # os.kill(pid, 0) on Windows invokes TerminateProcess — it would kill
+        # the process being probed. OpenProcess is the safe existence check.
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
-    Returns True if the sentinel is gone (stale or already removed) and the
-    caller should proceed; False if a live run genuinely owns it.
+
+def _clear_stale_analysis_sentinel(sentinel: Path) -> bool:
+    """Remove a .running sentinel whose owning run can no longer finish.
+
+    Sentinels record their creator's PID: a run whose process is dead can
+    never complete, and a live PID means a live run — including one owned by
+    a different uvicorn worker, which must not be touched. Sentinels written
+    before the PID field existed fall back to the process-boot check.
+    Returns True when the sentinel is gone and the caller may proceed.
     """
     try:
+        pid_text = sentinel.read_text(encoding="utf-8").strip()
+        pid = int(pid_text) if pid_text else None
+    except FileNotFoundError:
+        return True
+    except Exception:
+        pid = None
+
+    try:
+        if pid is not None:
+            if not _pid_is_alive(pid):
+                sentinel.unlink(missing_ok=True)
+                return True
+            return False
         if sentinel.stat().st_mtime < _PROCESS_STARTED_AT:
             sentinel.unlink(missing_ok=True)
             return True
@@ -6175,6 +6213,7 @@ async def trigger_analysis(job_id: str, language: str, background_tasks: Backgro
 
     # Check if already running (stale sentinels cleared — see helper)
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
+    error_file = dubbed_dir / f"analysis_{lang_norm}.error"
     if sentinel.exists() and not _clear_stale_analysis_sentinel(sentinel):
         return JSONResponse(
             status_code=202,
@@ -6183,13 +6222,20 @@ async def trigger_analysis(job_id: str, language: str, background_tasks: Backgro
 
     from app.pipeline.analyze_dub import analyze_dub
 
-    background_tasks.add_task(
-        asyncio.to_thread,
-        analyze_dub,
-        job_id,
-        lang_norm,
-        job.video_path,
-    )
+    # Claim the run before scheduling: writing the sentinel here closes the
+    # gap where a GET or a second POST would otherwise see "no run" and
+    # duplicate it, and clearing the recorded failure up front stops a retry
+    # from reading the old error before the new task even starts.
+    try:
+        sentinel.write_text(str(os.getpid()), encoding="utf-8")
+        error_file.unlink(missing_ok=True)
+        background_tasks.add_task(
+            asyncio.to_thread, analyze_dub, job_id, lang_norm, job.video_path
+        )
+    except Exception:
+        sentinel.unlink(missing_ok=True)
+        raise
+
     logger.info(f"Job {job_id}: quality analysis triggered for {lang_norm}")
 
     return JSONResponse(
@@ -6358,16 +6404,25 @@ async def get_analysis(job_id: str, language: str):
                 content={"status": "running", "message": "Analysis in progress"}
             )
 
-    if not result_file.exists():
-        # A failed run leaves its reason behind — surface it instead of 404 so
-        # the editor can stop polling and show the failure.
-        error_file = dubbed_dir / f"analysis_{lang_norm}.error"
-        if error_file.exists():
+    # A failed run leaves its reason behind — surface it instead of 404 so
+    # the editor can stop polling and show the failure. When a previous
+    # result exists, the error only wins if it is NEWER than that result:
+    # an error from a retry that just failed must beat the stale success,
+    # while an error left over from before the last success is stale.
+    error_file = dubbed_dir / f"analysis_{lang_norm}.error"
+    if error_file.exists():
+        stale_error = (
+            result_file.exists()
+            and result_file.stat().st_mtime >= error_file.stat().st_mtime
+        )
+        if not stale_error:
             try:
                 err = _json.loads(error_file.read_text(encoding="utf-8"))
             except Exception:
                 err = {}
             return {"status": "failed", "reason": err.get("reason") or "Analysis failed"}
+
+    if not result_file.exists():
         raise HTTPException(
             status_code=404,
             detail="Analysis not found. Trigger with POST /api/analyze/{job_id}/{language}"
