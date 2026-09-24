@@ -7345,12 +7345,21 @@ export function DubVerseEditor({
               <div className="space-y-1.5 pt-1 border-t border-slate-800">
                 <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Share to')}</p>
                 <div className="flex gap-2">
-                  {/* Facebook */}
+                  {/* Facebook — download video then open Facebook. Its sharer
+                      URL only carries a link, so a file has to go in by hand. */}
                   <button
                     type="button"
-                    title={t('Share to Facebook')}
+                    title={t('Download for Facebook')}
                     className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#1877F2] hover:bg-[#1565C0] text-white transition-colors"
-                    onClick={() => window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}`, '_blank', 'width=600,height=400')}
+                    onClick={() => {
+                      if (activeDubbedVideoUrl) {
+                        const a = document.createElement('a')
+                        a.href = activeDubbedVideoUrl
+                        a.download = `${title || 'dubbed_video'}.mp4`
+                        a.click()
+                      }
+                      window.open('https://www.facebook.com/', '_blank')
+                    }}
                   >
                     <Facebook className="h-4 w-4" />
                     <span className="text-[9px] font-medium">{t('Facebook')}</span>
