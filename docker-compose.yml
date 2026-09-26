@@ -88,6 +88,9 @@ services:
     environment:
       - NODE_ENV=development
       - NEXT_PUBLIC_API_URL=http://localhost:8000
+      # Server-side API routes (Stripe webhook) run inside this container —
+      # localhost:8000 there is the frontend itself. Use the compose service name.
+      - INTERNAL_API_URL=http://backend:8000
       - WATCHPACK_POLLING=true
     depends_on:
       backend:

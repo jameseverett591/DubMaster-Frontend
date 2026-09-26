@@ -10391,6 +10391,38 @@ def _vt_video_notes(job_id: str, token: str, preset: str, duration_sec: float = 
         logger.info(f"[VIDEO-NOTES] job={job_id} {duration_sec/60:.1f}min exceeds VT_MAX_MINUTES={max_min}")
         return {"status": "error", "provider": "videotranscriber",
                 "reason": "exceeds_max_minutes"}
+@router.post("/webhooks/stripe")
+async def stripe_webhook_relay(request: Request):
+    """Stripe can't reach the Next.js frontend — ngrok exposes only this
+    backend, so Stripe posts to <public>/api/webhooks/stripe and we relay the
+    request verbatim to the frontend's verifier. The raw body is forwarded
+    untouched: the stripe-signature HMAC covers it byte-for-byte, so any
+    parsing would break verification. No auth dep here — the frontend's
+    signature check IS the auth."""
+    import httpx
+    body = await request.body()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "http://frontend:3001/api/webhooks/stripe",
+                content=body,
+                headers={
+                    "content-type": request.headers.get(
+                        "content-type", "application/json"),
+                    "stripe-signature": request.headers.get(
+                        "stripe-signature", ""),
+                },
+            )
+    except Exception as e:
+        # 502 so Stripe retries — the frontend may be mid-restart.
+        raise HTTPException(status_code=502, detail=f"webhook relay failed: {e}")
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type="application/json",
+    )
+
+
 
     state = vt.load_task_state(job_id)
     if not state:
