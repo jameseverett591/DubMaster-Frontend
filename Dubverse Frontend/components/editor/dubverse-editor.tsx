@@ -6594,7 +6594,7 @@ export function DubVerseEditor({
       isPreviewing: false,
       isUserEdited: false,
       audio_url,
-      status: 'auto',
+      status: 'auto' as const,
       committed_audio_url: undefined,
       committed_adapted_text: undefined,
       committed_start_time: undefined,
@@ -10442,7 +10442,6 @@ export function DubVerseEditor({
                   setReferenceJobId(null)
                   setReferenceDetectedLang(null)
                   setSelectedReferenceIndex(null)
-                  revertToOriginal()
                   if (videoRef.current) {
                     videoRef.current.pause()
                     videoRef.current.src = ''
@@ -10809,7 +10808,7 @@ export function DubVerseEditor({
               <VelmaPanel
                 segment={selectedSegmentIndex !== null ? displaySegments[selectedSegmentIndex] : null}
                 voices={[]}
-                setRightPanelTab={setRightPanelTab}
+                setRightPanelTab={setRightPanelTab as (tab: string) => void}
               />
             </div>
           )}
@@ -11382,7 +11381,7 @@ export function DubVerseEditor({
               if (!seg) return
               const targetDur = seg.end_time - seg.start_time
               const ratio = saved.duration > 0 ? targetDur / saved.duration : 1
-              const stretched = saved.curve.map((v: number, i: number) => v)
+              const stretched = saved.curve.map((v) => v.y)
               setImportedSegments(prev => {
                 if (!prev) return prev
                 return prev.map((s, i) => i === selectedSegmentIndex
@@ -11451,7 +11450,7 @@ export function DubVerseEditor({
                               <div className="text-[10px] text-slate-500 italic truncate">&ldquo;{curve.source_segment_text}&rdquo;</div>
                             )}
                           </div>
-                          <Sparkline curve={curve.curve as number[]} />
+                          <Sparkline curve={curve.curve.map(p => p.y)} />
                         </div>
                         <div className="flex items-center gap-1.5 flex-wrap">
                           {curve.core_emotion && (

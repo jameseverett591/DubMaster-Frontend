@@ -393,6 +393,12 @@ export interface RegenerateSegmentResponse {
     // True when the take was rendered in staged mode — path points at the
     // uncommitted _staged file, and nothing in segments.json changed.
     staged?: boolean
+    // Set only when the regenerated audio overran its slot — informational,
+    // never blocking (see the frontend's overlap badge for the real gate).
+    timing_exclusion?: boolean
+    timing_audio_duration?: number
+    timing_slot_duration?: number
+    timing_overlap?: number
   }
 }
 

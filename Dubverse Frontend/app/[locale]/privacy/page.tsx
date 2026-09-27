@@ -26,161 +26,80 @@ export default function PrivacyPage() {
 
       {/* Content */}
       <main className="relative max-w-4xl mx-auto px-6 py-16">
-        {/* Page heading */}
         <div className="flex items-center gap-4 mb-3">
           <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-gradient-to-br from-[#A855F7]/20 to-[#22D3EE]/20 border border-[#A855F7]/30">
             <Shield className="w-6 h-6 text-[#C084FC]" />
           </div>
           <h1 className="text-4xl font-bold text-white">Privacy Policy</h1>
         </div>
-        <p className="text-xs text-[#64748B] mb-6">Last updated: January 2025</p>
+        <p className="text-xs text-[#64748B] mb-6">Last updated: September 26, 2026</p>
 
         <hr className="border-[#A855F7]/20 mb-8" />
 
-        <p className="text-[#94A3B8] leading-relaxed">
-          At DubMaster, we are committed to protecting your privacy and handling your personal data with
-          transparency and care. This Privacy Policy explains what information we collect, how we use it,
-          and the rights you have over your data when you use the DubMaster service.
-        </p>
+        <p className="text-[#94A3B8] leading-relaxed">{"This Privacy Policy explains what information DubMaster collects, how it is used, and the choices you have."}</p>
 
-        {/* Section 1 */}
-        <h2 className="text-2xl font-bold text-white mb-4 mt-10">1. Information We Collect</h2>
-        <p className="text-[#94A3B8] leading-relaxed mb-4">
-          We collect only the data necessary to provide and improve our service:
-        </p>
-
-        <h3 className="text-lg font-semibold text-[#C084FC] mb-2 mt-6">Account Information</h3>
-        <p className="text-[#94A3B8] leading-relaxed">
-          When you create an account, we collect your name, email address, and a securely hashed version
-          of your password. We never store your password in plain text.
-        </p>
-
-        <h3 className="text-lg font-semibold text-[#C084FC] mb-2 mt-6">Payment Information</h3>
-        <p className="text-[#94A3B8] leading-relaxed">
-          Payments are processed exclusively by Stripe, our PCI-DSS compliant payment processor. DubMaster
-          never stores, transmits, or has access to your card details. We only retain a Stripe customer ID
-          and subscription status linked to your account.
-        </p>
-
-        <h3 className="text-lg font-semibold text-[#C084FC] mb-2 mt-6">Usage Data</h3>
-        <p className="text-[#94A3B8] leading-relaxed">
-          We record activity such as videos uploaded, dubbing jobs submitted, languages selected, and
-          dubbing minutes consumed. This data is used to enforce plan limits and analyse service usage.
-        </p>
-
-        <h3 className="text-lg font-semibold text-[#C084FC] mb-2 mt-6">Technical Data</h3>
-        <p className="text-[#94A3B8] leading-relaxed">
-          We may collect your IP address, browser type, operating system, and device information for
-          security, diagnostics, and fraud prevention purposes.
-        </p>
-
-        {/* Section 2 */}
-        <h2 className="text-2xl font-bold text-white mb-4 mt-10">2. How We Use Your Information</h2>
-        <p className="text-[#94A3B8] leading-relaxed mb-2">
-          The data we collect is used solely for the following purposes:
-        </p>
-        <ul className="list-disc list-inside space-y-2 text-[#94A3B8] leading-relaxed">
-          <li>Provide, operate, and improve the DubMaster service</li>
-          <li>Process payments and manage your subscription</li>
-          <li>Send transactional emails such as confirmations, receipts, and account alerts</li>
-          <li>Analyse aggregate usage patterns to develop and improve features</li>
-          <li>Comply with applicable legal and regulatory obligations</li>
+        <h2 className="text-2xl font-bold text-white mb-4 mt-10">{"1. Information We Collect"}</h2>
+        <p className="text-[#94A3B8] leading-relaxed mb-3">{"DubMaster is an AI video dubbing platform. We collect only what is needed to run it:"}</p>
+        <ul className="list-disc pl-6 space-y-1.5 text-[#94A3B8] leading-relaxed mb-3">
+          <li>{"Account information: your email address and the sign-in details managed by our authentication provider (Supabase), including Google sign-in if you use it."}</li>
+          <li>{"Payment information: payments are processed by Stripe. We never see or store your card number. We keep a Stripe customer ID, payment amounts, and payment status."}</li>
+          <li>{"Content you upload: videos and audio files, and the transcripts, translations, voice settings and dubbed videos generated from them."}</li>
+          <li>{"Voice samples: if you use voice cloning, the audio samples you provide."}</li>
+          <li>{"YouTube data, only if you choose to connect YouTube (see section 3)."}</li>
+          <li>{"Usage information: the minutes rendered and wallet balance needed for billing."}</li>
         </ul>
-
-        {/* Section 3 */}
-        <h2 className="text-2xl font-bold text-white mb-4 mt-10">3. Data Storage &amp; Security</h2>
-
-        <h3 className="text-lg font-semibold text-[#C084FC] mb-2 mt-6">Database</h3>
-        <p className="text-[#94A3B8] leading-relaxed">
-          Account and usage data is stored on Supabase (PostgreSQL) with encryption at rest and in
-          transit using TLS. Access to the database is restricted to authorised personnel only.
-        </p>
-
-        <h3 className="text-lg font-semibold text-[#C084FC] mb-2 mt-6">Video Processing</h3>
-        <p className="text-[#94A3B8] leading-relaxed">
-          Videos are processed via secure cloud infrastructure. Uploaded files are retained only as long
-          as necessary to fulfil your dubbing request, after which they are deleted from our processing
-          pipeline.
-        </p>
-
-        <h3 className="text-lg font-semibold text-[#C084FC] mb-2 mt-6">Payment Security</h3>
-        <p className="text-[#94A3B8] leading-relaxed">
-          All payment data is handled by Stripe with full PCI-DSS compliance. We never store card numbers,
-          CVVs, or any sensitive financial details on our servers.
-        </p>
-
-        <h3 className="text-lg font-semibold text-[#C084FC] mb-2 mt-6">No Data Selling</h3>
-        <p className="text-[#94A3B8] leading-relaxed">
-          We will never sell, rent, or trade your personal data to third parties for any purpose.
-        </p>
-
-        {/* Section 4 */}
-        <h2 className="text-2xl font-bold text-white mb-4 mt-10">4. Your Rights</h2>
-        <p className="text-[#94A3B8] leading-relaxed mb-2">
-          You have the following rights with respect to your personal data:
-        </p>
-        <ul className="list-disc list-inside space-y-2 text-[#94A3B8] leading-relaxed">
-          <li>
-            <span className="text-white font-medium">Access &amp; Correction:</span> View and update your
-            account information at any time from your account settings.
-          </li>
-          <li>
-            <span className="text-white font-medium">Data Export:</span> Request a copy of your data by
-            contacting{" "}
-            <a
-              href="mailto:support@dubmaster.ai"
-              className="text-[#C084FC] hover:text-[#A855F7] transition-colors"
-            >
-              support@dubmaster.ai
-            </a>
-            .
-          </li>
-          <li>
-            <span className="text-white font-medium">Marketing Opt-out:</span> Withdraw consent for
-            marketing communications at any time via the unsubscribe link in any email or through account
-            settings.
-          </li>
-          <li>
-            <span className="text-white font-medium">Right to Erasure:</span> Deleting your account will
-            result in the removal of all associated personal data within 30 days.
-          </li>
+        <h2 className="text-2xl font-bold text-white mb-4 mt-10">{"2. How We Use Your Information"}</h2>
+        <ul className="list-disc pl-6 space-y-1.5 text-[#94A3B8] leading-relaxed mb-3">
+          <li>{"To provide the dubbing service: transcribing, translating, voicing and rendering your videos."}</li>
+          <li>{"To bill you and to manage your account and wallet."}</li>
+          <li>{"To keep the service secure and to fix errors."}</li>
         </ul>
-
-        {/* Section 5 */}
-        <h2 className="text-2xl font-bold text-white mb-4 mt-10">5. Cookies</h2>
-
-        <h3 className="text-lg font-semibold text-[#C084FC] mb-2 mt-6">Essential Cookies</h3>
-        <p className="text-[#94A3B8] leading-relaxed">
-          We use essential cookies to maintain your authenticated session via Supabase. These cookies are
-          strictly necessary for the service to function and cannot be disabled.
-        </p>
-
-        <h3 className="text-lg font-semibold text-[#C084FC] mb-2 mt-6">Third-Party Tracking</h3>
-        <p className="text-[#94A3B8] leading-relaxed">
-          We do not use third-party tracking or advertising cookies without your explicit consent.
-        </p>
-
-        {/* Section 6 */}
-        <h2 className="text-2xl font-bold text-white mb-4 mt-10">6. Contact</h2>
-        <p className="text-[#94A3B8] leading-relaxed">
-          If you have any questions about this Privacy Policy or wish to make a data request, please
-          contact our privacy team:
-        </p>
-        <p className="mt-3 text-[#94A3B8] leading-relaxed">
-          Email:{" "}
-          <a
-            href="mailto:privacy@dubmaster.ai"
-            className="text-[#C084FC] hover:text-[#A855F7] transition-colors"
-          >
-            privacy@dubmaster.ai
-          </a>
-        </p>
+        <p className="text-[#94A3B8] leading-relaxed mb-3">{"We do not sell your personal information or your content, and we do not use your content to advertise to you."}</p>
+        <h2 className="text-2xl font-bold text-white mb-4 mt-10">{"3. YouTube Data and Google API Services"}</h2>
+        <p className="text-[#94A3B8] leading-relaxed mb-3">{"DubMaster offers an optional \"Sign in with YouTube\" feature. If you use it, we request the youtube.readonly scope, which lets DubMaster read your own YouTube channel's list of videos."}</p>
+        <ul className="list-disc pl-6 space-y-1.5 text-[#94A3B8] leading-relaxed mb-3">
+          <li>{"We use this only to show you the videos on your own channel and to import the ones you choose for dubbing."}</li>
+          <li>{"The access token is held in your browser for the current session only. It is not sent to or stored on our servers, and it is revoked when you sign out of YouTube inside DubMaster."}</li>
+          <li>{"We do not sell, share or transfer YouTube data to third parties, and we do not use it for advertising."}</li>
+          <li>{"You can revoke DubMaster's access at any time at https://myaccount.google.com/permissions."}</li>
+        </ul>
+        <p className="text-[#94A3B8] leading-relaxed mb-3">{"DubMaster's use and transfer of information received from Google APIs adheres to the Google API Services User Data Policy, including the Limited Use requirements."}</p>
+        <p className="text-[#94A3B8] leading-relaxed mb-3">{"Videos you import by pasting a URL are downloaded from YouTube's public pages. You are responsible for having the right to import them (see our Terms of Service)."}</p>
+        <h2 className="text-2xl font-bold text-white mb-4 mt-10">{"4. Third-Party Services"}</h2>
+        <p className="text-[#94A3B8] leading-relaxed mb-3">{"To deliver the service we send data to the following providers, only as needed for their function:"}</p>
+        <ul className="list-disc pl-6 space-y-1.5 text-[#94A3B8] leading-relaxed mb-3">
+          <li>{"Stripe: payment processing."}</li>
+          <li>{"Supabase: account authentication and our database."}</li>
+          <li>{"Anthropic: language models used for translation and scene summaries (transcript text)."}</li>
+          <li>{"Deepgram and Speechmatics: speech recognition and speaker identification (audio)."}</li>
+          <li>{"Fish Audio and ElevenLabs: synthetic voice generation and voice cloning (text and voice samples)."}</li>
+          <li>{"Sync.Labs: lip-sync processing (your video and the dubbed audio)."}</li>
+          <li>{"Hume: emotion analysis (audio)."}</li>
+          <li>{"RunPod: GPU compute that processes your media."}</li>
+          <li>{"Cloudflare R2: storage for media files."}</li>
+          <li>{"Google / YouTube OAuth: optional sign-in to browse your own channel."}</li>
+        </ul>
+        <p className="text-[#94A3B8] leading-relaxed mb-3">{"Each provider handles data under its own terms and privacy policy."}</p>
+        <h2 className="text-2xl font-bold text-white mb-4 mt-10">{"5. Data We Store and Retention"}</h2>
+        <p className="text-[#94A3B8] leading-relaxed mb-3">{"We store your dubbed video outputs, project data and uploaded source files so you can return to and edit your projects. Projects are kept indefinitely. Deleting a job deletes its files, and deleting your account deletes your data."}</p>
+        <p className="text-[#94A3B8] leading-relaxed mb-3">{"Payment records may be retained as required for accounting and legal obligations."}</p>
+        <h2 className="text-2xl font-bold text-white mb-4 mt-10">{"6. Share Links"}</h2>
+        <p className="text-[#94A3B8] leading-relaxed mb-3">{"If you choose to share a finished dub, DubMaster creates a public link that is valid for 90 days. Anyone who has the link can view and download the dubbed video. Do not share the link with anyone you do not want to have the video."}</p>
+        <h2 className="text-2xl font-bold text-white mb-4 mt-10">{"7. Your Rights"}</h2>
+        <ul className="list-disc pl-6 space-y-1.5 text-[#94A3B8] leading-relaxed mb-3">
+          <li>{"Access: you can ask what personal data we hold about you."}</li>
+          <li>{"Deletion: you can delete individual jobs, or ask us to delete your account and data."}</li>
+          <li>{"Portability: you can download your finished dubs, and you can ask us for a copy of your data."}</li>
+        </ul>
+        <p className="text-[#94A3B8] leading-relaxed mb-3">{"To exercise these rights, contact us at the address below."}</p>
+        <h2 className="text-2xl font-bold text-white mb-4 mt-10">{"8. Security"}</h2>
+        <p className="text-[#94A3B8] leading-relaxed mb-3">{"We use access controls and encrypted connections to protect your data. No system is perfectly secure, and we cannot guarantee absolute security."}</p>
+        <h2 className="text-2xl font-bold text-white mb-4 mt-10">{"9. Contact"}</h2>
+        <p className="text-[#94A3B8] leading-relaxed mb-3">{"DubMaster (an unincorporated business). For any privacy question or request:"}</p>
+        <p className="text-[#94A3B8] leading-relaxed mb-3">Email:{" "}<a href="mailto:james.everett.jmpl@gmail.com" className="text-[#C084FC] hover:text-[#A855F7] transition-colors">james.everett.jmpl@gmail.com</a></p>
 
         <hr className="border-[#A855F7]/20 mt-16 mb-6" />
-        <p className="text-xs text-[#64748B]">
-          This policy may be updated from time to time. Continued use of DubMaster after changes are
-          posted constitutes your acceptance of the revised policy.
-        </p>
+        <p className="text-xs text-[#64748B]">{"We may update this Privacy Policy from time to time. The date above shows the latest revision; continued use of the service means you accept the updated policy."}</p>
       </main>
     </div>
   );
