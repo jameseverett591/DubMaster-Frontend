@@ -268,7 +268,7 @@ interface EditorState {
   setImportedSegmentsJobId: (jobId: string | null) => void
 }
 
-export const useEditorStore = create<EditorState>(
+export const useEditorStore = create<EditorState>()(
   persist(
     (set, get) => ({
   // Initial state
