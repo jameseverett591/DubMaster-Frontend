@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
-import { Loader2, Film, Trash2 } from "lucide-react"
+import { Loader2, Film, Trash2, Share2, Check } from "lucide-react"
 import { apiClient } from "@/lib/api-client"
 import { createClient } from "@/lib/supabase/client"
+import { shareDubbedVideo } from "@/lib/share-dub"
 
 import { useT } from '@/lib/use-t'
 
@@ -22,6 +23,8 @@ type Project = {
   updated_at: string
   /** Retention date. null/absent = permanent (Professional). */
   expires_at?: string | null
+  /** True once the job's render has been billed. Gates Share. */
+  paid?: boolean
 }
 
 interface RecentProjectsProps {
@@ -36,6 +39,17 @@ export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [sharedId, setSharedId] = useState<string | null>(null)
+
+  const handleShare = async (project: Project) => {
+    if (!project.target_language) return
+    const url = apiClient.getDubDownloadURL(project.job_id, project.target_language)
+    const result = await shareDubbedVideo({ url, title: project.title || project.job_id.slice(0, 8) })
+    if (result === "copied") {
+      setSharedId(project.job_id)
+      window.setTimeout(() => setSharedId(null), 1500)
+    }
+  }
 
   useEffect(() => {
     const supabase = createClient()
@@ -176,6 +190,16 @@ export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
               >
                 {copiedId === project.job_id ? 'Copied' : project.job_id}
               </button>
+              {project.paid && project.status.toLowerCase().startsWith("complete") && project.target_language && (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); void handleShare(project) }}
+                  className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+                >
+                  {sharedId === project.job_id ? <Check className="h-3 w-3 text-emerald-400" /> : <Share2 className="h-3 w-3" />}
+                  {sharedId === project.job_id ? t("Link copied!") : t("Share")}
+                </button>
+              )}
               <div className="mt-1 flex items-center justify-between text-xs text-muted-foreground">
                 <span className="capitalize">{project.status}</span>
                 <span>{formatDate(project.updated_at)}</span>

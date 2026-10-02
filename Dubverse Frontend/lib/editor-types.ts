@@ -98,6 +98,10 @@ export interface Segment {
   committed_pitch?: number
   committed_emotion?: string
   committed_speed?: number
+  // Pace the backend last rendered this take at (first-pass generation speed,
+  // or use_speed persisted by /segment/regenerate). The speed chip reads it so
+  // the control shows the actual pace rather than always "1.00".
+  speed?: number
   committed_audio_url?: string
   committed_start_time?: number
   committed_end_time?: number

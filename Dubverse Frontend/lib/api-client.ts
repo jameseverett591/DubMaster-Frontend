@@ -556,6 +556,17 @@ export interface QualityAnalysis {
     reason?: string
   }
   loudness: LoudnessAnalysis
+  source_quality?: {
+    status: string
+    warnings?: string[]
+    flags?: string[]
+    frame_stalls?: Array<{ start: number; end: number }>
+    black_spans?: Array<{ start: number; end: number }>
+    mean_volume_db?: number
+    max_volume_db?: number
+    re_recording_suspected?: boolean
+    reason?: string
+  }
   emotion?: EmotionAnalysis
   pronunciation?: PronunciationAssessment
   translation?: TranslationQuality

@@ -85,6 +85,7 @@ import PerformPanel from '@/components/editor/perform-panel'
 import { HeatmapBar } from '@/components/timeline/HeatmapBar'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { ExportModal } from '@/components/editor/export-modal'
+import { DubReadyDialog } from '@/components/dub-ready-dialog'
 import { ReviewQueuePanel } from '@/components/editor/review-queue-panel'
 import { stitchRPT, stitchRPTWindow, overlayStagedEdits, clearCache, scheduleRPTPlayback, effStart, effEnd, CROSSFADE_MAX_SEC, CROSSFADE_WARN_SEC, type CrosslayerRange } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
@@ -1541,7 +1542,7 @@ export function DubVerseEditor({
     segmentIndex: number
   } | null>(null)
   const [addSegmentFeedback, setAddSegmentFeedback] = useState<'success' | 'error' | null>(null)
-  const [shareCopied, setShareCopied] = useState<'link' | 'video' | null>(null)
+  const [showDubReady, setShowDubReady] = useState(false)
   // The HTML `download` attribute is IGNORED for cross-origin URLs (UI on
   // :3001, API on :8000), so `<a download href=activeDubbedVideoUrl>` just
   // navigated and PLAYED the film inline instead of saving it. The backend's
@@ -2430,6 +2431,17 @@ export function DubVerseEditor({
     if (i == null) return ''
     const s = displaySegments[i]
     return s ? getSegmentKey(s) : ''
+  }, [displaySegments])
+
+  // Pace this segment's audio was actually rendered at — the committed choice,
+  // else the generation speed the backend stored on the segment. stagedSpeeds
+  // layers on top; controls that read 1.0 instead would show "1.00" on a take
+  // that was really rendered at 1.4x and regenerate it slower than it sounded.
+  const renderedSpeedAt = useCallback((i: number | null | undefined): number => {
+    if (i == null) return 1.0
+    const s = displaySegments[i]
+    const v = s ? (s.committed_speed ?? s.speed) : undefined
+    return typeof v === 'number' && isFinite(v) && v > 0 ? v : 1.0
   }, [displaySegments])
 
   // Bounds of the current group selection: the first/last selected segment (only
@@ -5691,7 +5703,7 @@ export function DubVerseEditor({
       }, undefined)
       const regenPayload = {
         text: regenerateText,
-        speed: stagedSpeeds[keyAt(activeIndex)] ?? 1.0,
+        speed: stagedSpeeds[keyAt(activeIndex)] ?? renderedSpeedAt(activeIndex),
         // '' = explicit clear (backend pops seg["emotion"]); undefined = unset → use committed
         emotion: stagedEmotions[keyAt(activeIndex)] ?? segment.committed_emotion,
         // attached_traits = frozen on first keystroke. undefined = no change; [] = clear; non-empty = set
@@ -5872,7 +5884,7 @@ export function DubVerseEditor({
       })
       setPlaybackMode('preview')
       const _committedVoice = response.segment.voice_id ?? voiceOverride ?? stagedVoices[keyAt(activeIndex)] ?? speakerVoiceMap[segment.speaker_id]
-      const _committedSpeed = stagedSpeeds[keyAt(activeIndex)] ?? 1.0
+      const _committedSpeed = stagedSpeeds[keyAt(activeIndex)] ?? renderedSpeedAt(activeIndex)
       commitSegmentChanges(activeIndex, {
         committed_audio_url: audio_url,
         committed_voice_id: _committedVoice,
@@ -6798,6 +6810,13 @@ export function DubVerseEditor({
   // Everything else becomes a warning on click. A disabled button tells the user
   // "no" without telling them why or what to do about it, and the reason lived
   // in a tooltip, which is undiscoverable. See renderWarnings below.
+  // Display-only dismiss for the failed-save banner. The failure record itself
+  // (failedSegments) is untouched — MAKE MOVIE still gates on it. A NEW failure
+  // after dismissal re-arms the banner via the key-change effect below.
+  const [failedBannerDismissed, setFailedBannerDismissed] = useState(false)
+  const failedSegmentsKey = Object.keys(failedSegments).join(',')
+  useEffect(() => { setFailedBannerDismissed(false) }, [failedSegmentsKey])
+
   const [confirmRender, setConfirmRender] = useState<null | {
     staged: number; unreviewed: number; failed: string[]
     /** Sections still lifted to the layover track. They are excluded from the
@@ -6918,6 +6937,12 @@ export function DubVerseEditor({
     (lipQuote?.current_selection ?? []).every(id => (lipQuote?.synced_selection ?? []).includes(id))
   const shareUnlocked = isPro || (renderQuote !== null && renderSettled && lipSyncSettled)
 
+  // Payment-success moment: the only place in the editor that offers Share.
+  // Opens once per finished Make Movie, and only when the job is paid.
+  useEffect(() => {
+    if (rebuildStatus === 'complete' && shareUnlocked && activeDubbedVideoUrl) setShowDubReady(true)
+  }, [rebuildStatus, shareUnlocked, activeDubbedVideoUrl])
+
   const handleRebuildVideo = useCallback(async () => {
     // Lip-sync is paid BEFORE the vendor runs — if the wallet can't cover the
     // selected scope, stop here and hand off to the checkout modal instead of
@@ -6958,14 +6983,24 @@ export function DubVerseEditor({
       const absUrl = apiClient.toAbsoluteUrl(response.dubbed_video_url)
       setActiveDubbedVideoUrl(absUrl)
       const lip = (response as any).lipsync
+      // Lip sync was requested but never ran. A vendor rejection (suspended
+      // account, refused job) is NOT a footnote — it's a hard banner that
+      // stays until dismissed. Auto-hide is skipped for it below.
+      const lipFailed = lip && (lip.vendor_error || lip.applied === false)
       if (lip?.refunded) {
         setLipSyncNote('lip-sync charge refunded — provider rejected the job')
       } else if (lip?.charge_seconds) {
         setLipSyncNote(`lip sync billed ~$${(lip.charge_seconds * 2.5 / 60).toFixed(2)}`)
-      } else if (lip && lip.applied === false) {
+      } else if (lipFailed) {
         setLipSyncNote('lip sync not applied — video kept as dubbed')
       }
-      setRebuildStatus('complete')
+      if (lipFailed) {
+        const detail = lip.vendor_error || (lip.skipped ? String(lip.skipped).replace(/_/g, ' ') : 'the provider did not run the job')
+        setRebuildError(`Lip sync did NOT run — ${detail}. The film is the un-synced dub; nothing was billed for lip sync.`)
+        setRebuildStatus('error')
+      } else {
+        setRebuildStatus('complete')
+      }
       // Keep any edit made WHILE the rebuild ran. The remix read segments.json
       // when it started, so work committed after that is not in the finished
       // film; clearing every flag would tell the user it was.
@@ -6985,7 +7020,9 @@ export function DubVerseEditor({
       // by ear before it leaves the building, so a rebuild ends in the editor
       // with the finished film loaded for review. Export is a separate, deliberate
       // press once the review passes.
-      setTimeout(() => setRebuildStatus('idle'), 5000)
+      // Auto-hide on success only — a lip-sync failure banner must stay up
+      // until the user dismisses it, or a rejected paid pass reads as done.
+      if (!lipFailed) setTimeout(() => setRebuildStatus('idle'), 5000)
       if (videoRef.current) {
         videoRef.current.volume = isMuted ? 0 : masterVolume / 100
       }
@@ -8400,32 +8437,6 @@ export function DubVerseEditor({
             </Button>
           </Link>
           <h1 className="text-sm font-medium truncate max-w-[300px]">{title}</h1>
-
-          {/* Failed-save warning, beside the filename in the sub-header — it
-              used to sit in the top nav before MAKE MOVIE, where the job id
-              and the lip-sync checkbox made it unreadable. A save is
-              commit-what-you-can, so a failed segment is NOT in the render —
-              the user has to know that before spending a full render on an
-              incomplete film. */}
-          {Object.keys(failedSegments).length > 0 && (
-            <div className={cn(
-              "ml-2 flex items-center gap-2 rounded-md border px-3 py-1.5 shrink-0",
-              releasedForRender
-                ? "border-amber-500/60 bg-amber-500/15"
-                : "border-red-500/60 bg-red-500/15"
-            )}>
-              <AlertCircle className={cn("h-4 w-4 shrink-0", releasedForRender ? "text-amber-400" : "text-red-400")} />
-              <span className={cn("text-xs font-semibold whitespace-nowrap", releasedForRender ? "text-amber-200" : "text-red-200")}>
-                {Object.keys(failedSegments).length === 1
-                  ? `Segment ${Object.keys(failedSegments)[0]} FAILED`
-                  : `Segments ${Object.keys(failedSegments).join(', ')} FAILED`}
-                {' — '}
-                {releasedForRender
-                  ? 'RELEASED: this render will not contain them.'
-                  : `${Object.keys(failedSegments).length === 1 ? 'segment' : 'segments'} will be re-loaded at the end for re-editing.`}
-              </span>
-            </div>
-          )}
         </div>
 
         {/* Live cost counter + budget — the big panel in the middle of the
@@ -8535,165 +8546,6 @@ export function DubVerseEditor({
           <Button variant="ghost" size="sm" className="h-8" onClick={handleGlobalUndo} title={t('Undo last edit')}>
             <RotateCcw className="h-4 w-4" />
           </Button>
-          <Popover onOpenChange={() => setShareCopied(null)}>
-            <PopoverTrigger asChild>
-              <Button variant="ghost" size="sm" className="h-8">
-                <Share2 className="h-4 w-4" />
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent align="end" className="w-80 bg-slate-900 border-slate-700 p-4 space-y-4">
-              <p className="text-sm font-semibold text-white flex items-center gap-2">
-                <Share2 className="h-4 w-4 text-amber-400" />
-                {t('Share Project')}
-              </p>
-
-              {shareUnlocked ? (
-              <>
-              {/* Editor link — collaboration access rides the same payment
-                  gate as video sharing: an unpaid job's edit page (which plays
-                  the dub) does not leave the app either. */}
-              <div className="space-y-1.5">
-                <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Editor link')}</p>
-                <div className="flex gap-2">
-                  <input
-                    readOnly
-                    aria-label={t('Editor link')}
-                    value={typeof window !== 'undefined' ? window.location.href : ''}
-                    className="flex-1 text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 truncate focus:outline-none"
-                  />
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className={cn(
-                      "h-7 px-2 text-xs border-slate-700 shrink-0 transition-colors",
-                      shareCopied === 'link' ? "text-emerald-400 border-emerald-500/40" : "text-slate-300"
-                    )}
-                    onClick={() => {
-                      navigator.clipboard.writeText(window.location.href)
-                      setShareCopied('link')
-                      setTimeout(() => setShareCopied(null), 2000)
-                    }}
-                  >
-                    {shareCopied === 'link' ? <Check className="h-3 w-3" /> : <Link2 className="h-3 w-3" />}
-                  </Button>
-                </div>
-              </div>
-
-              {/* Dubbed video */}
-              {activeDubbedVideoUrl ? (
-                <div className="space-y-1.5">
-                  <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Dubbed video')}</p>
-                  <div className="flex gap-2">
-                    <input
-                      readOnly
-                      aria-label={t('Dubbed video link')}
-                      value={activeDubbedVideoUrl}
-                      className="flex-1 text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 truncate focus:outline-none"
-                    />
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className={cn(
-                        "h-7 px-2 text-xs border-slate-700 shrink-0 transition-colors",
-                        shareCopied === 'video' ? "text-emerald-400 border-emerald-500/40" : "text-slate-300"
-                      )}
-                      onClick={() => {
-                        navigator.clipboard.writeText(activeDubbedVideoUrl)
-                        setShareCopied('video')
-                        setTimeout(() => setShareCopied(null), 2000)
-                      }}
-                    >
-                      {shareCopied === 'video' ? <Check className="h-3 w-3" /> : <Link2 className="h-3 w-3" />}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 px-2 text-xs border-slate-700 text-slate-300 shrink-0"
-                      asChild
-                    >
-                      <a href={withAttachment(apiClient.refreshMediaUrl(activeDubbedVideoUrl))} title={t('Download dubbed video')}>
-                        <Download className="h-3 w-3" />
-                      </a>
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                <p className="text-xs text-slate-600 italic">{t('No dubbed video yet — rebuild to generate one.')}</p>
-              )}
-
-              {/* Social share */}
-              <div className="space-y-1.5 pt-1 border-t border-slate-800">
-                <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Share to')}</p>
-                <div className="flex gap-2">
-                  {/* Facebook */}
-                  <button
-                    type="button"
-                    title={t('Share to Facebook')}
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#1877F2] hover:bg-[#1565C0] text-white transition-colors"
-                    onClick={() => window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}`, '_blank', 'width=600,height=400')}
-                  >
-                    <Facebook className="h-4 w-4" />
-                    <span className="text-[9px] font-medium">{t('Facebook')}</span>
-                  </button>
-                  {/* Twitter / X */}
-                  <button
-                    type="button"
-                    title="Share to X (Twitter)"
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-black hover:bg-neutral-800 text-white transition-colors"
-                    onClick={() => window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}&text=${encodeURIComponent(`Check out my dubbed video — ${title}`)}`, '_blank', 'width=600,height=400')}
-                  >
-                    <Twitter className="h-4 w-4" />
-                    <span className="text-[9px] font-medium">{t('X / Twitter')}</span>
-                  </button>
-                  {/* YouTube — download video then open YouTube Studio */}
-                  <button
-                    type="button"
-                    title={t('Download for YouTube')}
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#FF0000] hover:bg-[#CC0000] text-white transition-colors"
-                    onClick={() => {
-                      if (activeDubbedVideoUrl) {
-                        const a = document.createElement('a')
-                        a.href = withAttachment(apiClient.refreshMediaUrl(activeDubbedVideoUrl))
-                        a.click()
-                      }
-                      window.open('https://studio.youtube.com/channel/upload', '_blank')
-                    }}
-                  >
-                    <Youtube className="h-4 w-4" />
-                    <span className="text-[9px] font-medium">{t('YouTube')}</span>
-                  </button>
-                  {/* Instagram — download video (no web upload API) */}
-                  <button
-                    type="button"
-                    title={t('Download for Instagram')}
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-gradient-to-br from-[#833AB4] via-[#E1306C] to-[#F77737] hover:opacity-90 text-white transition-opacity"
-                    onClick={() => {
-                      if (activeDubbedVideoUrl) {
-                        const a = document.createElement('a')
-                        a.href = withAttachment(apiClient.refreshMediaUrl(activeDubbedVideoUrl))
-                        a.click()
-                      }
-                    }}
-                  >
-                    <Instagram className="h-4 w-4" />
-                    <span className="text-[9px] font-medium">{t('Instagram')}</span>
-                  </button>
-                </div>
-              </div>
-              </>
-              ) : (
-                <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
-                  <Lock className="h-4 w-4 shrink-0 mt-0.5 text-amber-400" />
-                  <div className="text-xs">
-                    <p className="font-medium text-amber-200">{t('Available after payment')}</p>
-                    <p className="text-amber-200/70 mt-0.5">
-                      {t('Sharing and downloads unlock once this job is paid in full — see the Render / Lip sync totals in the budget tracker above.')}
-                    </p>
-                  </div>
-                </div>
-              )}
-            </PopoverContent>
-          </Popover>
           <Button
             size="sm"
             variant="outline"
@@ -9863,29 +9715,37 @@ export function DubVerseEditor({
                           )
                         })()}
                         {/* Speed chip */}
-                        <span
-                          className={cn(
-                            'inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full border transition-colors cursor-pointer select-none font-mono',
-                            stagedSpeeds[keyAt(index)] !== undefined && stagedSpeeds[keyAt(index)] !== 1.0
-                              ? 'bg-orange-500/20 text-orange-300 border-orange-500/40 hover:bg-red-500/20 hover:text-red-300'
-                              : 'text-slate-600 border-slate-800 hover:text-orange-400 hover:border-orange-500/30'
-                          )}
-                          title={t('Adjust segment speed')}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-                            setSpeedPopupPos({
-                              x: Math.min(rect.left, window.innerWidth - 300),
-                              y: Math.max(10, rect.top - 260),
-                            })
-                            setSpeedPopupIndex(prev => prev === index ? null : index)
-                          }}
-                        >
-                          {stagedSpeeds[keyAt(index)] !== undefined && stagedSpeeds[keyAt(index)] !== 1.0
-                            ? `${stagedSpeeds[keyAt(index)].toFixed(2)}×`
-                            : <><Gauge className="h-2 w-2" />speed</>
-                          }
-                        </span>
+                        {(() => {
+                          const _stagedSpeed = stagedSpeeds[keyAt(index)]
+                          const _pillSpeed = _stagedSpeed ?? renderedSpeedAt(index)
+                          return (
+                            <span
+                              className={cn(
+                                'inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full border transition-colors cursor-pointer select-none font-mono',
+                                _stagedSpeed !== undefined && _stagedSpeed !== 1.0
+                                  ? 'bg-orange-500/20 text-orange-300 border-orange-500/40 hover:bg-red-500/20 hover:text-red-300'
+                                  : _pillSpeed !== 1.0
+                                  ? 'text-slate-300 border-slate-600 hover:text-orange-400 hover:border-orange-500/30'
+                                  : 'text-slate-600 border-slate-800 hover:text-orange-400 hover:border-orange-500/30'
+                              )}
+                              title={t('Adjust segment speed')}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                                setSpeedPopupPos({
+                                  x: Math.min(rect.left, window.innerWidth - 300),
+                                  y: Math.max(10, rect.top - 260),
+                                })
+                                setSpeedPopupIndex(prev => prev === index ? null : index)
+                              }}
+                            >
+                              {_pillSpeed !== 1.0
+                                ? `${_pillSpeed.toFixed(2)}×`
+                                : <><Gauge className="h-2 w-2" />speed</>
+                              }
+                            </span>
+                          )
+                        })()}
                         {splitWordMode === index ? (
                           <div
                             className="text-sm flex flex-wrap gap-x-1 gap-y-1 px-3 py-2 rounded-2xl border-2 border-amber-500 bg-amber-500/10 shadow-[0_0_10px_rgba(251,191,36,0.4)] select-none"
@@ -12127,26 +11987,26 @@ export function DubVerseEditor({
                 type="button"
                 className="h-9 w-9 rounded-full bg-slate-700 hover:bg-slate-600 text-white text-lg font-bold flex items-center justify-center transition-colors"
                 onClick={() => setSpeedPopupIndex(idx => {
-                  if (idx !== null) setStagedSpeeds(prev => ({ ...prev, [keyAt(idx)]: Math.max(0.5, parseFloat(((prev[keyAt(idx)] ?? 1.0) - 0.1).toFixed(2))) }))
+                  if (idx !== null) setStagedSpeeds(prev => ({ ...prev, [keyAt(idx)]: Math.max(0.5, parseFloat(((prev[keyAt(idx)] ?? renderedSpeedAt(idx)) - 0.1).toFixed(2))) }))
                   return idx
                 })}
               >−</button>
               <span
                 className={cn(
                   "text-4xl font-mono w-28 text-center cursor-pointer select-none transition-colors",
-                  (stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0) !== 1.0 ? "text-orange-400" : "text-white"
+                  (stagedSpeeds[keyAt(speedPopupIndex)] ?? renderedSpeedAt(speedPopupIndex)) !== 1.0 ? "text-orange-400" : "text-white"
                 )}
                 title={t('Click to reset')}
                 onClick={() => setStagedSpeeds(prev => { const n = { ...prev }; delete n[keyAt(speedPopupIndex)]; return n })}
               >
-                {(stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0).toFixed(2)}
+                {(stagedSpeeds[keyAt(speedPopupIndex)] ?? renderedSpeedAt(speedPopupIndex)).toFixed(2)}
                 <span className="text-lg ml-0.5 text-slate-400">×</span>
               </span>
               <button
                 type="button"
                 className="h-9 w-9 rounded-full bg-slate-700 hover:bg-slate-600 text-white text-lg font-bold flex items-center justify-center transition-colors"
                 onClick={() => setSpeedPopupIndex(idx => {
-                  if (idx !== null) setStagedSpeeds(prev => ({ ...prev, [keyAt(idx)]: Math.min(2.0, parseFloat(((prev[keyAt(idx)] ?? 1.0) + 0.1).toFixed(2))) }))
+                  if (idx !== null) setStagedSpeeds(prev => ({ ...prev, [keyAt(idx)]: Math.min(2.0, parseFloat(((prev[keyAt(idx)] ?? renderedSpeedAt(idx)) + 0.1).toFixed(2))) }))
                   return idx
                 })}
               >+</button>
@@ -12154,7 +12014,7 @@ export function DubVerseEditor({
 
             {/* Slider */}
             <Slider
-              value={[stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0]}
+              value={[stagedSpeeds[keyAt(speedPopupIndex)] ?? renderedSpeedAt(speedPopupIndex)]}
               onValueChange={([v]) => setStagedSpeeds(prev => ({ ...prev, [keyAt(speedPopupIndex)]: v }))}
               min={0.5}
               max={2.0}
@@ -12174,7 +12034,7 @@ export function DubVerseEditor({
                   onClick={() => setStagedSpeeds(prev => ({ ...prev, [keyAt(speedPopupIndex)]: preset }))}
                   className={cn(
                     'text-[10px] px-2 py-1 rounded-md border transition-colors font-mono',
-                    (stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0) === preset
+                    (stagedSpeeds[keyAt(speedPopupIndex)] ?? renderedSpeedAt(speedPopupIndex)) === preset
                       ? 'bg-orange-500/20 text-orange-300 border-orange-500/40'
                       : 'bg-slate-700 text-slate-400 border-slate-600 hover:bg-slate-600'
                   )}
@@ -12289,6 +12149,37 @@ export function DubVerseEditor({
                     .sort((a, b) => a - b)
                     .join(", ")}
                 </span>
+              )}
+              {/* Failed-save warning, in the transport bar next to the locked
+                  readout — it used to sit beside the filename in the sub-header,
+                  crowding the title. A save is commit-what-you-can, so a failed
+                  segment is NOT in the render — the user has to know that before
+                  spending a full render on an incomplete film. */}
+              {Object.keys(failedSegments).length > 0 && !failedBannerDismissed && (
+                <div className={cn(
+                  "ml-3 flex items-center gap-2 rounded-md border px-3 py-1 shrink-0",
+                  releasedForRender
+                    ? "border-amber-500/60 bg-amber-500/15"
+                    : "border-red-500/60 bg-red-500/15"
+                )}>
+                  <AlertCircle className={cn("h-4 w-4 shrink-0", releasedForRender ? "text-amber-400" : "text-red-400")} />
+                  <span className={cn("text-xs font-semibold whitespace-nowrap", releasedForRender ? "text-amber-200" : "text-red-200")}>
+                    {Object.keys(failedSegments).length === 1
+                      ? `Segment ${Object.keys(failedSegments)[0]} FAILED`
+                      : `Segments ${Object.keys(failedSegments).join(', ')} FAILED`}
+                    {' — '}
+                    {releasedForRender
+                      ? 'RELEASED: this render will not contain them.'
+                      : `${Object.keys(failedSegments).length === 1 ? 'segment' : 'segments'} will be re-loaded at the end for re-editing.`}
+                  </span>
+                  <button
+                    className="ml-1 shrink-0 rounded p-0.5 hover:bg-white/10"
+                    title={t('Dismiss warning — the failed segment is still not saved')}
+                    onClick={() => setFailedBannerDismissed(true)}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               )}
             </div>
           </div>
@@ -14469,8 +14360,9 @@ export function DubVerseEditor({
                             other handles, so there is always something to grab. */}
                         {(() => {
                           const staged = stagedSpeeds[keyAt(index)]
-                          const live = dragSpeedPreview?.index === index ? dragSpeedPreview.speed : staged
-                          const isSet = live !== undefined
+                          const rendered = renderedSpeedAt(index)
+                          const live = dragSpeedPreview?.index === index ? dragSpeedPreview.speed : (staged ?? rendered)
+                          const isSet = staged !== undefined
                           return (
                             <span
                               data-speed-label
@@ -14478,7 +14370,7 @@ export function DubVerseEditor({
                               title="Drag up to speed this line up, down to slow it down"
                               className={cn(
                                 'font-mono shrink-0 cursor-ns-resize select-none px-1 rounded transition-opacity hover:bg-white/10',
-                                isSet ? 'text-amber-400' : 'text-white/50 opacity-0 group-hover:opacity-100'
+                                isSet ? 'text-amber-400' : rendered !== 1.0 ? 'text-white/60' : 'text-white/50 opacity-0 group-hover:opacity-100'
                               )}
                               onClick={(e) => { e.preventDefault(); e.stopPropagation() }}
                               onMouseDown={(e) => {
@@ -14487,7 +14379,7 @@ export function DubVerseEditor({
                                 if (layoutLocked || lockedSegments.has(keyAt(index))) return
                                 const startY = e.clientY
                                 const originalDuration = effEnd(segment) - effStart(segment)
-                                const initialSpeed = staged ?? 1.0
+                                const initialSpeed = staged ?? rendered
                                 // Same direct-DOM rule as the edge handles: resize
                                 // this segment's block on every track per move and
                                 // write state once, on release.
@@ -14501,7 +14393,7 @@ export function DubVerseEditor({
                                   const raw = initialSpeed + (startY - ev.clientY) / 200
                                   const snapped = Math.round(raw / 0.05) * 0.05
                                   lastSpeed = Math.min(1.5, Math.max(0.5, snapped))
-                                  const w = Math.max((originalDuration / lastSpeed) * PIXELS_PER_SECOND, 2)
+                                  const w = Math.max((originalDuration * rendered / lastSpeed) * PIXELS_PER_SECOND, 2)
                                   for (const el of els) el.style.width = `${w}px`
                                   labelEls?.forEach(el => { el.textContent = `${lastSpeed.toFixed(2)}x` })
                                 }
@@ -14644,8 +14536,9 @@ export function DubVerseEditor({
                         width: Math.max(
                           (() => {
                             const dur = endT - startT
-                            const spd = dragSpeedPreview?.index === i ? dragSpeedPreview.speed : (stagedSpeeds[keyAt(i)] ?? 1.0)
-                            return (dur / spd) * PIXELS_PER_SECOND
+                            const rendered = renderedSpeedAt(i)
+                            const spd = dragSpeedPreview?.index === i ? dragSpeedPreview.speed : (stagedSpeeds[keyAt(i)] ?? rendered)
+                            return (dur * rendered / spd) * PIXELS_PER_SECOND
                           })(),
                           2
                         )
@@ -14667,14 +14560,15 @@ export function DubVerseEditor({
                           const els: HTMLElement[] = []
                           timelineRef.current?.querySelectorAll<HTMLElement>(`[data-drag-block="${i}"]`).forEach(el => els.push(el))
                           const labelEl = timelineRef.current?.querySelector<HTMLElement>(`[data-drag-block="${i}"] [data-speed-label]`)
-                          let lastSpeed = stagedSpeeds[keyAt(i)] ?? 1.0
+                          const rendered = renderedSpeedAt(i)
+                          let lastSpeed = stagedSpeeds[keyAt(i)] ?? rendered
                           setDragSpeedPreview({ index: i, speed: lastSpeed })
                           const onMouseMove = (ev: MouseEvent) => {
                             const dx = ev.clientX - startX
                             const newDuration = Math.max(0.1, originalDuration - dx / PIXELS_PER_SECOND)
-                            const newSpeed = Math.min(2.0, Math.max(0.5, originalDuration / newDuration))
+                            const newSpeed = Math.min(2.0, Math.max(0.5, rendered * originalDuration / newDuration))
                             lastSpeed = newSpeed
-                            const w = Math.max((originalDuration / newSpeed) * PIXELS_PER_SECOND, 2)
+                            const w = Math.max((originalDuration * rendered / newSpeed) * PIXELS_PER_SECOND, 2)
                             for (const el of els) el.style.width = `${w}px`
                             if (labelEl) labelEl.textContent = `${newSpeed.toFixed(2)}x`
                           }
@@ -14708,14 +14602,15 @@ export function DubVerseEditor({
                           const els: HTMLElement[] = []
                           timelineRef.current?.querySelectorAll<HTMLElement>(`[data-drag-block="${i}"]`).forEach(el => els.push(el))
                           const labelEl = timelineRef.current?.querySelector<HTMLElement>(`[data-drag-block="${i}"] [data-speed-label]`)
-                          let lastSpeed = stagedSpeeds[keyAt(i)] ?? 1.0
+                          const rendered = renderedSpeedAt(i)
+                          let lastSpeed = stagedSpeeds[keyAt(i)] ?? rendered
                           setDragSpeedPreview({ index: i, speed: lastSpeed })
                           const onMouseMove = (ev: MouseEvent) => {
                             const dx = ev.clientX - startX
                             const newDuration = Math.max(0.1, originalDuration + dx / PIXELS_PER_SECOND)
-                            const newSpeed = Math.min(2.0, Math.max(0.5, originalDuration / newDuration))
+                            const newSpeed = Math.min(2.0, Math.max(0.5, rendered * originalDuration / newDuration))
                             lastSpeed = newSpeed
-                            const w = Math.max((originalDuration / newSpeed) * PIXELS_PER_SECOND, 2)
+                            const w = Math.max((originalDuration * rendered / newSpeed) * PIXELS_PER_SECOND, 2)
                             for (const el of els) el.style.width = `${w}px`
                             if (labelEl) labelEl.textContent = `${newSpeed.toFixed(2)}x`
                           }
@@ -15091,7 +14986,7 @@ export function DubVerseEditor({
                   setRegeneratingSegmentIndex(idx)
                   try {
                     const response = await apiClient.regenerateSegment(jobId, seg.transcript_index ?? idx, {
-                      speed: stagedSpeeds[keyAt(idx)] ?? 1.0,
+                      speed: stagedSpeeds[keyAt(idx)] ?? renderedSpeedAt(idx),
                       emotion: stagedEmotions[keyAt(idx)] ?? seg.committed_emotion,
                       voice_key: stagedVoices[keyAt(idx)] ?? speakerVoiceMap[seg.speaker_id],
                       pitch: stagedPitches[keyAt(idx)] ?? speakerPitchMap[seg.speaker_id] ?? 0,
@@ -15217,6 +15112,15 @@ export function DubVerseEditor({
             </div>
           </div>
         </div>
+      )}
+      {activeDubbedVideoUrl && (
+        <DubReadyDialog
+          open={showDubReady}
+          onClose={() => setShowDubReady(false)}
+          title={title}
+          videoUrl={apiClient.refreshMediaUrl(activeDubbedVideoUrl)}
+          downloadUrl={withAttachment(apiClient.refreshMediaUrl(activeDubbedVideoUrl))}
+        />
       )}
       {showExportModal && jobId && (
         <ExportModal
