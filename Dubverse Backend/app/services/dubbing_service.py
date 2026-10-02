@@ -170,6 +170,18 @@ MEANING_DIVERGENCE_THRESHOLD = 0.7
 # returns the stems it already produces on GPU.
 ACCOMPANIMENT_MAX_DURATION_S = 600
 
+# Bounds concurrent emotion2vec inference during the auto-emotion pre-pass —
+# unbounded gather would fire one ffmpeg + model call per segment at once.
+_EMOTION2VEC_MAX_CONCURRENT = 4
+_emotion2vec_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _get_emotion2vec_semaphore() -> asyncio.Semaphore:
+    global _emotion2vec_semaphore
+    if _emotion2vec_semaphore is None:
+        _emotion2vec_semaphore = asyncio.Semaphore(_EMOTION2VEC_MAX_CONCURRENT)
+    return _emotion2vec_semaphore
+
 
 def _phonetic_respelling(
     text: str,
@@ -950,6 +962,133 @@ class DubbingService:
 
         return speaker_to_voice
 
+    # emotion2vec labels that map directly onto the manual emotion picker's
+    # vocabulary (dubverse-editor.tsx EMOTIONS). "neutral"/"other"/"unknown"
+    # are deliberately left out — no tag is the correct output for flat
+    # delivery, not a forced label.
+    _E2V_TO_FISH_EMOTION = {
+        "angry": "Angry",
+        "disgusted": "Disgusted",
+        "fearful": "Fearful",
+        "happy": "Happy",
+        "sad": "Sad",
+        "surprised": "Surprised",
+    }
+    # Below this score the top label isn't distinguishable enough from noise
+    # to justify overriding a line with a forced emotional performance —
+    # 9-way softmax baseline is ~0.11, so 0.35 requires real dominance.
+    _E2V_MIN_CONFIDENCE = 0.35
+    # On acoustically out-of-distribution input (e.g. a screen re-recording or
+    # phone-filmed TV) emotion2vec does not fail soft - the softmax collapses to
+    # ~1.0 on one label for nearly every segment (observed: 18/23 segments at
+    # angry=1.0000 incl. calm lines, while clean Cantonese/English sources give
+    # distributed 0.3-0.8 scores). Distrust the pass only when the collapse is
+    # near-total: a genuinely hostile scene can saturate ~65-70% of lines and
+    # be correct (verified: Ip Man 3 confrontation = 68%), while OOD audio
+    # collapses to ~85%+ (verified: screen re-recording = 87%).
+    _E2V_SATURATION_SCORE = 0.98
+    _E2V_SATURATION_FRAC = 0.8
+
+    async def _detect_segment_emotions_auto(
+        self,
+        transcript: List[Dict],
+        audio_path: str,
+    ) -> None:
+        """Run emotion2vec on every segment's source audio and stamp
+        ``segment["auto_emotion"]`` in place.
+
+        This is the automatic fallback for the Fish Audio emotion directive
+        when no manual per-line override exists and Velma's STT emotion
+        signal is unavailable (i.e. every Chinese/Cantonese job today — see
+        AGENTS.md/dubbing_service.py history). Runs BEFORE segment_id
+        stamping/translation so the field rides along through split/merge via
+        the ``{**seg, ...}`` copy pattern used throughout translation_service.
+
+        Best-effort only: any failure (model unavailable, ffmpeg failure,
+        one bad segment) must never block or slow the dub beyond the bounded
+        per-segment timeout — segments simply keep no auto_emotion, same as
+        today.
+        """
+        try:
+            from app.services import emotion2vec_service
+        except Exception as _imp_err:
+            logger.warning(f"[AUTO-EMOTION] emotion2vec_service unavailable: {_imp_err}")
+            return
+
+        if not audio_path or not os.path.exists(audio_path):
+            logger.info("[AUTO-EMOTION] No source audio available — skipping")
+            return
+
+        if not emotion2vec_service.is_enabled():
+            logger.info("[AUTO-EMOTION] emotion2vec dependencies not installed — skipping")
+            return
+
+        semaphore = _get_emotion2vec_semaphore()
+        candidates: List[tuple] = []
+
+        async def _detect_one(segment: Dict) -> None:
+            start = float(segment.get("start", 0.0))
+            end = float(segment.get("end", start))
+            duration = end - start
+            if duration < 0.5:
+                return
+
+            async with semaphore:
+                tmp_path = None
+                try:
+                    fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+                    os.close(fd)
+                    cmd = [
+                        "ffmpeg", "-y", "-ss", str(start), "-t", str(duration),
+                        "-i", audio_path, "-vn", "-ar", "16000", "-ac", "1",
+                        "-f", "wav", tmp_path,
+                    ]
+                    proc = await asyncio.to_thread(
+                        subprocess.run, cmd, capture_output=True, timeout=30
+                    )
+                    if proc.returncode != 0 or os.path.getsize(tmp_path) < 1000:
+                        return
+
+                    result = await asyncio.to_thread(
+                        emotion2vec_service.analyze_single_segment, tmp_path
+                    )
+                    if not result or not result.get("emotions"):
+                        return
+
+                    top = result["emotions"][0]
+                    label = top.get("label")
+                    score = float(top.get("score", 0.0))
+                    fish_emotion = self._E2V_TO_FISH_EMOTION.get(label)
+                    if fish_emotion and score >= self._E2V_MIN_CONFIDENCE:
+                        candidates.append((segment, fish_emotion, score))
+                except Exception as _seg_err:
+                    logger.warning(
+                        f"[AUTO-EMOTION] segment {start:.2f}-{end:.2f}s failed: {_seg_err}"
+                    )
+                finally:
+                    if tmp_path:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+
+        t0 = time.monotonic()
+        await asyncio.gather(*[_detect_one(seg) for seg in transcript])
+        saturated = sum(1 for _, _, s in candidates if s >= self._E2V_SATURATION_SCORE)
+        if candidates and saturated / len(candidates) > self._E2V_SATURATION_FRAC:
+            logger.warning(
+                f"[AUTO-EMOTION] {saturated}/{len(candidates)} predictions saturated "
+                "(~1.0 confidence) - audio likely out-of-distribution for emotion2vec "
+                "(re-recorded/low-quality capture); discarding all auto tags"
+            )
+            return
+        for segment, fish_emotion, _ in candidates:
+            segment["auto_emotion"] = fish_emotion
+        logger.info(
+            f"[AUTO-EMOTION] Tagged {len(candidates)}/{len(transcript)} segments "
+            f"in {time.monotonic() - t0:.1f}s"
+        )
+
     def _extract_speaker_references(
         self,
         transcript: List[Dict],
@@ -1305,7 +1444,57 @@ class DubbingService:
                     logger.warning(f"[VOICE-CLONE] Extraction failed, using presets: {_ref_err}")
                     speaker_voice_refs = {}
             else:
-                logger.info("[VOICE-CLONE] Preset-only mode — no vocals or non-Fish provider")
+                logger.info("[VOICE-CLONE] Preset-only mode - no vocals or non-Fish provider")
+
+            # --- Upload clone refs as persistent Fish voice models ---
+            # Inline zero-shot refs force the msgpack request on s2-pro --
+            # the older model, where composed [bracket] directives never
+            # parse. A persistent model is just a reference_id: it takes
+            # the JSON /v1/tts path on s2.1-pro, so emotion directives
+            # (incl. auto_emotion) reach cloned voices too, and Fish
+            # documents pre-uploaded models as higher quality and lower
+            # latency than inline cloning. speaker_models.json persists
+            # per job so re-dubs and regens reuse the same model instead
+            # of re-uploading.
+            speaker_models: Dict[str, str] = {}
+            _sm_path = os.path.join(output_dir, "speaker_models.json")
+            try:
+                if os.path.exists(_sm_path):
+                    with open(_sm_path, encoding="utf-8") as _sf:
+                        speaker_models = {
+                            str(k): str(v) for k, v in json.load(_sf).items()
+                        }
+            except Exception:
+                speaker_models = {}
+            if provider_name_check == "fish-audio" and speaker_voice_refs:
+                for _spk, _r in speaker_voice_refs.items():
+                    if self._explicit_voice_for_speaker(_spk, voice_mapping):
+                        continue  # user-assigned voice wins - no clone needed
+                    if speaker_models.get(_spk):
+                        continue  # reuse the model uploaded for a prior pass
+                    _mid = await fish_audio_tts.create_voice_model(
+                        [ref["audio"] for ref in _r], f"dub-{job_id[:8]}-{_spk}"
+                    )
+                    if _mid:
+                        speaker_models[_spk] = _mid
+                        logger.info(f"[VOICE-CLONE] {_spk} -> uploaded model {_mid}")
+                try:
+                    with open(_sm_path, "w", encoding="utf-8") as _sf:
+                        json.dump(speaker_models, _sf)
+                except Exception as _w:
+                    logger.warning(f"[VOICE-CLONE] could not persist speaker_models: {_w}")
+
+            # --- Auto-detect per-segment emotion from the source audio ---
+            # Must also happen BEFORE translation/segment_id stamping so
+            # auto_emotion rides along through split/merge via the
+            # {**seg, ...} copy pattern in translation_service.py. Runs
+            # regardless of TTS provider — cheap enough, and future
+            # providers can read it too.
+            if provider_name_check == "fish-audio" and video_path and os.path.exists(video_path):
+                try:
+                    await self._detect_segment_emotions_auto(transcript, video_path)
+                except Exception as _emo_err:
+                    logger.warning(f"[AUTO-EMOTION] Pre-pass failed, continuing without it: {_emo_err}")
 
             target_norm = normalize_language_code(target_language, strict=True)
 
@@ -1633,7 +1822,17 @@ class DubbingService:
                             tts_kwargs = None
 
                 if provider_name == "fish-audio" and tts_kwargs is not None:
-                    seg_emotion = segment.get("emotion")
+                    # emotion: an explicit per-line editor override wins; otherwise
+                    # fall back to Velma's STT emotion_signal (skipped for all
+                    # Chinese/Cantonese jobs today, so normally empty there);
+                    # otherwise fall back to the emotion2vec auto-detection
+                    # pre-pass run on the separated source vocals above, which
+                    # actually does fire for Cantonese content.
+                    seg_emotion = (
+                        segment.get("emotion")
+                        or segment.get("velma_emotion")
+                        or segment.get("auto_emotion")
+                    )
                     # Character traits (per-speaker) + emotion (per-line) fold into ONE
                     # composed S2 directive rather than separate stacked brackets.
                     speaker_traits = (traits_mapping or {}).get(speaker) or []
@@ -1645,9 +1844,12 @@ class DubbingService:
                     #   1. EXPLICIT user/library assignment -> reference_id -> JSON
                     #      /v1/tts -> s2.1-pro, composed directive PARSES. Costs no
                     #      Fish voice slot: the model already lives on Fish's side.
-                    #   2. Zero-shot clone of the source actor -> SDK msgpack ->
-                    #      s2-pro, directive inert. Preserves the ORIGINAL actor's
-                    #      timbre, so it stays the default when nothing is assigned.
+                    #   2. Uploaded persistent clone model -> reference_id -> JSON
+                    #      /v1/tts -> s2.1-pro, directive PARSES. Same actor
+                    #      timbre as zero-shot, newer model, emotion live.
+                    #   3. Zero-shot clone of the source actor -> SDK msgpack ->
+                    #      s2-pro, directive inert. Fallback only, when model
+                    #      upload failed for this speaker.
                     #
                     # Previously the explicit assignment was resolved into
                     # tts_kwargs["voice_id"] and then unconditionally overridden by
@@ -1657,11 +1859,19 @@ class DubbingService:
                     # Must test against raw voice_mapping, NOT speaker_to_voice: the
                     # latter is gender-pool-filled for every speaker (Passes 2/3), so
                     # it reports "assigned" for everyone and would kill cloning.
-                    # A per-segment committed_voice_id is also a deliberate assignment.
-                    _explicit = (
-                        segment.get("committed_voice_id")
-                        or self._explicit_voice_for_speaker(speaker, voice_mapping)
-                    )
+                    #
+                    # segment["committed_voice_id"] is NOT used here, even though it
+                    # looks like the same signal: PATCH /segment/commit sets it on
+                    # every ordinary review-and-approve save, not only when a voice
+                    # was deliberately picked. A job dubbed once, reviewed, then
+                    # re-dubbed would otherwise have every speaker permanently
+                    # locked out of zero-shot cloning after that first pass —
+                    # confirmed on a real job: extraction succeeded ("Extracted
+                    # references for 4 speakers") but every segment still logged
+                    # "assigned ... no voice slot used" because each one already
+                    # carried a committed_voice_id from the prior review pass.
+                    _explicit = self._explicit_voice_for_speaker(speaker, voice_mapping)
+                    _model_id = speaker_models.get(speaker)
                     _refs = speaker_voice_refs.get(speaker)
                     if _explicit:
                         # voice_id was already resolved from this same assignment at
@@ -1671,15 +1881,50 @@ class DubbingService:
                             f"[VOICE-PATH] {speaker}: assigned {_explicit!r} "
                             f"(Path A / s2.1-pro, directives live, no voice slot used)"
                         )
+                    elif _model_id:
+                        tts_kwargs["voice_id"] = _model_id
+                        voice_id = _model_id
+                        logger.info(
+                            f"[VOICE-PATH] {speaker}: uploaded clone {_model_id[:8]}... "
+                            "(Path B2 / s2.1-pro, directives live)"
+                        )
                     elif _refs:
                         tts_kwargs["speaker_references"] = _refs
                         logger.info(
-                            f"[VOICE-PATH] {speaker}: zero-shot clone (Path B / s2-pro)"
+                            f"[VOICE-PATH] {speaker}: zero-shot clone (Path B / s2-pro,"
+                            " model upload unavailable)"
                         )
+
+                    # Generation pace: Fish's default cadence is measured —
+                    # slower than film dialogue — and the Phase B fit only
+                    # speeds up takes that overflow full_room, so a slow take
+                    # that fits its window stays slow. Request the speed that
+                    # lands the predicted duration inside the same comfortable
+                    # window Phase B sanctions (segment span + up to 80% of the
+                    # trailing gap), so the take arrives at dialogue pace and
+                    # seg["speed"] records a real number instead of always 1.0.
+                    _seg_dur = max(
+                        0.2,
+                        float(segment.get("end", 0) or 0) - float(segment.get("start", 0) or 0),
+                    )
+                    _pred_dur = natural_duration(tts_text or text, _voice_key)
+                    if i + 1 < len(transcript):
+                        _gap = float(transcript[i + 1].get("start", 0) or 0) - float(segment.get("end", 0) or 0)
+                        _expand = min(max(_pred_dur - _seg_dur, 0.0), _gap * 0.8) if _gap > 0 else 0.0
+                        _gen_window = _seg_dur + _expand
+                    else:
+                        _gen_window = _seg_dur
+                    _gen_speed = max(
+                        MIN_SPEED_RATIO,
+                        min(self._FIT_MAX_SPEED, _pred_dur / max(0.2, _gen_window)),
+                    )
+                    tts_kwargs["speed"] = round(_gen_speed, 3)
+                    fish_speed_applied = abs(_gen_speed - 1.0) > 0.01
 
                     logger.info(
                         f"[FISH-TTS] seg {i} speaker={speaker} gender={speaker_gender} "
-                        f"voice_id={voice_id!r} text={text[:60]!r}"
+                        f"voice_id={voice_id!r} speed={tts_kwargs['speed']:.2f} "
+                        f"text={text[:60]!r}"
                     )
                 elif tts_kwargs is not None:
                     # ElevenLabs path: pass through user pitch_shift for SSML / post-processing
@@ -4848,10 +5093,16 @@ class DubbingService:
             if user_committed_timing and actual_dur > slot_dur + 0.05:
                 target = max(0.2, slot_dur)
                 stretched_path = os.path.join(output_dir, f"segment_{segment_index:04d}{_take_suffix}_fit.mp3")
+                # Same 1.5x quality ceiling as the non-committed-timing branch
+                # below (and the main dub loop's _FIT_MAX_SPEED) — this branch
+                # used to allow up to 2.0x, which is audibly degraded (clipped
+                # attacks, robotic/"transistorized" artifacts). A ratio that
+                # still can't fit at 1.5x falls through to the hard-trim
+                # fallback right below, same as everywhere else in this file.
                 stretched = await asyncio.to_thread(
                     self._adjust_audio_duration,
                     final_path, stretched_path, target,
-                    min_speed=0.5, max_speed=2.0,
+                    min_speed=0.5, max_speed=self._FIT_MAX_SPEED,
                 )
                 if stretched and os.path.exists(stretched_path):
                     final_path = stretched_path

@@ -141,6 +141,7 @@ def analyze_dub(
         analysis["silences"] = _detect_silences(audio_source, original_transcript)
         analysis["speed"] = _detect_speed_anomalies(timing_data)
         analysis["loudness"] = _analyze_loudness(audio_source)
+        analysis["source_quality"] = _probe_source_quality(original_video_path)
 
         # --- New AI-powered analyses (optional — graceful skip) ---
         # Get original segments and dubbed transcript for the new analyses
@@ -606,6 +607,111 @@ def _analyze_loudness(dubbed_video: Path) -> Dict[str, Any]:
         return {"status": "error", "reason": str(e)}
 
 
+def _probe_source_quality(video_path: str) -> Dict[str, Any]:
+    """Probe the SOURCE video for capture-quality defects the pipeline cannot
+    fix — frame stalls, long black/fade-out spans, and very low audio level.
+    These are the signature of screen re-recordings and other OOD sources;
+    surfacing them early explains otherwise mysterious QC fallout (frozen
+    picture, hallucination-prone ASR, clone timbre artifacts).
+    """
+    result: Dict[str, Any] = {"status": "ok", "warnings": [], "flags": []}
+    if not video_path or not os.path.exists(video_path):
+        return {"status": "skipped", "reason": "source video not found"}
+
+    # --- Frame stalls (held/frozen picture) ---
+    stalls: List[Dict[str, float]] = []
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-i", video_path,
+             "-vf", "freezedetect=n=0.001:d=0.6",
+             "-an", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=300,
+        )
+        start = None
+        for m in re.finditer(
+            r"lavfi\.freezedetect\.(freeze_start|freeze_duration|freeze_end):\s*([\d.]+)",
+            proc.stderr,
+        ):
+            kind, val = m.group(1), float(m.group(2))
+            if kind == "freeze_start":
+                start = val
+            elif kind == "freeze_end" and start is not None:
+                stalls.append({"start": round(start, 2), "end": round(val, 2)})
+                start = None
+        result["frame_stalls"] = stalls
+        if stalls:
+            span = ", ".join(f"{s['start']}-{s['end']}s" for s in stalls[:5])
+            result["flags"].append("frame_stall")
+            result["warnings"].append(
+                f"Source video freezes {len(stalls)}x ({span}) — held frames "
+                "baked into the recording; cannot be repaired"
+            )
+    except Exception as e:
+        logger.warning(f"[ANALYSIS] freezedetect probe failed: {e}")
+
+    # --- Long black spans (fade-out tail / dead picture) ---
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-i", video_path,
+             "-vf", "blackdetect=d=2.0:pix_th=0.10",
+             "-an", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=300,
+        )
+        blacks = [
+            {"start": round(float(m.group(1)), 2),
+             "end": round(float(m.group(2)), 2)}
+            for m in re.finditer(
+                r"black_start:([\d.]+)\s+black_end:([\d.]+)", proc.stderr
+            )
+        ]
+        result["black_spans"] = blacks
+        if blacks:
+            span = ", ".join(f"{s['start']}-{s['end']}s" for s in blacks[:5])
+            result["flags"].append("black_span")
+            result["warnings"].append(
+                f"Source has {len(blacks)} black/fade span(s) ({span}) — "
+                "lines inside these windows have no visible speaker"
+            )
+    except Exception as e:
+        logger.warning(f"[ANALYSIS] blackdetect probe failed: {e}")
+
+    # --- Audio level (re-recordings run far below normal mix level) ---
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-i", video_path, "-af", "volumedetect",
+             "-vn", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=300,
+        )
+        mean_m = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", proc.stderr)
+        max_m = re.search(r"max_volume:\s*([-\d.]+)\s*dB", proc.stderr)
+        mean_db = float(mean_m.group(1)) if mean_m else None
+        max_db = float(max_m.group(1)) if max_m else None
+        result["mean_volume_db"] = mean_db
+        result["max_volume_db"] = max_db
+        if mean_db is not None and mean_db < -40:
+            result["flags"].append("low_audio_level")
+            result["warnings"].append(
+                f"Source audio is very quiet ({mean_db:.1f} dB mean) — "
+                "typical of camera/screen re-recordings; expect degraded "
+                "transcription confidence and clone fidelity"
+            )
+    except Exception as e:
+        logger.warning(f"[ANALYSIS] volumedetect probe failed: {e}")
+
+    if {"frame_stall", "low_audio_level"} & set(result["flags"]):
+        result["re_recording_suspected"] = True
+        result["warnings"].append(
+            "Capture-quality signature suggests a re-recording — treat "
+            "low-confidence ASR and edge-case QC findings accordingly"
+        )
+    else:
+        result["re_recording_suspected"] = False
+
+    for w in result["warnings"]:
+        logger.warning(f"[SOURCE-QC] {w}")
+    return result
+
+
 # ---------------------------------------------------------------------------
 # AI-powered analyses (Azure Speech)
 # ---------------------------------------------------------------------------
@@ -985,7 +1091,8 @@ def _gemini_review(
         if not is_enabled():
             return {"status": "skipped", "reason": "GEMINI_API_KEY not configured"}
 
-        logger.info("[ANALYSIS] Running Gemini 2.5 Pro holistic review")
+        from app.services.gemini_service import GEMINI_MODEL
+        logger.info(f"[ANALYSIS] Running {GEMINI_MODEL} holistic review")
 
         context = {}
         if timing_data:

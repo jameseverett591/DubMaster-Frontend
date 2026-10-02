@@ -868,7 +868,13 @@ class TranslationService:
         # regardless of which translation engine handles the segment.
         for seg in segments:
             conf = seg.get("confidence")
-            if conf is None:
+            # Empty/placeholder source ("..", punctuation only): nothing was
+            # actually heard, so any translated text is an invention. Flag it
+            # regardless of confidence — the ASR score measures nothing here.
+            if not re.sub(r"[\s\W]+", "", seg.get("text") or ""):
+                seg["translation_flagged"] = True
+                seg["flag_reason"] = "empty_source_text"
+            elif conf is None:
                 seg["translation_flagged"] = True
                 seg["flag_reason"] = "unknown_asr_provenance"
             elif seg.get("gap_filled"):

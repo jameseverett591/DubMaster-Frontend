@@ -71,8 +71,14 @@ _HALLUCINATION_PHRASES = {
     "assalamu alaikum",
     "alhamdulillah",
     "la ilaha illallah",
-    # Cantonese/Mandarin short phrases Whisper hallucinates from silence
-    # at the end of clips (often after the dialogue has ended).
+}
+
+# Short Cantonese/Mandarin phrases Whisper hallucinates from silence at the
+# end of clips — but which are ALSO ordinary dialogue ("走開" = "go away",
+# "打不死" = "can't kill [him] by beating"). Kept separate from the list above:
+# they are never rejected on dominance alone, only when the ASR signal is
+# suspicious (high no_speech_prob / low logprob), so a real line survives.
+_DIALOGUE_LIKE_PHRASES = {
     "走呀",
     "走呀 走呀",
     "走開",
@@ -106,6 +112,10 @@ _CREDIT_PHRASES = {
     "别忘了订阅",
     "感謝收看",
     "感谢收看",
+    # "subtitles provided by <community>" credits — "字幕由 Amara.org 社群提供"
+    # is a classic Whisper tail hallucination on separated-vocals audio.
+    "字幕由",
+    "amara.org",
 }
 
 _WHISPER_MODELS: Dict[Tuple[str, str, str], Any] = {}
@@ -354,15 +364,29 @@ def _filter_hallucinations(
         _gate = _is_whisper or _suspicious
 
         if _matched_ph is None:
+            # Ordinary-dialogue denylist entries (走開, 打不死, ...). A bare
+            # substring/dominance match from a clean ASR signal is a real
+            # line, not a hallucination — reject only when the acoustics
+            # themselves are suspect.
+            _matched_ph = next(
+                (ph for ph in _DIALOGUE_LIKE_PHRASES if _dominates(ph)), None
+            )
+            _gate = _suspicious
+
+        if _matched_ph is None:
             # A credit phrase can also sit INSIDE a longer segment, because
             # Whisper appends a volunteer's name ("中文字幕志愿者:小明"). But so
             # can real speech: "把中文字幕打开" is "turn on the Chinese
             # subtitles", and "感谢收看本期节目" is a genuine sign-off line.
-            # Containment alone cannot tell those apart, so require evidence the
-            # audio was silence or background — a hallucination has a poor
-            # logprob or a high no-speech probability, and real speech does not.
+            # For non-Whisper engines containment alone cannot tell those
+            # apart, so require evidence the audio was silence or background —
+            # a hallucination has a poor logprob or a high no-speech
+            # probability, and real speech does not. Whisper is different: it
+            # only ever fills gaps here (gap_filled → review-gated anyway), and
+            # credit boilerplate on a quiet tail routinely carries a CLEAN
+            # signal, so for it containment alone is enough.
             _matched_ph = next((ph for ph in _CREDIT_PHRASES if ph in _norm_text), None)
-            _gate = _suspicious
+            _gate = _is_whisper or _suspicious
 
         if _matched_ph is not None and _gate:
             logger.info(
