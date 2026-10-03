@@ -10,16 +10,14 @@
 
 ## Summary pipeline
 
-- Primary provider: **VideoTranscriber.ai** OpenAPI
-  (`app/services/videotranscriber_service.py`, route
-  `POST /api/jobs/{id}/video-notes`). Chapters + transcript, pure vendor
-  output — no LLM re-summarization on top.
-- `VT_API_KEY` in backend `.env`; `VT_MAX_MINUTES` caps film length to guard
-  quota (billing ≈ 2 quota/min: transcribe + chapters). Their API needs a
-  public URL — we hand them `PUBLIC_BASE_URL/api/media/{job}/video?access_token=<jwt>`.
-- Claude fallback (`scene_summary.py::generate_video_notes`) only runs when
-  `VT_API_KEY` is unset. Per-segment "selected line" context card still uses
-  Claude — accepted for now.
+- Primary provider: **Claude over the job's own transcript**
+  (`scene_summary.py::generate_video_notes`, route
+  `POST /api/jobs/{id}/video-notes`). The dubbing pipeline already produces
+  the transcript, so this is one LLM call — no vendor billing, no public
+  URL needed. Selected via `VIDEO_NOTES_PROVIDER` env (default `claude`;
+  `vt` = VideoTranscriber.ai ~2 quota/min, `deepgram` = summarize+topics).
+- `VT_API_KEY`/`VT_MAX_MINUTES` still apply when `VIDEO_NOTES_PROVIDER=vt`.
+- Per-segment "selected line" context card still uses Claude — accepted.
 - Results cache per job+preset in `video_notes.json`; VT task id persists in
   `vt_task.json` (idempotent, never double-bills).
 

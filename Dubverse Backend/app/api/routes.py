@@ -11143,14 +11143,32 @@ def _dg_video_notes(job_id: str, token: str, preset: str) -> Optional[dict]:
     }
 
 
+def _claude_video_notes(all_segments: list, preset: str, job_id: str) -> Optional[dict]:
+    """Whole-video notes + chapters from the job's own transcript via Claude.
+
+    Cheapest provider — the dubbing pipeline already produced the transcript,
+    so this is one LLM call, no vendor transcription and no public URL needed.
+    Returns None when ANTHROPIC_API_KEY is unset so the caller can fall
+    through to a configured vendor provider."""
+    if not os.getenv("ANTHROPIC_API_KEY", "").strip():
+        return None
+    from app.services.scene_summary import generate_video_notes
+    return generate_video_notes(all_segments, preset=preset, job_id=job_id)
+
+
 @router.post("/jobs/{job_id}/video-notes", dependencies=[Depends(_dep_job_access)])
 async def get_video_notes(job_id: str, request: Request):
     """Generate (or return cached) whole-video AI Notes + chapter cards.
 
-    Primary provider: VideoTranscriber.ai (their transcription + chapters over
-    the job's own video). Fallback: Deepgram summarize+topics over the same
-    media URL — deterministic, transcript-bound output. Async for VT only —
-    returns {status:"processing"} while the vendor task runs; the panel polls.
+    Provider order via VIDEO_NOTES_PROVIDER env (default "claude"):
+      claude   — job's own transcript + Claude: cheapest, no vendor billing,
+                 no public URL needed
+      vt       — VideoTranscriber.ai (~2 quota/min billed); returns
+                 {status:"processing"} while their task runs, panel polls
+      deepgram — summarize+topics over the media URL, transcript-bound,
+                 no generative model
+    Whichever provider is selected returning an error surfaces honestly —
+    providers are never silently swapped mid-task.
 
     Cached per job per preset in video_notes.json.
     """
@@ -11183,38 +11201,41 @@ async def get_video_notes(job_id: str, request: Request):
     # cheap fingerprint of the segment list (count + first/last boundary).
     fp = f"{len(all_segments)}:{all_segments[0].get('start')}:{all_segments[-1].get('end')}"
     cache_key = f"{preset}:{fp}"
-    if cache_key in cache:
+    # regenerate=true bypasses the cache (panel's refresh button) — the fresh
+    # result still replaces the cached entry below.
+    if not body.get("regenerate") and cache_key in cache:
         return cache[cache_key]
 
-    # Primary provider: VideoTranscriber.ai. Only "ok" results are cached —
-    # "processing" returns straight through so the next poll re-enters here.
-    vt_result = _vt_video_notes(job_id, token, preset,
-                                duration_sec=all_segments[-1].get("end", 0))
-    if vt_result is not None:
-        if vt_result.get("status") == "ok":
-            cache[cache_key] = vt_result
-            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            with open(cache_path, "w", encoding="utf-8") as f:
-                _json.dump(cache, f, ensure_ascii=False, indent=2)
-        return vt_result
+    provider = (os.getenv("VIDEO_NOTES_PROVIDER") or "claude").strip().lower()
 
-    # Fallback: Deepgram summarize+topics over the job's public media URL.
-    # All output is measured from the audio (transcript, summary blurb, topic
-    # segmentation) — no generative model in this path, so nothing can be
-    # invented. Fires when VT is not configured; VT failures surface as
-    # honest errors rather than silently swapping providers mid-task.
-    dg_result = _dg_video_notes(job_id, token, preset)
-    if dg_result is not None:
-        if dg_result.get("status") == "ok":
-            cache[cache_key] = dg_result
+    def _run(name: str) -> Optional[dict]:
+        if name == "claude":
+            return _claude_video_notes(all_segments, preset, job_id)
+        if name == "vt":
+            return _vt_video_notes(job_id, token, preset,
+                                   duration_sec=all_segments[-1].get("end", 0))
+        if name == "deepgram":
+            return _dg_video_notes(job_id, token, preset)
+        return None
+
+    # Selected provider first; fall through to the others only when it isn't
+    # configured at all (returns None). An error/None-producing provider that
+    # IS configured returns its status unchanged — never a silent swap.
+    for name in [provider] + [p for p in ("claude", "vt", "deepgram") if p != provider]:
+        result = _run(name)
+        if result is None:
+            continue
+        if result.get("status") == "ok":
+            result["provider"] = name
+            cache[cache_key] = result
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
             with open(cache_path, "w", encoding="utf-8") as f:
                 _json.dump(cache, f, ensure_ascii=False, indent=2)
-        return dg_result
+        return result
 
     return {
         "status": "error",
         "provider": "none",
         "reason": "no_summary_provider",
-        "error_message": "No summary provider is configured (set VT_API_KEY or DEEPGRAM_API_KEY).",
+        "error_message": "No summary provider is configured (set ANTHROPIC_API_KEY, VT_API_KEY, or DEEPGRAM_API_KEY).",
     }

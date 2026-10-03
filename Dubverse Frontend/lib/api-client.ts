@@ -1274,11 +1274,11 @@ class DubVerseAPIClient {
     return response.json()
   }
 
-  async getVideoNotes(jobId: string, preset: VideoNotesPreset = 'smart'): Promise<VideoNotes> {
+  async getVideoNotes(jobId: string, preset: VideoNotesPreset = 'smart', regenerate = false): Promise<VideoNotes> {
     const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/video-notes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
-      body: JSON.stringify({ preset }),
+      body: JSON.stringify({ preset, ...(regenerate ? { regenerate: true } : {}) }),
     })
     if (!response.ok) throw new Error('Failed to load video notes')
     return response.json()
