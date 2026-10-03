@@ -10376,7 +10376,7 @@ export function DubVerseEditor({
                   className={cn(
                     'shrink-0 whitespace-nowrap text-xs px-3 py-1 rounded-md transition-colors',
                     rightPanelTab === tab.id
-                      ? tab.id === 'scene' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-white'
+                      ? tab.id === 'scene' ? 'bg-slate-700 text-white ring-2 ring-amber-400' : 'bg-slate-700 text-white'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
                   )}
                 >
@@ -11456,7 +11456,7 @@ export function DubVerseEditor({
                   className={cn(
                     'shrink-0 w-full px-1 py-2 text-[10px] leading-tight font-medium text-center break-words transition-colors border-b border-neutral-800/60',
                     rightPanelTab === tab.id
-                      ? tab.id === 'scene' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-white'
+                      ? tab.id === 'scene' ? 'bg-slate-700 text-white ring-2 ring-amber-400' : 'bg-slate-700 text-white'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
                   )}
                 >

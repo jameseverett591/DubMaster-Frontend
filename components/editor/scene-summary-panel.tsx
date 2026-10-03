@@ -78,22 +78,6 @@ function mmss(t: number): string {
   return `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`
 }
 
-/** Highlights only the lead sentence — the section's key point — in a soft
- *  blue wash; the rest of the prose stays plain. */
-function LeadHighlight({ text, onSeek }: { text: string; onSeek: (t: number) => void }) {
-  const i = text.indexOf('. ')
-  const lead = i === -1 ? text : text.slice(0, i + 1)
-  const rest = i === -1 ? '' : text.slice(i + 2)
-  return (
-    <>
-      <span className="bg-blue-500/30 box-decoration-clone px-1 py-0.5 rounded">
-        <LinkedSummary text={lead} onSeek={onSeek} />
-      </span>
-      {rest && <> <LinkedSummary text={rest} onSeek={onSeek} /></>}
-    </>
-  )
-}
-
 function ProviderChip({ provider }: { provider?: string }) {
   if (provider === 'videotranscriber') {
     return (
@@ -325,7 +309,7 @@ export function SceneSummaryPanel() {
                       )}
                     </div>
                     <p className="text-[13px] font-medium text-white leading-[1.75] mt-1.5">
-                      <LeadHighlight text={c.summary} onSeek={seekTo} />
+                      <LinkedSummary text={c.summary} onSeek={seekTo} />
                     </p>
                   </section>
                 ))}
@@ -352,7 +336,7 @@ export function SceneSummaryPanel() {
                         )}
                       </div>
                       <p className="text-[13px] font-medium text-white leading-[1.75] mt-1.5">
-                        <LeadHighlight text={c.summary} onSeek={seekTo} />
+                        <LinkedSummary text={c.summary} onSeek={seekTo} />
                       </p>
                     </section>
                   ))}
@@ -406,9 +390,7 @@ export function SceneSummaryPanel() {
                       >
                         [{mmss(n.start)}]
                       </button>
-                      <p className="text-[13px] font-medium text-white leading-relaxed">
-                        <LeadHighlight text={n.text} onSeek={seekTo} />
-                      </p>
+                      <p className="text-[13px] font-medium text-white leading-relaxed">{n.text}</p>
                     </div>
                   ))}
                 </div>
