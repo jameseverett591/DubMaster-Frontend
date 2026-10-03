@@ -165,10 +165,8 @@ export function SceneSummaryPanel() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!jobId) return
-    if (notesJobRef.current !== jobId) {
-      notesJobRef.current = jobId
-      setNotes(null)
-    }
+    if (notesJobRef.current !== jobId) notesJobRef.current = jobId
+    setNotes(null)
     if (pollTimer.current) clearTimeout(pollTimer.current)
     loadNotes(preset)
     return () => { if (pollTimer.current) clearTimeout(pollTimer.current) }
@@ -193,12 +191,17 @@ export function SceneSummaryPanel() {
         <ProviderChip provider={notes?.provider} />
         <div className="flex-1" />
         <Select value={preset} onValueChange={(v) => setPreset(v as VideoNotesPreset)}>
-          <SelectTrigger className="h-7 w-36 bg-neutral-900 border-neutral-700 text-[11px] text-slate-300">
+          <SelectTrigger className="h-7 w-36 bg-neutral-900 border-neutral-600 text-[11px] font-medium text-slate-100">
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className="bg-neutral-900 border-neutral-600">
             {PRESETS.map(p => (
-              <SelectItem key={p.id} value={p.id} title={t(p.hint)}>
+              <SelectItem
+                key={p.id}
+                value={p.id}
+                title={t(p.hint)}
+                className="text-slate-100 text-[11px]"
+              >
                 {t(p.label)}
               </SelectItem>
             ))}
@@ -290,7 +293,7 @@ export function SceneSummaryPanel() {
                   <section key={i}>
                     <div className="flex items-baseline gap-2 flex-wrap">
                       <h3
-                        className="text-sm font-semibold text-sky-300 leading-snug"
+                        className="text-[15px] font-bold text-sky-200 leading-snug"
                         style={{ WebkitTextStroke: '0.6px rgba(0,0,0,0.9)' }}
                       >
                         {c.title}
@@ -299,14 +302,16 @@ export function SceneSummaryPanel() {
                         <button
                           type="button"
                           onClick={() => seekTo(c.start!)}
-                          className="text-[10px] font-mono text-sky-400/80 hover:text-sky-300 transition-colors"
+                          className="text-[11px] font-mono font-semibold text-sky-300 hover:text-sky-200 transition-colors"
                         >
                           [{mmss(c.start)}{c.end !== null ? `–${mmss(c.end)}` : ''}]
                         </button>
                       )}
                     </div>
-                    <p className="text-[13px] text-slate-300 leading-[1.75] mt-1.5">
-                      <LinkedSummary text={c.summary} onSeek={seekTo} />
+                    <p className="text-[13px] font-medium text-white leading-[1.75] mt-1.5">
+                      <span className="bg-blue-500/40 box-decoration-clone px-1 py-0.5 rounded">
+                        <LinkedSummary text={c.summary} onSeek={seekTo} />
+                      </span>
                     </p>
                   </section>
                 ))}
@@ -317,7 +322,7 @@ export function SceneSummaryPanel() {
                     <section key={i + 3}>
                       <div className="flex items-baseline gap-2 flex-wrap">
                         <h3
-                          className="text-sm font-semibold text-sky-300 leading-snug"
+                          className="text-[15px] font-bold text-sky-200 leading-snug"
                           style={{ WebkitTextStroke: '0.6px rgba(0,0,0,0.9)' }}
                         >
                           {c.title}
@@ -326,14 +331,16 @@ export function SceneSummaryPanel() {
                           <button
                             type="button"
                             onClick={() => seekTo(c.start!)}
-                            className="text-[10px] font-mono text-sky-400/80 hover:text-sky-300 transition-colors"
+                            className="text-[11px] font-mono font-semibold text-sky-300 hover:text-sky-200 transition-colors"
                           >
                             [{mmss(c.start)}{c.end !== null ? `–${mmss(c.end)}` : ''}]
                           </button>
                         )}
                       </div>
-                      <p className="text-[13px] text-slate-300 leading-[1.75] mt-1.5">
-                        <LinkedSummary text={c.summary} onSeek={seekTo} />
+                      <p className="text-[13px] font-medium text-white leading-[1.75] mt-1.5">
+                        <span className="bg-blue-500/40 box-decoration-clone px-1 py-0.5 rounded">
+                          <LinkedSummary text={c.summary} onSeek={seekTo} />
+                        </span>
                       </p>
                     </section>
                   ))}
@@ -387,7 +394,9 @@ export function SceneSummaryPanel() {
                       >
                         [{mmss(n.start)}]
                       </button>
-                      <p className="text-[13px] text-slate-300 leading-relaxed">{n.text}</p>
+                      <p className="text-[13px] font-medium text-white leading-relaxed">
+                        <span className="bg-blue-500/40 box-decoration-clone px-1 py-0.5 rounded">{n.text}</span>
+                      </p>
                     </div>
                   ))}
                 </div>
