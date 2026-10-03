@@ -51,6 +51,7 @@ export default function AccountPage() {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [deleteConfirmText, setDeleteConfirmText] = useState("")
   const [deleting, setDeleting] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
 
   const router = useRouter()
   const supabase = createClient()
@@ -101,6 +102,19 @@ export default function AccountPage() {
     })
     const { url } = await res.json()
     if (url) window.location.href = url
+  }
+
+  async function handleCancelSubscription() {
+    if (!subscription?.stripe_subscription_id) return
+    setCancelling(true)
+    const res = await fetch("/api/create-portal-session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscription_id: subscription.stripe_subscription_id }),
+    })
+    const { url } = await res.json()
+    if (url) window.location.href = url
+    else setCancelling(false)
   }
 
   async function handleDeleteAccount() {
@@ -316,6 +330,16 @@ export default function AccountPage() {
                         </Button>
                       )}
                     </div>
+
+                    {!subscription.cancel_at_period_end && subscription.stripe_subscription_id && (
+                      <button
+                        onClick={handleCancelSubscription}
+                        disabled={cancelling}
+                        className="text-xs text-[#64748B] hover:text-red-400 underline underline-offset-2 transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        {cancelling ? t('Opening cancellation…') : t('Cancel subscription')}
+                      </button>
+                    )}
                   </>
                 ) : (
                   <div className="text-center py-8">

@@ -242,6 +242,48 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
           </CardContent>
         </Card>
 
+        {/* Source Quality — capture defects baked into the upload */}
+        {analysis.source_quality?.status === "ok" && (analysis.source_quality.warnings?.length ?? 0) > 0 && (
+          <Card className="border-orange-500/30">
+            <CardHeader className="pb-1.5">
+              <CardTitle className="flex items-center gap-1.5 text-xs">
+                <Eye className="h-3.5 w-3.5 text-orange-500" />
+                {t('Source Quality')}
+                <Badge variant="outline" className="ml-auto text-[9px] h-4 border-orange-500/30 text-orange-600">
+                  {analysis.source_quality.flags?.length ?? 0} flags
+                </Badge>
+              </CardTitle>
+              {analysis.source_quality.re_recording_suspected && (
+                <CardDescription className="text-[10px]">
+                  {t('Likely a camera/screen re-recording')}
+                </CardDescription>
+              )}
+            </CardHeader>
+            <CardContent className="pt-0">
+              <div className="space-y-1">
+                {analysis.source_quality.warnings!.map((w, i) => (
+                  <div key={i} className="flex items-start gap-1.5 text-[10px] py-0.5 border-b border-border/50 last:border-0">
+                    <AlertTriangle className="h-2.5 w-2.5 mt-0.5 shrink-0 text-orange-500" />
+                    <span className="text-muted-foreground">{w}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {analysis.source_quality.mean_volume_db !== undefined && (
+                  <Badge variant="outline" className="text-[9px] h-4">
+                    {t('Audio')}: {analysis.source_quality.mean_volume_db} dB
+                  </Badge>
+                )}
+                {analysis.source_quality.frame_stalls?.map((s, i) => (
+                  <Badge key={i} variant="outline" className="text-[9px] h-4">
+                    {t('Freeze')}: {formatTime(s.start)}–{formatTime(s.end)}
+                  </Badge>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Timing Issues */}
         {analysis.timing.status === "ok" && (
           <Card>

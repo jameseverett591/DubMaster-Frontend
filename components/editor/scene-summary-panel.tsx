@@ -19,10 +19,10 @@ import {
 // modeled on videotranscriber.ai's panel: a title, prose chapter sections
 // whose [MM:SS] markers link into the timeline, and a key-moments table.
 //
-// Provider: VideoTranscriber.ai (their transcription + chapters pipeline —
-// no Claude in that path). While their task runs the endpoint returns
-// {status:"processing"} and we poll it. If VT is unavailable or fails, the
-// backend falls back to the built-in summarizer over our own transcript.
+// Provider: Claude over the job's own transcript (scene_summary.py) —
+// synchronous, no vendor billing. The VideoTranscriber.ai path still
+// exists behind VIDEO_NOTES_PROVIDER=vt; while a vendor task runs the
+// endpoint returns {status:"processing"} and we poll it.
 // ---------------------------------------------------------------------------
 
 const PRESETS: { id: VideoNotesPreset; label: string; hint: string }[] = [
@@ -129,11 +129,11 @@ export function SceneSummaryPanel() {
     if (idx >= 0) selectSegment(idx)
   }, [segments, selectSegment, setCurrentTime, setIsPlaying])
 
-  async function loadNotes(p: VideoNotesPreset) {
+  async function loadNotes(p: VideoNotesPreset, regenerate = false) {
     if (!jobId) return
     setNotesLoading(true)
     try {
-      const result = await apiClient.getVideoNotes(jobId, p)
+      const result = await apiClient.getVideoNotes(jobId, p, regenerate)
       setNotes(result)
       if (result.status === 'processing') {
         const wait = Math.min(Math.max(result.retry_after ?? 4, 2), 15) * 1000
@@ -206,7 +206,7 @@ export function SceneSummaryPanel() {
         </Select>
         <button
           type="button"
-          onClick={() => loadNotes(preset)}
+          onClick={() => loadNotes(preset, true)}
           disabled={notesLoading || processing}
           title={t('Regenerate')}
           className="p-1.5 rounded-md border border-neutral-700 text-slate-400 hover:text-white hover:border-neutral-500 transition-colors disabled:opacity-50"
