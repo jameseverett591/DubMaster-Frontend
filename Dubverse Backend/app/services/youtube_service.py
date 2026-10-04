@@ -81,7 +81,13 @@ def _dl(opts: dict):
     # the container without a rebuild.
     cookies = os.getenv("YTDLP_COOKIES_FILE")
     if cookies and os.path.isfile(cookies):
-        opts["cookiefile"] = cookies
+        # Feed yt-dlp an in-memory copy: it rewrites the jar on exit, and
+        # that atomic rewrite desyncs on Docker Desktop's Windows file
+        # sharing — the container ends up with a gutted file (no login
+        # cookies) while the host export still looks intact.
+        import io
+        opts["cookiefile"] = io.StringIO(
+            open(cookies, encoding="utf-8").read())
     return yt_dlp.YoutubeDL(opts)
 
 
