@@ -32,6 +32,12 @@
   yt-dlp was in requirements for weeks but the image predated it →
   "No module named 'yt_dlp'" in production). Never `pip install` inside a
   running container as the fix — it doesn't survive recreate.
+- **Age-restricted YouTube videos need cookies.** `YTDLP_COOKIES_FILE`
+  (default `/app/data/yt_cookies.txt`) — a Netscape cookies.txt exported
+  from a signed-in YouTube session. `data/` is volume-mounted and
+  gitignored, so dropping the file in works instantly — no rebuild or
+  recreate needed. Cookies expire: if age-restricted imports start
+  failing again, re-export.
 - Backend health: `curl http://127.0.0.1:8000/health` (localhost may resolve
   oddly — use 127.0.0.1).
 

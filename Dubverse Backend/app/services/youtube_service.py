@@ -74,6 +74,14 @@ def parse_youtube_url(url: str) -> str:
 
 def _dl(opts: dict):
     import yt_dlp
+    # YTDLP_COOKIES_FILE points at a Netscape cookies.txt exported from a
+    # signed-in browser. Required for age-restricted videos — YouTube's
+    # age gate rejects every unauthenticated client, no extractor-arg
+    # bypass exists. data/ is volume-mounted, so the file lands inside
+    # the container without a rebuild.
+    cookies = os.getenv("YTDLP_COOKIES_FILE")
+    if cookies and os.path.isfile(cookies):
+        opts["cookiefile"] = cookies
     return yt_dlp.YoutubeDL(opts)
 
 
@@ -306,6 +314,8 @@ def _friendly_error(e: Exception) -> str:
         return "That video is private — sign-in downloads aren't supported"
     if "age" in low and ("confirm" in low or "restrict" in low):
         return "That video is age-restricted — it can't be downloaded without sign-in"
+    if "drm" in low or "requested format is not available" in low:
+        return "That video is DRM-protected (licensed TV/film content) — it can't be downloaded"
     if "unavailable" in low or "removed" in low or "copyright" in low:
         return "That video is unavailable (removed, blocked, or copyright-restricted)"
     if "sign in" in low or "bot" in low:
