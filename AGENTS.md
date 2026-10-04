@@ -26,6 +26,12 @@
 - `.env` vars bake at container-create time. After editing `.env`:
   `docker compose up -d --force-recreate backend` — `restart` is not enough.
 - Code/docs are volume-mounted; a plain `restart` picks those up.
+- **New pip deps in `requirements.txt` need an image rebuild** —
+  `docker compose build backend && docker compose up -d backend`.
+  `restart`/`up -d` alone will NOT pick them up (learned the hard way:
+  yt-dlp was in requirements for weeks but the image predated it →
+  "No module named 'yt_dlp'" in production). Never `pip install` inside a
+  running container as the fix — it doesn't survive recreate.
 - Backend health: `curl http://127.0.0.1:8000/health` (localhost may resolve
   oddly — use 127.0.0.1).
 

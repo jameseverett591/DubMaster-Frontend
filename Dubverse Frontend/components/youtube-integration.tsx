@@ -830,6 +830,22 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
                               alt={video.title}
                               className="h-full w-full object-cover"
                             />
+                            <button
+                              type="button"
+                              title={t('Import to DubMaster')}
+                              disabled={isImporting}
+                              onClick={() => {
+                                setImportingVideoId(video.id)
+                                handleImportVideo(
+                                  `https://www.youtube.com/watch?v=${video.id}`,
+                                  video.title,
+                                  video.thumbnail,
+                                  video.duration)
+                              }}
+                              className="absolute top-1.5 right-1.5 rounded-xl px-2.5 py-1 text-xs font-bold text-white shadow-[0_2px_8px_rgba(0,0,0,0.5)] bg-gradient-to-r from-[#A855F7] to-[#22D3EE] opacity-90 hover:opacity-100 transition-opacity disabled:opacity-50"
+                            >
+                              DubMaster
+                            </button>
                             {video.duration && (
                               <div className="absolute bottom-2 right-2 flex items-center gap-1 rounded bg-black/80 px-2 py-1 text-xs text-white">
                                 <Clock className="h-3 w-3" />
