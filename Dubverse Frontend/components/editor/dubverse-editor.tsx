@@ -11456,7 +11456,7 @@ export function DubVerseEditor({
                   className={cn(
                     'shrink-0 w-full px-1 py-2 text-[10px] leading-tight font-medium text-center break-words transition-colors border-b border-neutral-800/60',
                     rightPanelTab === tab.id
-                      ? tab.id === 'scene' ? 'bg-slate-700 text-white ring-2 ring-amber-400' : 'bg-slate-700 text-white'
+                      ? tab.id === 'scene' ? 'bg-slate-700 text-white ring-2 ring-inset ring-amber-400' : 'bg-slate-700 text-white'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
                   )}
                 >

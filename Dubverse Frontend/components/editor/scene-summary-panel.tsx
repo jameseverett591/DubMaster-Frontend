@@ -191,7 +191,7 @@ export function SceneSummaryPanel() {
         <ProviderChip provider={notes?.provider} />
         <div className="flex-1" />
         <Select value={preset} onValueChange={(v) => setPreset(v as VideoNotesPreset)}>
-          <SelectTrigger className="h-7 w-36 bg-neutral-900 border-neutral-600 text-[11px] font-medium text-slate-100">
+          <SelectTrigger className="h-7 w-36 bg-neutral-900 border-neutral-600 text-[11px] font-medium text-slate-100 focus-visible:ring-0 focus-visible:border-neutral-600">
             <SelectValue />
           </SelectTrigger>
           <SelectContent className="bg-neutral-900 border-neutral-600">
@@ -200,7 +200,7 @@ export function SceneSummaryPanel() {
                 key={p.id}
                 value={p.id}
                 title={t(p.hint)}
-                className="text-slate-100 text-[11px]"
+                className="text-slate-100 text-[11px] focus:bg-transparent focus:text-slate-100 data-[highlighted]:bg-transparent data-[highlighted]:text-slate-100"
               >
                 {t(p.label)}
               </SelectItem>
@@ -278,7 +278,7 @@ export function SceneSummaryPanel() {
             <>
               {/* Document title */}
               <div>
-                <h2 className="text-2xl font-bold text-white leading-snug">
+                <h2 className="text-2xl font-bold text-amber-400 leading-snug">
                   {notes.video_title || title || t('Video Summary')}
                 </h2>
                 <div className="flex items-center gap-3 mt-1.5 text-[10px] text-slate-500">
@@ -293,7 +293,7 @@ export function SceneSummaryPanel() {
                   <section key={i}>
                     <div className="flex items-baseline gap-2 flex-wrap">
                       <h3
-                        className="text-[15px] font-bold text-sky-200 leading-snug"
+                        className="text-[15px] font-bold text-amber-400 leading-snug"
                         style={{ WebkitTextStroke: '0.6px rgba(0,0,0,0.9)' }}
                       >
                         {c.title}
@@ -320,7 +320,7 @@ export function SceneSummaryPanel() {
                     <section key={i + 3}>
                       <div className="flex items-baseline gap-2 flex-wrap">
                         <h3
-                          className="text-[15px] font-bold text-sky-200 leading-snug"
+                          className="text-[15px] font-bold text-amber-400 leading-snug"
                           style={{ WebkitTextStroke: '0.6px rgba(0,0,0,0.9)' }}
                         >
                           {c.title}
@@ -346,7 +346,7 @@ export function SceneSummaryPanel() {
               {/* Key moments table — brass plate with rivets */}
               {chapters.length > 0 && (
                 <section>
-                  <h3 className="text-sm font-semibold text-sky-300 mb-2">{t('Key Moments')}</h3>
+                  <h3 className="text-sm font-semibold text-amber-400 mb-2">{t('Key Moments')}</h3>
                   <div className="relative rounded-lg border-2 border-[#8a6d3b] bg-gradient-to-b from-[#4a3a1c] via-[#352a12] to-[#2a2110] overflow-hidden shadow-[inset_0_1px_0_rgba(255,220,150,0.25),0_2px_8px_rgba(0,0,0,0.5)]">
                     {/* corner rivets */}
                     {['top-1.5 left-1.5', 'top-1.5 right-1.5', 'bottom-1.5 left-1.5', 'bottom-1.5 right-1.5'].map(pos => (
