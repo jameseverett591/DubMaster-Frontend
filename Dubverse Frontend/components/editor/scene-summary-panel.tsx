@@ -183,7 +183,7 @@ export function SceneSummaryPanel() {
   const chapters = notes?.chapters ?? []
 
   return (
-    <div className="flex flex-col min-h-0 h-full bg-neutral-950">
+    <div className="flex flex-col min-h-0 h-full bg-neutral-950 ring-2 ring-inset ring-amber-400/70">
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-neutral-800 shrink-0">
         <ListVideo className="h-3.5 w-3.5 text-sky-400 shrink-0" />
