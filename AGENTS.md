@@ -33,11 +33,27 @@
   "No module named 'yt_dlp'" in production). Never `pip install` inside a
   running container as the fix — it doesn't survive recreate.
 - **Age-restricted YouTube videos need cookies.** `YTDLP_COOKIES_FILE`
-  (default `/app/data/yt_cookies.txt`) — a Netscape cookies.txt exported
-  from a signed-in YouTube session. `data/` is volume-mounted and
-  gitignored, so dropping the file in works instantly — no rebuild or
-  recreate needed. Cookies expire: if age-restricted imports start
-  failing again, re-export.
+  (default `/app/data/yt_cookies.txt`) — a Netscape cookies.txt that
+  MUST contain `LOGIN_INFO` (HttpOnly — extension exports that scrape
+  `document.cookie` silently miss it). **YouTube rotates session cookies
+  on active browsing**, so the export dies within minutes if it comes
+  from a browser YouTube is used on. Durable source: the dedicated
+  Firefox profile (`4svdnchn.default-release`) — nobody browses YouTube
+  in it. Refresh via `Dubverse Backend/scripts/export_yt_cookies.py`
+  (docker cp the profile's `cookies.sqlite` in, run the script inside
+  the container — writes `/app/data/yt_cookies.txt` directly). DO NOT
+  use `yt-dlp --cookies-from-browser firefox` — it silently dropped the
+  auth cookies here. Gotcha: `moz_cookies.expiry` is SECONDS while
+  `creationTime`/`lastAccessed` are MICROSECONDS — dividing expiry by
+  1e6 produces cookies that expired in 1970 and the jar silently drops
+  the entire auth set. `data/` is volume-mounted and gitignored; file
+  changes take effect instantly — no rebuild/recreate. The file is fed
+  to yt-dlp via `io.StringIO` (its jar rewrite on exit desyncs Docker
+  Desktop bind mounts — never pass the mounted path as `cookiefile`,
+  and never point `--cookies` at the mounted file in tests either).
+- **Signed-in YouTube sessions need `deno` + `yt-dlp-ejs`** (both baked
+  in the image) to solve signature/n challenges — without them cookie
+  requests return "No video formats found".
 - Backend health: `curl http://127.0.0.1:8000/health` (localhost may resolve
   oddly — use 127.0.0.1).
 

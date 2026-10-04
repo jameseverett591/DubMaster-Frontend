@@ -318,6 +318,8 @@ def _friendly_error(e: Exception) -> str:
         return "That video is over the size limit"
     if "private" in low:
         return "That video is private — sign-in downloads aren't supported"
+    if "no longer valid" in low or "rotated" in low:
+        return "YouTube session expired — the exported cookies need refreshing"
     if "age" in low and ("confirm" in low or "restrict" in low):
         return "That video is age-restricted — it can't be downloaded without sign-in"
     if "drm" in low or "requested format is not available" in low:
