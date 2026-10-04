@@ -191,7 +191,7 @@ export function SceneSummaryPanel() {
         <ProviderChip provider={notes?.provider} />
         <div className="flex-1" />
         <Select value={preset} onValueChange={(v) => setPreset(v as VideoNotesPreset)}>
-          <SelectTrigger className="h-7 w-36 bg-neutral-900 border-neutral-600 text-[11px] font-medium text-slate-100 focus-visible:ring-0 focus-visible:border-neutral-600">
+          <SelectTrigger className="h-7 w-36 bg-neutral-900 border-amber-400/80 text-[11px] font-medium text-slate-100 shadow-[0_0_10px_rgba(251,191,36,0.35)] focus-visible:ring-0 focus-visible:border-amber-400">
             <SelectValue />
           </SelectTrigger>
           <SelectContent className="bg-neutral-900 border-neutral-600">
@@ -278,7 +278,7 @@ export function SceneSummaryPanel() {
             <>
               {/* Document title */}
               <div>
-                <h2 className="text-2xl font-bold text-amber-400 leading-snug">
+                <h2 className="text-2xl font-bold text-white leading-snug">
                   {notes.video_title || title || t('Video Summary')}
                 </h2>
                 <div className="flex items-center gap-3 mt-1.5 text-[10px] text-slate-500">
