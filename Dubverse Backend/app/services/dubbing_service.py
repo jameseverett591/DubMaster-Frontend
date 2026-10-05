@@ -28,6 +28,7 @@ from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
 from app.services.respeecher_service import respeecher_tts, SEED_HISTORY_MAX
 from app.services import tts_usage
+from app.services import path_safety
 from app.services.rulebook import (
     apply_pronunciations,
     load_global_rules,
@@ -4153,11 +4154,17 @@ class DubbingService:
                 continue
             if seg_end <= start or seg_start >= end:
                 continue
-            seg_path = audio_url
-            if not os.path.isabs(seg_path):
-                if seg_path.startswith("/media/"):
-                    seg_path = seg_path.split("/")[-1]
-                seg_path = os.path.join(output_dir, seg_path)
+            # The URL/path comes from segments.json, which the client can write.
+            # Resolve it and refuse anything outside this job's folder — absolute
+            # paths and "../" included — instead of handing it to ffmpeg.
+            try:
+                seg_path = path_safety.resolve_job_file(output_dir, audio_url)
+            except path_safety.UnsafePath:
+                logger.warning(
+                    f"[SCENE-PREVIEW] job={job_id}: skipping segment audio outside the job folder "
+                    f"(transcript_index={seg.get('transcript_index')})"
+                )
+                continue
             merge_segments.append({
                 "path": seg_path,
                 "start": seg_start,
@@ -4880,8 +4887,19 @@ class DubbingService:
         # A performed segment re-renders from its stored recording. If that file
         # is gone there is nothing to convert — fall back rather than fail, since
         # the text is still there and Fish can speak it.
+        # perf_path is a stored recording that is later opened and uploaded to
+        # ElevenLabs. It can be set from the client (a synced new segment carries
+        # arbitrary keys), so only a file inside this job's folder may be used.
+        _perf = None
+        if seg.get("perf_path"):
+            try:
+                _perf = path_safety.resolve_job_file(output_dir, seg["perf_path"])
+            except path_safety.UnsafePath as _perf_err:
+                logger.warning(
+                    f"[ENGINE] seg {segment_index}: refused perf_path outside the job folder "
+                    f"({_perf_err}) — treating the performance as missing"
+                )
         if use_engine == "elevenlabs-sts":
-            _perf = seg.get("perf_path")
             if not _perf or not os.path.exists(_perf):
                 logger.warning(
                     f"[ENGINE] seg {segment_index}: no stored performance -> fish-audio"
@@ -4970,7 +4988,7 @@ class DubbingService:
             # of truth here, so text edits, emotion pills and Delivery Scripts do
             # NOT reach this engine — same as Respeecher, for the same reason:
             # there is no directive channel to put them through.
-            with open(seg["perf_path"], "rb") as _pf:
+            with open(_perf, "rb") as _pf:
                 _perf_bytes = _pf.read()
             _payload = await elevenlabs_tts.speech_to_speech(
                 audio_bytes=_perf_bytes,
@@ -4980,7 +4998,7 @@ class DubbingService:
                 # Replay the isolation setting the take was made with, or the
                 # re-render would differ from the audio it is meant to reproduce.
                 remove_background_noise=bool(seg.get("perf_denoise")),
-                filename=os.path.basename(seg["perf_path"]),
+                filename=os.path.basename(_perf),
             )
             result = {"path": audio_path, "engine": "elevenlabs-sts"} if _payload else None
         else:
@@ -5529,21 +5547,11 @@ class DubbingService:
         # nothing points at a real file, the line renders as silence and the
         # build carries on — a missing line is fixable in the editor, a dead
         # render is not.
+        # Both `path` and the media URLs are client-writable (PATCH /segment/commit,
+        # PUT /segments), so resolution goes through path_safety: a candidate outside
+        # this job's folder is skipped as if it did not exist, never opened.
         def _resolve_segment_audio(seg: Dict) -> Optional[str]:
-            p = seg.get("path")
-            if p and os.path.exists(p):
-                return p
-            for key in ("committed_audio_url", "audio_url"):
-                url = seg.get(key) or ""
-                if "/audio/" not in url:
-                    continue
-                fname = url.split("/audio/", 1)[1].split("?", 1)[0]
-                if not fname:
-                    continue
-                cand = os.path.join(output_dir, fname)
-                if os.path.exists(cand):
-                    return cand
-            return None
+            return path_safety.resolve_segment_audio(seg, output_dir, label=f"[REMIX] job={job_id}")
 
         merge_segments = []
         silent_indices = []

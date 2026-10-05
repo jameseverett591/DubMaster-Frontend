@@ -132,10 +132,19 @@ def analyze_dub(
             with open(segments_file, "r", encoding="utf-8") as f:
                 seg_data = json.load(f)
             segs = seg_data.get("segments", [])
-            merge_segments = [
-                {"path": s["path"], "start": s["start"], "end": s["end"]}
-                for s in segs if s.get("path")
-            ]
+            # seg["path"] is client-writable (PATCH /segment/commit, PUT /segments):
+            # only a file inside this job's folder may reach ffmpeg.
+            from app.services import path_safety
+            merge_segments = []
+            for s in segs:
+                if not s.get("path"):
+                    continue
+                safe = path_safety.resolve_segment_audio(
+                    {"transcript_index": s.get("transcript_index"), "path": s["path"]},
+                    str(dubbed_dir), label=f"[ANALYSIS] job={job_id}",
+                )
+                if safe:
+                    merge_segments.append({"path": safe, "start": s["start"], "end": s["end"]})
             if not merge_segments:
                 return _fail("No generated audio yet")
 
