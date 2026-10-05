@@ -253,9 +253,18 @@ def analyze_dub(
         # emotion2vec emotion preservation (local, free) -- needs real video
         # frames for its dubbed-side extraction as currently implemented;
         # skipped until export exists, same as pronunciation above.
+        def _local_cuda() -> bool:
+            try:
+                import torch as _t
+                return bool(_t.cuda.is_available())
+            except Exception:
+                return False
+
         analysis["emotion_preservation"] = (
             _analyze_emotion_preservation(original_video_path, str(dubbed_video), timing_data)
-            if has_export else {"status": "skipped", "reason": "video not yet exported"}
+            if has_export and _local_cuda()
+            else {"status": "skipped", "reason": "video not yet exported" if not has_export
+                  else "no local GPU — emotion2vec skipped (retranscription runs via RunPod)"}
         )
         # Gemini 2.5 Pro holistic review (optional, ~$0.12/video) -- needs real
         # video frames; skipped until export exists.
@@ -304,6 +313,110 @@ def analyze_dub(
 # ---------------------------------------------------------------------------
 
 
+def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> Dict[str, Any]:
+    """Offload the QC re-transcription to the RunPod GPU worker.
+
+    The backend has no GPU, and the local CPU Whisper pass this replaces took
+    45+ minutes on a feature film while starving every other request. The
+    worker already transcribes on GPU for source ASR — QC just sends it the
+    DUBBED audio with a transcribe-only step and maps its segments back into
+    the QC schema (start/end/text/confidence).
+    """
+    try:
+        import asyncio as _asyncio
+
+        from app.services.runpod_service import runpod_service
+
+        # 16kHz mono opus — Whisper needs nothing more, and at 96kbps a
+        # feature film is ~55MB instead of ~150MB of PCM.
+        audio_path = dubbed_video.with_suffix(".qc.opus")
+        cmd = [
+            "ffmpeg", "-y", "-i", str(dubbed_video),
+            "-vn", "-acodec", "libopus", "-b:a", "96k", "-ar", "16000", "-ac", "1",
+            str(audio_path),
+        ]
+        subprocess.run(cmd, capture_output=True, timeout=600)
+        if not audio_path.exists() or audio_path.stat().st_size < 1000:
+            return {"status": "error", "reason": "audio extraction failed"}
+
+        # Upload to R2 so the worker can pull it (same handoff pattern the
+        # dub pipeline uses — presigned GET).
+        r2_bucket = os.getenv("R2_BUCKET_NAME", "")
+        r2_key_id = os.getenv("R2_ACCESS_KEY_ID", "")
+        r2_secret = os.getenv("R2_SECRET_ACCESS_KEY", "")
+        r2_account = os.getenv("R2_ACCOUNT_ID", "")
+        if not (r2_bucket and r2_key_id and r2_secret and r2_account):
+            return {"status": "error",
+                    "reason": "RunPod offload needs R2 configured (R2_BUCKET_NAME etc.)"}
+
+        import boto3
+        from botocore.config import Config
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=f"https://{r2_account}.r2.cloudflarestorage.com",
+            aws_access_key_id=r2_key_id,
+            aws_secret_access_key=r2_secret,
+            config=Config(signature_version="s3v4"),
+            region_name="auto",
+        )
+        job_id = dubbed_video.parent.name
+        object_key = f"{job_id}/qc_{audio_path.name}"
+        s3.upload_file(str(audio_path), r2_bucket, object_key,
+                       ExtraArgs={"ContentType": "audio/ogg"})
+        file_url = s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": r2_bucket, "Key": object_key},
+            ExpiresIn=7200,
+        )
+
+        async def _submit_and_poll() -> Dict[str, Any]:
+            submitted = await runpod_service.submit_job(
+                file_url=file_url,
+                job_id=f"{job_id}_qc",
+                language=target_language,
+                steps=["transcribe"],
+            )
+            rp_id = submitted.get("id")
+            if not rp_id:
+                raise RuntimeError(f"RunPod returned no job id: {submitted}")
+            return await runpod_service.poll_until_complete(
+                rp_id,
+                timeout=int(os.getenv("QC_RUNPOD_TIMEOUT_SEC", "1800")),
+                interval=5,
+            )
+
+        output = _asyncio.run(_submit_and_poll())
+        if output.get("error"):
+            return {"status": "error", "reason": f"RunPod: {output['error']}"}
+        raw_segments = output.get("segments") or []
+        segments = [
+            {
+                "start": round(float(s.get("start", 0.0)), 3),
+                "end": round(float(s.get("end", 0.0)), 3),
+                "text": (s.get("text") or "").strip(),
+                "confidence": s.get("confidence"),
+            }
+            for s in raw_segments
+            if (s.get("text") or "").strip()
+        ]
+
+        try:
+            audio_path.unlink()
+        except Exception:
+            pass
+
+        return {
+            "status": "ok",
+            "language": target_language,
+            "segment_count": len(segments),
+            "segments": segments,
+            "engine": "runpod",
+        }
+    except Exception as e:
+        logger.warning(f"[ANALYSIS] RunPod retranscription failed: {e}")
+        return {"status": "error", "reason": str(e)}
+
+
 def _retranscribe_dubbed_audio(dubbed_video: Path, target_language: str = "") -> Dict[str, Any]:
     """Re-transcribe the dubbed video with Whisper to verify actual spoken content.
 
@@ -314,6 +427,11 @@ def _retranscribe_dubbed_audio(dubbed_video: Path, target_language: str = "") ->
     meaningless near-zero pronunciation_clarity score that has nothing to do
     with actual pronunciation quality.
     """
+    # GPU offload first — the local CPU Whisper pass below took 45+ minutes on
+    # a feature film and starved the backend. RunPod is the same worker pool
+    # the dub's own ASR already uses.
+    if os.getenv("RUNPOD_API_KEY") and os.getenv("RUNPOD_ENDPOINT_ID"):
+        return _retranscribe_via_runpod(dubbed_video, target_language)
     try:
         # Extract audio from dubbed video
         audio_path = dubbed_video.with_suffix(".wav")

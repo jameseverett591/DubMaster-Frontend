@@ -7479,17 +7479,24 @@ def _acquire_analysis_sentinel(sentinel: Path) -> bool:
 
 
 def _qc_gpu_available() -> bool:
-    """QC (Whisper large-v3, emotion2vec, SyncNet) must never run on the backend CPU."""
+    """QC needs GPU capacity — either local CUDA or the RunPod worker.
+
+    The backend container has no CUDA device; RunPod is the GPU provider for
+    QC re-transcription in production.
+    """
     try:
         import torch
-        return bool(torch.cuda.is_available())
+        if torch.cuda.is_available():
+            return True
     except Exception:
-        return False
+        pass
+    return bool(os.getenv("RUNPOD_API_KEY") and os.getenv("RUNPOD_ENDPOINT_ID"))
 
 
 _QC_NO_GPU_MESSAGE = (
-    "QC requires a GPU. This backend has none, so quality analysis is disabled "
-    "until it runs on the GPU worker."
+    "QC needs GPU capacity: this backend has no CUDA device and RunPod is not "
+    "configured (RUNPOD_API_KEY / RUNPOD_ENDPOINT_ID). Set the RunPod worker "
+    "for this deployment, or run QC on the GPU worker."
 )
 
 
