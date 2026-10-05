@@ -103,6 +103,22 @@ class CommitEndpointTests(_Workspace, unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException):
             await self.commit({"committed_audio_url": f"/api/media/{JOB_A}/audio/../{JOB_B}/secret.mp3"})
 
+    async def test_dotdot_spelling_is_refused_even_when_it_resolves_inside_the_job(self):
+        # These land in the job's own folder — but the stored STRING would carry a
+        # ".." that anything reading the text (not the file) could be steered by.
+        for spelled in (
+            f"{self.dubbed}/{JOB_A}/../{JOB_A}/segment_0000.mp3",
+            f"{self.dubbed}/{JOB_B}/../{JOB_A}/segment_0000.mp3",
+            f"/api/media/{JOB_A}/audio/../audio/segment_0000.mp3",
+        ):
+            with self.subTest(spelled=spelled):
+                with self.assertRaises(HTTPException) as cm:
+                    await self.commit({"committed_audio_url": spelled})
+                self.assertEqual(cm.exception.status_code, 400)
+                with self.assertRaises(HTTPException):
+                    await self.commit({"staged_path": spelled})
+        self.assertIsNone(self.read_segment()["committed_audio_url"])
+
     async def test_staged_path_into_another_job_is_rejected(self):
         # The old check only required the shared dubbed/ root, and the file existing.
         with self.assertRaises(HTTPException) as cm:
@@ -278,6 +294,22 @@ class MixerReadSideTests(_Workspace):
         self.assertEqual(result["status"], "error")
         self.assertEqual(captured["paths"], [os.path.realpath(own)])
 
+    def test_dotdot_components_and_encoded_separators_are_refused_by_the_resolver(self):
+        from app.services import path_safety as ps
+        for bad in (
+            "a/../segment_0000.mp3", f"{JOB_A}/../{JOB_A}/segment_0000.mp3", "../segment_0000.mp3",
+            "segment_0000.mp3/..", "..\\segment_0000.mp3", "%2e%2e/segment_0000.mp3",
+            "dir%2fsegment_0000.mp3", "dir%5csegment_0000.mp3",
+            f"/api/media/{JOB_A}/audio/../{JOB_A}/segment_0000.mp3",
+            self.dir_a + "/../" + JOB_A + "/segment_0000.mp3",
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ps.UnsafePath):
+                    ps.resolve_job_file(self.dir_a, bad)
+        # and a plain, legitimate value is unaffected
+        self.assertEqual(ps.resolve_job_file(self.dir_a, "segment_0000.mp3"),
+                         os.path.realpath(self.own_take))
+
     @unittest.skipUnless(hasattr(os, "symlink"), "needs symlinks")
     def test_symlink_planted_in_the_job_folder_cannot_escape(self):
         from app.services import path_safety as ps
@@ -361,8 +393,9 @@ class CallSiteTests(_Workspace, unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(by_ti[0]["path"])
             self.assertIsNone(by_ti[1]["committed_audio_url"])
             self.assertIsNone(by_ti[2]["audio_url"])
-            self.assertEqual(by_ti[3]["path"], self.own_take)             # safe values untouched
-            self.assertEqual(by_ti[3]["committed_audio_url"], "segment_0000.mp3")
+            # safe values come back as their normalized real path (same file, no spelling to misread)
+            self.assertEqual(by_ti[3]["path"], os.path.realpath(self.own_take))
+            self.assertEqual(by_ti[3]["committed_audio_url"], os.path.realpath(self.own_take))
         # cleaning the in-memory copy must not rewrite segments.json
         self.assertEqual(self.read_segment(0)["path"], self.other_take)
 
@@ -383,6 +416,139 @@ class CallSiteTests(_Workspace, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(seen), 2)
         for segments in seen:
             self.assertIsNone(segments[0]["path"])
+
+    async def test_analyze_lipsync_dotdot_spelling_cannot_steer_the_scorers_into_another_job(self):
+        # Resolves INSIDE job A, but its spelling names job B: the scorer derives
+        # search folders from the directory names in `path` ("data/dubbed/<job>/…"
+        # -> "data/projects/<job>/dubbed"), so an unnormalized value could make it
+        # look in job B's project folder for the file named by committed_audio_url.
+        from app.services import syncnet_service as sn
+        self.chdir_to_tmp()
+        for d in (f"data/dubbed/{JOB_A}", f"data/dubbed/{JOB_B}", f"data/projects/{JOB_B}/dubbed"):
+            os.makedirs(os.path.join(self.tmp, d), exist_ok=True)
+        secret = os.path.join(self.tmp, "data", "projects", JOB_B, "dubbed", "dubbed_en.mp4")
+        with open(secret, "wb") as f:
+            f.write(b"another customer's film")
+        with open(os.path.join(self.tmp, "data", "dubbed", JOB_A, "segments.json"), "w", encoding="utf-8") as f:
+            json.dump({"video_path": self.video, "segments": [{
+                "transcript_index": 0, "start_time": 0, "end_time": 3,
+                "path": f"data/dubbed/{JOB_B}/../{JOB_A}/missing.mp3",
+                "committed_audio_url": f"/api/media/{JOB_A}/audio/dubbed_en.mp4",
+            }]}, f)
+        seen = []
+
+        def spy(_video, segments, *_a, **_k):
+            seen.append(segments)
+            return []
+
+        request = mock.MagicMock()
+        request.json = mock.AsyncMock(return_value={})
+        with mock.patch.object(self.routes.settings, "DUBBED_DIR", "data/dubbed"), \
+                mock.patch("app.services.syncnet_service.score_lipsync_windows", spy), \
+                mock.patch("app.services.syncnet_service.score_lipsync_audio_windows", spy), \
+                mock.patch.object(self.routes, "_probe_video_duration", return_value=3.0):
+            await self.routes.analyze_lipsync_windows(JOB_A, request)
+        self.assertTrue(seen)
+        for segments in seen:
+            # run the scorer's real file lookup on exactly what it was handed
+            found = sn._resolve_seg_audio(segments[0], sn._job_dir_hints(JOB_A))
+            self.assertNotEqual(found and os.path.realpath(found), os.path.realpath(secret))
+            self.assertIsNone(segments[0]["path"])               # a ".." spelling is refused outright
+            self.assertNotIn(JOB_B, str(segments[0].get("path")))
+
+    def test_sanitize_segments_returns_normalized_real_paths(self):
+        from app.services import path_safety as ps
+        self.chdir_to_tmp()
+        # Odd-but-harmless spellings (doubled slash, "./") are rewritten to the one
+        # canonical real path, so no reader is left to interpret the spelling.
+        out = ps.sanitize_segments(
+            [{"transcript_index": 0,
+              "path": f"dubbed//{JOB_A}/./segment_0000.mp3",
+              "committed_audio_url": "segment_0000.mp3"}],
+            os.path.join("dubbed", JOB_A))
+        want = os.path.realpath(self.own_take)
+        self.assertEqual(out[0]["path"], want)
+        self.assertEqual(out[0]["committed_audio_url"], want)
+
+    def test_job_dir_hints_come_only_from_the_job_id(self):
+        # The scorer's fallback folders: this job's folder and its projects-layout
+        # twin — chosen from the job id, never from the text of a stored path.
+        from app.services import syncnet_service as sn
+        from app.config import get_settings
+        self.chdir_to_tmp()
+        for d in (f"data/dubbed/{JOB_A}", f"data/projects/{JOB_A}/dubbed",
+                  f"data/dubbed/{JOB_B}", f"data/projects/{JOB_B}/dubbed"):
+            os.makedirs(os.path.join(self.tmp, d))
+        with mock.patch.object(get_settings(), "DUBBED_DIR", "data/dubbed"):
+            self.assertEqual(sn._job_dir_hints(JOB_A),
+                             [f"data/dubbed/{JOB_A}".replace("/", os.sep),
+                              os.path.join("data", "projects", JOB_A, "dubbed")])
+            # a job id that is not a plain name yields no folders at all
+            for bad in (None, "", "..", ".", f"{JOB_A}/../{JOB_B}", f"../{JOB_B}"):
+                self.assertEqual(sn._job_dir_hints(bad), [], bad)
+
+    def test_scorer_finds_the_jobs_own_files_with_normalized_paths(self):
+        # POSITIVE test. Normalization hands the scorer absolute paths; its
+        # lookups must still FIND the job's own audio — directly, and through the
+        # fallback folders (this job's folder and its projects-layout twin).
+        from app.services import path_safety as ps
+        from app.services import syncnet_service as sn
+        from app.config import get_settings
+        self.chdir_to_tmp()
+        job_dir = os.path.join("data", "dubbed", JOB_A)
+        twin = os.path.join("data", "projects", JOB_A, "dubbed")
+
+        def touch(folder, name):
+            os.makedirs(os.path.join(self.tmp, folder), exist_ok=True)
+            p = os.path.join(self.tmp, folder, name)
+            with open(p, "wb") as f:
+                f.write(b"ID3")
+            return os.path.realpath(p)
+
+        own = touch(job_dir, "segment_0000.mp3")
+        film = touch(job_dir, "dubbed_en.mp4")
+        moved = touch(twin, "segment_0002.mp3")          # job folder cleaned up; copy lives in the twin
+        moved_film = touch(twin, "dubbed_fr.mp4")        # film only in the twin: fallback lookup
+        stale = f"data/dubbed/{JOB_A}/gone.mp3"
+        segs = [
+            {"transcript_index": 0, "path": f"data/dubbed/{JOB_A}/segment_0000.mp3"},
+            {"transcript_index": 1, "path": stale, "committed_audio_url": "dubbed_en.mp4"},
+            {"transcript_index": 2, "path": f"data/dubbed/{JOB_A}/segment_0002.mp3",
+             "committed_audio_url": "segment_0002.mp3"},
+            {"transcript_index": 3, "path": stale, "audio_url": f"/api/media/{JOB_A}/audio/dubbed_fr.mp4"},
+        ]
+        with mock.patch.object(get_settings(), "DUBBED_DIR", "data/dubbed"):
+            clean = ps.sanitize_segments(segs, job_dir)
+            hints = sn._job_dir_hints(JOB_A)
+            found = [sn._resolve_seg_audio(s, hints) for s in clean]
+        self.assertEqual([os.path.realpath(p) if p else None for p in found],
+                         [own, film, moved, moved_film])
+
+    async def test_analyze_lipsync_passes_the_requests_job_id_to_every_scorer(self):
+        # The scorers search fallback folders; the route must hand them the job id
+        # so the search is never steered by path text.
+        self.write_segments([{"transcript_index": 0, "start_time": 0, "end_time": 3,
+                              "path": self.own_take}])
+        calls = []
+
+        def spy(name):
+            def _spy(_video, _segments, *_a, **kwargs):
+                calls.append((name, kwargs.get("job_id")))
+                return {} if "range" in name else []
+            return _spy
+
+        for body in ({}, {"start": 0, "end": 5}):
+            calls.clear()
+            request = mock.MagicMock()
+            request.json = mock.AsyncMock(return_value=body)
+            with mock.patch("app.services.syncnet_service.score_lipsync_windows", spy("windows")), \
+                    mock.patch("app.services.syncnet_service.score_lipsync_audio_windows", spy("audio_windows")), \
+                    mock.patch("app.services.syncnet_service.score_lipsync_range", spy("range")), \
+                    mock.patch("app.services.syncnet_service.score_lipsync_audio_range", spy("audio_range")), \
+                    mock.patch.object(self.routes, "_probe_video_duration", return_value=12.0):
+                await self.routes.analyze_lipsync_windows(JOB_A, request)
+            self.assertEqual(len(calls), 2, body)
+            self.assertTrue(all(job == JOB_A for _name, job in calls), calls)
 
     # ---- remix_dub (Make Movie) ----------------------------------------------
     def _write_remix_segments(self, segments):
