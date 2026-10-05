@@ -43,6 +43,12 @@ class _Workspace(unittest.TestCase):
         with open(self.video, "wb") as f:
             f.write(b"\x00")
 
+    def chdir_to_tmp(self):
+        """Run as the server does: cwd above a *relative* dubbed/ root."""
+        old = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, old)
+
     def write_segments(self, segments):
         with open(os.path.join(self.dir_a, "segments.json"), "w", encoding="utf-8") as f:
             json.dump({"segments": segments, "video_path": self.video}, f)
@@ -108,12 +114,32 @@ class CommitEndpointTests(_Workspace, unittest.IsolatedAsyncioTestCase):
         for good in (
             "segment_0000.mp3",                                   # bare filename
             self.own_take,                                        # absolute, inside this job
-            os.path.join(self.dubbed, JOB_A, "segment_0000.mp3"), # cwd-relative/absolute form
+            os.path.join(self.dubbed, JOB_A, "segment_0000.mp3"), # absolute (via the dubbed root)
             f"/api/media/{JOB_A}/audio/segment_0000.mp3",         # served URL, own job
         ):
             with self.subTest(good=good):
                 await self.commit({"committed_audio_url": good})
                 self.assertEqual(self.read_segment()["committed_audio_url"], good)
+
+    async def test_cwd_relative_values_with_a_relative_dubbed_root(self):
+        # Production shape: DUBBED_DIR is relative ("data/dubbed") and the server
+        # stores take paths relative to its working directory. This is the form
+        # the staged-take feature sends, and the one a naive "relative to the job
+        # folder" reading would wrongly reject.
+        self.chdir_to_tmp()
+        rel_take = f"dubbed/{JOB_A}/segment_0000.mp3"
+        with mock.patch.object(self.routes.settings, "DUBBED_DIR", "dubbed"):
+            await self.commit({"committed_audio_url": rel_take})
+            self.assertEqual(self.read_segment()["committed_audio_url"], rel_take)
+            await self.commit({"staged_path": rel_take})
+            self.assertEqual(self.read_segment()["path"], rel_take)
+            # ...and the same relative form pointing at another job is still refused.
+            for attack in (f"dubbed/{JOB_B}/secret.mp3", f"dubbed/{JOB_A}/../{JOB_B}/secret.mp3"):
+                with self.subTest(attack=attack):
+                    with self.assertRaises(HTTPException):
+                        await self.commit({"committed_audio_url": attack})
+                    with self.assertRaises(HTTPException):
+                        await self.commit({"staged_path": attack})
 
     async def test_valid_staged_path_is_accepted(self):
         await self.commit({"staged_path": self.own_take})
@@ -163,6 +189,94 @@ class MixerReadSideTests(_Workspace):
         self.assertEqual(
             ps.resolve_segment_audio({"audio_url": f"/api/media/{JOB_A}/audio/segment_0000.mp3"}, d),
             os.path.realpath(self.own_take))
+
+    def test_cwd_relative_value_resolves_in_the_film_render_and_preview(self):
+        from app.services import dubbing_service as ds
+        from app.services import path_safety as ps
+        self.chdir_to_tmp()
+        rel_dir = os.path.join("dubbed", JOB_A)                 # relative job folder, as in production
+        rel_take = f"dubbed/{JOB_A}/segment_0000.mp3"           # relative to the working directory
+        want = os.path.realpath(self.own_take)
+        # film render (remix_dub) resolver
+        self.assertEqual(ps.resolve_segment_audio({"path": rel_take}, rel_dir), want)
+        self.assertEqual(ps.resolve_segment_audio({"path": "segment_0000.mp3"}, rel_dir), want)
+        self.assertIsNone(ps.resolve_segment_audio({"path": f"dubbed/{JOB_B}/secret.mp3"}, rel_dir))
+        # scene preview, with the relative form in segments.json
+        self.write_segments([{"transcript_index": 0, "start_time": 0, "end_time": 3,
+                              "committed_audio_url": rel_take}])
+        captured = {}
+
+        def fake_mixdown(segments, *_a, **_k):
+            captured["paths"] = [os.path.realpath(s["path"]) for s in segments]
+            return False
+
+        scene = {"start": 0, "end": 10, "source_start": 0, "source_end": 10}
+        with mock.patch.object(ds.settings, "DUBBED_DIR", "dubbed"), \
+                mock.patch.object(ds.dubbing_service, "_merge_audio_segments_mixdown", fake_mixdown):
+            with self.assertRaises(RuntimeError):
+                ds.dubbing_service.render_scene_preview(JOB_A, scene, os.path.join(self.tmp, "out.mp4"))
+        self.assertEqual(captured["paths"], [want])
+
+    def test_film_render_logs_every_refused_file(self):
+        from app.services import path_safety as ps
+        seg = {"transcript_index": 7, "path": self.other_take,
+               "committed_audio_url": f"/api/media/{JOB_B}/audio/secret.mp3"}
+        with self.assertLogs("app.services.path_safety", level="WARNING") as logs:
+            self.assertIsNone(ps.resolve_segment_audio(seg, self.dir_a, label=f"[REMIX] job={JOB_A}"))
+        text = "\n".join(logs.output)
+        self.assertIn(f"[REMIX] job={JOB_A}", text)
+        self.assertIn("transcript_index=7", text)
+        self.assertIn("field=path", text)
+        self.assertIn("field=committed_audio_url", text)
+        self.assertIn("render as silence", text)
+
+    def test_a_missing_file_is_not_logged_as_refused(self):
+        from app.services import path_safety as ps
+        with self.assertNoLogs("app.services.path_safety", level="WARNING"):
+            self.assertIsNone(ps.resolve_segment_audio(
+                {"transcript_index": 1, "path": os.path.join(self.dir_a, "not_rendered_yet.mp3")}, self.dir_a))
+
+    def test_a_value_with_directories_is_read_as_the_server_reads_it(self):
+        # "sub/x.mp3" is NOT quietly re-read as job-folder-relative: the rest of the
+        # server opens stored values relative to its working directory, so the
+        # string has to be safe under THAT reading. Bare filenames are job-relative.
+        from app.services import path_safety as ps
+        with self.assertRaises(ps.UnsafePath):
+            ps.resolve_job_file(self.dir_a, "sub/x.mp3")
+        self.assertEqual(ps.resolve_job_file(self.dir_a, "segment_0000.mp3"),
+                         os.path.realpath(self.own_take))
+
+    def test_qc_preview_stitch_only_receives_safe_paths(self):
+        # analyze_dub (QC, no export yet) also feeds seg["path"] to ffmpeg.
+        from app.pipeline import analyze_dub as ad
+        from app.services import dubbing_service as ds
+        self.chdir_to_tmp()
+        qc_a = os.path.join(self.tmp, "data", "dubbed", JOB_A)
+        qc_b = os.path.join(self.tmp, "data", "dubbed", JOB_B)
+        os.makedirs(qc_a)
+        os.makedirs(qc_b)
+        own = os.path.join(qc_a, "segment_0000.mp3")
+        other = os.path.join(qc_b, "secret.mp3")
+        for p in (own, other):
+            with open(p, "wb") as f:
+                f.write(b"ID3")
+        segs = [
+            {"transcript_index": 0, "start": 0, "end": 3, "path": f"data/dubbed/{JOB_A}/segment_0000.mp3"},
+            {"transcript_index": 1, "start": 3, "end": 6, "path": other},                          # absolute attack
+            {"transcript_index": 2, "start": 6, "end": 9, "path": f"data/dubbed/{JOB_B}/secret.mp3"},  # relative attack
+        ]
+        with open(os.path.join(qc_a, "segments.json"), "w", encoding="utf-8") as f:
+            json.dump({"segments": segs, "video_duration": 10}, f)
+        captured = {}
+
+        def fake_merge(merge_segments, *_a, **_k):
+            captured["paths"] = [os.path.realpath(m["path"]) for m in merge_segments]
+            return False  # stop after the stitch; we only need its inputs
+
+        with mock.patch.object(ds.dubbing_service, "_merge_audio_segments", fake_merge):
+            result = ad.analyze_dub(JOB_A, "en", self.video)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(captured["paths"], [os.path.realpath(own)])
 
     @unittest.skipUnless(hasattr(os, "symlink"), "needs symlinks")
     def test_symlink_planted_in_the_job_folder_cannot_escape(self):

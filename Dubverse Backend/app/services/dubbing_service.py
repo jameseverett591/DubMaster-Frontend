@@ -5289,7 +5289,7 @@ class DubbingService:
         # PUT /segments), so resolution goes through path_safety: a candidate outside
         # this job's folder is skipped as if it did not exist, never opened.
         def _resolve_segment_audio(seg: Dict) -> Optional[str]:
-            return path_safety.resolve_segment_audio(seg, output_dir)
+            return path_safety.resolve_segment_audio(seg, output_dir, label=f"[REMIX] job={job_id}")
 
         merge_segments = []
         silent_indices = []

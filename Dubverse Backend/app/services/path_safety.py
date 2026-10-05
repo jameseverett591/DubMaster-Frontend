@@ -11,9 +11,12 @@ Every public function resolves symlinks (realpath), so a link planted inside the
 job folder cannot be used to step outside it either.
 """
 
+import logging
 import os
 import re
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class UnsafePath(ValueError):
@@ -43,11 +46,13 @@ def _inside(root_real: str, candidate_real: str) -> bool:
 def resolve_job_file(job_dir: str, value: Any) -> str:
     """Return the real path `value` names inside `job_dir`, or raise UnsafePath.
 
-    Accepts a bare filename, a path relative to the job folder or to the server's
-    working directory, an absolute path, or a served media URL. The result is always an absolute, symlink-resolved path that is inside
-    `job_dir`. Absolute paths and `..` are not rejected on sight — they are
-    resolved first and refused only if they land outside the folder, so a
-    legitimate absolute path to this job's own take still works.
+    Accepts a bare filename (taken to be in the job folder), a path with
+    directories (read relative to the server's working directory, as the server
+    writes them, or absolute), or a served media URL. The result is always an
+    absolute, symlink-resolved path that is inside `job_dir`. Absolute paths and
+    `..` are not rejected on sight — they are resolved first and refused only if
+    they land outside the folder, so a legitimate absolute path to this job's own
+    take still works.
     """
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         raise UnsafePath("empty or malformed path")
@@ -66,13 +71,17 @@ def resolve_job_file(job_dir: str, value: Any) -> str:
         candidate = os.path.join(job_dir, name)
     elif os.path.isabs(value):
         candidate = value
-    else:
-        # The server itself stores take paths relative to its working directory
-        # ("data/dubbed/<job>/segment_0013.mp3"); the editor also sends bare
-        # filenames. Accept whichever reading lands inside the job folder.
+    elif "/" in value or "\\" in value:
+        # A path with directories. The server writes these relative to its working
+        # directory ("data/dubbed/<job>/segment_0013.mp3"), and every other reader
+        # of a stored value opens it that way — so that is the ONLY reading that
+        # counts. Accepting "whichever reading lands inside the job folder" let
+        # "dubbed/<other job>/x.mp3" through: harmless when read as job-relative,
+        # but it names another job's file everywhere else the value is used.
         candidate = os.path.abspath(value)
-        if not _inside(root_real, os.path.realpath(candidate)):
-            candidate = os.path.join(job_dir, value)
+    else:
+        # A bare filename ("segment_0013.mp3"): lives in the job folder.
+        candidate = os.path.join(job_dir, value)
 
     real = os.path.realpath(candidate)
     if not _inside(root_real, real):
@@ -80,18 +89,32 @@ def resolve_job_file(job_dir: str, value: Any) -> str:
     return real
 
 
-def resolve_segment_audio(seg: Dict[str, Any], job_dir: str) -> Optional[str]:
+def _refused(label: str, seg: Dict[str, Any], key: str, value: Any, why: str) -> None:
+    # A refused file renders as silence, so say so — otherwise an unexpected
+    # silent line has no trail. repr() + truncation keeps attacker-supplied text
+    # from breaking the log line.
+    logger.warning(
+        "%s refused segment audio outside the job folder: transcript_index=%s field=%s "
+        "value=%.120r (%s) — the line will render as silence",
+        label, seg.get("transcript_index"), key, value, why,
+    )
+
+
+def resolve_segment_audio(seg: Dict[str, Any], job_dir: str, label: str = "[AUDIO]") -> Optional[str]:
     """Pick the existing audio file for a segment, or None if there isn't a safe one.
 
     Order: the segment's `path`, then a served URL in `committed_audio_url` /
     `audio_url`. Any candidate outside `job_dir` is skipped as if it did not
-    exist — a bad value must never kill the render, and must never be opened.
+    exist — a bad value must never kill the render, and must never be opened —
+    and a warning naming the segment and field is logged each time one is refused.
+    `label` prefixes the warning (e.g. "[REMIX] job=<id>").
     """
     p = seg.get("path")
     if p:
         try:
             real = resolve_job_file(job_dir, p)
-        except UnsafePath:
+        except UnsafePath as e:
+            _refused(label, seg, "path", p, str(e))
             real = None
         if real and os.path.exists(real):
             return real
@@ -101,7 +124,8 @@ def resolve_segment_audio(seg: Dict[str, Any], job_dir: str) -> Optional[str]:
             continue
         try:
             real = resolve_job_file(job_dir, url)
-        except UnsafePath:
+        except UnsafePath as e:
+            _refused(label, seg, key, url, str(e))
             continue
         if os.path.exists(real):
             return real
