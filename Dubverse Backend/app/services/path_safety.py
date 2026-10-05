@@ -89,15 +89,49 @@ def resolve_job_file(job_dir: str, value: Any) -> str:
     return real
 
 
-def _refused(label: str, seg: Dict[str, Any], key: str, value: Any, why: str) -> None:
+def _refused(label: str, seg: Dict[str, Any], key: str, value: Any, why: str,
+             consequence: str = "the line will render as silence") -> None:
     # A refused file renders as silence, so say so — otherwise an unexpected
     # silent line has no trail. repr() + truncation keeps attacker-supplied text
     # from breaking the log line.
     logger.warning(
         "%s refused segment audio outside the job folder: transcript_index=%s field=%s "
-        "value=%.120r (%s) — the line will render as silence",
-        label, seg.get("transcript_index"), key, value, why,
+        "value=%.120r (%s) — %s",
+        label, seg.get("transcript_index"), key, value, why, consequence,
     )
+
+
+# The segment fields a reader may turn into a file open.
+AUDIO_FIELDS = ("path", "committed_audio_url", "audio_url")
+
+
+def sanitize_segments(segments: Any, job_dir: str, label: str = "[AUDIO]") -> list:
+    """Copy of `segments` in which every audio field that does not resolve inside
+    `job_dir` is set to None.
+
+    For code that takes a whole segment list and does its own file lookups
+    (e.g. the lip-sync scorers): clean the list once at the entry point and no
+    reader downstream can be handed another job's file. Safe values are left
+    exactly as stored, so downstream behaviour is unchanged for them. The input
+    is not modified.
+    """
+    cleaned = []
+    for seg in segments or []:
+        if not isinstance(seg, dict):
+            cleaned.append(seg)
+            continue
+        out = dict(seg)
+        for key in AUDIO_FIELDS:
+            value = out.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                resolve_job_file(job_dir, value)
+            except UnsafePath as e:
+                _refused(label, seg, key, value, str(e), consequence="ignored for this request")
+                out[key] = None
+        cleaned.append(out)
+    return cleaned
 
 
 def resolve_segment_audio(seg: Dict[str, Any], job_dir: str, label: str = "[AUDIO]") -> Optional[str]:

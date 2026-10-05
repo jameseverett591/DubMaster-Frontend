@@ -290,5 +290,181 @@ class MixerReadSideTests(_Workspace):
             ps.resolve_job_file(self.dir_a, "innocent.mp3")
 
 
+class CallSiteTests(_Workspace, unittest.IsolatedAsyncioTestCase):
+    """The real entry points that open files named by a segment — each is called
+    the way the server calls it, with the expensive/IO parts stubbed so the test
+    can see exactly which file would have been opened."""
+
+    async def asyncSetUp(self):
+        from app.api import routes
+        self.routes = routes
+        p = mock.patch.object(routes.settings, "DUBBED_DIR", self.dubbed)
+        p.start()
+        self.addCleanup(p.stop)
+
+    # ---- POST /analyze-segment/{job}/{index} ---------------------------------
+    async def test_analyze_segment_refuses_another_jobs_audio(self):
+        self.write_segments([{"transcript_index": 0, "start": 0, "end": 3, "path": self.other_take}])
+        spy = mock.MagicMock(return_value={"status": "ok"})
+        with mock.patch("app.services.syncnet_service.analyze_segment_lip_sync", spy):
+            with self.assertRaises(HTTPException) as cm:
+                await self.routes.analyze_segment(JOB_A, 0)
+        self.assertEqual(cm.exception.status_code, 404)
+        spy.assert_not_called()                       # the other job's file was never opened
+
+    async def test_analyze_segment_relative_attack_is_refused(self):
+        self.chdir_to_tmp()
+        self.write_segments([{"transcript_index": 0, "start": 0, "end": 3,
+                              "path": f"dubbed/{JOB_B}/secret.mp3"}])
+        spy = mock.MagicMock(return_value={"status": "ok"})
+        with mock.patch.object(self.routes.settings, "DUBBED_DIR", "dubbed"), \
+                mock.patch("app.services.syncnet_service.analyze_segment_lip_sync", spy):
+            with self.assertRaises(HTTPException):
+                await self.routes.analyze_segment(JOB_A, 0)
+        spy.assert_not_called()
+
+    async def test_analyze_segment_opens_the_jobs_own_file(self):
+        self.write_segments([{"transcript_index": 0, "start": 0, "end": 3, "path": self.own_take}])
+        spy = mock.MagicMock(return_value={"status": "ok"})
+        with mock.patch("app.services.syncnet_service.analyze_segment_lip_sync", spy):
+            result = await self.routes.analyze_segment(JOB_A, 0)
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(os.path.realpath(spy.call_args.args[1]), os.path.realpath(self.own_take))
+
+    # ---- POST /analyze-lipsync/{job} -----------------------------------------
+    async def test_analyze_lipsync_never_hands_attack_paths_to_the_scorers(self):
+        self.write_segments([
+            {"transcript_index": 0, "start_time": 0, "end_time": 3, "path": self.other_take},
+            {"transcript_index": 1, "start_time": 3, "end_time": 6,
+             "committed_audio_url": f"../{JOB_B}/secret.mp3"},
+            {"transcript_index": 2, "start_time": 6, "end_time": 9,
+             "audio_url": f"/api/media/{JOB_B}/audio/secret.mp3"},
+            {"transcript_index": 3, "start_time": 9, "end_time": 12, "path": self.own_take,
+             "committed_audio_url": "segment_0000.mp3"},
+        ])
+        seen = []
+
+        def spy(_video, segments, *_a, **_k):
+            seen.append(segments)
+            return []
+
+        request = mock.MagicMock()
+        request.json = mock.AsyncMock(return_value={})
+        with mock.patch("app.services.syncnet_service.score_lipsync_windows", spy), \
+                mock.patch("app.services.syncnet_service.score_lipsync_audio_windows", spy), \
+                mock.patch.object(self.routes, "_probe_video_duration", return_value=12.0):
+            result = await self.routes.analyze_lipsync_windows(JOB_A, request)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(seen), 2)                          # both scorers were called
+        for segments in seen:
+            by_ti = {s["transcript_index"]: s for s in segments}
+            self.assertIsNone(by_ti[0]["path"])
+            self.assertIsNone(by_ti[1]["committed_audio_url"])
+            self.assertIsNone(by_ti[2]["audio_url"])
+            self.assertEqual(by_ti[3]["path"], self.own_take)             # safe values untouched
+            self.assertEqual(by_ti[3]["committed_audio_url"], "segment_0000.mp3")
+        # cleaning the in-memory copy must not rewrite segments.json
+        self.assertEqual(self.read_segment(0)["path"], self.other_take)
+
+    async def test_analyze_lipsync_range_form_is_cleaned_too(self):
+        self.write_segments([{"transcript_index": 0, "start_time": 0, "end_time": 3, "path": self.other_take}])
+        seen = []
+
+        def spy(_video, segments, *_a, **_k):
+            seen.append(segments)
+            return {}
+
+        request = mock.MagicMock()
+        request.json = mock.AsyncMock(return_value={"start": 0, "end": 5})
+        with mock.patch("app.services.syncnet_service.score_lipsync_range", spy), \
+                mock.patch("app.services.syncnet_service.score_lipsync_audio_range", spy), \
+                mock.patch.object(self.routes, "_probe_video_duration", return_value=12.0):
+            await self.routes.analyze_lipsync_windows(JOB_A, request)
+        self.assertEqual(len(seen), 2)
+        for segments in seen:
+            self.assertIsNone(segments[0]["path"])
+
+    # ---- remix_dub (Make Movie) ----------------------------------------------
+    def _write_remix_segments(self, segments):
+        with open(os.path.join(self.dir_a, "segments.json"), "w", encoding="utf-8") as f:
+            json.dump({"segments": segments, "video_path": self.video, "language": "en",
+                       "video_duration": 12.0}, f)
+
+    async def test_remix_dub_mixes_only_the_jobs_own_audio(self):
+        from app.services import dubbing_service as ds
+        self._write_remix_segments([
+            {"transcript_index": 0, "start": 0, "end": 3, "path": self.other_take},                  # absolute attack
+            {"transcript_index": 1, "start": 3, "end": 6, "path": f"../{JOB_B}/secret.mp3"},         # relative attack
+            {"transcript_index": 2, "start": 6, "end": 9,
+             "committed_audio_url": f"/api/media/{JOB_A}/audio/../{JOB_B}/secret.mp3"},               # URL attack
+            {"transcript_index": 3, "start": 9, "end": 12, "path": self.own_take},                  # legitimate
+        ])
+        captured = {}
+
+        def fake_merge(merge_segments, *_a, **_k):
+            captured["paths"] = [os.path.realpath(m["path"]) for m in merge_segments]
+            return False                                   # stop before the video mux
+
+        with mock.patch.object(ds.dubbing_service, "dubbed_dir", self.dubbed), \
+                mock.patch.object(ds.dubbing_service, "_merge_audio_segments", fake_merge):
+            with self.assertRaises(RuntimeError):
+                await ds.dubbing_service.remix_dub(JOB_A)
+        self.assertEqual(captured["paths"], [os.path.realpath(self.own_take)])
+
+    async def test_remix_dub_with_only_refused_audio_never_reaches_the_mixer(self):
+        # Existing behaviour (remix_dub raised this before this PR): when EVERY line is
+        # refused or missing the render stops ("no segments have audio") and nothing is
+        # mixed. POST /dub/remix refunds the debit when remix_dub raises (_unmeter_render).
+        # What is NOT covered is a PARTIAL refusal, which still renders (and bills) a
+        # film with some silent lines — see the follow-up list.
+        from app.services import dubbing_service as ds
+        self._write_remix_segments([
+            {"transcript_index": 0, "start": 0, "end": 3, "path": self.other_take},
+            {"transcript_index": 1, "start": 3, "end": 6, "path": f"../{JOB_B}/secret.mp3"},
+        ])
+        merge = mock.MagicMock(return_value=True)
+        with mock.patch.object(ds.dubbing_service, "dubbed_dir", self.dubbed), \
+                mock.patch.object(ds.dubbing_service, "_merge_audio_segments", merge):
+            with self.assertRaises(RuntimeError) as cm:
+                await ds.dubbing_service.remix_dub(JOB_A)
+        self.assertIn("no segments have audio", str(cm.exception))
+        merge.assert_not_called()
+
+
+    # ---- regenerate_segment: the stored voice-changer recording --------------
+    async def _regenerate_with_perf(self, perf_value):
+        from app.services import dubbing_service as ds
+        self.write_segments([{
+            "transcript_index": 0, "start": 0, "end": 3, "text": "hello", "voice_id": "v1",
+            "speaker": "speaker-1", "engine": "elevenlabs-sts", "perf_path": perf_value,
+        }])
+        sts = mock.AsyncMock(return_value=None)
+        with mock.patch.object(ds.dubbing_service, "dubbed_dir", self.dubbed), \
+                mock.patch.object(ds.elevenlabs_tts, "speech_to_speech", sts), \
+                mock.patch.object(ds.elevenlabs_tts, "enabled", True), \
+                mock.patch.object(ds, "fish_audio_tts", mock.MagicMock()):
+            try:
+                await ds.dubbing_service.regenerate_segment(JOB_A, 0)
+            except Exception:
+                pass          # what happens after the guard is not under test
+        return sts
+
+    async def test_regenerate_never_uploads_another_jobs_recording(self):
+        # Without the guard, regenerate_segment open()s perf_path and posts its bytes
+        # to ElevenLabs speech-to-speech: another job's file leaves the server.
+        for attack in (self.other_take, f"../{JOB_B}/secret.mp3", "/etc/hostname"):
+            with self.subTest(attack=attack):
+                sts = await self._regenerate_with_perf(attack)
+                sts.assert_not_called()
+
+    async def test_regenerate_still_uses_the_jobs_own_recording(self):
+        own_perf = os.path.join(self.dir_a, "segment_0000_perf.wav")
+        with open(own_perf, "wb") as f:
+            f.write(b"RIFFdata")
+        sts = await self._regenerate_with_perf(own_perf)
+        sts.assert_called_once()
+        self.assertEqual(sts.call_args.kwargs["audio_bytes"], b"RIFFdata")
+
+
 if __name__ == "__main__":
     unittest.main()

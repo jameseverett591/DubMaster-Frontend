@@ -7037,7 +7037,14 @@ async def analyze_lipsync_windows(job_id: str, request: Request):
     if not video_path or not os.path.exists(video_path):
         raise HTTPException(status_code=404, detail="Original source video not found for this job")
 
-    segments = data.get("segments", [])
+    # segments.json holds client-writable audio paths, and the scorers open them
+    # (and derive directories from them). Clean the list once, here, so nothing
+    # downstream can be handed a file outside this job's folder.
+    segments = path_safety.sanitize_segments(
+        data.get("segments", []),
+        os.path.join(settings.DUBBED_DIR, job_id),
+        label=f"[LIPSYNC] job={job_id}",
+    )
 
     body = {}
     try:
