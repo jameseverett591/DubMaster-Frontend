@@ -6866,6 +6866,36 @@ export function DubVerseEditor({
       .catch(err => console.warn('[REVIEW-QUEUE] mark-ok persist failed:', err))
   }, [jobId, updateSegment, displaySegments, setImportedSegments])
 
+  // Bulk release of TTS-withheld segments. Sequential on purpose:
+  // handleGenerateSpeech serializes through isRegeneratingRef (a concurrent
+  // second call queues last-write-wins and would drop 100+ requests to one),
+  // and awaiting each iteration also keeps the commit-then-regen order per
+  // segment. Rows leave the queue as each clears — no separate progress UI.
+  const handleClearAllFlagged = useCallback(async (indices: number[]) => {
+    for (const idx of indices) {
+      const seg = displaySegmentsRef.current[idx]
+      if (!seg?.translation_flagged) continue
+      const ti = seg.transcript_index ?? idx
+      try {
+        await apiClient.commitSegmentTiming(jobId, ti, {
+          clear_translation_flag: true,
+          flag_status: 'reviewed_no_change',
+          correction_type: null,
+        })
+        updateSegment(idx, {
+          translation_flagged: false, flag_reason: null,
+          flag_status: 'reviewed_no_change', correction_type: null,
+        })
+        setImportedSegments(prev => prev ? prev.map((s, i) =>
+          i === idx ? { ...s, translation_flagged: false, flag_reason: null, flag_status: 'reviewed_no_change', correction_type: null } : s
+        ) : prev)
+        await handleGenerateSpeechRef.current(idx)
+      } catch (err) {
+        console.warn(`[REVIEW-QUEUE] clear+dub failed for segment ${ti}:`, err)
+      }
+    }
+  }, [jobId, updateSegment, setImportedSegments])
+
   // MAKE MOVIE is never blocked by judgement calls — only by the two states
   // where a click is meaningless (a render already running, a save mid-flight).
   // Everything else becomes a warning on click. A disabled button tells the user
@@ -15204,6 +15234,7 @@ export function DubVerseEditor({
             setCurrentTime(displaySegments[idx] ? effStart(displaySegments[idx]) : 0)
           }}
           onMarkOk={handleMarkOk}
+          onClearAll={handleClearAllFlagged}
         />
       )}
     </div>

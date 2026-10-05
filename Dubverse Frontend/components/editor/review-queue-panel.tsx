@@ -1,7 +1,7 @@
 'use client'
 
-import { useMemo } from 'react'
-import { X, ArrowRight, CheckCircle, AlertTriangle } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { X, ArrowRight, CheckCircle, AlertTriangle, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { Segment } from '@/lib/editor-types'
 import { useT } from '@/lib/use-t'
@@ -11,6 +11,9 @@ interface ReviewQueuePanelProps {
   onClose: () => void
   onJumpToSegment: (index: number) => void
   onMarkOk: (index: number) => void
+  // Clears the TTS gate on every withheld segment and regenerates its audio.
+  // Receives editor-array indices of the currently flagged segments.
+  onClearAll?: (indices: number[]) => Promise<void> | void
 }
 
 function formatTime(secs: number): string {
@@ -46,8 +49,13 @@ export function ReviewQueuePanel({
   onClose,
   onJumpToSegment,
   onMarkOk,
+  onClearAll,
 }: ReviewQueuePanelProps) {
   const t = useT()
+  // Bulk clear is two-step: first click arms a confirm (it fires N TTS
+  // generations — expensive and not casually undoable), second click runs it.
+  const [clearAllArmed, setClearAllArmed] = useState(false)
+  const [clearAllBusy, setClearAllBusy] = useState(false)
   const flagged = useMemo(
     () =>
       segments.filter(
@@ -87,6 +95,55 @@ export function ReviewQueuePanel({
             <X className="h-4 w-4" />
           </button>
         </div>
+
+        {/* Bulk release: every withheld segment at once. Two-click arm so N
+            TTS generations can't fire on a stray click. Rows drop out of the
+            queue as each clears — the shrinking count IS the progress bar. */}
+        {(() => {
+          const withheld = flagged.filter(s => s.translation_flagged)
+          if (!withheld.length || !onClearAll) return null
+          return (
+            <div className="px-3 py-2 border-b border-neutral-700 shrink-0 flex items-center gap-2">
+              <button
+                disabled={clearAllBusy}
+                onClick={async () => {
+                  if (!clearAllArmed) { setClearAllArmed(true); return }
+                  setClearAllBusy(true)
+                  try {
+                    await onClearAll(withheld.map(s => s.index))
+                  } finally {
+                    setClearAllBusy(false)
+                    setClearAllArmed(false)
+                  }
+                }}
+                className={cn(
+                  'flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded border transition-colors',
+                  clearAllArmed
+                    ? 'bg-emerald-900/40 border-emerald-600 text-emerald-300 hover:bg-emerald-900/60'
+                    : 'bg-neutral-800 border-neutral-700 text-neutral-300 hover:text-emerald-300 hover:border-emerald-700',
+                  clearAllBusy && 'opacity-60 cursor-wait'
+                )}
+              >
+                {clearAllBusy
+                  ? <RefreshCw className="h-3 w-3 animate-spin" />
+                  : <CheckCircle className="h-3 w-3" />}
+                {clearAllBusy
+                  ? t('Clearing & dubbing…')
+                  : clearAllArmed
+                    ? `${t('Sure?')} ${withheld.length} ${t('segments will be dubbed')}`
+                    : `${t('Clear all')} ${withheld.length} & ${t('dub')}`}
+              </button>
+              {clearAllArmed && !clearAllBusy && (
+                <button
+                  onClick={() => setClearAllArmed(false)}
+                  className="text-xs text-neutral-500 hover:text-neutral-300"
+                >
+                  {t('Cancel')}
+                </button>
+              )}
+            </div>
+          )
+        })()}
 
         {/* Body */}
         <div className="overflow-y-auto flex-1 p-3 space-y-2">
