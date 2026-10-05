@@ -40,6 +40,7 @@ from app.storage.manager import StorageManager
 from app.services.job_manager import job_manager
 from app.services import quota_service
 from app.services import tts_usage
+from app.services import path_safety
 from app.services.supabase_client import verify_jwt
 from app.services import upload_reservations
 from app.pipeline.chunk_video import VideoChunker
@@ -6986,7 +6987,15 @@ async def analyze_segment(job_id: str, segment_index: int):
     if seg is None:
         raise HTTPException(status_code=404, detail=f"Segment with transcript_index={segment_index} not found")
 
-    audio_path = seg.get("path")
+    # seg["path"] is client-writable; only a file inside this job's folder is opened.
+    audio_path = None
+    if seg.get("path"):
+        try:
+            audio_path = path_safety.resolve_job_file(
+                os.path.join(settings.DUBBED_DIR, job_id), seg.get("path")
+            )
+        except path_safety.UnsafePath:
+            audio_path = None
     if not audio_path or not os.path.exists(audio_path):
         raise HTTPException(status_code=404, detail="Segment audio file not found — regenerate it first")
 
@@ -7028,7 +7037,14 @@ async def analyze_lipsync_windows(job_id: str, request: Request):
     if not video_path or not os.path.exists(video_path):
         raise HTTPException(status_code=404, detail="Original source video not found for this job")
 
-    segments = data.get("segments", [])
+    # segments.json holds client-writable audio paths, and the scorers open them
+    # (and derive directories from them). Clean the list once, here, so nothing
+    # downstream can be handed a file outside this job's folder.
+    segments = path_safety.sanitize_segments(
+        data.get("segments", []),
+        os.path.join(settings.DUBBED_DIR, job_id),
+        label=f"[LIPSYNC] job={job_id}",
+    )
 
     body = {}
     try:
@@ -7059,11 +7075,14 @@ async def analyze_lipsync_windows(job_id: str, request: Request):
         end_f = min(end_f, cap)
         if start_f >= end_f:
             raise HTTPException(status_code=422, detail="start is beyond the video duration")
+        # job_id, not path text, decides which folders the scorers search.
         visual = await asyncio.to_thread(
-            syncnet_service.score_lipsync_range, video_path, segments, start_f, end_f
+            syncnet_service.score_lipsync_range, video_path, segments, start_f, end_f,
+            job_id=job_id,
         )
         audio = await asyncio.to_thread(
-            syncnet_service.score_lipsync_audio_range, video_path, segments, start_f, end_f
+            syncnet_service.score_lipsync_audio_range, video_path, segments, start_f, end_f,
+            job_id=job_id,
         )
         return {"status": "ok", "start": start_f, "end": end_f,
                 "visual": visual, "audio": audio}
@@ -7079,10 +7098,12 @@ async def analyze_lipsync_windows(job_id: str, request: Request):
         raise HTTPException(status_code=422, detail="Could not determine video duration")
 
     visual_windows = await asyncio.to_thread(
-        syncnet_service.score_lipsync_windows, video_path, segments, duration
+        syncnet_service.score_lipsync_windows, video_path, segments, duration,
+        job_id=job_id,
     )
     audio_windows = await asyncio.to_thread(
-        syncnet_service.score_lipsync_audio_windows, video_path, segments, duration
+        syncnet_service.score_lipsync_audio_windows, video_path, segments, duration,
+        job_id=job_id,
     )
     # One row per window carries both signals: audio-vs-audio is the trusted
     # timing metric; visual is supplementary where faces are readable.
@@ -8699,11 +8720,23 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     # take written only to committed_audio_url would be silently absent from
     # the next rebuild.
     staged_path = body.get("staged_path")
+    # Both audio fields are opened by ffmpeg at the next render, so each must name
+    # a file inside THIS job's folder. The old staged_path check only required the
+    # shared dubbed/ root, which let one job point at another job's audio; and
+    # committed_audio_url was not checked at all (absolute paths, "../").
+    _job_dir = os.path.join(settings.DUBBED_DIR, job_id)
     if staged_path is not None:
-        dubbed_dir_abs = os.path.abspath(settings.DUBBED_DIR)
-        staged_abs = os.path.abspath(staged_path)
-        if not staged_abs.startswith(dubbed_dir_abs + os.sep) or not os.path.exists(staged_abs):
-            raise HTTPException(status_code=400, detail=f"Invalid staged_path: {staged_path}")
+        try:
+            _staged_real = path_safety.resolve_job_file(_job_dir, staged_path)
+        except path_safety.UnsafePath:
+            raise HTTPException(status_code=400, detail="Invalid staged_path")
+        if not os.path.exists(_staged_real):
+            raise HTTPException(status_code=400, detail="Invalid staged_path")
+    if committed_audio_url:
+        try:
+            path_safety.resolve_job_file(_job_dir, committed_audio_url)
+        except path_safety.UnsafePath:
+            raise HTTPException(status_code=400, detail="Invalid committed_audio_url")
     # Update Supabase — sequence stores transcript_index (see upsert_segments docstring)
     update_data = {"sequence": index}
     if locked is not None:
