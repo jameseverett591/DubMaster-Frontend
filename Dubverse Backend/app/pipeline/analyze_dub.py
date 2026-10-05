@@ -23,11 +23,16 @@ import logging
 import os
 import subprocess
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# How often a running analysis touches its .running sentinel. routes.py treats a
+# sentinel with no heartbeat for _ANALYSIS_SENTINEL_MAX_AGE_S as a dead run.
+ANALYSIS_HEARTBEAT_S = 60
 
 
 def analyze_dub(
@@ -69,11 +74,46 @@ def analyze_dub(
     output_file = dubbed_dir / f"analysis_{lang_norm}.json"
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
 
-    # Create sentinel to indicate analysis in progress
+    # Create sentinel to indicate analysis in progress. Callers normally claim it
+    # atomically first (routes._acquire_analysis_sentinel); touch() is idempotent.
     try:
         sentinel.touch()
     except Exception:
         pass
+
+    # Heartbeat: keep the sentinel's mtime fresh while the run is alive. Staleness
+    # is judged on time since the last heartbeat, never on how long the run has
+    # taken — a feature-length film legitimately runs for a long time.
+    _hb_stop = threading.Event()
+
+    def _heartbeat() -> None:
+        while not _hb_stop.wait(ANALYSIS_HEARTBEAT_S):
+            try:
+                sentinel.touch()
+            except Exception:
+                pass
+
+    _hb_thread = threading.Thread(
+        target=_heartbeat, name=f"analysis-heartbeat-{job_id}", daemon=True
+    )
+    _hb_thread.start()
+
+    def _fail(reason: str):
+        # Persist the failure too — a bare error return leaves GET 404ing, and
+        # the editor used to treat "no report yet" as "re-trigger me", looping
+        # forever on a run that could never succeed.
+        try:
+            with open(output_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "job_id": job_id,
+                    "target_language": lang_norm,
+                    "status": "error",
+                    "reason": reason,
+                    "generated_at": datetime.utcnow().isoformat() + "Z",
+                }, f, indent=2)
+        except Exception:
+            pass
+        return {"status": "error", "reason": reason}
 
     try:
         has_export = dubbed_video.exists()
@@ -88,7 +128,7 @@ def analyze_dub(
             # its qc_preview_ prefix keeps it unambiguous against the real
             # export artifacts (dubbed_{lang}.mp4, dubbed_audio.wav).
             if not segments_file.exists():
-                return {"status": "error", "reason": "No segments available yet"}
+                return _fail("No segments available yet")
             with open(segments_file, "r", encoding="utf-8") as f:
                 seg_data = json.load(f)
             segs = seg_data.get("segments", [])
@@ -97,7 +137,7 @@ def analyze_dub(
                 for s in segs if s.get("path")
             ]
             if not merge_segments:
-                return {"status": "error", "reason": "No generated audio yet"}
+                return _fail("No generated audio yet")
 
             from app.services.dubbing_service import dubbing_service
             video_duration = seg_data.get("video_duration") or 0.0
@@ -109,7 +149,7 @@ def analyze_dub(
                 merge_segments, str(stitched_audio), video_duration
             )
             if not ok:
-                return {"status": "error", "reason": "Could not build preview audio for QC"}
+                return _fail("Could not build preview audio for QC")
             audio_source = stitched_audio
 
         analysis: Dict[str, Any] = {
@@ -238,9 +278,12 @@ def analyze_dub(
 
     except Exception as e:
         logger.error(f"[ANALYSIS] Failed for job {job_id}: {e}", exc_info=True)
-        return {"status": "error", "reason": str(e)}
+        return _fail(str(e))
     finally:
-        # Remove sentinel
+        # Stop the heartbeat BEFORE removing the sentinel, or a late touch()
+        # would recreate it and block the next run until it goes stale.
+        _hb_stop.set()
+        _hb_thread.join(timeout=5)
         try:
             sentinel.unlink(missing_ok=True)
         except Exception:

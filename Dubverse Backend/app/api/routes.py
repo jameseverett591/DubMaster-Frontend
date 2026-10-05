@@ -5718,11 +5718,23 @@ async def _run_dubbing_pipeline(
             )
             logger.info(f"Job {job_id} dubbing completed successfully")
 
-            # Auto-trigger QC analysis concurrently — non-blocking fire-and-forget
+            # Auto-trigger QC analysis concurrently — non-blocking fire-and-forget.
+            # Never on a CPU-only host, and only if no analysis already holds the
+            # slot (same atomic claim as POST /api/analyze).
             try:
-                from app.pipeline.analyze_dub import analyze_dub as _analyze_dub
-                asyncio.create_task(asyncio.to_thread(_analyze_dub, job_id, target_lang, video_path))
-                logger.info(f"Job {job_id}: QC analysis auto-triggered")
+                if not _qc_gpu_available():
+                    logger.info(f"Job {job_id}: QC auto-trigger skipped — {_QC_NO_GPU_MESSAGE}")
+                else:
+                    _qc_sentinel = (
+                        Path(settings.DUBBED_DIR) / job_id
+                        / f"analysis_{target_lang.lower().strip()}.running"
+                    )
+                    if _acquire_analysis_sentinel(_qc_sentinel):
+                        from app.pipeline.analyze_dub import analyze_dub as _analyze_dub
+                        asyncio.create_task(asyncio.to_thread(_analyze_dub, job_id, target_lang, video_path))
+                        logger.info(f"Job {job_id}: QC analysis auto-triggered")
+                    else:
+                        logger.info(f"Job {job_id}: QC auto-trigger skipped — analysis already running")
             except Exception as _qc_err:
                 logger.warning(f"Job {job_id}: QC auto-trigger skipped: {_qc_err}")
         else:
@@ -7417,14 +7429,18 @@ async def clone_voice(
 # Quality Analysis endpoints
 # ---------------------------------------------------------------------------
 
-# A sentinel older than this with no result file means the analysis task died
-# or wedged (observed: first-run emotion2vec model download) — without age
-# expiry the QC monitor sits on 202 "running" forever.
-_ANALYSIS_SENTINEL_MAX_AGE_S = 20 * 60
+# The running analysis touches its sentinel every ANALYSIS_HEARTBEAT_S (see
+# analyze_dub.py). A sentinel with NO heartbeat for this long means the task
+# died or wedged — without expiry the QC monitor sits on 202 "running" forever.
+# This is time since the last heartbeat, never the age of the run: a 78-minute
+# film legitimately runs for well over 20 minutes, and treating its sentinel as
+# stale on age alone is what let the poller start two duplicate runs on top of
+# it (three concurrent Whisper large-v3 passes exhausted memory).
+_ANALYSIS_SENTINEL_MAX_AGE_S = 5 * 60
 
 
 def _clear_stale_analysis_sentinel(sentinel: Path) -> bool:
-    """Delete the sentinel if it is older than _ANALYSIS_SENTINEL_MAX_AGE_S."""
+    """Delete the sentinel if its heartbeat is older than _ANALYSIS_SENTINEL_MAX_AGE_S."""
     try:
         if time.time() - sentinel.stat().st_mtime <= _ANALYSIS_SENTINEL_MAX_AGE_S:
             return False
@@ -7434,12 +7450,55 @@ def _clear_stale_analysis_sentinel(sentinel: Path) -> bool:
         return False
 
 
+def _acquire_analysis_sentinel(sentinel: Path) -> bool:
+    """Atomically claim the one analysis slot for this job+language.
+
+    The sentinel used to be created by the analysis thread once it started, so
+    two requests 48 ms apart both saw "no sentinel" and both started a run.
+    O_CREAT|O_EXCL makes check-and-create a single filesystem operation: exactly
+    one caller gets True. The caller that wins owns the sentinel; analyze_dub()
+    heartbeats it and removes it when it finishes. A caller that gets False must
+    not start a run. If a dead run's sentinel is in the way (no heartbeat, see
+    above) it is cleared and the claim is retried once.
+    """
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(str(sentinel), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if _clear_stale_analysis_sentinel(sentinel):
+                continue
+            return False
+        os.close(fd)
+        return True
+    return False
+
+
+def _qc_gpu_available() -> bool:
+    """QC (Whisper large-v3, emotion2vec, SyncNet) must never run on the backend CPU."""
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+_QC_NO_GPU_MESSAGE = (
+    "QC requires a GPU. This backend has none, so quality analysis is disabled "
+    "until it runs on the GPU worker."
+)
+
+
 @router.post("/analyze/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
 async def trigger_analysis(job_id: str, language: str, background_tasks: BackgroundTasks):
     """Trigger post-dub quality analysis. Returns 202 immediately."""
     job = await _get_or_rehydrate_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    # Nothing compute-heavy runs on the backend CPU. Refuse rather than run.
+    if not _qc_gpu_available():
+        raise HTTPException(status_code=503, detail=_QC_NO_GPU_MESSAGE)
 
     lang_norm = language.lower().strip()
     dubbed_dir = Path(settings.DUBBED_DIR) / job_id
@@ -7450,27 +7509,30 @@ async def trigger_analysis(job_id: str, language: str, background_tasks: Backgro
             detail=f"No dubbed video found for language '{lang_norm}'"
         )
 
-    # Check if already running — but a wedged/crashed task leaves the
-    # sentinel behind; clear it and allow a fresh run instead of 202'ing forever.
+    # Atomic claim of the single analysis slot (exclusive create). A sentinel
+    # with a live heartbeat means a run is in progress; one with no heartbeat
+    # for _ANALYSIS_SENTINEL_MAX_AGE_S is a dead run and is cleared by the claim.
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
-    if sentinel.exists():
-        if _clear_stale_analysis_sentinel(sentinel):
-            logger.warning(f"Job {job_id}: cleared stale analysis sentinel for {lang_norm}")
-        else:
-            return JSONResponse(
-                status_code=202,
-                content={"status": "running", "message": "Analysis already in progress"}
-            )
+    if not _acquire_analysis_sentinel(sentinel):
+        return JSONResponse(
+            status_code=202,
+            content={"status": "running", "message": "Analysis already in progress"}
+        )
 
     from app.pipeline.analyze_dub import analyze_dub
 
-    background_tasks.add_task(
-        asyncio.to_thread,
-        analyze_dub,
-        job_id,
-        lang_norm,
-        job.video_path,
-    )
+    try:
+        background_tasks.add_task(
+            asyncio.to_thread,
+            analyze_dub,
+            job_id,
+            lang_norm,
+            job.video_path,
+        )
+    except Exception:
+        # Never leave a claimed sentinel behind for a run that was not queued.
+        sentinel.unlink(missing_ok=True)
+        raise
     logger.info(f"Job {job_id}: quality analysis triggered for {lang_norm}")
 
     return JSONResponse(
@@ -7647,6 +7709,17 @@ async def get_analysis(job_id: str, language: str):
 
     with open(result_file, "r", encoding="utf-8") as f:
         analysis = _json.load(f)
+
+    # analyze_dub persists its failures (status=error) so a dead run is
+    # distinguishable from "not started" — without this the editor's poller
+    # saw a bare 404 and kept re-triggering an analysis that had already
+    # failed, looping GET 404 → POST forever.
+    if analysis.get("status") == "error":
+        return {
+            "status": "failed",
+            "error": analysis.get("reason") or "Analysis failed",
+            "analysis": analysis,
+        }
 
     return {"status": "complete", "analysis": analysis}
 

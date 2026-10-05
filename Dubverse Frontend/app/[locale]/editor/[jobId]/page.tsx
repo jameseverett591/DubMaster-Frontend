@@ -43,6 +43,12 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   // QC state — populated concurrently while editor loads
   const [qcAnalysis, setQcAnalysis] = useState<any>(null)
   const [qcLoading, setQcLoading] = useState(false)
+  // Terminal QC failure shown in the monitor instead of an endless "Analyzing…".
+  const [qcError, setQcError] = useState<string | null>(null)
+  // Job we have already POSTed /api/analyze for. The poller asks for a run at
+  // most once per editor session — every extra POST is another chance to start
+  // a duplicate multi-minute analysis.
+  const qcTriggeredForRef = useRef<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [qcUpdatedAt, setQcUpdatedAt] = useState<string | null>(null)
   const [reanalyzeNonce, setReanalyzeNonce] = useState(0)
@@ -196,6 +202,12 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             flags: seg.flags ?? [],
             flag_status: seg.flag_status ?? 'unreviewed',
             correction_type: seg.correction_type ?? null,
+            // Pre-translation confidence gate: TTS was withheld for these until
+            // human review. They carry no `flags` entry, so without mapping
+            // these fields they were completely invisible — silent segments
+            // with no explanation and no way to release them.
+            translation_flagged: seg.translation_flagged ?? false,
+            flag_reason: seg.flag_reason ?? null,
             qc_findings: seg.qc_findings ?? [],
             // TTS engine + Respeecher take metadata. This mapper is a whitelist,
             // so anything not named here is dropped on load — these were, which
@@ -307,13 +319,39 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     const FAST_INTERVAL_MS = 5000
     const SLOW_INTERVAL_MS = 30000
     const SLOW_ATTEMPTS = 240
+    // Consecutive failed polls (no response, or 5xx/401) before giving up, and
+    // the per-request ceiling. Without these a hung backend left every poll
+    // pending forever and each tick stacked another request behind the last.
+    const MAX_CONSECUTIVE_FAILURES = 12
+    const REQUEST_TIMEOUT_MS = 15000
+    let failures = 0
+    let inFlight = false
+
+    setQcError(null)
 
     function startPolling(intervalMs: number) {
       if (pollRef.current) clearInterval(pollRef.current)
       pollRef.current = setInterval(checkQC, intervalMs)
     }
 
+    /** Terminal: stop polling and tell the user why. */
+    function stopQc(message: string) {
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+      reanalyzePendingRef.current = false
+      if (!cancelled) { setQcError(message); setQcLoading(false) }
+    }
+
     async function checkQC() {
+      if (inFlight) return
+      inFlight = true
+      try {
+        await pollOnce()
+      } finally {
+        inFlight = false
+      }
+    }
+
+    async function pollOnce() {
       attempts += 1
       // Cross into the slow phase once the fast window elapses.
       if (attempts === FAST_ATTEMPTS + 1) {
@@ -330,7 +368,14 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
       try {
         const res = await fetch(`${API_BASE}/api/analysis/${jobId}/${lang}`, {
           headers: await apiClient.ensureAuthHeaders(),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         })
+        if (res.ok || res.status === 202 || res.status === 404) {
+          failures = 0
+        } else if (++failures >= MAX_CONSECUTIVE_FAILURES) {
+          stopQc(`QC status is unavailable (backend returned ${res.status}). Use Re-analyze to try again.`)
+          return
+        }
         if (res.ok) {
           const data = await res.json()
           if (data.status === 'complete' && data.analysis) {
@@ -347,28 +392,66 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
                 reanalyzePendingRef.current = false
               }
               setQcLoading(false)
+              setQcError(null)
               if (pollRef.current) {
                 clearInterval(pollRef.current)
                 pollRef.current = null
               }
             }
+          } else if (data.status === 'failed') {
+            // Persisted failure — terminal. During a manual re-analyze this
+            // may still be the PREVIOUS run's file, so apply the same
+            // generated_at staleness check as the 'complete' branch above.
+            if (reanalyzePendingRef.current && data.analysis?.generated_at === prevGen) {
+              if (!cancelled) setQcLoading(true)
+              return
+            }
+            if (reanalyzePendingRef.current) reanalyzePendingRef.current = false
+            stopQc(data.error || 'QC analysis failed. Use Re-analyze to try again.')
+            return
           } else if (data.status === 'running') {
             if (!cancelled) setQcLoading(true)
           }
         } else if (res.status === 202) {
           if (!cancelled) setQcLoading(true)
         } else if (res.status === 404) {
-          // Not yet triggered — kick it off
+          if (qcTriggeredForRef.current === jobId) {
+            // We already asked for a run this session and the backend has neither
+            // a report nor a running analysis. Polling cannot change that — the
+            // run ended without producing a report. Terminal, not retried.
+            stopQc('QC finished without producing a report. Use Re-analyze to try again.')
+            return
+          }
+          // No report and no run yet — ask for one, once.
+          let trigger: Response | null = null
           try {
-            await fetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, {
+            trigger = await fetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, {
               method: 'POST',
               headers: await apiClient.ensureAuthHeaders(),
+              signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
             })
           } catch {}
+          if (trigger) {
+            // Only latch once the backend actually answered; a dropped request
+            // may be retried on the next tick (bounded by the failure cap).
+            qcTriggeredForRef.current = jobId
+            if (!trigger.ok) {
+              // Refused: 503 (backend has no GPU) or 404 (no dubbed video yet).
+              const body = await trigger.json().catch(() => null)
+              stopQc(body?.detail || `QC could not start (backend returned ${trigger.status}).`)
+              return
+            }
+          } else if (++failures >= MAX_CONSECUTIVE_FAILURES) {
+            stopQc('QC could not reach the backend. Use Re-analyze to try again.')
+            return
+          }
           if (!cancelled) setQcLoading(true)
         }
       } catch {
-        // Network error — keep polling silently
+        // No response (network error or timeout). Retry, but not forever.
+        if (++failures >= MAX_CONSECUTIVE_FAILURES) {
+          stopQc('QC could not reach the backend. Use Re-analyze to try again.')
+        }
       }
     }
 
@@ -391,18 +474,29 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     if (!editorProps || qcLoading) return
     const lang = editorProps.targetLangCode || 'en'
     setQcLoading(true)
+    setQcError(null)
     let res: Response | null = null
     try {
       res = await fetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, {
         method: 'POST',
         headers: await apiClient.ensureAuthHeaders(),
+        signal: AbortSignal.timeout(15000),
       })
     } catch {}
     if (!res || !res.ok) {
-      // No dubbed video to analyze (404) or network error — abort cleanly.
+      // Refused (503 no GPU, 404 no dubbed video) or no response — abort cleanly
+      // and say why instead of silently doing nothing.
       setQcLoading(false)
+      if (res) {
+        const body = await res.json().catch(() => null)
+        setQcError(body?.detail || `QC could not start (backend returned ${res.status}).`)
+      } else {
+        setQcError('QC could not reach the backend.')
+      }
       return
     }
+    // The poller must not POST again for a run we just requested.
+    qcTriggeredForRef.current = jobId
     reanalyzePrevGenRef.current = qcAnalysis?.generated_at ?? null
     reanalyzePendingRef.current = true
     setQcUpdatedAt(null)
@@ -446,6 +540,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         qcFindings={NO_FINDINGS}
         qcAnalysis={qcAnalysis}
         qcLoading={qcLoading}
+        qcError={qcError}
         qcUpdatedAt={qcUpdatedAt}
         canReanalyze={!!editorProps.dubbedVideoUrl}
         onReanalyze={handleReanalyze}

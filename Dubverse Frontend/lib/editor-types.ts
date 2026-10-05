@@ -141,6 +141,12 @@ export interface Segment {
   flags?: Array<{ code: string; score?: number | null; threshold?: number; reason?: string | null }>
   flag_status?: 'unreviewed' | 'reviewed_no_change' | 'reviewed_corrected'
   correction_type?: 'timing' | 'text' | 'voice' | 'emotion' | null
+  // Pre-translation confidence gate: TTS was withheld for this segment until a
+  // human reviews it. Distinct from `flags` — those are advisory QC findings;
+  // this blocks audio synthesis outright. Cleared via the commit endpoint's
+  // clear_translation_flag, which releases the segment to dub.
+  translation_flagged?: boolean
+  flag_reason?: string | null
   // TTS engine that actually rendered this segment, after the child/availability
   // fallbacks — not necessarily the one requested. "fish-audio" | "respeecher".
   engine?: string

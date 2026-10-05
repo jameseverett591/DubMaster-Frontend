@@ -602,8 +602,9 @@ export interface LipSyncWindowResult {
 export type AnalysisStatus = 'idle' | 'running' | 'complete' | 'error'
 
 export interface AnalysisResponse {
-  status: 'started' | 'running' | 'complete'
+  status: 'started' | 'running' | 'complete' | 'failed'
   message?: string
+  error?: string
   analysis?: QualityAnalysis
 }
 
@@ -671,7 +672,17 @@ class DubVerseAPIClient {
     // is near expiry, so this is cheap to call per request.
     try {
       const { createClient } = await import('@/lib/supabase/client')
-      const { data } = await createClient().auth.getSession()
+      // getSession() takes the GoTrue auth-token lock; when that lock wedges
+      // ("auth-token lock was not released within 5000ms") the promise never
+      // resolves — and every API call behind _fetch hung with it, which is how
+      // the Save button spun forever. Cap it: on timeout keep whatever token
+      // we already hold and let the request 401 if it's stale.
+      const { data } = await Promise.race([
+        createClient().auth.getSession(),
+        new Promise<{ data: { session: null }; error: null }>((resolve) =>
+          setTimeout(() => resolve({ data: { session: null }, error: null }), 8000)
+        ),
+      ])
       if (data.session?.access_token) {
         this._token = data.session.access_token
       }
@@ -1944,6 +1955,9 @@ class DubVerseAPIClient {
       // Promote a staged take: backend sets BOTH path and committed_audio_url
       // so the next rebuild merges the auditioned audio.
       staged_path?: string
+      // Explicit human-review signal: releases a translation_flagged segment
+      // to TTS. Never inferred from other fields — see routes.py commit notes.
+      clear_translation_flag?: boolean
     }
   ): Promise<void> {
     // Edits commit as they are made, so this call IS the save — a failure here
@@ -1954,6 +1968,10 @@ class DubVerseAPIClient {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify(data),
+      // A small JSON PATCH has no business taking 30s; without a ceiling a hung
+      // connection held handleSaveStaged's sequential await open forever and
+      // the Save spinner with it.
+      signal: AbortSignal.timeout(30000),
     })
     if (!res.ok) {
       const detail = await this._detail(res).catch(() => res.statusText)

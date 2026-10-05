@@ -57,6 +57,8 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
   const [error, setError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  const pollAttemptsRef = useRef(0)
+
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
       clearInterval(pollRef.current)
@@ -70,6 +72,17 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
       if (resp.status === "complete" && resp.analysis) {
         setAnalysis(resp.analysis)
         setStatus("complete")
+        stopPolling()
+      } else if (resp.status === "failed") {
+        // Persisted failure — re-polling just re-reads the same dead result.
+        setError(resp.error || "Analysis failed")
+        setStatus("error")
+        stopPolling()
+      } else if (++pollAttemptsRef.current >= 100) {
+        // ~5 min at 3s intervals. A run that produces neither a result nor a
+        // failure by then is dead; spinning forever used to be the default.
+        setError("Analysis did not produce a result. Try again.")
+        setStatus("error")
         stopPolling()
       }
       // If "running" or "started", keep polling
@@ -86,6 +99,7 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
     try {
       await apiClient.triggerAnalysis(jobId, language)
       // Start polling at 3s intervals
+      pollAttemptsRef.current = 0
       pollRef.current = setInterval(poll, 3000)
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to trigger analysis")
@@ -104,7 +118,11 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
           setStatus("complete")
         } else if (resp.status === "running") {
           setStatus("running")
+          pollAttemptsRef.current = 0
           pollRef.current = setInterval(poll, 3000)
+        } else if (resp.status === "failed") {
+          setError(resp.error || "Analysis failed")
+          setStatus("error")
         }
       } catch {
         // No existing analysis — that's fine

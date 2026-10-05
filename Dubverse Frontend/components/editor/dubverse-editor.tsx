@@ -458,6 +458,7 @@ interface DubVerseEditorProps {
   qcFindings?: QCFinding[]
   qcAnalysis?: any
   qcLoading?: boolean
+  qcError?: string | null
   qcUpdatedAt?: string | null
   canReanalyze?: boolean
   onReanalyze?: () => void
@@ -1024,6 +1025,7 @@ export function DubVerseEditor({
   qcFindings = [],
   qcAnalysis,
   qcLoading = false,
+  qcError = null,
   qcUpdatedAt = null,
   canReanalyze = false,
   onReanalyze,
@@ -6721,14 +6723,30 @@ export function DubVerseEditor({
     // PATCH sends the client's committed_audio_url, which for a staged segment
     // still points at the pre-audition take — sending it would overwrite the
     // take that was just promoted and silently discard the audition.
-    const { succeeded: promotedIndices } = await handleSaveStaged()
-    const promoted = new Set(promotedIndices)
-    const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-    // Resolved once, not per segment — a Save can fan out to dozens of PATCHes.
-    const authHeaders = await apiClient.ensureAuthHeaders()
+    //
+    // Everything awaited lives INSIDE the try: handleSaveStaged and
+    // ensureAuthHeaders used to run before it, so a hang or throw up there
+    // skipped the finally entirely and left the Save spinner on forever.
     try {
+      const { succeeded: promotedIndices } = await handleSaveStaged()
+      const promoted = new Set(promotedIndices)
+      const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+      // Resolved once, not per segment — a Save can fan out to dozens of PATCHes.
+      // Capped because ensureAuthHeaders can wedge on the GoTrue auth-token
+      // lock (the "lock was not released" console warning): fall back to the
+      // last known token rather than spin the button forever.
+      const authHeaders = await Promise.race([
+        apiClient.ensureAuthHeaders(),
+        new Promise<Record<string, string>>((resolve) =>
+          setTimeout(() => resolve(apiClient.authHeaders()), 10000)
+        ),
+      ])
+      // Per-segment failures accumulate here and merge into failedSegments once
+      // after the fan-out — the store setter takes a value, not an updater, so
+      // concurrent writes inside .map would race on a stale snapshot.
+      const saveFailures: Record<number, string> = {}
       await Promise.all(
-        toSave.map((seg, i) => {
+        toSave.map(async (seg, i) => {
           // Chunk mode saves the window you are working in, not the whole film.
           // Un-scoped this fired one PATCH per segment — 839 on a feature — which
           // looked like a hang and wrote back values that had not changed.
@@ -6742,30 +6760,49 @@ export function DubVerseEditor({
           // Just promoted from a staged take — the server already holds the
           // authoritative state for it.
           if (promoted.has(seg.transcript_index ?? seg.index)) return null
-          return (
           // Address by transcript_index (the stable id the commit endpoint matches
           // on) — seg.index is array position and drifts after splits/inserts.
           // `locked` is written for every segment so Save is the authoritative
           // checkpoint for lock state, not just the fire-and-forget per-lock write.
-          fetch(`${base}/api/segment/commit/${jobId}/${seg.transcript_index ?? seg.index}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json', ...authHeaders },
-            body: JSON.stringify({
-              committed_audio_url: seg.committed_audio_url,
-              committed_adapted_text: seg.committed_adapted_text,
-              committed_start_time: seg.committed_start_time,
-              committed_end_time: seg.committed_end_time,
-              flag_status: seg.flag_status,
-              correction_type: seg.correction_type,
-              locked: lockedSegments.has(keyAt(i)),
-              // Persist the display text too so a plain edit doesn't revert on
-              // reopen — the loader reads `text` back into target/active text.
-              text: seg.active_text ?? seg.target_text,
-            }),
-          })
-          )
+          const ti = seg.transcript_index ?? seg.index
+          // A timed-out or refused request records the segment instead of
+          // rejecting Promise.all — one bad PATCH must not abort the save.
+          let res: Response
+          try {
+            res = await fetch(`${base}/api/segment/commit/${jobId}/${ti}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json', ...authHeaders },
+              signal: AbortSignal.timeout(30000),
+              body: JSON.stringify({
+                committed_audio_url: seg.committed_audio_url,
+                committed_adapted_text: seg.committed_adapted_text,
+                committed_start_time: seg.committed_start_time,
+                committed_end_time: seg.committed_end_time,
+                flag_status: seg.flag_status,
+                correction_type: seg.correction_type,
+                locked: lockedSegments.has(keyAt(i)),
+                // Persist the display text too so a plain edit doesn't revert on
+                // reopen — the loader reads `text` back into target/active text.
+                text: seg.active_text ?? seg.target_text,
+              }),
+            })
+          } catch (err) {
+            saveFailures[ti] = 'Save failed (no response)'
+            console.error(`[save] segment ${ti} commit failed:`, err)
+            return null
+          }
+          // The response used to be ignored entirely: a rejected PATCH was
+          // indistinguishable from a saved one. Record it so the failed-save
+          // banner can surface it before MAKE MOVIE, same as staged commits.
+          if (!res.ok) {
+            saveFailures[ti] = `Save failed (HTTP ${res.status})`
+            console.error(`[save] segment ${ti} commit failed: HTTP ${res.status}`)
+          }
         })
       )
+      if (Object.keys(saveFailures).length) {
+        setFailedSegments({ ...failedSegments, ...saveFailures })
+      }
       // Mark the window saved so its chip turns green and survives a reload.
       // The bulk Save wrote committed_* for every segment but never recorded
       // chunk_status, so nothing in the chunk bar ever went green.
@@ -6789,7 +6826,8 @@ export function DubVerseEditor({
       setIsSaving(false)
     }
   }, [isSaving, displaySegments, jobId, title, targetLanguage, lockedSegments, keyAt,
-      chunkMode, chunkStart, chunkEnd, activeChunk, chunkStatusMap, setChunkStatusMap])
+      chunkMode, chunkStart, chunkEnd, activeChunk, chunkStatusMap, setChunkStatusMap,
+      handleSaveStaged, failedSegments, setFailedSegments])
 
   // Flag outcome helpers — set both flag_status and correction_type together,
   // only on segments that are currently unreviewed and have flags.
@@ -6800,10 +6838,33 @@ export function DubVerseEditor({
   }, [displaySegments, updateSegment])
 
   const handleMarkOk = useCallback((idx: number) => {
+    const seg = displaySegments[idx]
+    const ti = seg?.transcript_index ?? idx
+    if (seg?.translation_flagged) {
+      // Translation-gate review: the explicit clear_translation_flag commit
+      // releases the segment to TTS, then generate the withheld audio. Until
+      // now this flag never reached the editor at all, so muted segments sat
+      // silent with no way to release them.
+      updateSegment(idx, {
+        translation_flagged: false, flag_reason: null,
+        flag_status: 'reviewed_no_change', correction_type: null,
+      })
+      setImportedSegments(prev => prev ? prev.map((s, i) =>
+        i === idx ? { ...s, translation_flagged: false, flag_reason: null, flag_status: 'reviewed_no_change', correction_type: null } : s
+      ) : prev)
+      apiClient.commitSegmentTiming(jobId, ti, {
+        clear_translation_flag: true,
+        flag_status: 'reviewed_no_change',
+        correction_type: null,
+      })
+        .then(() => handleGenerateSpeechRef.current(idx))
+        .catch(err => console.warn('[REVIEW-QUEUE] flag-clear persist failed:', err))
+      return
+    }
     updateSegment(idx, { flag_status: 'reviewed_no_change', correction_type: null })
-    apiClient.commitSegmentTiming(jobId, displaySegments[idx]?.transcript_index ?? idx, { flag_status: 'reviewed_no_change', correction_type: null })
+    apiClient.commitSegmentTiming(jobId, ti, { flag_status: 'reviewed_no_change', correction_type: null })
       .catch(err => console.warn('[REVIEW-QUEUE] mark-ok persist failed:', err))
-  }, [jobId, updateSegment, displaySegments])
+  }, [jobId, updateSegment, displaySegments, setImportedSegments])
 
   // MAKE MOVIE is never blocked by judgement calls — only by the two states
   // where a click is meaningless (a render already running, a save mid-flight).
@@ -12519,6 +12580,11 @@ export function DubVerseEditor({
                     <div className="space-y-1.5"><div className="h-2.5 w-[80%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[65%] rounded-full bg-slate-800/60 animate-pulse" /></div>
                     <div className="space-y-1.5"><div className="h-2.5 w-[50%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[35%] rounded-full bg-slate-800/60 animate-pulse" /></div>
                   </div>
+                )}
+                {qcError && !qcAnalysis && !qcLoading && (
+                  <p className="px-3 py-2 text-[11px] text-amber-300 border-b border-neutral-800">
+                    {qcError}
+                  </p>
                 )}
                 {qcFixNote && (
                   <p className="px-3 py-1.5 text-[10px] text-amber-300/90 border-b border-neutral-800">
