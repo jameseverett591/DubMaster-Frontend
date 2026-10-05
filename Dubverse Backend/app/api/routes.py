@@ -7075,11 +7075,14 @@ async def analyze_lipsync_windows(job_id: str, request: Request):
         end_f = min(end_f, cap)
         if start_f >= end_f:
             raise HTTPException(status_code=422, detail="start is beyond the video duration")
+        # job_id, not path text, decides which folders the scorers search.
         visual = await asyncio.to_thread(
-            syncnet_service.score_lipsync_range, video_path, segments, start_f, end_f
+            syncnet_service.score_lipsync_range, video_path, segments, start_f, end_f,
+            job_id=job_id,
         )
         audio = await asyncio.to_thread(
-            syncnet_service.score_lipsync_audio_range, video_path, segments, start_f, end_f
+            syncnet_service.score_lipsync_audio_range, video_path, segments, start_f, end_f,
+            job_id=job_id,
         )
         return {"status": "ok", "start": start_f, "end": end_f,
                 "visual": visual, "audio": audio}
@@ -7095,10 +7098,12 @@ async def analyze_lipsync_windows(job_id: str, request: Request):
         raise HTTPException(status_code=422, detail="Could not determine video duration")
 
     visual_windows = await asyncio.to_thread(
-        syncnet_service.score_lipsync_windows, video_path, segments, duration
+        syncnet_service.score_lipsync_windows, video_path, segments, duration,
+        job_id=job_id,
     )
     audio_windows = await asyncio.to_thread(
-        syncnet_service.score_lipsync_audio_windows, video_path, segments, duration
+        syncnet_service.score_lipsync_audio_windows, video_path, segments, duration,
+        job_id=job_id,
     )
     # One row per window carries both signals: audio-vs-audio is the trusted
     # timing metric; visual is supplementary where faces are readable.

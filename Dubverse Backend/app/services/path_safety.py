@@ -49,13 +49,22 @@ def resolve_job_file(job_dir: str, value: Any) -> str:
     Accepts a bare filename (taken to be in the job folder), a path with
     directories (read relative to the server's working directory, as the server
     writes them, or absolute), or a served media URL. The result is always an
-    absolute, symlink-resolved path that is inside `job_dir`. Absolute paths and
-    `..` are not rejected on sight — they are resolved first and refused only if
-    they land outside the folder, so a legitimate absolute path to this job's own
-    take still works.
+    absolute, symlink-resolved path that is inside `job_dir`. A value containing a
+    `..` component (or an encoded separator) is refused outright. Absolute paths
+    are resolved first and refused only if they land outside the folder, so a
+    legitimate absolute path to this job's own take still works.
     """
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         raise UnsafePath("empty or malformed path")
+
+    # No legitimate writer produces a ".." component or an encoded separator, and
+    # a stored string that carries one means different things to different
+    # readers: anything that interprets the TEXT of a value, rather than the file
+    # it resolves to, can be steered by it. Refuse it outright, on write and read.
+    path_part = re.split(r"[?#]", value, maxsplit=1)[0]
+    if any(part == ".." for part in re.split(r"[\\/]+", path_part)) \
+            or re.search(r"%2e|%2f|%5c", path_part, re.I):
+        raise UnsafePath("path contains '..' or an encoded separator")
 
     job_id = os.path.basename(os.path.normpath(job_dir))
     root_real = os.path.realpath(job_dir)
@@ -106,14 +115,19 @@ AUDIO_FIELDS = ("path", "committed_audio_url", "audio_url")
 
 
 def sanitize_segments(segments: Any, job_dir: str, label: str = "[AUDIO]") -> list:
-    """Copy of `segments` in which every audio field that does not resolve inside
-    `job_dir` is set to None.
+    """Copy of `segments` in which every audio field is either the **resolved real
+    path** of a file inside `job_dir`, or None.
 
     For code that takes a whole segment list and does its own file lookups
     (e.g. the lip-sync scorers): clean the list once at the entry point and no
-    reader downstream can be handed another job's file. Safe values are left
-    exactly as stored, so downstream behaviour is unchanged for them. The input
-    is not modified.
+    reader downstream can be handed another job's file.
+
+    Safe values are *replaced by their normalized real path*, not left as
+    spelled. A reader may interpret the TEXT of a value rather than the file it
+    names — the lip-sync scorer derives search folders from the directory names
+    inside `path`, so `data/dubbed/<job B>/../<job A>/x.mp3` (which resolves
+    inside job A) would still steer it into job B. A normalized path has no
+    `..` and names only this job. The input is not modified.
     """
     cleaned = []
     for seg in segments or []:
@@ -126,10 +140,12 @@ def sanitize_segments(segments: Any, job_dir: str, label: str = "[AUDIO]") -> li
             if value in (None, ""):
                 continue
             try:
-                resolve_job_file(job_dir, value)
+                real = resolve_job_file(job_dir, value)
             except UnsafePath as e:
                 _refused(label, seg, key, value, str(e), consequence="ignored for this request")
                 out[key] = None
+            else:
+                out[key] = real
         cleaned.append(out)
     return cleaned
 
