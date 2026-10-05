@@ -7167,6 +7167,17 @@ async def get_analysis(job_id: str, language: str):
     with open(result_file, "r", encoding="utf-8") as f:
         analysis = _json.load(f)
 
+    # analyze_dub persists its failures (status=error) so a dead run is
+    # distinguishable from "not started" — without this the editor's poller
+    # saw a bare 404 and kept re-triggering an analysis that had already
+    # failed, looping GET 404 → POST forever.
+    if analysis.get("status") == "error":
+        return {
+            "status": "failed",
+            "error": analysis.get("reason") or "Analysis failed",
+            "analysis": analysis,
+        }
+
     return {"status": "complete", "analysis": analysis}
 
 

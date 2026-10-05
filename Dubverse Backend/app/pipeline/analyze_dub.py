@@ -75,6 +75,23 @@ def analyze_dub(
     except Exception:
         pass
 
+    def _fail(reason: str):
+        # Persist the failure too — a bare error return leaves GET 404ing, and
+        # the editor used to treat "no report yet" as "re-trigger me", looping
+        # forever on a run that could never succeed.
+        try:
+            with open(output_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "job_id": job_id,
+                    "target_language": lang_norm,
+                    "status": "error",
+                    "reason": reason,
+                    "generated_at": datetime.utcnow().isoformat() + "Z",
+                }, f, indent=2)
+        except Exception:
+            pass
+        return {"status": "error", "reason": reason}
+
     try:
         has_export = dubbed_video.exists()
         audio_source: Optional[Path] = None
@@ -88,7 +105,7 @@ def analyze_dub(
             # its qc_preview_ prefix keeps it unambiguous against the real
             # export artifacts (dubbed_{lang}.mp4, dubbed_audio.wav).
             if not segments_file.exists():
-                return {"status": "error", "reason": "No segments available yet"}
+                return _fail("No segments available yet")
             with open(segments_file, "r", encoding="utf-8") as f:
                 seg_data = json.load(f)
             segs = seg_data.get("segments", [])
@@ -106,7 +123,7 @@ def analyze_dub(
                 if safe:
                     merge_segments.append({"path": safe, "start": s["start"], "end": s["end"]})
             if not merge_segments:
-                return {"status": "error", "reason": "No generated audio yet"}
+                return _fail("No generated audio yet")
 
             from app.services.dubbing_service import dubbing_service
             video_duration = seg_data.get("video_duration") or 0.0
@@ -118,7 +135,7 @@ def analyze_dub(
                 merge_segments, str(stitched_audio), video_duration
             )
             if not ok:
-                return {"status": "error", "reason": "Could not build preview audio for QC"}
+                return _fail("Could not build preview audio for QC")
             audio_source = stitched_audio
 
         analysis: Dict[str, Any] = {
@@ -246,7 +263,7 @@ def analyze_dub(
 
     except Exception as e:
         logger.error(f"[ANALYSIS] Failed for job {job_id}: {e}", exc_info=True)
-        return {"status": "error", "reason": str(e)}
+        return _fail(str(e))
     finally:
         # Remove sentinel
         try:
