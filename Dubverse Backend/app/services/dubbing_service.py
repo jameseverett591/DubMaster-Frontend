@@ -28,6 +28,7 @@ from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
 from app.services.respeecher_service import respeecher_tts, SEED_HISTORY_MAX
 from app.services import tts_usage
+from app.services import path_safety
 from app.services.rulebook import (
     apply_pronunciations,
     load_global_rules,
@@ -3908,11 +3909,17 @@ class DubbingService:
                 continue
             if seg_end <= start or seg_start >= end:
                 continue
-            seg_path = audio_url
-            if not os.path.isabs(seg_path):
-                if seg_path.startswith("/media/"):
-                    seg_path = seg_path.split("/")[-1]
-                seg_path = os.path.join(output_dir, seg_path)
+            # The URL/path comes from segments.json, which the client can write.
+            # Resolve it and refuse anything outside this job's folder — absolute
+            # paths and "../" included — instead of handing it to ffmpeg.
+            try:
+                seg_path = path_safety.resolve_job_file(output_dir, audio_url)
+            except path_safety.UnsafePath:
+                logger.warning(
+                    f"[SCENE-PREVIEW] job={job_id}: skipping segment audio outside the job folder "
+                    f"(transcript_index={seg.get('transcript_index')})"
+                )
+                continue
             merge_segments.append({
                 "path": seg_path,
                 "start": seg_start,
@@ -5278,21 +5285,11 @@ class DubbingService:
         # nothing points at a real file, the line renders as silence and the
         # build carries on — a missing line is fixable in the editor, a dead
         # render is not.
+        # Both `path` and the media URLs are client-writable (PATCH /segment/commit,
+        # PUT /segments), so resolution goes through path_safety: a candidate outside
+        # this job's folder is skipped as if it did not exist, never opened.
         def _resolve_segment_audio(seg: Dict) -> Optional[str]:
-            p = seg.get("path")
-            if p and os.path.exists(p):
-                return p
-            for key in ("committed_audio_url", "audio_url"):
-                url = seg.get(key) or ""
-                if "/audio/" not in url:
-                    continue
-                fname = url.split("/audio/", 1)[1].split("?", 1)[0]
-                if not fname:
-                    continue
-                cand = os.path.join(output_dir, fname)
-                if os.path.exists(cand):
-                    return cand
-            return None
+            return path_safety.resolve_segment_audio(seg, output_dir)
 
         merge_segments = []
         silent_indices = []
