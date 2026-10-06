@@ -9107,6 +9107,53 @@ async def download_export(job_id: str, filename: str):
     )
 
 
+def _heal_segment_audio_paths(job_id: str, segments_path: str, data: Dict[str, Any]) -> None:
+    """Restore a segment's `path` when it is empty but audio still exists.
+
+    The editor preview builds each block's audio from `path` alone, while the
+    render mixer already falls back to committed_audio_url/audio_url — a
+    segment that lost its path (a re-dub's duplicate skip, or a sync payload
+    echoing stale client state) therefore plays SILENT in the editor even
+    though its take is on disk and would still mix into the film. The newest
+    edit_history new_path is the freshest intentional take and wins; the media
+    URLs are the fallback. All candidates go through path_safety, and healing
+    only ever points at a file inside this job's folder.
+    """
+    from app.services import path_safety
+
+    job_dir = os.path.join(settings.DUBBED_DIR, job_id)
+    changed = False
+    for seg in data.get("segments", []):
+        if seg.get("path"):
+            continue
+        candidates = []
+        for h in reversed(seg.get("edit_history") or []):
+            if h.get("new_path"):
+                candidates.append(h["new_path"])
+                break
+        candidates.extend([seg.get("committed_audio_url"), seg.get("audio_url")])
+        for cand in candidates:
+            if not cand:
+                continue
+            try:
+                real = path_safety.resolve_job_file(job_dir, cand)
+            except Exception:
+                continue
+            if os.path.exists(real):
+                seg["path"] = os.path.join(
+                    settings.DUBBED_DIR, job_id, os.path.basename(real)
+                ).replace("\\", "/")
+                changed = True
+                logger.info(
+                    f"[SEGMENTS] healed audio path for segment "
+                    f"{seg.get('transcript_index')} (job {job_id}): "
+                    f"{os.path.basename(real)}"
+                )
+                break
+    if changed:
+        atomic_write_json(segments_path, data)
+
+
 @router.get("/segments/{job_id}", dependencies=[Depends(_dep_job_access)])
 async def get_segments(job_id: str):
     segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
@@ -9143,6 +9190,9 @@ async def get_segments(job_id: str):
         raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
     with open(segments_path, "r", encoding="utf-8") as f:
         data = _json.load(f)
+    # Restore audio paths lost to earlier syncs/re-dubs before serving — the
+    # preview plays `path`, and silence here regenerates user trust issues.
+    _heal_segment_audio_paths(job_id, segments_path, data)
     # Retention state travels with the segments the editor already loads, so the
     # countdown card needs no extra request and cannot show a stale deadline.
     data["retention"] = _retention_state(job_id)
@@ -9644,9 +9694,27 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest, request: Request
                     if new_text is not None:
                         merged["text"] = new_text
                         merged["committed_adapted_text"] = new_text
-                    merged["path"] = None
-                    merged["committed_audio_url"] = None
-                    merged.pop("audio_url", None)
+                    # A stale payload (missing URLs with the text untouched)
+                    # must not delete audio the server can still resolve —
+                    # regen/commit writes path server-side, and an older
+                    # client object echoing cleared URLs then wipes a take
+                    # the user just made. Structural edits change the text,
+                    # and that still strips.
+                    keep = False
+                    if audio_cleared and not text_changed:
+                        try:
+                            from app.services import path_safety
+                            keep = path_safety.resolve_segment_audio(
+                                merged,
+                                os.path.join(settings.DUBBED_DIR, job_id),
+                                label="[SYNC]",
+                            ) is not None
+                        except Exception:
+                            keep = False
+                    if not keep:
+                        merged["path"] = None
+                        merged["committed_audio_url"] = None
+                        merged.pop("audio_url", None)
             result.append(merged)
         else:
             max_ti += 1
