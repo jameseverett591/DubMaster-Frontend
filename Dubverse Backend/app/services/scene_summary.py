@@ -303,7 +303,9 @@ def generate_video_notes(
 
     payload = {
         "model": os.getenv("SCENE_SUMMARY_MODEL", "claude-sonnet-4-6"),
-        "max_tokens": int(os.getenv("VIDEO_NOTES_MAX_TOKENS", "4096")),
+        # Feature-length jobs produce long notes arrays — 4096 truncates the
+        # JSON mid-string and surfaces to the panel as "Summary unavailable".
+        "max_tokens": int(os.getenv("VIDEO_NOTES_MAX_TOKENS", "8192")),
         "temperature": 0.2,
         "system": system,
         "messages": [{"role": "user", "content": user}],
@@ -314,31 +316,37 @@ def generate_video_notes(
         "Content-Type": "application/json",
     }
 
-    try:
-        resp = httpx.post(
-            "https://api.anthropic.com/v1/messages",
-            json=payload,
-            headers=headers,
-            timeout=float(os.getenv("VIDEO_NOTES_TIMEOUT_SEC", "90")),
-        )
-    except Exception as e:
-        logger.warning(f"[VIDEO-NOTES] job={job_id} request failed: {e}")
-        return {"status": "error", "reason": str(e)}
+    parsed = None
+    for _attempt in range(2):
+        try:
+            resp = httpx.post(
+                "https://api.anthropic.com/v1/messages",
+                json=payload,
+                headers=headers,
+                timeout=float(os.getenv("VIDEO_NOTES_TIMEOUT_SEC", "90")),
+            )
+        except Exception as e:
+            logger.warning(f"[VIDEO-NOTES] job={job_id} request failed: {e}")
+            return {"status": "error", "reason": str(e)}
 
-    if resp.status_code != 200:
-        logger.warning(
-            f"[VIDEO-NOTES] job={job_id} Claude failed: {resp.status_code} {resp.text[:200]}"
-        )
-        return {"status": "error", "reason": f"http_{resp.status_code}"}
+        if resp.status_code != 200:
+            logger.warning(
+                f"[VIDEO-NOTES] job={job_id} Claude failed: {resp.status_code} {resp.text[:200]}"
+            )
+            return {"status": "error", "reason": f"http_{resp.status_code}"}
 
-    try:
-        text = resp.json()["content"][0]["text"].strip()
-        if text.startswith("```"):
-            text = "\n".join(l for l in text.split("\n") if not l.startswith("```"))
-        parsed = json.loads(text)
-    except Exception as e:
-        logger.warning(f"[VIDEO-NOTES] job={job_id} failed to parse response: {e}")
-        return {"status": "error", "reason": "parse_failed"}
+        try:
+            text = resp.json()["content"][0]["text"].strip()
+            if text.startswith("```"):
+                text = "\n".join(l for l in text.split("\n") if not l.startswith("```"))
+            parsed = json.loads(text)
+            break
+        except Exception as e:
+            # One retry: a truncated/malformed completion is transient, and the
+            # panel's only alternative is a permanent "unavailable" state.
+            logger.warning(f"[VIDEO-NOTES] job={job_id} failed to parse response: {e}")
+            if _attempt == 1:
+                return {"status": "error", "reason": "parse_failed"}
 
     def _parse_mmss(v: Any) -> Optional[float]:
         if isinstance(v, (int, float)):
