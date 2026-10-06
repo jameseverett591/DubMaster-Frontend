@@ -300,7 +300,9 @@ def parse_caption_segments(raw: Any, max_end: float = 0.0) -> list[dict[str, Any
         if end <= start:
             raise ValueError(f"transcript segment {i} has end <= start")
         if max_end and start >= max_end:
-            break
+            # Skip, don't break — captions are only sorted AFTER this loop, so
+            # an out-of-order entry would truncate every valid segment after it.
+            continue
         if max_end and end > max_end:
             end = max_end
         speaker = str(seg.get("speaker") or "speaker-1")

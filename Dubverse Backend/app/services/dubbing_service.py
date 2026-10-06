@@ -3555,7 +3555,10 @@ class DubbingService:
             # an envelope — composes with the fades below exactly as the browser
             # stitch does, and unlike a fade it leaves the level flat across the
             # whole take.
-            _vol = float(seg.get("volume") or 1.0)
+            _vraw = seg.get("volume")
+            # volume=0 is a director-set MUTE — `or 1.0` would revive it at
+            # full level. Only an absent value defaults to unity.
+            _vol = float(1.0 if _vraw is None else _vraw)
             _vol = max(0.0, min(1.0, _vol))
             if _vol < 1.0:
                 seg_data *= _vol
@@ -3675,7 +3678,9 @@ class DubbingService:
                 fade_filters = []
                 # Clip gain from the top-edge drag — a level, not an envelope,
                 # so it orders before the fades and multiplies through them.
-                _vol = float(seg.get("volume") or 1.0)
+                _vraw = seg.get("volume")
+                # volume=0 is a director-set MUTE — `or 1.0` would revive it.
+                _vol = float(1.0 if _vraw is None else _vraw)
                 if 0.0 <= _vol < 1.0:
                     fade_filters.append(f"volume={_vol:.3f}")
                 if fade_in > 0:

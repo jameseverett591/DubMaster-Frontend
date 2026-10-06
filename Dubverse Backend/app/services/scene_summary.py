@@ -301,11 +301,12 @@ def generate_video_notes(
         "Produce the JSON object now."
     )
 
+    base_tokens = int(os.getenv("VIDEO_NOTES_MAX_TOKENS", "8192"))
     payload = {
         "model": os.getenv("SCENE_SUMMARY_MODEL", "claude-sonnet-4-6"),
         # Feature-length jobs produce long notes arrays — 4096 truncates the
         # JSON mid-string and surfaces to the panel as "Summary unavailable".
-        "max_tokens": int(os.getenv("VIDEO_NOTES_MAX_TOKENS", "8192")),
+        "max_tokens": base_tokens,
         "temperature": 0.2,
         "system": system,
         "messages": [{"role": "user", "content": user}],
@@ -318,6 +319,10 @@ def generate_video_notes(
 
     parsed = None
     for _attempt in range(2):
+        if _attempt:
+            # A retry that sends the same budget re-truncates at the same
+            # point — double it so the second call can actually finish.
+            payload["max_tokens"] = base_tokens * 2
         try:
             resp = httpx.post(
                 "https://api.anthropic.com/v1/messages",

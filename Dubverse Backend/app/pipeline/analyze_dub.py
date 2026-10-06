@@ -253,16 +253,9 @@ def analyze_dub(
         # emotion2vec emotion preservation (local, free) -- needs real video
         # frames for its dubbed-side extraction as currently implemented;
         # skipped until export exists, same as pronunciation above.
-        def _local_cuda() -> bool:
-            try:
-                import torch as _t
-                return bool(_t.cuda.is_available())
-            except Exception:
-                return False
-
         analysis["emotion_preservation"] = (
             _analyze_emotion_preservation(original_video_path, str(dubbed_video), timing_data)
-            if has_export and _local_cuda()
+            if has_export and _has_local_gpu()
             else {"status": "skipped", "reason": "video not yet exported" if not has_export
                   else "no local GPU — emotion2vec skipped (retranscription runs via RunPod)"}
         )
@@ -311,6 +304,14 @@ def analyze_dub(
 # ---------------------------------------------------------------------------
 # Sub-analyses
 # ---------------------------------------------------------------------------
+
+
+def _has_local_gpu() -> bool:
+    try:
+        import torch as _t
+        return bool(_t.cuda.is_available())
+    except Exception:
+        return False
 
 
 def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> Dict[str, Any]:
@@ -385,7 +386,20 @@ def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> D
                 interval=5,
             )
 
-        output = _asyncio.run(_submit_and_poll())
+        try:
+            output = _asyncio.run(_submit_and_poll())
+        finally:
+            # The R2 handoff copy and the local opus are single-use — clean
+            # both whether the worker succeeded, failed, or timed out,
+            # otherwise a billed byte accumulates per QC run.
+            try:
+                s3.delete_object(Bucket=r2_bucket, Key=object_key)
+            except Exception as e:
+                logger.warning(f"[ANALYSIS] R2 QC cleanup failed for {object_key}: {e}")
+            try:
+                audio_path.unlink(missing_ok=True)
+            except Exception:
+                pass
         if output.get("error"):
             return {"status": "error", "reason": f"RunPod: {output['error']}"}
         raw_segments = output.get("segments") or []
@@ -399,11 +413,6 @@ def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> D
             for s in raw_segments
             if (s.get("text") or "").strip()
         ]
-
-        try:
-            audio_path.unlink()
-        except Exception:
-            pass
 
         return {
             "status": "ok",
@@ -788,62 +797,75 @@ def _probe_source_quality(video_path: str) -> Dict[str, Any]:
     if not video_path or not os.path.exists(video_path):
         return {"status": "skipped", "reason": "source video not found"}
 
-    # --- Frame stalls (held/frozen picture) ---
-    stalls: List[Dict[str, float]] = []
-    try:
-        proc = subprocess.run(
-            ["ffmpeg", "-i", video_path,
-             "-vf", "freezedetect=n=0.001:d=0.6",
-             "-an", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=300,
+    # The frame scans below are full-video decodes (300s timeouts each) — on a
+    # CPU-only backend they starve the request workers, so they only run where
+    # a local GPU host would be doing the QC anyway. The audio-level probe
+    # further down is cheap enough to keep everywhere.
+    video_scans = _has_local_gpu()
+    if not video_scans:
+        result["flags"].append("video_scans_skipped")
+        result["warnings"].append(
+            "Source frame scans skipped — no local GPU (full-video decode "
+            "would starve this backend)"
         )
-        start = None
-        for m in re.finditer(
-            r"lavfi\.freezedetect\.(freeze_start|freeze_duration|freeze_end):\s*([\d.]+)",
-            proc.stderr,
-        ):
-            kind, val = m.group(1), float(m.group(2))
-            if kind == "freeze_start":
-                start = val
-            elif kind == "freeze_end" and start is not None:
-                stalls.append({"start": round(start, 2), "end": round(val, 2)})
-                start = None
-        result["frame_stalls"] = stalls
-        if stalls:
-            span = ", ".join(f"{s['start']}-{s['end']}s" for s in stalls[:5])
-            result["flags"].append("frame_stall")
-            result["warnings"].append(
-                f"Source video freezes {len(stalls)}x ({span}) — held frames "
-                "baked into the recording; cannot be repaired"
-            )
-    except Exception as e:
-        logger.warning(f"[ANALYSIS] freezedetect probe failed: {e}")
 
-    # --- Long black spans (fade-out tail / dead picture) ---
-    try:
-        proc = subprocess.run(
-            ["ffmpeg", "-i", video_path,
-             "-vf", "blackdetect=d=2.0:pix_th=0.10",
-             "-an", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=300,
-        )
-        blacks = [
-            {"start": round(float(m.group(1)), 2),
-             "end": round(float(m.group(2)), 2)}
+    if video_scans:
+        # --- Frame stalls (held/frozen picture) ---
+        stalls: List[Dict[str, float]] = []
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-i", video_path,
+                 "-vf", "freezedetect=n=0.001:d=0.6",
+                 "-an", "-f", "null", "-"],
+                capture_output=True, text=True, timeout=300,
+            )
+            start = None
             for m in re.finditer(
-                r"black_start:([\d.]+)\s+black_end:([\d.]+)", proc.stderr
+                r"lavfi\.freezedetect\.(freeze_start|freeze_duration|freeze_end):\s*([\d.]+)",
+                proc.stderr,
+            ):
+                kind, val = m.group(1), float(m.group(2))
+                if kind == "freeze_start":
+                    start = val
+                elif kind == "freeze_end" and start is not None:
+                    stalls.append({"start": round(start, 2), "end": round(val, 2)})
+                    start = None
+            result["frame_stalls"] = stalls
+            if stalls:
+                span = ", ".join(f"{s['start']}-{s['end']}s" for s in stalls[:5])
+                result["flags"].append("frame_stall")
+                result["warnings"].append(
+                    f"Source video freezes {len(stalls)}x ({span}) — held frames "
+                    "baked into the recording; cannot be repaired"
+                )
+        except Exception as e:
+            logger.warning(f"[ANALYSIS] freezedetect probe failed: {e}")
+
+        # --- Long black spans (fade-out tail / dead picture) ---
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-i", video_path,
+                 "-vf", "blackdetect=d=2.0:pix_th=0.10",
+                 "-an", "-f", "null", "-"],
+                capture_output=True, text=True, timeout=300,
             )
-        ]
-        result["black_spans"] = blacks
-        if blacks:
-            span = ", ".join(f"{s['start']}-{s['end']}s" for s in blacks[:5])
-            result["flags"].append("black_span")
-            result["warnings"].append(
-                f"Source has {len(blacks)} black/fade span(s) ({span}) — "
-                "lines inside these windows have no visible speaker"
-            )
-    except Exception as e:
-        logger.warning(f"[ANALYSIS] blackdetect probe failed: {e}")
+            blacks = [
+                {"start": round(float(m.group(1)), 2),
+                 "end": round(float(m.group(2)), 2)}
+                for m in re.finditer(
+                    r"black_start:([\d.]+)\s+black_end:([\d.]+)", proc.stderr
+                )
+            ]
+            result["black_spans"] = blacks
+            if blacks:
+                span = ", ".join(f"{s['start']}-{s['end']}s" for s in blacks[:5])
+                result["flags"].append("black_span")
+                result["warnings"].append(
+                    f"Source has {len(blacks)} black/fade span(s) ({span}) — "
+                    "lines inside these windows have no visible speaker"
+                )
+        except Exception as e:
+            logger.warning(f"[ANALYSIS] blackdetect probe failed: {e}")
 
     # --- Audio level (re-recordings run far below normal mix level) ---
     try:

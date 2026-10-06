@@ -56,13 +56,18 @@ export function ReviewQueuePanel({
   // generations — expensive and not casually undoable), second click runs it.
   const [clearAllArmed, setClearAllArmed] = useState(false)
   const [clearAllBusy, setClearAllBusy] = useState(false)
+  // Actions take the segment's CURRENT array position — seg.index is a stored
+  // field that drifts after splits/inserts and would jump/mark/clear the wrong
+  // block.
   const flagged = useMemo(
     () =>
-      segments.filter(
-        (s) =>
-          (s.flags && s.flags.length > 0 || s.translation_flagged) &&
-          s.flag_status === 'unreviewed'
-      ),
+      segments
+        .map((seg, arrayIndex) => ({ seg, arrayIndex }))
+        .filter(
+          ({ seg }) =>
+            (seg.flags && seg.flags.length > 0 || seg.translation_flagged) &&
+            seg.flag_status === 'unreviewed'
+        ),
     [segments]
   )
 
@@ -100,7 +105,7 @@ export function ReviewQueuePanel({
             TTS generations can't fire on a stray click. Rows drop out of the
             queue as each clears — the shrinking count IS the progress bar. */}
         {(() => {
-          const withheld = flagged.filter(s => s.translation_flagged)
+          const withheld = flagged.filter(({ seg }) => seg.translation_flagged)
           if (!withheld.length || !onClearAll) return null
           return (
             <div className="px-3 py-2 border-b border-neutral-700 shrink-0 flex items-center gap-2">
@@ -110,7 +115,7 @@ export function ReviewQueuePanel({
                   if (!clearAllArmed) { setClearAllArmed(true); return }
                   setClearAllBusy(true)
                   try {
-                    await onClearAll(withheld.map(s => s.index))
+                    await onClearAll(withheld.map(({ arrayIndex }) => arrayIndex))
                   } finally {
                     setClearAllBusy(false)
                     setClearAllArmed(false)
@@ -160,7 +165,7 @@ export function ReviewQueuePanel({
             </div>
           )}
 
-          {flagged.map((seg) => {
+          {flagged.map(({ seg, arrayIndex }) => {
             // The confidence-gate flag carries no `flags` entries — synthesize
             // one from flag_reason so badges/details render uniformly.
             const effFlags = (seg.flags && seg.flags.length > 0)
@@ -221,14 +226,14 @@ export function ReviewQueuePanel({
                 {/* Actions */}
                 <div className="flex gap-2 pt-1">
                   <button
-                    onClick={() => onJumpToSegment(seg.index)}
+                    onClick={() => onJumpToSegment(arrayIndex)}
                     className="flex items-center gap-1 text-xs px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white transition-colors border border-neutral-700"
                   >
                     <ArrowRight className="h-3 w-3" />
                     {t('Jump')}
                   </button>
                   <button
-                    onClick={() => onMarkOk(seg.index)}
+                    onClick={() => onMarkOk(arrayIndex)}
                     className="flex items-center gap-1 text-xs px-2.5 py-1 rounded bg-neutral-800 hover:bg-emerald-900/50 text-neutral-300 hover:text-emerald-300 transition-colors border border-neutral-700 hover:border-emerald-700"
                   >
                     <CheckCircle className="h-3 w-3" />

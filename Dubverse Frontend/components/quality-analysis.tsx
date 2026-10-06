@@ -78,9 +78,12 @@ export function QualityAnalysisPanel({ jobId, language, dubbingComplete }: Quali
         setError(resp.error || "Analysis failed")
         setStatus("error")
         stopPolling()
-      } else if (++pollAttemptsRef.current >= 100) {
-        // ~5 min at 3s intervals. A run that produces neither a result nor a
-        // failure by then is dead; spinning forever used to be the default.
+      } else if (++pollAttemptsRef.current >= 600) {
+        // ~30 min at 3s intervals. The backend heartbeats its sentinel, so a
+        // run that still answers "running" really is alive — a feature-film
+        // QC legitimately exceeds the old 5-minute cap, which hid a completed
+        // report behind a false "failed" state. This is a genuine last
+        // resort, not a realistic ceiling.
         setError("Analysis did not produce a result. Try again.")
         setStatus("error")
         stopPolling()

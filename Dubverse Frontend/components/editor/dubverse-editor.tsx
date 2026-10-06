@@ -2172,19 +2172,22 @@ export function DubVerseEditor({
   // AudioContext.currentTime when the latest RPT playback started, so the
   // playhead can follow the audio even if the video element stalls.
   const audioStartTimeRef = useRef<number | null>(null)
-  // Pending regen while one is in flight (depth 1, last-write-wins).
+  // Pending regens while one is in flight — a FIFO, not a single slot. The old
+  // depth-1 last-write-wins queue dropped every intermediate request, so two
+  // rapid approvals released BOTH flags while only the latest ever rendered
+  // audio (a released-but-silent segment is the worst state to leave).
   // engineOverride and extraPayload ride along: a deferred regen replayed without
   // them silently falls back to the segment's stored engine and loses any pinned
   // seed, so a voice drop or a library recall issued while another regen was in
   // flight would come back on the wrong engine or as a fresh race.
-  const regenQueueRef = useRef<{
+  const regenQueueRef = useRef<Array<{
     segIdx?: number
     voiceOverride?: string
     textOverride?: string
     ttsTextOverride?: string
     engineOverride?: string
     extraPayload?: Partial<RegenerateSegmentRequest>
-  } | null>(null)
+  }>>([])
   const autoRegenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingAutoRegenRef = useRef<number | null>(null)
   const [editingText, setEditingText] = useState('')
@@ -5633,10 +5636,10 @@ export function DubVerseEditor({
     console.log('[REGEN] called', { segIdx, voiceOverride, textOverride, activeIndex, isRegenerating, selectedSegmentIndex })
     if (activeIndex === null) { console.warn('[REGEN] aborted — activeIndex null'); return false }
     if (isRegeneratingRef.current) {
-      // Queue instead of dropping (depth 1, last-write-wins); drained in finally.
-      regenQueueRef.current = { segIdx, voiceOverride, textOverride, ttsTextOverride, engineOverride, extraPayload }
+      // FIFO — drained one-per-completion in finally; nothing is dropped.
+      regenQueueRef.current.push({ segIdx, voiceOverride, textOverride, ttsTextOverride, engineOverride, extraPayload })
       setQueuedSegmentIndex(activeIndex)
-      console.warn('[REGEN] queued — regen already in flight', { segIdx, voiceOverride })
+      console.warn('[REGEN] queued — regen already in flight', { segIdx, voiceOverride, depth: regenQueueRef.current.length })
       return false
     }
     const segment = displaySegments[activeIndex]
@@ -5950,15 +5953,17 @@ export function DubVerseEditor({
       // Two-pulse confirmation
       setConfirmingSegmentIndex(activeIndex)
       setTimeout(() => setConfirmingSegmentIndex(null), 1200)
-      // Drain queued regen. The ref guard above is already false, so the next
-      // invocation proceeds regardless of React render timing.
-      const queued = regenQueueRef.current
+      // Drain queued regen (FIFO — each completion runs the oldest pending
+      // request, which in turn drains the next). The ref guard above is
+      // already false, so the invocation proceeds regardless of render timing.
+      const queued = regenQueueRef.current.shift()
       if (queued) {
-        regenQueueRef.current = null
-        setQueuedSegmentIndex(null)
+        setQueuedSegmentIndex(regenQueueRef.current.length ? (regenQueueRef.current[0].segIdx ?? null) : null)
         setTimeout(() => {
           handleGenerateSpeechRef.current(queued.segIdx, queued.voiceOverride, queued.textOverride, queued.ttsTextOverride, queued.engineOverride, queued.extraPayload)
         }, 0)
+      } else {
+        setQueuedSegmentIndex(null)
       }
     }
   }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, updateSegment, stagedSpeeds, lockedSegments, selectSegment, setImportedSegments, setPlaybackMode, keyAt])
@@ -6745,6 +6750,7 @@ export function DubVerseEditor({
       // after the fan-out — the store setter takes a value, not an updater, so
       // concurrent writes inside .map would race on a stale snapshot.
       const saveFailures: Record<number, string> = {}
+      const savedTis: number[] = []
       await Promise.all(
         toSave.map(async (seg, i) => {
           // Chunk mode saves the window you are working in, not the whole film.
@@ -6797,11 +6803,19 @@ export function DubVerseEditor({
           if (!res.ok) {
             saveFailures[ti] = `Save failed (HTTP ${res.status})`
             console.error(`[save] segment ${ti} commit failed: HTTP ${res.status}`)
+          } else {
+            savedTis.push(ti)
           }
         })
       )
-      if (Object.keys(saveFailures).length) {
-        setFailedSegments({ ...failedSegments, ...saveFailures })
+      // A retried PATCH that now succeeds must clear its earlier failure —
+      // otherwise the failed-save banner and the MAKE MOVIE gate stay armed
+      // for segments that saved fine.
+      const nextFailed = { ...failedSegments }
+      for (const ti of savedTis) delete nextFailed[ti]
+      Object.assign(nextFailed, saveFailures)
+      if (Object.keys(saveFailures).length || savedTis.length) {
+        setFailedSegments(nextFailed)
       }
       // Mark the window saved so its chip turns green and survives a reload.
       // The bulk Save wrote committed_* for every segment but never recorded
@@ -6857,7 +6871,27 @@ export function DubVerseEditor({
         flag_status: 'reviewed_no_change',
         correction_type: null,
       })
-        .then(() => handleGenerateSpeechRef.current(idx))
+        .then(async () => {
+          // A call while another regen runs returns false for "queued", not
+          // "failed" — wait out the in-flight render so false is honest.
+          while (isRegeneratingRef.current) {
+            await new Promise(r => setTimeout(r, 400))
+          }
+          return handleGenerateSpeechRef.current(idx)
+        })
+        .then((ok) => {
+          // Generation genuinely failed after the flag was cleared — re-arm
+          // the gate so the segment stays visible in the queue (and silent)
+          // instead of disappearing.
+          if (ok !== false) return
+          apiClient.commitSegmentTiming(jobId, ti, {
+            set_translation_flag: true,
+            flag_status: 'unreviewed',
+          }).catch(err => console.warn('[REVIEW-QUEUE] re-flag persist failed:', err))
+          updateSegment(idx, {
+            translation_flagged: true, flag_status: 'unreviewed', correction_type: null,
+          })
+        })
         .catch(err => console.warn('[REVIEW-QUEUE] flag-clear persist failed:', err))
       return
     }
@@ -6889,12 +6923,40 @@ export function DubVerseEditor({
         setImportedSegments(prev => prev ? prev.map((s, i) =>
           i === idx ? { ...s, translation_flagged: false, flag_reason: null, flag_status: 'reviewed_no_change', correction_type: null } : s
         ) : prev)
-        await handleGenerateSpeechRef.current(idx)
+        // Wait out any in-flight regen: a call made while one runs returns
+        // `false` for "queued", not "failed" — don't re-flag a queued render.
+        while (isRegeneratingRef.current) {
+          await new Promise(r => setTimeout(r, 400))
+        }
+        const ok = await handleGenerateSpeechRef.current(idx)
+        if (!ok) {
+          // Regen failed AFTER the flag was cleared — without re-arming the
+          // gate the segment is silent AND gone from the review queue, even
+          // after reload. Re-flag it (server + local) and record the failure
+          // so the failed-save banner / MAKE MOVIE gate still see it.
+          console.warn(`[REVIEW-QUEUE] dub failed for segment ${ti} — re-flagging`)
+          apiClient.commitSegmentTiming(jobId, ti, {
+            set_translation_flag: true,
+            flag_reason: seg.flag_reason ?? 'clear_all_regen_failed',
+            flag_status: 'unreviewed',
+          }).catch(err => console.warn('[REVIEW-QUEUE] re-flag persist failed:', err))
+          updateSegment(idx, {
+            translation_flagged: true, flag_reason: seg.flag_reason,
+            flag_status: 'unreviewed', correction_type: null,
+          })
+          setImportedSegments(prev => prev ? prev.map((s, i) =>
+            i === idx ? { ...s, translation_flagged: true, flag_status: 'unreviewed' } : s
+          ) : prev)
+          setFailedSegments({
+            ...failedSegmentsRef.current,
+            [ti]: 'Dub generation failed — segment re-flagged for review',
+          })
+        }
       } catch (err) {
         console.warn(`[REVIEW-QUEUE] clear+dub failed for segment ${ti}:`, err)
       }
     }
-  }, [jobId, updateSegment, setImportedSegments])
+  }, [jobId, updateSegment, setImportedSegments, setFailedSegments])
 
   // MAKE MOVIE is never blocked by judgement calls — only by the two states
   // where a click is meaningless (a render already running, a save mid-flight).

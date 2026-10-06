@@ -7490,13 +7490,22 @@ def _qc_gpu_available() -> bool:
             return True
     except Exception:
         pass
-    return bool(os.getenv("RUNPOD_API_KEY") and os.getenv("RUNPOD_ENDPOINT_ID"))
+    # The RunPod path hands the dubbed audio to the worker through R2 — without
+    # the bucket the retranscription can't run at all, so don't admit the job.
+    runpod_ok = bool(os.getenv("RUNPOD_API_KEY") and os.getenv("RUNPOD_ENDPOINT_ID"))
+    r2_ok = all(
+        os.getenv(k)
+        for k in ("R2_BUCKET_NAME", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ACCOUNT_ID")
+    )
+    return runpod_ok and r2_ok
 
 
 _QC_NO_GPU_MESSAGE = (
-    "QC needs GPU capacity: this backend has no CUDA device and RunPod is not "
-    "configured (RUNPOD_API_KEY / RUNPOD_ENDPOINT_ID). Set the RunPod worker "
-    "for this deployment, or run QC on the GPU worker."
+    "QC needs GPU capacity: this backend has no CUDA device and the RunPod "
+    "worker path is not fully configured (RUNPOD_API_KEY / RUNPOD_ENDPOINT_ID "
+    "plus R2_BUCKET_NAME / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / "
+    "R2_ACCOUNT_ID for the audio handoff). Set the RunPod worker for this "
+    "deployment, or run QC on the GPU worker."
 )
 
 
@@ -7721,16 +7730,26 @@ async def get_analysis(job_id: str, language: str):
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
     result_file = dubbed_dir / f"analysis_{lang_norm}.json"
     if sentinel.exists():
-        if result_file.exists() or _clear_stale_analysis_sentinel(sentinel):
-            try:
-                sentinel.unlink(missing_ok=True)
-            except Exception:
-                pass
+        # A live heartbeat means a run owns the slot even while a PREVIOUS
+        # run's report still sits on disk — unlinking the sentinel just
+        # because a result file existed let a second POST double-start the
+        # analysis. The report only proves completion when it is at least as
+        # new as the last heartbeat; otherwise it is the stale prior result.
+        if _clear_stale_analysis_sentinel(sentinel):
+            pass  # dead run — fall through and serve whatever report exists
         else:
-            return JSONResponse(
-                status_code=202,
-                content={"status": "running", "message": "Analysis in progress"}
-            )
+            try:
+                finished = result_file.exists() and (
+                    result_file.stat().st_mtime >= sentinel.stat().st_mtime
+                )
+            except OSError:
+                finished = False
+            if not finished:
+                return JSONResponse(
+                    status_code=202,
+                    content={"status": "running", "message": "Analysis in progress"}
+                )
+            sentinel.unlink(missing_ok=True)
 
     if not result_file.exists():
         raise HTTPException(
@@ -9107,31 +9126,41 @@ async def download_export(job_id: str, filename: str):
     )
 
 
-def _heal_segment_audio_paths(job_id: str, segments_path: str, data: Dict[str, Any]) -> None:
+def _heal_segment_audio_paths(job_id: str, segments_path: str, data: Dict[str, Any]) -> Dict[Any, str]:
     """Restore a segment's `path` when it is empty but audio still exists.
 
     The editor preview builds each block's audio from `path` alone, while the
     render mixer already falls back to committed_audio_url/audio_url — a
     segment that lost its path (a re-dub's duplicate skip, or a sync payload
     echoing stale client state) therefore plays SILENT in the editor even
-    though its take is on disk and would still mix into the film. The newest
-    edit_history new_path is the freshest intentional take and wins; the media
-    URLs are the fallback. All candidates go through path_safety, and healing
-    only ever points at a file inside this job's folder.
+    though its take is on disk and would still mix into the film.
+
+    Candidate order matters: the committed/audio URLs name the take the user
+    approved. edit_history new_path comes LAST and only when the entry's
+    new_text still matches the segment's current text — a take rendered for a
+    line the user has since replaced must not resurrect (e.g. after
+    retranslation stripped the audio but left history intact).
+
+    Returns {transcript_index: healed_path} so the caller can persist only the
+    healed fields into a freshly re-read file — writing the whole `data`
+    snapshot back could overwrite a save that raced this GET.
     """
     from app.services import path_safety
 
     job_dir = os.path.join(settings.DUBBED_DIR, job_id)
-    changed = False
+    healed: Dict[Any, str] = {}
     for seg in data.get("segments", []):
         if seg.get("path"):
             continue
-        candidates = []
+        candidates = [seg.get("committed_audio_url"), seg.get("audio_url")]
+        current_text = seg.get("committed_adapted_text") or seg.get("text")
         for h in reversed(seg.get("edit_history") or []):
-            if h.get("new_path"):
+            if not h.get("new_path"):
+                continue
+            h_text = h.get("new_text")
+            if h_text is None or h_text == current_text:
                 candidates.append(h["new_path"])
                 break
-        candidates.extend([seg.get("committed_audio_url"), seg.get("audio_url")])
         for cand in candidates:
             if not cand:
                 continue
@@ -9140,18 +9169,43 @@ def _heal_segment_audio_paths(job_id: str, segments_path: str, data: Dict[str, A
             except Exception:
                 continue
             if os.path.exists(real):
-                seg["path"] = os.path.join(
+                healed_path = os.path.join(
                     settings.DUBBED_DIR, job_id, os.path.basename(real)
                 ).replace("\\", "/")
-                changed = True
+                seg["path"] = healed_path
+                healed[seg.get("transcript_index")] = healed_path
                 logger.info(
                     f"[SEGMENTS] healed audio path for segment "
                     f"{seg.get('transcript_index')} (job {job_id}): "
                     f"{os.path.basename(real)}"
                 )
                 break
-    if changed:
-        atomic_write_json(segments_path, data)
+    return healed
+
+
+def _persist_healed_paths(segments_path: str, healed: Dict[Any, str]) -> None:
+    """Write healed paths into a FRESHLY re-read segments.json.
+
+    The GET handler's copy may be stale by the time it is served — a PATCH or
+    regen can land between its read and this write. Re-reading and touching
+    only the `path` of segments that are STILL missing one keeps a concurrent
+    save from being overwritten by the older snapshot.
+    """
+    if not healed:
+        return
+    try:
+        with open(segments_path, "r", encoding="utf-8") as f:
+            fresh = _json.load(f)
+    except Exception:
+        return
+    applied = False
+    for seg in fresh.get("segments", []):
+        ti = seg.get("transcript_index")
+        if not seg.get("path") and ti in healed:
+            seg["path"] = healed[ti]
+            applied = True
+    if applied:
+        atomic_write_json(segments_path, fresh)
 
 
 @router.get("/segments/{job_id}", dependencies=[Depends(_dep_job_access)])
@@ -9192,7 +9246,9 @@ async def get_segments(job_id: str):
         data = _json.load(f)
     # Restore audio paths lost to earlier syncs/re-dubs before serving — the
     # preview plays `path`, and silence here regenerates user trust issues.
-    _heal_segment_audio_paths(job_id, segments_path, data)
+    _persist_healed_paths(
+        segments_path, _heal_segment_audio_paths(job_id, segments_path, data)
+    )
     # Retention state travels with the segments the editor already loads, so the
     # countdown card needs no extra request and cannot show a stale deadline.
     data["retention"] = _retention_state(job_id)
@@ -9341,6 +9397,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     committed_start_time = body.get("committed_start_time")
     committed_end_time = body.get("committed_end_time")
     committed_audio_url = body.get("committed_audio_url")
+    if isinstance(committed_audio_url, str):
+        # The editor cache-busts served takes with ?ts=… — never persist the
+        # query as part of the filename (it resolved to nothing on disk).
+        committed_audio_url = committed_audio_url.split("?", 1)[0].split("#", 1)[0] or None
     committed_adapted_text = body.get("committed_adapted_text")
     committed_voice_id = body.get("committed_voice_id")
     committed_speed = body.get("committed_speed")
@@ -9369,6 +9429,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     # save from playback), or every unrelated save would silently release a
     # low-confidence segment to TTS without anyone having looked at it.
     clear_translation_flag = body.get("clear_translation_flag") is True
+    # Inverse of clear_translation_flag: a failed "Clear & dub" re-arms the
+    # gate so the segment stays in the review queue instead of going silent
+    # and disappearing. Explicit-only, same rule as the clear.
+    set_translation_flag = body.get("set_translation_flag") is True
     # Chunk-lens staged-take promotion: the path of an auditioned-but-uncommitted
     # take (segment_NNNN_staged*.mp3) the user has chosen to keep. Sets BOTH
     # `path` (which remix_dub merges from) and `committed_audio_url` — a staged
@@ -9440,6 +9504,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     if clear_translation_flag:
         update_data["translation_flagged"] = False
         update_data["flag_reason"] = None
+    elif set_translation_flag:
+        update_data["translation_flagged"] = True
+        if body.get("flag_reason") is not None:
+            update_data["flag_reason"] = body["flag_reason"]
     try:
         supabase_writer.table("segments").update(update_data).eq("job_id", job_id).eq("sequence", index).execute()
     except Exception as e:
@@ -9497,6 +9565,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     if clear_translation_flag:
         seg["translation_flagged"] = False
         seg["flag_reason"] = None
+    elif set_translation_flag:
+        seg["translation_flagged"] = True
+        if body.get("flag_reason") is not None:
+            seg["flag_reason"] = body["flag_reason"]
     data["segments"] = segs
     stamp_job_edited(data)  # film is now out of date — see export staleness guard
     atomic_write_json(segments_path, data)
@@ -9700,8 +9772,26 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest, request: Request
                     # client object echoing cleared URLs then wipes a take
                     # the user just made. Structural edits change the text,
                     # and that still strips.
+                    #
+                    # A SPLIT left-half can arrive with its text unchanged but
+                    # its span shortened — the inherited take was rendered for
+                    # the parent's full span and must not survive. A timing DRAG
+                    # moves the block whole, so a shorter duration (not any
+                    # timing change) is the structural signature.
+                    old_seg = existing_by_ti[ti]
+                    try:
+                        old_dur = float(old_seg.get("end", 0)) - float(old_seg.get("start", 0))
+                        new_dur = (
+                            float(incoming["end_time"]) - float(incoming["start_time"])
+                            if incoming.get("end_time") is not None
+                            and incoming.get("start_time") is not None
+                            else old_dur
+                        )
+                    except (TypeError, ValueError):
+                        new_dur = old_dur
+                    span_shrunk = new_dur < old_dur - 0.05
                     keep = False
-                    if audio_cleared and not text_changed:
+                    if audio_cleared and not text_changed and not span_shrunk:
                         try:
                             from app.services import path_safety
                             keep = path_safety.resolve_segment_audio(
@@ -9715,6 +9805,12 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest, request: Request
                         merged["path"] = None
                         merged["committed_audio_url"] = None
                         merged.pop("audio_url", None)
+                        # Purge audio pointers from edit_history too — the GET
+                        # heal restores missing paths from history, and a take
+                        # invalidated here would otherwise resurrect.
+                        for h in merged.get("edit_history") or []:
+                            h["new_path"] = None
+                            h["previous_path"] = None
             result.append(merged)
         else:
             max_ti += 1
@@ -11406,7 +11502,9 @@ async def get_video_notes(job_id: str, request: Request):
     # configured at all (returns None). An error/None-producing provider that
     # IS configured returns its status unchanged — never a silent swap.
     for name in [provider] + [p for p in ("claude", "vt", "deepgram") if p != provider]:
-        result = _run(name)
+        # Provider calls are synchronous HTTP (90s+ each, retried once) — keep
+        # them off the event loop or every other request stalls behind a retry.
+        result = await asyncio.to_thread(_run, name)
         if result is None:
             continue
         if result.get("status") == "ok":

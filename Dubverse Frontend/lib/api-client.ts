@@ -1958,6 +1958,10 @@ class DubVerseAPIClient {
       // Explicit human-review signal: releases a translation_flagged segment
       // to TTS. Never inferred from other fields — see routes.py commit notes.
       clear_translation_flag?: boolean
+      // Re-arms the TTS gate after a failed "Clear & dub" so the segment
+      // stays in the review queue instead of going silent.
+      set_translation_flag?: boolean
+      flag_reason?: string | null
     }
   ): Promise<void> {
     // Edits commit as they are made, so this call IS the save — a failure here

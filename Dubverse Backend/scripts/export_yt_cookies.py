@@ -12,16 +12,21 @@ Why this exists instead of `yt-dlp --cookies-from-browser`:
   MICROSECONDS. Mixing that up writes cookies that expired in 1970 and
   the jar silently discards them (the "9 anonymous cookies" bug).
 
-Usage (from repo root, backend running):
+Usage (from repo root, backend running) — the backend image copies only
+app/, so the script itself has to be docker cp'd in, same as the DB:
 
     docker cp "%APPDATA%\\Mozilla\\Firefox\\Profiles\\<profile>\\cookies.sqlite" \
         dubverse-backend:/tmp/cookies.sqlite
-    docker exec dubverse-backend python /app/app/scripts/export_yt_cookies.py
+    docker cp "Dubverse Backend\\scripts\\export_yt_cookies.py" \
+        dubverse-backend:/tmp/export_yt_cookies.py
+    docker exec dubverse-backend python /tmp/export_yt_cookies.py
 
-Writes /app/data/yt_cookies.txt (volume-mounted -> host data/). No restart
-needed — the service reads the file per request (io.StringIO).
+Writes /app/data/yt_cookies.txt (volume-mounted -> host data/) with
+owner-only permissions — it holds live Google session credentials. No
+restart needed — the service reads the file per request (io.StringIO).
 """
 
+import os
 import sqlite3
 import sys
 
@@ -43,7 +48,12 @@ for host, path, secure, expiry, name, value in cur.fetchall():
     lines.append("\t".join([host, flag, path, sec, exp, name, value]))
     n += 1
 
-with open(OUT_PATH, "w") as f:
+# Owner-only: the file is bind-mounted to the host and carries plaintext
+# YouTube/Google session cookies — default umask would leave it readable
+# by other local users.
+fd = os.open(OUT_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
     f.write("\n".join(lines) + "\n")
+os.chmod(OUT_PATH, 0o600)  # tighten an existing file too
 
 print(f"wrote {n} cookies -> {OUT_PATH}")

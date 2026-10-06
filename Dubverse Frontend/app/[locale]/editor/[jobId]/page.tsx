@@ -57,6 +57,11 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   // (the GET endpoint can serve the prior result mid-run).
   const reanalyzePendingRef = useRef(false)
   const reanalyzePrevGenRef = useRef<string | null>(null)
+  // generated_at of the last report seen — complete OR failed. Failures never
+  // land in qcAnalysis, so without tracking them a Re-analyze after a failed
+  // run compared the OLD failure's timestamp against null and stopped the
+  // poll with the stale error.
+  const qcLastResultGenRef = useRef<string | null>(null)
 
   useEffect(() => {
     localStorage.setItem('dubverse.lastEditorJobId', jobId)
@@ -379,6 +384,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         if (res.ok) {
           const data = await res.json()
           if (data.status === 'complete' && data.analysis) {
+            qcLastResultGenRef.current = data.analysis.generated_at ?? qcLastResultGenRef.current
             // During a manual re-analyze, ignore the prior (stale) result the GET
             // endpoint may still serve until the new run finishes.
             if (reanalyzePendingRef.current && data.analysis.generated_at === prevGen) {
@@ -402,6 +408,9 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             // Persisted failure — terminal. During a manual re-analyze this
             // may still be the PREVIOUS run's file, so apply the same
             // generated_at staleness check as the 'complete' branch above.
+            // Track its generated_at too: failures never land in qcAnalysis,
+            // which is exactly the case that broke Re-analyze (prevGen=null).
+            qcLastResultGenRef.current = data.analysis?.generated_at ?? qcLastResultGenRef.current
             if (reanalyzePendingRef.current && data.analysis?.generated_at === prevGen) {
               if (!cancelled) setQcLoading(true)
               return
@@ -497,7 +506,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     }
     // The poller must not POST again for a run we just requested.
     qcTriggeredForRef.current = jobId
-    reanalyzePrevGenRef.current = qcAnalysis?.generated_at ?? null
+    reanalyzePrevGenRef.current = qcLastResultGenRef.current ?? qcAnalysis?.generated_at ?? null
     reanalyzePendingRef.current = true
     setQcUpdatedAt(null)
     setReanalyzeNonce((n) => n + 1)
