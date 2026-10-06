@@ -5353,12 +5353,7 @@ async def _run_dubbing_pipeline(
             logger.info(f"Job {job_id} dubbing completed successfully")
 
             # Auto-trigger QC analysis concurrently — non-blocking fire-and-forget
-            try:
-                from app.pipeline.analyze_dub import analyze_dub as _analyze_dub
-                asyncio.create_task(asyncio.to_thread(_analyze_dub, job_id, target_lang, video_path))
-                logger.info(f"Job {job_id}: QC analysis auto-triggered")
-            except Exception as _qc_err:
-                logger.warning(f"Job {job_id}: QC auto-trigger skipped: {_qc_err}")
+            _auto_trigger_qc(job_id, target_lang, video_path)
         else:
             if render_charge and user_id:
                 await _unmeter_render(job_id, user_id)
@@ -6913,12 +6908,43 @@ def _clear_stale_analysis_sentinel(sentinel: Path) -> bool:
         return False
 
 
+def _qc_gpu_available() -> bool:
+    """QC runs heavy models; on a CPU-only backend it piles up and starves the API."""
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+_QC_NO_GPU_MESSAGE = (
+    "QC requires a GPU. This backend has none, so quality analysis is disabled "
+    "until it runs on the GPU worker."
+)
+
+
+def _auto_trigger_qc(job_id: str, target_lang: str, video_path) -> None:
+    """Fire-and-forget QC after a dub; skipped (logged) when there is no GPU."""
+    if not _qc_gpu_available():
+        logger.info(f"Job {job_id}: QC auto-trigger skipped: no GPU on this backend")
+        return
+    try:
+        from app.pipeline.analyze_dub import analyze_dub as _analyze_dub
+        asyncio.create_task(asyncio.to_thread(_analyze_dub, job_id, target_lang, video_path))
+        logger.info(f"Job {job_id}: QC analysis auto-triggered")
+    except Exception as _qc_err:
+        logger.warning(f"Job {job_id}: QC auto-trigger skipped: {_qc_err}")
+
+
 @router.post("/analyze/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
 async def trigger_analysis(job_id: str, language: str, background_tasks: BackgroundTasks):
     """Trigger post-dub quality analysis. Returns 202 immediately."""
     job = await _get_or_rehydrate_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    if not _qc_gpu_available():
+        raise HTTPException(status_code=503, detail=_QC_NO_GPU_MESSAGE)
 
     lang_norm = language.lower().strip()
     dubbed_dir = Path(settings.DUBBED_DIR) / job_id
