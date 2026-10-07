@@ -5521,10 +5521,17 @@ def _make_film_state_saver(job_id: str, charge_key, charge_seconds: int,
     """Async on_submitted callback — the fingerprint hash is offloaded so a
     full-file read never runs on the event loop mid-submission."""
     async def _save(_sid: str):
+        # Persist the generation id BEFORE the hash: a shutdown between
+        # vendor-accept and hash-complete must not orphan a paid job.
+        # Empty audio_fp reads as pre-fingerprint state on resume — the
+        # mtime fallback still validates it.
+        _save_film_lipsync_state(
+            job_id, _sid, charge_key, charge_seconds, audio_path, "")
         _fp = (await asyncio.to_thread(_audio_fingerprint, audio_path)
                if audio_path else "")
-        _save_film_lipsync_state(
-            job_id, _sid, charge_key, charge_seconds, audio_path, _fp)
+        if _fp:
+            _save_film_lipsync_state(
+                job_id, _sid, charge_key, charge_seconds, audio_path, _fp)
     return _save
 
 
@@ -5553,7 +5560,9 @@ def _save_film_lipsync_state(job_id: str, sync_job_id: str,
         "charge_key": charge_key,
         "charge_seconds": charge_seconds,
         "audio_mtime": audio_mtime,
-        "fp_version": 2,
+        # Version describes the fingerprint actually stored — an empty fp is
+        # a pre-fingerprint state, so the matcher can use its mtime fallback.
+        "fp_version": 2 if audio_fp else 0,
         "audio_fp": audio_fp,
         "saved_at": time.time(),
     })
