@@ -14,11 +14,14 @@ export type ShareResult = 'shared' | 'copied' | 'cancelled' | 'failed'
 
 export async function shareDubbedVideo(opts: { jobId: string; url: string; title: string }): Promise<ShareResult> {
   const fileName = `${opts.title}_dubbed.mp4`
+  // The caller's stored media URL may carry a rotated-out access_token —
+  // re-mint it so the file fetch doesn't 401 into the link fallback.
+  const freshUrl = await apiClient.refreshMediaUrlAsync(opts.url)
 
   // Web Share Level 2: hand the OS the actual video file when it fits.
   if (navigator.canShare) {
     try {
-      const resp = await fetch(opts.url)
+      const resp = await fetch(freshUrl)
       if (resp.ok) {
         const blob = await resp.blob()
         if (blob.size <= SHARE_FILE_MAX_BYTES) {

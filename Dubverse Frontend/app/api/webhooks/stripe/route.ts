@@ -60,9 +60,28 @@ async function recordPayment(
       .eq("status", row.status)
       .limit(1)
     if (existing && existing.length > 0) return
+    // Atomic dedup: two concurrent deliveries can both pass the select above,
+    // so the conflict must be resolved by the unique index, not by us. A lost
+    // race is a no-op (ignoreDuplicates), NOT a 500 → no pointless Stripe
+    // retry storm.
+    const { error: upsertError } = await supabase
+      .from("payments")
+      .upsert(row, {
+        onConflict: "stripe_payment_id,status",
+        ignoreDuplicates: true,
+      })
+    if (!upsertError) return
+    if (upsertError.code === "23505") return
+    if (upsertError.code !== "42P10") throw upsertError
+    // 42P10: the dedup migration hasn't been applied — fall through to the
+    // plain insert (the old check-then-insert race window stays open until
+    // supabase/migrations/20260925_payments_dedup.sql runs).
+    console.warn(
+      "[STRIPE] payments dedup index missing — run migrations/20260925_payments_dedup.sql"
+    )
   }
   const { error } = await supabase.from("payments").insert(row)
-  if (error) throw error
+  if (error && error.code !== "23505") throw error
 }
 
 function subPeriod(subscription: Stripe.Subscription) {

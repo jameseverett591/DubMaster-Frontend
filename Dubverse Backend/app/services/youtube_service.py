@@ -88,8 +88,43 @@ def _needs_signin(exc_text: str) -> bool:
     )
 
 
-def _dl(opts: dict, use_cookies: bool = True):
+class _YdlLogger:
+    """Collects yt-dlp warnings/errors. 'no_warnings' only silences stderr —
+    a supplied logger still receives them, which is the ONLY way to see
+    cookie-rotation notices: YouTube reports those as warnings, not
+    exceptions, so the error path would otherwise show generic guidance."""
+
+    def __init__(self):
+        self.warnings: list = []
+
+    def debug(self, _msg):
+        pass
+
+    def info(self, _msg):
+        pass
+
+    def warning(self, msg):
+        self.warnings.append(str(msg))
+
+    def error(self, msg):
+        self.warnings.append(str(msg))
+
+
+def _cookie_expiry_error(warnings: list):
+    """'Refresh the cookies' message when captured warnings say the session
+    rotated/expired — checked before generic error text so operators get the
+    actionable cause, not 'try another video'."""
+    low = " ".join(warnings).lower()
+    if "no longer valid" in low or "rotated" in low:
+        return ("YouTube session expired — the exported cookies need "
+                "refreshing (scripts/export_yt_cookies.py)")
+    return None
+
+
+def _dl(opts: dict, use_cookies: bool = True, logger=None):
     import yt_dlp
+    if logger is not None:
+        opts["logger"] = logger
     # YTDLP_COOKIES_FILE points at a Netscape cookies.txt exported from a
     # signed-in browser. Required for age-restricted videos — YouTube's
     # age gate rejects every unauthenticated client, no extractor-arg
@@ -125,12 +160,13 @@ def get_video_info(url: str) -> dict:
     except Exception as e:
         if not _needs_signin(str(e)):
             raise ValueError(_friendly_error(e))
+        log = _YdlLogger()
         try:
-            with _dl(dict(probe), use_cookies=True) as ydl:
+            with _dl(dict(probe), use_cookies=True, logger=log) as ydl:
                 info = ydl.extract_info(watch, download=False)
             needs_cookies = True
         except Exception as e2:
-            raise ValueError(_friendly_error(e2))
+            raise ValueError(_cookie_expiry_error(log.warnings) or _friendly_error(e2))
     if info.get("is_live"):
         raise ValueError("Live streams can't be imported")
     subs = sorted(set((info.get("subtitles") or {}).keys()))
@@ -195,7 +231,8 @@ def download_video(url: str, dest_path_no_ext: str, max_bytes: int,
         "sleep_interval_subtitles": 2,
         "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
     }
-    with _dl(opts, use_cookies=use_cookies) as ydl:
+    dl_log = _YdlLogger()
+    with _dl(opts, use_cookies=use_cookies, logger=dl_log) as ydl:
         try:
             ydl.download([watch])
         except Exception as e:
@@ -210,9 +247,11 @@ def download_video(url: str, dest_path_no_ext: str, max_bytes: int,
                     try:
                         ydl.download([watch])
                     except Exception as e2:
-                        raise ValueError(_friendly_error(e2))
+                        raise ValueError(
+                            _cookie_expiry_error(dl_log.warnings) or _friendly_error(e2))
                 else:
-                    raise ValueError(_friendly_error(e))
+                    raise ValueError(
+                        _cookie_expiry_error(dl_log.warnings) or _friendly_error(e))
 
     video_path = _video_on_disk(dest_path_no_ext)
     if not video_path:

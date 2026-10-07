@@ -2200,6 +2200,7 @@ export function DubVerseEditor({
     ttsTextOverride?: string
     engineOverride?: string
     extraPayload?: Partial<RegenerateSegmentRequest>
+    resolve?: (ok: boolean) => void
   }>>([])
   const autoRegenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingAutoRegenRef = useRef<number | null>(null)
@@ -5650,10 +5651,14 @@ export function DubVerseEditor({
     if (activeIndex === null) { console.warn('[REGEN] aborted — activeIndex null'); return false }
     if (isRegeneratingRef.current) {
       // FIFO — drained one-per-completion in finally; nothing is dropped.
-      regenQueueRef.current.push({ segIdx, voiceOverride, textOverride, ttsTextOverride, engineOverride, extraPayload })
-      setQueuedSegmentIndex(activeIndex)
-      console.warn('[REGEN] queued — regen already in flight', { segIdx, voiceOverride, depth: regenQueueRef.current.length })
-      return false
+      // The caller resolves with the QUEUED run's real outcome, not a bare
+      // "busy" false — waiters that re-flag on false were mis-flagging work
+      // that was merely queued and could generate successfully.
+      console.warn('[REGEN] queued — regen already in flight', { segIdx, voiceOverride, depth: regenQueueRef.current.length + 1 })
+      return new Promise<boolean>((resolve) => {
+        regenQueueRef.current.push({ segIdx, voiceOverride, textOverride, ttsTextOverride, engineOverride, extraPayload, resolve })
+        setQueuedSegmentIndex(activeIndex)
+      })
     }
     const segment = displaySegments[activeIndex]
     if (!segment) { console.warn('[REGEN] aborted — no segment at index', activeIndex); return false }
@@ -5974,6 +5979,7 @@ export function DubVerseEditor({
         setQueuedSegmentIndex(regenQueueRef.current.length ? (regenQueueRef.current[0].segIdx ?? null) : null)
         setTimeout(() => {
           handleGenerateSpeechRef.current(queued.segIdx, queued.voiceOverride, queued.textOverride, queued.ttsTextOverride, queued.engineOverride, queued.extraPayload)
+            .then(ok => queued.resolve?.(ok))
         }, 0)
       } else {
         setQueuedSegmentIndex(null)

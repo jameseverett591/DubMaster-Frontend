@@ -746,6 +746,15 @@ class DubVerseAPIClient {
     }
   }
 
+  /** refreshMediaUrl with the token guaranteed loaded. Stored URLs carry the
+   *  access_token they were minted with; after rotation the stale token 401s.
+   *  Click handlers on persisted URLs (result card download/share) need the
+   *  async form — _ensureToken may not have run yet on a fresh page load. */
+  async refreshMediaUrlAsync(url: string): Promise<string> {
+    await this._ensureToken()
+    return this.refreshMediaUrl(url)
+  }
+
   private _mediaUrl(path: string): string {
     const url = `${this.baseURL}${path}`
     if (!this._token) return url
@@ -1761,6 +1770,7 @@ class DubVerseAPIClient {
     sourceLanguage?: string,
     targetLanguage?: string,
     numSpeakers?: number,
+    transcript?: Array<{ text: string; start: number; end: number; speaker?: string }>,
   ): Promise<UploadResponse> {
     const response = await this._fetch(`${this.baseURL}/api/youtube/import`, {
       method: 'POST',
@@ -1770,6 +1780,7 @@ class DubVerseAPIClient {
         source_language: sourceLanguage,
         target_language: targetLanguage,
         num_speakers: numSpeakers,
+        transcript,
       }),
     })
     if (!response.ok) {

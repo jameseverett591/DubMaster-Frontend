@@ -281,12 +281,20 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
   // ── Video import ─────────────────────────────────────────────────────────
 
   const handleImportVideo = async (url: string, title?: string,
-                                   thumbnail?: string, duration?: string) => {
+                                   thumbnail?: string, duration?: string,
+                                   transcript?: TranscriptLine[], lang?: string | null) => {
     if (!url.trim() || isImporting) return
     setIsImporting(true)
     setImportError(null)
     try {
-      const res = await apiClient.importYouTube(url)
+      // Pass the reviewed captions through so the job uses THEM as the
+      // transcript — a fresh ASR pass would discard the text the user just
+      // checked and can produce different words/timings.
+      const res = await apiClient.importYouTube(
+        url, lang || undefined, undefined, undefined,
+        transcript?.map(l => ({
+          text: l.text, start: l.start, end: l.end, speaker: l.speaker,
+        })))
       // The import returns 'accepted' while yt-dlp downloads server-side —
       // the media URL and segment manifest 404 until it lands, and the
       // workspace loads data once. Poll until the download finishes (status
@@ -397,7 +405,12 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
       // as the job transcript and skips ASR entirely.
       const res = await apiClient.uploadVideo(
         ownVideoFile,
-        undefined, undefined, undefined, undefined, undefined,
+        undefined,
+        // The caption track's real language — without it the backend stores
+        // the transcript as English and every dub translates from the wrong
+        // source.
+        extractedLang || undefined,
+        undefined, undefined, undefined,
         extractedTranscript.map(l => ({
           text: l.text, start: l.start, end: l.end, speaker: l.speaker,
         })),
@@ -584,7 +597,10 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
                     disabled={isImporting}
                     onClick={() => handleImportVideo(
                       extractUrl,
-                      extractedTitle || undefined)}
+                      extractedTitle || undefined,
+                      undefined, undefined,
+                      extractedTranscript || undefined,
+                      extractedLang)}
                   >
                     {isImporting
                       ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />

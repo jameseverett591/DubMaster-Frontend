@@ -499,14 +499,22 @@ async def _dep_media_access(job_id: str, request: Request):
     token (?media_token=). The token only ever unlocks media bytes for the
     one job it was minted for — never mutating routes, never other jobs."""
     mt = request.query_params.get("media_token", "")
+    request.state.vendor_token = False
     if mt:
         if not _media_token_valid(job_id, mt):
             raise HTTPException(status_code=401, detail="Invalid or expired media token")
         job = await _get_or_rehydrate_job(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+        request.state.vendor_token = True
         return job
     return await _require_job(job_id, _caller(request))
+
+
+def _vendor_limited(request: Request) -> bool:
+    """True when the media request is authenticated by a vendor media_token
+    rather than the owner's JWT."""
+    return bool(getattr(request.state, "vendor_token", False))
 
 
 
@@ -3289,6 +3297,17 @@ async def upload_video(
         # dubbing still re-separates audio itself at render time.
         provided = None
         if transcript:
+            # Supplied captions skip ASR entirely, so nothing re-detects the
+            # language later — a missing source_language would stamp the
+            # transcript "en" and every dub would translate from the wrong
+            # source. Require it rather than guess.
+            if not src_lang:
+                os.remove(video_path)
+                await job_manager.delete_job(job_id)
+                raise HTTPException(
+                    status_code=422,
+                    detail="source_language is required when supplying captions",
+                )
             try:
                 provided = youtube_service.parse_caption_segments(
                     _json.loads(transcript), max_end=_dur
@@ -3402,6 +3421,15 @@ async def youtube_import(body: YouTubeImportRequest,
         if normalized and normalized != "auto":
             src_lang = normalized
 
+    # Supplied captions skip ASR entirely — without their language the
+    # transcript gets stamped "en" and every dub translates from the wrong
+    # source. Same requirement as /upload's transcript field.
+    if body.transcript and not src_lang:
+        raise HTTPException(
+            status_code=422,
+            detail="source_language is required when supplying captions",
+        )
+
     tgt_lang: Optional[str] = None
     if body.target_language:
         try:
@@ -3442,7 +3470,8 @@ async def youtube_import(body: YouTubeImportRequest,
         # several minutes and holding the HTTP request open for it invites
         # proxy timeouts. Status polling carries the progress instead.
         background_tasks.add_task(
-            _youtube_download_then_pipeline, job_id, body.url, dest_stem)
+            _youtube_download_then_pipeline, job_id, body.url, dest_stem,
+            body.transcript, src_lang)
 
         return UploadResponse(
             job_id=job_id,
@@ -3461,9 +3490,14 @@ async def youtube_import(body: YouTubeImportRequest,
 
 
 async def _youtube_download_then_pipeline(job_id: str, url: str,
-                                          dest_stem: str):
+                                          dest_stem: str,
+                                          transcript: Optional[list] = None,
+                                          src_lang: Optional[str] = None):
     """Background leg of /youtube/import: download, enforce the same caps as
-    /upload on the real bytes, then hand off to the normal pipeline."""
+    /upload on the real bytes, then hand off to the normal pipeline. When the
+    caller supplied reviewed captions they become the transcript instead —
+    the pipeline would only spend GPU re-deriving words the user already
+    checked."""
     try:
         video_path, yt_info = await asyncio.to_thread(
             youtube_service.download_video,
@@ -3510,7 +3544,47 @@ async def _youtube_download_then_pipeline(job_id: str, url: str,
         f"YouTube import: {yt_info.get('title')!r} "
         f"({file_size} bytes, {_dur:.1f}s) -> Job {job_id}")
 
-    await process_video_pipeline(job_id, video_path)
+    provided = None
+    if transcript:
+        try:
+            provided = youtube_service.parse_caption_segments(
+                transcript, max_end=_dur)
+        except ValueError as e:
+            await job_manager.update_job_status(
+                job_id, JobStatus.FAILED, error_message=f"Invalid transcript: {e}")
+            return
+
+    if provided:
+        # Same supplied-captions contract as /upload: store the reviewed
+        # segments as the transcript and mark complete — no ASR pass.
+        await job_manager.update_job_transcript(
+            job_id,
+            Transcript(
+                language=src_lang or "en",
+                duration=_dur,
+                text=" ".join(s["text"] for s in provided),
+                segments=[
+                    TranscriptSegment(
+                        text=s["text"],
+                        start=s["start"],
+                        end=s["end"],
+                        speaker=s["speaker"],
+                        source="youtube_captions",
+                    )
+                    for s in provided
+                ],
+            ),
+        )
+        await job_manager.update_job_status(
+            job_id, JobStatus.COMPLETED, progress=100,
+            current_stage="Ready — using supplied captions",
+        )
+        logger.info(
+            f"Job {job_id}: {len(provided)} supplied caption segments stored; "
+            f"analysis pipeline skipped"
+        )
+    else:
+        await process_video_pipeline(job_id, video_path)
 
 
 def _build_ref_segments(raw_segments: list, ref_id: str, lang: str) -> list:
@@ -4861,6 +4935,33 @@ async def put_text_lock(job_id: str, request: Request):
     return {"status": "ok", "locked": _load_text_lock(job_id)}
 
 
+def _lipsync_synced_ids(segments: list, selected: list, synced_spans: list) -> list:
+    """The subset of the user's selected segment ids whose span is covered by
+    a range the vendor actually returned. Recording the whole selection as
+    synced — the old behavior — let a partially-failed run satisfy the export
+    gate and the billing check for footage that never got lips."""
+    sel = {str(i) for i in (selected or [])}
+    if not sel or not synced_spans:
+        return []
+    out = []
+    for seg in segments:
+        keys = {str(seg.get("id")), str(seg.get("segment_id")), str(seg.get("transcript_index"))}
+        hit = next(iter(keys & sel), None)
+        if hit is None:
+            continue
+        st = _first_time(seg.get("committed_start_time"), seg.get("start_time"), seg.get("start"))
+        en = _first_time(seg.get("committed_end_time"), seg.get("end_time"), seg.get("end"))
+        try:
+            mid = (float(st) + float(en)) / 2
+        except (TypeError, ValueError):
+            continue
+        # Same merge tolerance as _lipsync_selected_ranges: the merged vendor
+        # range can start slightly before/after the segment's own span.
+        if any(rs - 0.75 <= mid <= re_ + 0.75 for rs, re_ in synced_spans):
+            out.append(hit)
+    return out
+
+
 def _lipsync_selected_ranges(job_id: str, segments: list) -> list:
     """Resolve the stored per-segment selection to merged [start, end] ranges
     on the committed timeline. Returns [] when nothing is selected — callers
@@ -4999,14 +5100,13 @@ async def _run_lipsync_postpass(
         # The original attempt already debited (and kept) this charge.
         charge_key = _film_state.get("charge_key")
         charge_seconds = int(_film_state.get("charge_seconds") or 0)
-    elif user_id and not _chunk_ranges:
-        if ranges:
-            _dur = float(sum(max(0.0, e - s) for s, e in ranges))
-        else:
-            _dur = await asyncio.to_thread(_probe_video_duration, dubbed_output_path)
-            if not _dur:
-                _lj = await job_manager.get_job(job_id)
-                _dur = float(getattr(_lj, "video_duration", 0) or 0)
+    elif user_id and not _chunk_ranges and not ranges:
+        # Whole-film only: scoped sync bills per range inside the runner, so
+        # a range that fails before the vendor is never debited.
+        _dur = await asyncio.to_thread(_probe_video_duration, dubbed_output_path)
+        if not _dur:
+            _lj = await job_manager.get_job(job_id)
+            _dur = float(getattr(_lj, "video_duration", 0) or 0)
         charge_seconds = quota_service.seconds_for_lipsync(
             _dur, _LIPSYNC_COST_PER_SECOND.get(_lip_provider, 0.0)
         )
@@ -5051,8 +5151,9 @@ async def _run_lipsync_postpass(
         # splice each result back into the rendered film at the same offset.
         lipres = await _run_lipsync_ranges(
             job_id, dubbed_output_path, video_path, audio_path,
-            ranges, _media_qs, _lip_provider,
+            ranges, _media_qs, _lip_provider, user_id,
         )
+        charge_seconds = int(lipres.get("charge_seconds") or 0)
     else:
         # Whole-film pass. Persist the generation id the moment the vendor
         # accepts it (parity with the chunked path): if the poll window runs
@@ -5552,7 +5653,15 @@ async def _run_lipsync_chunks(
         [(c["start"], c["end"]) for c in done], duration)
     if not spliced:
         return {"status": "failed", "output_path": None, **summary}
-    _persist_job_metadata_field(job_id, "lipsync_synced_selection", _load_lipsync_selection(job_id))
+    try:
+        with open(os.path.join(job_dir, "segments.json"), "r", encoding="utf-8") as _jf:
+            _segs = (_json.load(_jf) or {}).get("segments", [])
+    except Exception:
+        _segs = []
+    _persist_job_metadata_field(
+        job_id, "lipsync_synced_selection",
+        _lipsync_synced_ids(_segs, _load_lipsync_selection(job_id),
+                            [(c["start"], c["end"]) for c in done]))
     if len(done) < len(ranges):
         logger.warning(f"Job {job_id}: {len(ranges) - len(done)}/{len(ranges)} lip-sync chunk(s) "
                        f"not synced — those spans keep the dubbed footage")
@@ -5567,6 +5676,7 @@ async def _run_lipsync_ranges(
     ranges: list,
     media_qs: str,
     provider: str,
+    user_id: str = "",
 ) -> dict:
     """Scoped lip-sync: cut each selected span, send it to the vendor as its
     own generation, splice the results back into the rendered film.
@@ -5581,6 +5691,8 @@ async def _run_lipsync_ranges(
     good_idx = []
     attempted = False
     failed = []
+    charge_seconds = 0
+    run_nonce = uuid.uuid4().hex[:8]
     for i, (s, e) in enumerate(ranges):
         v_in = os.path.join(job_dir, f"lip_in_{i}.mp4")
         a_in = os.path.join(job_dir, f"lip_in_{i}.wav")
@@ -5590,6 +5702,28 @@ async def _run_lipsync_ranges(
         if not ok:
             failed.append((s, e))
             continue
+        # Per-range debit AFTER the cut succeeds — a range that fails before
+        # reaching the vendor costs nothing (the old up-front sum billed it).
+        range_key = None
+        range_seconds = 0
+        if user_id:
+            range_seconds = quota_service.seconds_for_lipsync(
+                float(e - s), _LIPSYNC_COST_PER_SECOND.get(provider, 0.0))
+            if range_seconds > 0:
+                range_key = f"{job_id}:lipsync:{run_nonce}:r{i}"
+                try:
+                    await asyncio.to_thread(
+                        quota_service.deduct_quota, user_id, range_seconds,
+                        range_key, "lipsync")
+                    charge_seconds += range_seconds
+                except quota_service.QuotaExceeded:
+                    logger.info(f"Job {job_id}: lip-sync range {i} skipped — insufficient credit")
+                    failed.append((s, e))
+                    continue
+                except quota_service.QuotaUnavailable:
+                    logger.error(f"Job {job_id}: lip-sync range {i} skipped — quota ledger unavailable")
+                    failed.append((s, e))
+                    continue
         v_url = f"{base}/api/media/{job_id}/lip_in_{i}.mp4{qs}"
         a_url = f"{base}/api/media/{job_id}/lip_in_{i}.wav{qs}"
         res = await lipsync_service.lipsync_video(
@@ -5604,9 +5738,15 @@ async def _run_lipsync_ranges(
             good_idx.append(i)
         else:
             failed.append((s, e))
+            if range_key and not res.get("vendor_attempted"):
+                # The vendor provably never ran this range — reverse its debit.
+                rf = await asyncio.to_thread(quota_service.refund_quota, user_id, range_key)
+                if not rf.get("error"):
+                    charge_seconds -= range_seconds
 
     if not good_idx:
-        return {"status": "failed", "output_path": None, "vendor_attempted": attempted}
+        return {"status": "failed", "output_path": None, "vendor_attempted": attempted,
+                "charge_seconds": charge_seconds}
 
     # Splice only the ranges that actually produced output; failed ones keep
     # their dubbed span, which is honest — the film stays watchable.
@@ -5615,19 +5755,29 @@ async def _run_lipsync_ranges(
     duration = _probe_video_duration(dubbed_output_path) or 0
     if not duration:
         logger.error(f"[LIPSYNC-RANGE] job {job_id}: cannot probe rendered film")
-        return {"status": "failed", "output_path": None, "vendor_attempted": attempted}
+        return {"status": "failed", "output_path": None, "vendor_attempted": attempted,
+                "charge_seconds": charge_seconds}
     spliced = await asyncio.to_thread(
         _splice_lipsync_ranges, dubbed_output_path, synced, good, duration
     )
     if not spliced:
-        return {"status": "failed", "output_path": None, "vendor_attempted": attempted}
+        return {"status": "failed", "output_path": None, "vendor_attempted": attempted,
+                "charge_seconds": charge_seconds}
 
-    # The synced selection is now in the film — record which ids it covered so
-    # the export gate can tell a paid render from a stale one.
-    _persist_job_metadata_field(job_id, "lipsync_synced_selection", _load_lipsync_selection(job_id))
+    # Record only the ids whose footage actually synced — failed ranges keep
+    # dubbed spans and stay unpaid-looking to the export/share gate.
+    try:
+        with open(os.path.join(job_dir, "segments.json"), "r", encoding="utf-8") as _jf:
+            _segs = (_json.load(_jf) or {}).get("segments", [])
+    except Exception:
+        _segs = []
+    _persist_job_metadata_field(
+        job_id, "lipsync_synced_selection",
+        _lipsync_synced_ids(_segs, _load_lipsync_selection(job_id), good))
     if failed:
         logger.warning(f"Job {job_id}: {len(failed)}/{len(ranges)} lip-sync range(s) failed: {failed}")
-    return {"status": "completed", "output_path": dubbed_output_path, "vendor_attempted": attempted}
+    return {"status": "completed", "output_path": dubbed_output_path,
+            "vendor_attempted": attempted, "charge_seconds": charge_seconds}
 
 
 # One render per job at a time. Two racing /dub clicks share the first
@@ -6325,20 +6475,22 @@ async def download_dubbed_video(job_id: str, language: str, request: Request, at
     the API, so a plain link only ever played the file. Content-Disposition is
     the only thing that actually makes the browser save it.
 
-    attachment=1 is also the paywall boundary: taking the film OUT of the app
-    requires the job to be paid in full (see _job_share_unlocked)."""
+    The paywall covers BOTH responses, not just attachment=1 — inline bytes
+    save to disk exactly as well, so gating only the attachment left the
+    whole film one header short of free (see _job_share_unlocked)."""
     dubbed_path = os.path.join(settings.DUBBED_DIR, job_id, f"dubbed_{language}.mp4")
 
     if not os.path.exists(dubbed_path):
         raise HTTPException(status_code=404, detail="Dubbed video not found")
 
+    job = await _get_or_rehydrate_job(job_id)
+    if job and not await _job_share_unlocked(job_id, _caller(request), job):
+        raise HTTPException(
+            status_code=402,
+            detail="Download unlocks when this job is paid in full.",
+        )
+
     if attachment:
-        job = await _get_or_rehydrate_job(job_id)
-        if job and not await _job_share_unlocked(job_id, _caller(request), job):
-            raise HTTPException(
-                status_code=402,
-                detail="Download unlocks when this job is paid in full.",
-            )
         filename = f"dubbed_{language}_{job_id[:8]}.mp4"
         return FileResponse(
             dubbed_path,
@@ -6669,6 +6821,8 @@ _scrub_proxy_locks: Dict[str, asyncio.Lock] = {}
 
 @router.get("/media/{job_id}/scrub-proxy", dependencies=[Depends(_dep_media_access)])
 async def serve_scrub_proxy(job_id: str, background_tasks: BackgroundTasks, request: Request):
+    if _vendor_limited(request):
+        raise HTTPException(status_code=403, detail="Media token is scoped to vendor inputs only")
     """Serve the all-keyframe scrub proxy.
 
     202 while it is being generated — transcoding a feature in the request path
@@ -6724,10 +6878,21 @@ async def serve_scrub_proxy(job_id: str, background_tasks: BackgroundTasks, requ
 
 
 @router.api_route("/media/{job_id}/audio/{filename}", methods=["GET", "HEAD"], dependencies=[Depends(_dep_media_access)])
-async def serve_job_audio(job_id: str, filename: str):
+async def serve_job_audio(job_id: str, filename: str, request: Request):
     """Serve a dubbed audio file so Sync.Labs can fetch it by URL."""
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
+    if _vendor_limited(request) and Path(filename).suffix.lower() not in (".mp3", ".wav", ".m4a"):
+        raise HTTPException(status_code=403, detail="Media token is scoped to audio inputs only")
+    if not _vendor_limited(request) and filename.startswith("dubbed_") and filename.endswith(".mp4"):
+        # Same film gate as the other finished-film routes — /audio/ resolves
+        # the same job directory.
+        job = await _get_or_rehydrate_job(job_id)
+        if job and not await _job_share_unlocked(job_id, _caller(request), job):
+            raise HTTPException(
+                status_code=402,
+                detail="Download unlocks when this job is paid in full.",
+            )
     audio_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
     if not os.path.exists(audio_path):
         raise HTTPException(status_code=404, detail="Audio file not found")
@@ -6738,7 +6903,9 @@ async def serve_job_audio(job_id: str, filename: str):
 
 
 @router.get("/media/{job_id}/separated/{audio_type}", dependencies=[Depends(_dep_media_access)])
-async def get_separated_audio(job_id: str, audio_type: str):
+async def get_separated_audio(job_id: str, audio_type: str, request: Request):
+    if _vendor_limited(request):
+        raise HTTPException(status_code=403, detail="Media token is scoped to vendor inputs only")
     """Serve a separated audio track (vocals or accompaniment) for waveform rendering."""
     if audio_type not in ("vocals", "accompaniment"):
         raise HTTPException(status_code=400, detail="audio_type must be 'vocals' or 'accompaniment'")
@@ -6757,7 +6924,9 @@ WAVEFORM_BUCKETS = 8000
 
 
 @router.get("/media/{job_id}/waveform/{audio_type}", dependencies=[Depends(_dep_media_access)])
-async def get_waveform_peaks(job_id: str, audio_type: str):
+async def get_waveform_peaks(job_id: str, audio_type: str, request: Request):
+    if _vendor_limited(request):
+        raise HTTPException(status_code=403, detail="Media token is scoped to vendor inputs only")
     """Amplitude peaks for a separated stem, for drawing a waveform.
 
     The editor used to fetch the stem itself and decode it in the browser. A stem
@@ -6834,12 +7003,24 @@ async def get_waveform_peaks(job_id: str, audio_type: str):
     return JSONResponse(data, headers={"Cache-Control": "public, max-age=3600"})
 
 @router.api_route("/media/{job_id}/{filename}", methods=["GET", "HEAD"], dependencies=[Depends(_dep_media_access)])
-async def serve_job_audio_legacy(job_id: str, filename: str):
+async def serve_job_audio_legacy(job_id: str, filename: str, request: Request):
     """Backwards-compat: serve segment audio and scene previews from the job dir.
     Resolves stale URLs persisted in client localStorage before the /audio/
     sub-path was introduced to the getAudioFileUrl helper."""
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
+    if _vendor_limited(request) and not filename.startswith("lip_in_"):
+        # Vendors fetch exactly the input clips they were given (lip_in_*).
+        # The same directory holds the finished paid film — a scoped media
+        # token must never reach it.
+        raise HTTPException(status_code=403, detail="Media token is scoped to vendor inputs only")
+    if filename.startswith("dubbed_") and filename.endswith(".mp4"):
+        job = await _get_or_rehydrate_job(job_id)
+        if job and not await _job_share_unlocked(job_id, _caller(request), job):
+            raise HTTPException(
+                status_code=402,
+                detail="Download unlocks when this job is paid in full.",
+            )
     file_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -9304,12 +9485,19 @@ async def cancel_export(export_id: str):
 
 
 @router.get("/dub/export/download/{job_id}/{filename}", dependencies=[Depends(_dep_job_access)])
-async def download_export(job_id: str, filename: str):
+async def download_export(job_id: str, filename: str, request: Request):
     """Serve the exported file as a download attachment."""
     safe = os.path.basename(filename)
     file_path = os.path.join(settings.DUBBED_DIR, job_id, safe)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Export file not found")
+    if safe.startswith("dubbed_") and safe.endswith(".mp4"):
+        job = await _get_or_rehydrate_job(job_id)
+        if job and not await _job_share_unlocked(job_id, _caller(request), job):
+            raise HTTPException(
+                status_code=402,
+                detail="Download unlocks when this job is paid in full.",
+            )
     return FileResponse(
         file_path,
         media_type="application/octet-stream",

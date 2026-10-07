@@ -143,6 +143,10 @@ class YouTubeImportRequest(BaseModel):
     source_language: Optional[str] = None
     target_language: Optional[str] = None
     num_speakers: Optional[int] = None
+    # Caption segments the client already reviewed [{text, start, end,
+    # speaker?}] — when present the job skips ASR and these become the
+    # transcript, same contract as /upload's transcript field.
+    transcript: Optional[List[Dict[str, Any]]] = None
 
 
 class YouTubeCaptionsRequest(BaseModel):

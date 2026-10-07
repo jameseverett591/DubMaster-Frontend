@@ -81,8 +81,10 @@ export function DubbedVideoResult({
   const shareUnlocked = useShareUnlocked(originalVideo.jobId)
   const lockedTitle = t('Available after payment')
 
-  const handleDownload = () => {
-    let url = dubbedVideoUrl ?? originalVideo.url
+  const handleDownload = async () => {
+    // The stored URL was minted when the job completed — its access_token may
+    // have rotated since. Re-mint against the live token before using it.
+    let url = await apiClient.refreshMediaUrlAsync(dubbedVideoUrl ?? originalVideo.url)
     // Cross-origin (UI :3001 → API :8000) ignores the `download` attribute and
     // plays the file inline; the API's attachment=1 switch answers
     // Content-Disposition: attachment, which is what actually saves the file.
