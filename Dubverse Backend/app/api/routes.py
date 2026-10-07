@@ -70,6 +70,21 @@ def _projects_base_dir() -> Path:
     return Path(settings.PROJECTS_DIR)
 
 
+def _stamp_project_paid(job_id: str, paid: bool) -> None:
+    """Mirror the Make Movie paid stamp into project.json. billed_seconds
+    lives on the in-memory job — a backend restart forgets it, and without
+    this the projects list reports paid=false, hiding a paid project's
+    Share button until something happens to rehydrate the job."""
+    meta_path = _projects_base_dir() / job_id / "project.json"
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = _json.load(f)
+        meta["paid"] = paid
+        atomic_write_json(str(meta_path), meta)
+    except (OSError, ValueError):
+        pass
+
+
 def _safe_copytree(src: Path, dst: Path):
     import shutil
     if not src.exists():
@@ -3351,6 +3366,7 @@ async def youtube_info(url: str):
     except Exception as e:
         logger.error(f"YouTube info failed: {e}")
         raise HTTPException(status_code=502, detail="Could not reach YouTube")
+    info.pop("_needs_cookies", None)  # internal download hint — not client data
     return info
 
 
@@ -4585,7 +4601,11 @@ async def list_projects(request: Request):
                     meta = _json.load(f)
                 if meta.get("user_id") == caller:
                     _pj = await job_manager.get_job(meta.get("job_id", ""))
-                    meta["paid"] = bool(_pj and getattr(_pj, "billed_seconds", None))
+                    # In-memory billed_seconds wins; the durable stamp in
+                    # project.json covers jobs not yet rehydrated after a
+                    # backend restart.
+                    meta["paid"] = bool(_pj and getattr(_pj, "billed_seconds", None)) \
+                        or bool(meta.get("paid"))
                     projects.append(meta)
                 continue
             except Exception:
@@ -4625,12 +4645,14 @@ async def save_project(job_id: str, request: Request, body: SaveProjectBody = Sa
 
     # Preserve created_at if project already exists
     existing_created_at = now
+    existing_paid = False
     meta_path = base / "project.json"
     if meta_path.exists():
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 existing = _json.load(f)
                 existing_created_at = existing.get("created_at", now)
+                existing_paid = bool(existing.get("paid"))
         except Exception:
             pass
 
@@ -4651,6 +4673,10 @@ async def save_project(job_id: str, request: Request, body: SaveProjectBody = Sa
         "progress": getattr(job, "progress", 100),
         "created_at": existing_created_at,
         "updated_at": now,
+        # Paid state mirrors the job's billed_seconds; the durable stamp is
+        # what /projects reads after a restart. Stamped again at billing
+        # transitions by _stamp_project_paid.
+        "paid": bool(getattr(job, "billed_seconds", None)) or existing_paid,
     }
 
     # Copy canonical artifacts
@@ -5279,10 +5305,11 @@ def _chunk_state_path(job_id: str) -> str:
     return os.path.join(settings.DUBBED_DIR, job_id, LIPSYNC_CHUNKS_NAME)
 
 
-def _load_chunk_state(job_id: str, ranges: list) -> Optional[dict]:
-    """The saved run, but only if it describes THESE ranges and still has
-    unfinished chunks — i.e. a run interrupted by a restart. A fully finished
-    run is history; a new request starts a fresh run (fresh ledger keys)."""
+def _load_chunk_state(job_id: str, ranges: list, audio_path: str = "") -> Optional[dict]:
+    """The saved run, but only if it describes THESE ranges, was built from
+    the CURRENT dubbed audio, and still has unfinished chunks — i.e. a run
+    interrupted by a restart. A fully finished run is history; a new request
+    starts a fresh run (fresh ledger keys)."""
     try:
         with open(_chunk_state_path(job_id), "r", encoding="utf-8") as f:
             st = _json.load(f)
@@ -5296,6 +5323,22 @@ def _load_chunk_state(job_id: str, ranges: list) -> Optional[dict]:
             return None
     if all(c.get("status") in _CHUNK_TERMINAL for c in chunks):
         return None
+    # Same staleness guard as the whole-film path: the saved clips were
+    # generated against a PREVIOUS dubbed mix, so after a rebuild they
+    # would splice the old audio's lips onto the new film.
+    if audio_path:
+        _saved_mtime = st.get("audio_mtime")
+        try:
+            _cur_mtime = os.path.getmtime(audio_path)
+        except OSError:
+            _cur_mtime = None
+        if _saved_mtime is not None and _cur_mtime is not None and \
+                abs(_saved_mtime - _cur_mtime) > 1.0:
+            logger.info(
+                f"[LIPSYNC-CHUNKS] job {job_id}: saved run predates current "
+                f"dubbed audio — starting a fresh run"
+            )
+            return None
     return st
 
 
@@ -5373,13 +5416,17 @@ async def _run_lipsync_chunks(
     poll_max = int(float(os.environ.get("SYNCLABS_POLL_MAX_SECONDS", "3600") or 3600))
     concurrency = max(1, int(os.environ.get("SYNCLABS_MAX_CONCURRENT", "3") or 3))
 
-    state = _load_chunk_state(job_id, ranges)
+    state = _load_chunk_state(job_id, ranges, audio_path)
     resumed = state is not None
     if not state:
         run_id = uuid.uuid4().hex[:8]
+        try:
+            _audio_mtime = os.path.getmtime(audio_path) if audio_path else None
+        except OSError:
+            _audio_mtime = None
         state = {
             "version": 1, "run_id": run_id, "provider": provider,
-            "created_at": time.time(),
+            "created_at": time.time(), "audio_mtime": _audio_mtime,
             "chunks": [
                 {"i": i, "start": s, "end": e, "status": "pending", "sync_job_id": None,
                  "charge_key": f"{job_id}:lipsync:{run_id}:c{i}", "charge_seconds": 0,
@@ -5471,9 +5518,17 @@ async def _run_lipsync_chunks(
                 logger.info(f"[LIPSYNC-CHUNK] job {job_id} chunk {i}: {e - s:.1f}s of video "
                             f"processed in {ch['processing_seconds']}s")
             else:
-                ch["status"] = "failed" if ch["attempted"] else "rejected"
-                if not ch["attempted"]:
-                    await refund(ch)
+                if res.get("resumable") and ch["sync_job_id"]:
+                    # The poll window ran out or the finished clip could not
+                    # be downloaded, but the vendor says this generation can
+                    # still be resumed. "submitted" is non-terminal: the next
+                    # attempt re-polls THIS paid job instead of opening a new
+                    # charge for the same span.
+                    ch["status"] = "submitted"
+                else:
+                    ch["status"] = "failed" if ch["attempted"] else "rejected"
+                    if not ch["attempted"]:
+                        await refund(ch)
             await save()
 
     await asyncio.gather(*(work(ch) for ch in state["chunks"]))
@@ -7730,26 +7785,19 @@ async def get_analysis(job_id: str, language: str):
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
     result_file = dubbed_dir / f"analysis_{lang_norm}.json"
     if sentinel.exists():
-        # A live heartbeat means a run owns the slot even while a PREVIOUS
-        # run's report still sits on disk — unlinking the sentinel just
-        # because a result file existed let a second POST double-start the
-        # analysis. The report only proves completion when it is at least as
-        # new as the last heartbeat; otherwise it is the stale prior result.
+        # The worker owns the sentinel's lifecycle: analyze_dub unlinks it
+        # only AFTER its report write AND cleanup have fully finished.
+        # Deleting it here on "report looks newer" races that cleanup — the
+        # freed slot admits a second run whose sentinel the first run then
+        # unlinks. A live heartbeat always means running; only a stale
+        # heartbeat (dead worker) may be cleared so the report is served.
         if _clear_stale_analysis_sentinel(sentinel):
             pass  # dead run — fall through and serve whatever report exists
         else:
-            try:
-                finished = result_file.exists() and (
-                    result_file.stat().st_mtime >= sentinel.stat().st_mtime
-                )
-            except OSError:
-                finished = False
-            if not finished:
-                return JSONResponse(
-                    status_code=202,
-                    content={"status": "running", "message": "Analysis in progress"}
-                )
-            sentinel.unlink(missing_ok=True)
+            return JSONResponse(
+                status_code=202,
+                content={"status": "running", "message": "Analysis in progress"}
+            )
 
     if not result_file.exists():
         raise HTTPException(
@@ -8349,6 +8397,7 @@ async def _meter_render(job_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         # must NOT refund a debit it didn't make.
         return None
     await job_manager.set_billed_seconds(job_id, need)
+    await asyncio.to_thread(_stamp_project_paid, job_id, True)
     return split
 
 
@@ -8369,6 +8418,7 @@ async def _unmeter_render(job_id: str, user_id: str) -> None:
         )
         return
     await job_manager.set_billed_seconds(job_id, None)
+    await asyncio.to_thread(_stamp_project_paid, job_id, False)
 
 
 @router.post("/dub/remix/{job_id}", dependencies=[Depends(_dep_job_access)])
@@ -11282,8 +11332,22 @@ def _vt_video_notes(job_id: str, token: str, preset: str, duration_sec: float = 
 
     state = vt.load_task_state(job_id)
     # A terminally-failed task is not resumable — drop it so the next click
-    # creates a fresh one instead of polling a corpse forever.
+    # creates a fresh one instead of polling a corpse forever. But the
+    # one-retry limit must survive ACROSS requests too: count completed
+    # failed chains (each already burned its in-request auto-retry) in the
+    # persisted state and stop submitting once the cap is reached — a
+    # persistently-doomed source otherwise bills a fresh transcription on
+    # every click.
+    _chains_done = 0
     if state and state.get("status") in ("failed", "cancelled"):
+        _chains_done = int(state.get("chains", 0)) + 1
+        if _chains_done >= int(os.environ.get("VT_MAX_FAILED_CHAINS", "3") or 3):
+            logger.warning(
+                f"[VIDEO-NOTES] job={job_id} VT failed {_chains_done} chains — "
+                f"refusing to submit another billed transcription"
+            )
+            return {"status": "error", "provider": "videotranscriber",
+                    "reason": state.get("reason") or "provider_error"}
         state = None
     if not state:
         created = vt.create_task(job_id, source_url)
@@ -11293,6 +11357,10 @@ def _vt_video_notes(job_id: str, token: str, preset: str, duration_sec: float = 
             # than silently substituting Claude's summary.
             return {"status": "error", "provider": "videotranscriber",
                     "reason": created.get("reason") or "provider_error"}
+        if _chains_done:
+            st3 = vt.load_task_state(job_id) or {}
+            st3["chains"] = _chains_done
+            vt._save_task_state(job_id, st3)
         return {"status": "processing", "provider": "videotranscriber",
                 "stage": "submitted", "retry_after": created.get("retry_after", 5)}
 

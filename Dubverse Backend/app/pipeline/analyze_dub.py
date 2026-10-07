@@ -185,12 +185,32 @@ def analyze_dub(
 
         # --- 5 local analyses -- work identically whether audio_source is the
         # exported mp4 or the internal audio-only stitch; none read video frames. ---
-        analysis["retranscription"] = _retranscribe_dubbed_audio(audio_source, lang_norm)
-        analysis["timing"] = _compare_timing(timing_data, original_transcript)
-        analysis["silences"] = _detect_silences(audio_source, original_transcript)
-        analysis["speed"] = _detect_speed_anomalies(timing_data)
-        analysis["loudness"] = _analyze_loudness(audio_source)
-        analysis["source_quality"] = _probe_source_quality(original_video_path)
+        # These are advisory probes (each internally bounded) but SEQUENTIAL
+        # they stacked ~15min of ffmpeg on top of the RunPod round-trip.
+        # They are independent — overlap them so the report's wall time is
+        # the slowest scan, not their sum.
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _fut(fut, name):
+            try:
+                return fut.result()
+            except Exception as e:
+                logger.warning(f"[ANALYSIS] {name} failed: {e}")
+                return {"status": "error", "reason": str(e)}
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            f_retr = pool.submit(_retranscribe_dubbed_audio, audio_source, lang_norm)
+            f_sil = pool.submit(_detect_silences, audio_source, original_transcript)
+            f_loud = pool.submit(_analyze_loudness, audio_source)
+            f_sq = pool.submit(_probe_source_quality, original_video_path)
+            # Cheap in-process analyses run inline while the ffmpeg/RunPod
+            # work is in flight.
+            analysis["timing"] = _compare_timing(timing_data, original_transcript)
+            analysis["speed"] = _detect_speed_anomalies(timing_data)
+            analysis["retranscription"] = _fut(f_retr, "retranscription")
+            analysis["silences"] = _fut(f_sil, "silence detection")
+            analysis["loudness"] = _fut(f_loud, "loudness")
+            analysis["source_quality"] = _fut(f_sq, "source-quality probe")
 
         # --- New AI-powered analyses (optional — graceful skip) ---
         # Get original segments and dubbed transcript for the new analyses
@@ -314,6 +334,19 @@ def _has_local_gpu() -> bool:
         return False
 
 
+def _runpod_handoff_configured() -> bool:
+    """The QC offload needs RunPod to run the job AND R2 to hand it the audio.
+    Checking RunPod keys alone admitted hosts that then errored in the upload
+    step instead of falling back to their own GPU."""
+    if not (os.getenv("RUNPOD_API_KEY") and os.getenv("RUNPOD_ENDPOINT_ID")):
+        return False
+    return all(
+        os.getenv(v)
+        for v in ("R2_BUCKET_NAME", "R2_ACCESS_KEY_ID",
+                  "R2_SECRET_ACCESS_KEY", "R2_ACCOUNT_ID")
+    )
+
+
 def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> Dict[str, Any]:
     """Offload the QC re-transcription to the RunPod GPU worker.
 
@@ -323,6 +356,12 @@ def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> D
     DUBBED audio with a transcribe-only step and maps its segments back into
     the QC schema (start/end/text/confidence).
     """
+    audio_path: Optional[Path] = None
+    s3 = None
+    r2_bucket = ""
+    object_key = ""
+    rp_id: Optional[str] = None
+    finished = False
     try:
         import asyncio as _asyncio
 
@@ -371,6 +410,7 @@ def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> D
         )
 
         async def _submit_and_poll() -> Dict[str, Any]:
+            nonlocal rp_id, finished
             submitted = await runpod_service.submit_job(
                 file_url=file_url,
                 job_id=f"{job_id}_qc",
@@ -380,26 +420,25 @@ def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> D
             rp_id = submitted.get("id")
             if not rp_id:
                 raise RuntimeError(f"RunPod returned no job id: {submitted}")
-            return await runpod_service.poll_until_complete(
+            out = await runpod_service.poll_until_complete(
                 rp_id,
                 timeout=int(os.getenv("QC_RUNPOD_TIMEOUT_SEC", "1800")),
                 interval=5,
             )
+            finished = True
+            return out
 
         try:
             output = _asyncio.run(_submit_and_poll())
         finally:
-            # The R2 handoff copy and the local opus are single-use — clean
-            # both whether the worker succeeded, failed, or timed out,
-            # otherwise a billed byte accumulates per QC run.
-            try:
-                s3.delete_object(Bucket=r2_bucket, Key=object_key)
-            except Exception as e:
-                logger.warning(f"[ANALYSIS] R2 QC cleanup failed for {object_key}: {e}")
-            try:
-                audio_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            # A timed-out submit can leave the job still queued — cancel it
+            # BEFORE deleting its R2 input or the worker wakes to a missing
+            # file and burns a paid job for nothing.
+            if rp_id and not finished:
+                try:
+                    _asyncio.run(runpod_service.cancel_job(rp_id))
+                except Exception:
+                    pass
         if output.get("error"):
             return {"status": "error", "reason": f"RunPod: {output['error']}"}
         raw_segments = output.get("segments") or []
@@ -424,6 +463,20 @@ def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> D
     except Exception as e:
         logger.warning(f"[ANALYSIS] RunPod retranscription failed: {e}")
         return {"status": "error", "reason": str(e)}
+    finally:
+        # The R2 handoff copy and the local opus are single-use — clean both
+        # on EVERY exit path (extraction failure, R2 misconfig, upload or
+        # presign failure, poll timeout), not only after a successful poll.
+        if s3 is not None and object_key:
+            try:
+                s3.delete_object(Bucket=r2_bucket, Key=object_key)
+            except Exception as e:
+                logger.warning(f"[ANALYSIS] R2 QC cleanup failed for {object_key}: {e}")
+        if audio_path is not None:
+            try:
+                audio_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def _retranscribe_dubbed_audio(dubbed_video: Path, target_language: str = "") -> Dict[str, Any]:
@@ -438,8 +491,10 @@ def _retranscribe_dubbed_audio(dubbed_video: Path, target_language: str = "") ->
     """
     # GPU offload first — the local CPU Whisper pass below took 45+ minutes on
     # a feature film and starved the backend. RunPod is the same worker pool
-    # the dub's own ASR already uses.
-    if os.getenv("RUNPOD_API_KEY") and os.getenv("RUNPOD_ENDPOINT_ID"):
+    # the dub's own ASR already uses. Only dispatch when the whole handoff
+    # (RunPod AND R2) is configured — a GPU host without R2 must fall through
+    # to its own Whisper instead of erroring in the upload step.
+    if _runpod_handoff_configured():
         return _retranscribe_via_runpod(dubbed_video, target_language)
     try:
         # Extract audio from dubbed video

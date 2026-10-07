@@ -386,6 +386,17 @@ def _filter_hallucinations(
             # credit boilerplate on a quiet tail routinely carries a CLEAN
             # signal, so for it containment alone is enough.
             _matched_ph = next((ph for ph in _CREDIT_PHRASES if ph in _norm_text), None)
+            if _matched_ph is not None and _is_whisper and not _suspicious:
+                # Whisper's clean-signal tail boilerplate is still filtered,
+                # but only when the credit sits at the segment's edge
+                # ("中文字幕志愿者:小明", a bare trailing "感谢收看"). A phrase
+                # mid-sentence ("把中文字幕打开" = "turn on the Chinese
+                # subtitles") is real speech, not boilerplate — containment
+                # alone must not discard it.
+                _edge_text = _norm_text.strip('!.，。, ')
+                if not (_edge_text.startswith(_matched_ph)
+                        or _edge_text.endswith(_matched_ph)):
+                    _matched_ph = None
             _gate = _is_whisper or _suspicious
 
         if _matched_ph is not None and _gate:

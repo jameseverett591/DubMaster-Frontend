@@ -6113,16 +6113,14 @@ export function DubVerseEditor({
   // fire-and-forget. api-client announces failures globally; catching them here
   // routes them into the same failedSegments banner and MAKE MOVIE gate that
   // already exist, so a silent loss becomes a visible one.
-  const failedSegmentsRef = useRef(failedSegments)
-  failedSegmentsRef.current = failedSegments
   useEffect(() => {
     const onCommitFailed = (e: Event) => {
       const { index, error } = (e as CustomEvent).detail ?? {}
       if (typeof index !== 'number') return
-      setFailedSegments({
-        ...failedSegmentsRef.current,
+      setFailedSegments(prev => ({
+        ...prev,
         [index]: error || 'Edit failed to save',
-      })
+      }))
     }
     window.addEventListener('segment-commit-failed', onCommitFailed)
     return () => window.removeEventListener('segment-commit-failed', onCommitFailed)
@@ -6673,12 +6671,15 @@ export function DubVerseEditor({
     // Drop segments that have now committed. Merging failures alone meant one
     // transient error marked a segment failed forever — the red banner stayed
     // up and MAKE MOVIE stayed blocked even after a successful retry.
-    const nextFailed = { ...failedSegments }
-    succeeded.forEach(ti => { delete nextFailed[ti] })
-    setFailedSegments({ ...nextFailed, ...failed })
+    setFailedSegments(prev => {
+      const next = { ...prev }
+      succeeded.forEach(ti => { delete next[ti] })
+      Object.assign(next, failed)
+      return next
+    })
     setSaveProgress(null)
     return { succeeded, failed }
-  }, [stagedEdits, jobId, failedSegments, clearStagedEditsFor, setFailedSegments, setSaveProgress])
+  }, [stagedEdits, jobId, clearStagedEditsFor, setFailedSegments, setSaveProgress])
 
   /** Resolve the switch-chunk guard. Defined here because it calls
    *  handleSaveStaged above. */
@@ -6811,11 +6812,13 @@ export function DubVerseEditor({
       // A retried PATCH that now succeeds must clear its earlier failure —
       // otherwise the failed-save banner and the MAKE MOVIE gate stay armed
       // for segments that saved fine.
-      const nextFailed = { ...failedSegments }
-      for (const ti of savedTis) delete nextFailed[ti]
-      Object.assign(nextFailed, saveFailures)
       if (Object.keys(saveFailures).length || savedTis.length) {
-        setFailedSegments(nextFailed)
+        setFailedSegments(prev => {
+          const next = { ...prev }
+          for (const ti of savedTis) delete next[ti]
+          Object.assign(next, saveFailures)
+          return next
+        })
       }
       // Mark the window saved so its chip turns green and survives a reload.
       // The bulk Save wrote committed_* for every segment but never recorded
@@ -6947,10 +6950,10 @@ export function DubVerseEditor({
           setImportedSegments(prev => prev ? prev.map((s, i) =>
             i === idx ? { ...s, translation_flagged: true, flag_status: 'unreviewed' } : s
           ) : prev)
-          setFailedSegments({
-            ...failedSegmentsRef.current,
+          setFailedSegments(prev => ({
+            ...prev,
             [ti]: 'Dub generation failed — segment re-flagged for review',
-          })
+          }))
         }
       } catch (err) {
         console.warn(`[REVIEW-QUEUE] clear+dub failed for segment ${ti}:`, err)
@@ -7149,7 +7152,13 @@ export function DubVerseEditor({
       }
       if (lipFailed) {
         const detail = lip.vendor_error || (lip.skipped ? String(lip.skipped).replace(/_/g, ' ') : 'the provider did not run the job')
-        setRebuildError(`Lip sync did NOT run — ${detail}. The film is the un-synced dub; nothing was billed for lip sync.`)
+        // charge_seconds can be nonzero here even with applied=false — the
+        // vendor ran but produced no usable output, so the charge stands.
+        // Saying "nothing was billed" would misstate the bill.
+        const billedText = lip?.charge_seconds && !lip?.refunded
+          ? `~$${(lip.charge_seconds * 2.5 / 60).toFixed(2)} was billed — the provider ran but produced no usable output`
+          : 'nothing was billed for lip sync'
+        setRebuildError(`Lip sync did NOT run — ${detail}. The film is the un-synced dub; ${billedText}.`)
         setRebuildStatus('error')
       } else {
         setRebuildStatus('complete')
@@ -12673,7 +12682,7 @@ export function DubVerseEditor({
                     <div className="space-y-1.5"><div className="h-2.5 w-[50%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[35%] rounded-full bg-slate-800/60 animate-pulse" /></div>
                   </div>
                 )}
-                {qcError && !qcAnalysis && !qcLoading && (
+                {qcError && !qcLoading && (
                   <p className="px-3 py-2 text-[11px] text-amber-300 border-b border-neutral-800">
                     {qcError}
                   </p>
@@ -15276,6 +15285,7 @@ export function DubVerseEditor({
           open={showDubReady}
           onClose={() => setShowDubReady(false)}
           title={title}
+          jobId={jobId}
           videoUrl={apiClient.refreshMediaUrl(activeDubbedVideoUrl)}
           downloadUrl={withAttachment(apiClient.refreshMediaUrl(activeDubbedVideoUrl))}
         />

@@ -12,13 +12,15 @@ interface DubReadyDialogProps {
   open: boolean
   onClose: () => void
   title: string
+  /** Job whose dub is being shared — the public share link is minted for it. */
+  jobId: string
   /** Authenticated URL of the rendered dub. */
   videoUrl: string
   /** Same attachment-forcing URL the editor's Download uses. */
   downloadUrl: string
 }
 
-export function DubReadyDialog({ open, onClose, title, videoUrl, downloadUrl }: DubReadyDialogProps) {
+export function DubReadyDialog({ open, onClose, title, jobId, videoUrl, downloadUrl }: DubReadyDialogProps) {
   const t = useT()
   const [sharing, setSharing] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -26,7 +28,7 @@ export function DubReadyDialog({ open, onClose, title, videoUrl, downloadUrl }: 
   const handleShare = async () => {
     setSharing(true)
     try {
-      const result = await shareDubbedVideo({ url: videoUrl, title })
+      const result = await shareDubbedVideo({ jobId, url: videoUrl, title })
       if (result === "copied") {
         setCopied(true)
         setTimeout(() => setCopied(false), 2000)

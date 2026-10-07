@@ -339,11 +339,15 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
       pollRef.current = setInterval(checkQC, intervalMs)
     }
 
-    /** Terminal: stop polling and tell the user why. */
+    /** Terminal: stop polling and tell the user why. A stale async return
+     *  from a CANCELLED effect must not clear the NEW effect's poller or
+     *  reanalyze latch — check `cancelled` before touching shared refs. */
     function stopQc(message: string) {
+      if (cancelled) return
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
       reanalyzePendingRef.current = false
-      if (!cancelled) { setQcError(message); setQcLoading(false) }
+      setQcError(message)
+      setQcLoading(false)
     }
 
     async function checkQC() {
@@ -365,9 +369,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
       // Final safety cap so a genuinely wedged job (bad data, backend down)
       // can't poll forever if the tab is left open.
       if (attempts >= FAST_ATTEMPTS + SLOW_ATTEMPTS) {
+        if (cancelled) return  // stale tick — the new effect owns the refs now
         if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
         reanalyzePendingRef.current = false
-        if (!cancelled) setQcLoading(false)
+        setQcLoading(false)
         return
       }
       try {
@@ -375,8 +380,14 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
           headers: await apiClient.ensureAuthHeaders(),
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         })
-        if (res.ok || res.status === 202 || res.status === 404) {
+        // A 404 is not a successful attempt — the trigger fetch it leads to
+        // may itself fail. Resetting here meant the failure cap never fired:
+        // every cycle reset to 0, then a dead trigger endpoint incrementing
+        // back to 1 forever.
+        if (res.ok || res.status === 202) {
           failures = 0
+        } else if (res.status === 404) {
+          // handled below — leave `failures` alone until the trigger outcome
         } else if (++failures >= MAX_CONSECUTIVE_FAILURES) {
           stopQc(`QC status is unavailable (backend returned ${res.status}). Use Re-analyze to try again.`)
           return
@@ -415,7 +426,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
               if (!cancelled) setQcLoading(true)
               return
             }
-            if (reanalyzePendingRef.current) reanalyzePendingRef.current = false
+            if (!cancelled && reanalyzePendingRef.current) reanalyzePendingRef.current = false
             stopQc(data.error || 'QC analysis failed. Use Re-analyze to try again.')
             return
           } else if (data.status === 'running') {
@@ -444,6 +455,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             // Only latch once the backend actually answered; a dropped request
             // may be retried on the next tick (bounded by the failure cap).
             qcTriggeredForRef.current = jobId
+            failures = 0  // the POST reached the backend — connection is fine
             if (!trigger.ok) {
               // Refused: 503 (backend has no GPU) or 404 (no dubbed video yet).
               const body = await trigger.json().catch(() => null)

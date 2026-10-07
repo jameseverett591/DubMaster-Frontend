@@ -72,7 +72,23 @@ def parse_youtube_url(url: str) -> str:
 
 # ── yt-dlp: metadata + video download ───────────────────────────────────────
 
-def _dl(opts: dict):
+def _needs_signin(exc_text: str) -> bool:
+    """True when the failure is a POLICY gate the shared account can satisfy —
+    age-restriction or the bot-check — never access control. A private video
+    reachable only through the operator's signed-in cookies must stay private:
+    retrying those with the shared credential would hand any authenticated
+    caller the operator's private library."""
+    low = exc_text.lower()
+    if "private" in low:
+        return False
+    return (
+        ("age" in low and ("confirm" in low or "restrict" in low))
+        or "not a bot" in low
+        or "sign in to confirm" in low
+    )
+
+
+def _dl(opts: dict, use_cookies: bool = True):
     import yt_dlp
     # YTDLP_COOKIES_FILE points at a Netscape cookies.txt exported from a
     # signed-in browser. Required for age-restricted videos — YouTube's
@@ -80,7 +96,7 @@ def _dl(opts: dict):
     # bypass exists. data/ is volume-mounted, so the file lands inside
     # the container without a rebuild.
     cookies = os.getenv("YTDLP_COOKIES_FILE")
-    if cookies and os.path.isfile(cookies):
+    if use_cookies and cookies and os.path.isfile(cookies):
         # Feed yt-dlp an in-memory copy: it rewrites the jar on exit, and
         # that atomic rewrite desyncs on Docker Desktop's Windows file
         # sharing — the container ends up with a gutted file (no login
@@ -96,12 +112,25 @@ def get_video_info(url: str) -> dict:
     unavailable/private/live videos."""
     vid = parse_youtube_url(url)
     watch = f"https://www.youtube.com/watch?v={vid}"
-    with _dl({"quiet": True, "no_warnings": True, "noplaylist": True,
-              "socket_timeout": 20, "extract_flat": False}) as ydl:
-        try:
+    probe = {"quiet": True, "no_warnings": True, "noplaylist": True,
+             "socket_timeout": 20, "extract_flat": False}
+    # Probe WITHOUT the operator's signed-in cookies first: attaching them
+    # to an arbitrary caller-supplied URL would expose private videos that
+    # account can see. Only policy gates (age/bot-check) earn the retry —
+    # "private" stays private.
+    needs_cookies = False
+    try:
+        with _dl(dict(probe), use_cookies=False) as ydl:
             info = ydl.extract_info(watch, download=False)
-        except Exception as e:
+    except Exception as e:
+        if not _needs_signin(str(e)):
             raise ValueError(_friendly_error(e))
+        try:
+            with _dl(dict(probe), use_cookies=True) as ydl:
+                info = ydl.extract_info(watch, download=False)
+            needs_cookies = True
+        except Exception as e2:
+            raise ValueError(_friendly_error(e2))
     if info.get("is_live"):
         raise ValueError("Live streams can't be imported")
     subs = sorted(set((info.get("subtitles") or {}).keys()))
@@ -114,6 +143,9 @@ def get_video_info(url: str) -> dict:
         "uploader": info.get("uploader") or info.get("channel") or "",
         "subtitle_languages": subs,
         "auto_caption_languages": autos,
+        # Internal: download_video re-uses the same cookie decision the
+        # probe made — no second anonymous attempt, no unconditional cookies.
+        "_needs_cookies": needs_cookies,
     }
 
 
@@ -136,6 +168,7 @@ def download_video(url: str, dest_path_no_ext: str, max_bytes: int,
 
     info = get_video_info(watch)
     dur = info["duration"]
+    use_cookies = bool(info.pop("_needs_cookies", False))
     if dur and dur > max_duration:
         raise ValueError(
             f"That video is {dur / 60:.0f} minutes — the limit is "
@@ -162,7 +195,7 @@ def download_video(url: str, dest_path_no_ext: str, max_bytes: int,
         "sleep_interval_subtitles": 2,
         "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
     }
-    with _dl(opts) as ydl:
+    with _dl(opts, use_cookies=use_cookies) as ydl:
         try:
             ydl.download([watch])
         except Exception as e:
@@ -324,8 +357,14 @@ def _friendly_error(e: Exception) -> str:
         return "YouTube session expired — the exported cookies need refreshing"
     if "age" in low and ("confirm" in low or "restrict" in low):
         return "That video is age-restricted — it can't be downloaded without sign-in"
-    if "drm" in low or "requested format is not available" in low:
+    if "drm" in low:
         return "That video is DRM-protected (licensed TV/film content) — it can't be downloaded"
+    if "requested format is not available" in low:
+        # YouTube can serve a restricted format list (bot-check/SABR) where
+        # none of the preferred selectors match — not DRM. Say what failed so
+        # the fix (refresh cookies, try later) is visible.
+        return ("YouTube didn't offer a usable format for this video — "
+                "it may be restricted or need refreshed cookies")
     if "unavailable" in low or "removed" in low or "copyright" in low:
         return "That video is unavailable (removed, blocked, or copyright-restricted)"
     if "sign in" in low or "bot" in low:

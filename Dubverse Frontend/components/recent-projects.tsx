@@ -44,7 +44,7 @@ export function RecentProjects({ onVideoSelect }: RecentProjectsProps) {
   const handleShare = async (project: Project) => {
     if (!project.target_language) return
     const url = apiClient.getDubDownloadURL(project.job_id, project.target_language)
-    const result = await shareDubbedVideo({ url, title: project.title || project.job_id.slice(0, 8) })
+    const result = await shareDubbedVideo({ jobId: project.job_id, url, title: project.title || project.job_id.slice(0, 8) })
     if (result === "copied") {
       setSharedId(project.job_id)
       window.setTimeout(() => setSharedId(null), 1500)

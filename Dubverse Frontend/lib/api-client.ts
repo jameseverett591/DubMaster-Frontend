@@ -1165,6 +1165,21 @@ class DubVerseAPIClient {
   }
 
   /**
+   * Create (or reuse) the public share link for a finished, paid dub.
+   * Returns null when the backend refuses (unpaid, no export) — callers
+   * must NOT fall back to the authenticated media URL, which carries the
+   * owner's access token.
+   */
+  async createShareLink(jobId: string): Promise<string | null> {
+    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/share`, {
+      method: 'POST',
+    })
+    if (!response.ok) return null
+    const data = await response.json().catch(() => null)
+    return data?.share_url ?? null
+  }
+
+  /**
    * Trigger quality analysis for a dubbed video
    */
   async triggerAnalysis(jobId: string, language: string): Promise<AnalysisResponse> {
