@@ -4935,6 +4935,26 @@ async def put_text_lock(job_id: str, request: Request):
     return {"status": "ok", "locked": _load_text_lock(job_id)}
 
 
+def _audio_fingerprint(path: str) -> str:
+    """Content fingerprint for dubbed audio. A Make Movie rebuild touches
+    dubbed_audio.wav's mtime even when the bytes come out identical — but a
+    resumable vendor generation is only reusable when the audio is THE SAME,
+    so the staleness check has to compare content, not timestamps. Size +
+    first/last-MiB sha256 is cheap on multi-hundred-MB stems."""
+    try:
+        size = os.path.getsize(path)
+        import hashlib
+        h = hashlib.new("sha256")
+        with open(path, "rb") as f:
+            h.update(f.read(1 << 20))
+            if size > (1 << 20):
+                f.seek(max(1 << 20, size - (1 << 20)))
+                h.update(f.read())
+        return f"{size}:{h.hexdigest()[:24]}"
+    except OSError:
+        return ""
+
+
 def _lipsync_synced_ids(segments: list, selected: list, synced_spans: list) -> list:
     """The subset of the user's selected segment ids whose span is covered by
     a range the vendor actually returned. Recording the whole selection as
@@ -4952,12 +4972,18 @@ def _lipsync_synced_ids(segments: list, selected: list, synced_spans: list) -> l
         st = _first_time(seg.get("committed_start_time"), seg.get("start_time"), seg.get("start"))
         en = _first_time(seg.get("committed_end_time"), seg.get("end_time"), seg.get("end"))
         try:
-            mid = (float(st) + float(en)) / 2
+            st, en = float(st), float(en)
         except (TypeError, ValueError):
             continue
-        # Same merge tolerance as _lipsync_selected_ranges: the merged vendor
-        # range can start slightly before/after the segment's own span.
-        if any(rs - 0.75 <= mid <= re_ + 0.75 for rs, re_ in synced_spans):
+        if en <= st:
+            continue
+        # Synced ranges are merged/non-overlapping, so a simple overlap sum
+        # measures coverage. 0.5s slack for the 0.75s merge gap and boundary
+        # fuzz; a midpoint check let a segment straddling a FAILED range read
+        # as synced and satisfy the paid gate.
+        covered = sum(
+            max(0.0, min(en, re_) - max(st, rs)) for rs, re_ in synced_spans)
+        if covered >= (en - st) - 0.5:
             out.append(hit)
     return out
 
@@ -5077,16 +5103,23 @@ async def _run_lipsync_postpass(
     _film_state = None if (ranges or _chunk_ranges) else _load_film_lipsync_state(job_id)
     _resume_id = (_film_state or {}).get("sync_job_id") or ""
     if _resume_id and audio_path:
-        _saved_mtime = (_film_state or {}).get("audio_mtime")
-        try:
-            _cur_mtime = os.path.getmtime(audio_path)
-        except OSError:
-            _cur_mtime = None
-        if _saved_mtime is not None and _cur_mtime is not None and \
-                abs(_saved_mtime - _cur_mtime) > 1.0:
+        _saved_fp = (_film_state or {}).get("audio_fp")
+        _stale = False
+        if _saved_fp:
+            # Content, not mtime — see _audio_fingerprint.
+            _stale = _audio_fingerprint(audio_path) != _saved_fp
+        else:
+            _saved_mtime = (_film_state or {}).get("audio_mtime")
+            try:
+                _cur_mtime = os.path.getmtime(audio_path)
+            except OSError:
+                _cur_mtime = None
+            _stale = _saved_mtime is not None and _cur_mtime is not None and \
+                abs(_saved_mtime - _cur_mtime) > 1.0
+        if _stale:
             logger.info(
-                f"Job {job_id}: saved lip-sync generation predates current "
-                f"dubbed audio — dropping it"
+                f"Job {job_id}: saved lip-sync generation's audio differs from "
+                f"current dubbed mix — dropping it"
             )
             _clear_film_lipsync_state(job_id)
             _film_state, _resume_id = None, ""
@@ -5431,18 +5464,29 @@ def _load_chunk_state(job_id: str, ranges: list, audio_path: str = "") -> Option
     # generated against a PREVIOUS dubbed mix, so after a rebuild they
     # would splice the old audio's lips onto the new film.
     if audio_path:
-        _saved_mtime = st.get("audio_mtime")
-        try:
-            _cur_mtime = os.path.getmtime(audio_path)
-        except OSError:
-            _cur_mtime = None
-        if _saved_mtime is not None and _cur_mtime is not None and \
-                abs(_saved_mtime - _cur_mtime) > 1.0:
-            logger.info(
-                f"[LIPSYNC-CHUNKS] job {job_id}: saved run predates current "
-                f"dubbed audio — starting a fresh run"
-            )
-            return None
+        _saved_fp = st.get("audio_fp")
+        if _saved_fp:
+            # Content, not mtime: a rebuild that re-renders identical bytes
+            # still resumes the paid generation.
+            if _audio_fingerprint(audio_path) != _saved_fp:
+                logger.info(
+                    f"[LIPSYNC-CHUNKS] job {job_id}: saved run's audio differs "
+                    f"from current dubbed mix — starting a fresh run"
+                )
+                return None
+        else:
+            _saved_mtime = st.get("audio_mtime")
+            try:
+                _cur_mtime = os.path.getmtime(audio_path)
+            except OSError:
+                _cur_mtime = None
+            if _saved_mtime is not None and _cur_mtime is not None and \
+                    abs(_saved_mtime - _cur_mtime) > 1.0:
+                logger.info(
+                    f"[LIPSYNC-CHUNKS] job {job_id}: saved run predates current "
+                    f"dubbed audio — starting a fresh run"
+                )
+                return None
     return st
 
 
@@ -5485,6 +5529,7 @@ def _save_film_lipsync_state(job_id: str, sync_job_id: str,
         "charge_key": charge_key,
         "charge_seconds": charge_seconds,
         "audio_mtime": audio_mtime,
+        "audio_fp": _audio_fingerprint(audio_path) if audio_path else "",
         "saved_at": time.time(),
     })
 
@@ -5531,6 +5576,7 @@ async def _run_lipsync_chunks(
         state = {
             "version": 1, "run_id": run_id, "provider": provider,
             "created_at": time.time(), "audio_mtime": _audio_mtime,
+            "audio_fp": _audio_fingerprint(audio_path) if audio_path else "",
             "chunks": [
                 {"i": i, "start": s, "end": e, "status": "pending", "sync_job_id": None,
                  "charge_key": f"{job_id}:lipsync:{run_id}:c{i}", "charge_seconds": 0,
@@ -9382,13 +9428,14 @@ async def download_export(job_id: str, filename: str, request: Request):
     file_path = os.path.join(settings.DUBBED_DIR, job_id, safe)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Export file not found")
-    if safe.startswith("dubbed_") and safe.endswith(".mp4"):
-        job = await _get_or_rehydrate_job(job_id)
-        if job and not await _job_share_unlocked(job_id, _caller(request), job):
-            raise HTTPException(
-                status_code=402,
-                detail="Download unlocks when this job is paid in full.",
-            )
+    # Everything this route serves is a finished paid artifact — exports are
+    # named export_*.{mp4,mov,avi,mkv}, so a filename pattern misses them all.
+    job = await _get_or_rehydrate_job(job_id)
+    if job and not await _job_share_unlocked(job_id, _caller(request), job):
+        raise HTTPException(
+            status_code=402,
+            detail="Download unlocks when this job is paid in full.",
+        )
     return FileResponse(
         file_path,
         media_type="application/octet-stream",
