@@ -23,17 +23,12 @@ import logging
 import os
 import subprocess
 import re
-import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
-
-# How often a running analysis touches its .running sentinel. routes.py treats a
-# sentinel with no heartbeat for _ANALYSIS_SENTINEL_MAX_AGE_S as a dead run.
-ANALYSIS_HEARTBEAT_S = 60
-
 
 def analyze_dub(
     job_id: str,
@@ -73,44 +68,34 @@ def analyze_dub(
     transcript_file = Path("data/transcripts") / f"{job_id}.json"
     output_file = dubbed_dir / f"analysis_{lang_norm}.json"
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
+    error_file = dubbed_dir / f"analysis_{lang_norm}.error"
 
-    # Create sentinel to indicate analysis in progress. Callers normally claim it
-    # atomically first (routes._acquire_analysis_sentinel); touch() is idempotent.
+    # Create sentinel to indicate analysis in progress, and clear any failure
+    # recorded by a previous run — this run supersedes it. The sentinel holds
+    # the owning `pid:token` (PID + process start time) so the API can tell a
+    # crashed run from a live one without trusting timestamps across restarts
+    # or tripping on recycled PIDs.
     try:
-        sentinel.touch()
+        from app.api.routes import _process_token
+        sentinel.write_text(
+            f"{os.getpid()}:{_process_token(os.getpid()) or ''}",
+            encoding="utf-8",
+        )
+        error_file.unlink(missing_ok=True)
     except Exception:
         pass
 
-    # Heartbeat: keep the sentinel's mtime fresh while the run is alive. Staleness
-    # is judged on time since the last heartbeat, never on how long the run has
-    # taken — a feature-length film legitimately runs for a long time.
-    _hb_stop = threading.Event()
-
-    def _heartbeat() -> None:
-        while not _hb_stop.wait(ANALYSIS_HEARTBEAT_S):
-            try:
-                sentinel.touch()
-            except Exception:
-                pass
-
-    _hb_thread = threading.Thread(
-        target=_heartbeat, name=f"analysis-heartbeat-{job_id}", daemon=True
-    )
-    _hb_thread.start()
-
-    def _fail(reason: str):
-        # Persist the failure too — a bare error return leaves GET 404ing, and
-        # the editor used to treat "no report yet" as "re-trigger me", looping
-        # forever on a run that could never succeed.
+    def _fail(reason: str) -> Dict[str, Any]:
+        """Persist a failure reason for the GET endpoint, then return error."""
         try:
-            with open(output_file, "w", encoding="utf-8") as f:
-                json.dump({
-                    "job_id": job_id,
-                    "target_language": lang_norm,
-                    "status": "error",
+            error_file.write_text(
+                json.dumps({
                     "reason": reason,
-                    "generated_at": datetime.utcnow().isoformat() + "Z",
-                }, f, indent=2)
+                    "failed_at": datetime.utcnow().isoformat() + "Z",
+                    "failed_at_ts": time.time(),
+                }),
+                encoding="utf-8",
+            )
         except Exception:
             pass
         return {"status": "error", "reason": reason}
@@ -309,12 +294,10 @@ def analyze_dub(
 
     except Exception as e:
         logger.error(f"[ANALYSIS] Failed for job {job_id}: {e}", exc_info=True)
+        # Persist the failure — the GET endpoint surfaces it as status "failed"
+        # so the QC monitor shows a real error instead of polling forever.
         return _fail(str(e))
     finally:
-        # Stop the heartbeat BEFORE removing the sentinel, or a late touch()
-        # would recreate it and block the next run until it goes stale.
-        _hb_stop.set()
-        _hb_thread.join(timeout=5)
         try:
             sentinel.unlink(missing_ok=True)
         except Exception:

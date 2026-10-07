@@ -1545,6 +1545,10 @@ export function DubVerseEditor({
   } | null>(null)
   const [addSegmentFeedback, setAddSegmentFeedback] = useState<'success' | 'error' | null>(null)
   const [showDubReady, setShowDubReady] = useState(false)
+  const [shareCopied, setShareCopied] = useState<'link' | 'video' | null>(null)
+  // Minted public share URL for the dubbed video — the popover copies THIS,
+  // never activeDubbedVideoUrl (an authenticated URL carrying access_token).
+  const [shareVideoLink, setShareVideoLink] = useState<'pending' | 'unavailable' | string | null>(null)
   // The HTML `download` attribute is IGNORED for cross-origin URLs (UI on
   // :3001, API on :8000), so `<a download href=activeDubbedVideoUrl>` just
   // navigated and PLAYED the film inline instead of saving it. The backend's
@@ -1554,6 +1558,15 @@ export function DubVerseEditor({
     url.includes('/api/download/')
       ? `${url}${url.includes('?') ? '&' : '?'}attachment=1`
       : url
+  // The media URL serves Content-Disposition: inline so it can also back the
+  // <video> player; ?attachment=1 is what actually triggers a browser save.
+  const downloadDubbedVideo = () => {
+    if (!activeDubbedVideoUrl) return
+    const a = document.createElement('a')
+    a.href = withAttachment(activeDubbedVideoUrl)
+    a.download = `${title || 'dubbed_video'}.mp4`
+    a.click()
+  }
   const [askAiOpen, setAskAiOpen] = useState(false)
   const [askAiModel, setAskAiModel] = useState<'haiku' | 'sonnet' | 'opus'>('sonnet')
   const [characterProfileOpen, setCharacterProfileOpen] = useState<{
@@ -8708,6 +8721,165 @@ export function DubVerseEditor({
           <Button variant="ghost" size="sm" className="h-8" onClick={handleGlobalUndo} title={t('Undo last edit')}>
             <RotateCcw className="h-4 w-4" />
           </Button>
+          <Popover onOpenChange={(open) => {
+            setShareCopied(null)
+            // Mint the public share link when the popover opens — the copied
+            // URL must be the paid share-link, never the authenticated media
+            // URL with the owner's access_token baked in.
+            if (open && activeDubbedVideoUrl) {
+              setShareVideoLink('pending')
+              apiClient.createShareLink(jobId)
+                .then(u => setShareVideoLink(u ?? 'unavailable'))
+                .catch(() => setShareVideoLink('unavailable'))
+            }
+          }}>
+            <PopoverTrigger asChild>
+              <Button variant="ghost" size="sm" className="h-8">
+                <Share2 className="h-4 w-4" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-80 bg-slate-900 border-slate-700 p-4 space-y-4">
+              <p className="text-sm font-semibold text-white flex items-center gap-2">
+                <Share2 className="h-4 w-4 text-amber-400" />
+                {t('Share Project')}
+              </p>
+
+              {/* Editor link */}
+              <div className="space-y-1.5">
+                <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Editor link')}</p>
+                <div className="flex gap-2">
+                  <input
+                    readOnly
+                    aria-label={t('Editor link')}
+                    value={typeof window !== 'undefined' ? window.location.href : ''}
+                    className="flex-1 text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 truncate focus:outline-none"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className={cn(
+                      "h-7 px-2 text-xs border-slate-700 shrink-0 transition-colors",
+                      shareCopied === 'link' ? "text-emerald-400 border-emerald-500/40" : "text-slate-300"
+                    )}
+                    onClick={() => {
+                      navigator.clipboard.writeText(window.location.href)
+                      setShareCopied('link')
+                      setTimeout(() => setShareCopied(null), 2000)
+                    }}
+                  >
+                    {shareCopied === 'link' ? <Check className="h-3 w-3" /> : <Link2 className="h-3 w-3" />}
+                  </Button>
+                </div>
+              </div>
+
+              {/* Dubbed video */}
+              {activeDubbedVideoUrl ? (
+                <div className="space-y-1.5">
+                  <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Dubbed video')}</p>
+                  <div className="flex gap-2">
+                    <input
+                      readOnly
+                      aria-label={t('Dubbed video link')}
+                      value={
+                        shareVideoLink === 'pending' || shareVideoLink === null
+                          ? t('Creating share link…')
+                          : shareVideoLink === 'unavailable'
+                            ? t('Share link unavailable — payment required')
+                            : shareVideoLink
+                      }
+                      className="flex-1 text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 truncate focus:outline-none"
+                    />
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={!shareVideoLink || shareVideoLink === 'pending' || shareVideoLink === 'unavailable'}
+                      className={cn(
+                        "h-7 px-2 text-xs border-slate-700 shrink-0 transition-colors",
+                        shareCopied === 'video' ? "text-emerald-400 border-emerald-500/40" : "text-slate-300"
+                      )}
+                      onClick={() => {
+                        if (typeof shareVideoLink !== 'string') return
+                        navigator.clipboard.writeText(shareVideoLink)
+                        setShareCopied('video')
+                        setTimeout(() => setShareCopied(null), 2000)
+                      }}
+                    >
+                      {shareCopied === 'video' ? <Check className="h-3 w-3" /> : <Link2 className="h-3 w-3" />}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2 text-xs border-slate-700 text-slate-300 shrink-0"
+                      asChild
+                    >
+                      <a href={`${activeDubbedVideoUrl}${activeDubbedVideoUrl.includes('?') ? '&' : '?'}attachment=1`} download title={t('Download dubbed video')} target="_blank" rel="noreferrer">
+                        <Download className="h-3 w-3" />
+                      </a>
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-600 italic">{t('No dubbed video yet — rebuild to generate one.')}</p>
+              )}
+
+              {/* Social share */}
+              <div className="space-y-1.5 pt-1 border-t border-slate-800">
+                <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Share to')}</p>
+                <div className="flex gap-2">
+                  {/* Facebook — download video then open Facebook. Its sharer
+                      URL only carries a link, so a file has to go in by hand. */}
+                  <button
+                    type="button"
+                    title={activeDubbedVideoUrl ? t('Download for Facebook') : t('No dubbed video yet')}
+                    disabled={!activeDubbedVideoUrl}
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#1877F2] hover:bg-[#1565C0] text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[#1877F2]"
+                    onClick={() => {
+                      downloadDubbedVideo()
+                      window.open('https://www.facebook.com/', '_blank')
+                    }}
+                  >
+                    <Facebook className="h-4 w-4" />
+                    <span className="text-[9px] font-medium">{t('Facebook')}</span>
+                  </button>
+                  {/* Twitter / X */}
+                  <button
+                    type="button"
+                    title="Share to X (Twitter)"
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-black hover:bg-neutral-800 text-white transition-colors"
+                    onClick={() => window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}&text=${encodeURIComponent(`Check out my dubbed video — ${title}`)}`, '_blank', 'width=600,height=400')}
+                  >
+                    <Twitter className="h-4 w-4" />
+                    <span className="text-[9px] font-medium">{t('X / Twitter')}</span>
+                  </button>
+                  {/* YouTube — download video then open YouTube Studio */}
+                  <button
+                    type="button"
+                    title={activeDubbedVideoUrl ? t('Download for YouTube') : t('No dubbed video yet')}
+                    disabled={!activeDubbedVideoUrl}
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#FF0000] hover:bg-[#CC0000] text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[#FF0000]"
+                    onClick={() => {
+                      downloadDubbedVideo()
+                      window.open('https://studio.youtube.com/channel/upload', '_blank')
+                    }}
+                  >
+                    <Youtube className="h-4 w-4" />
+                    <span className="text-[9px] font-medium">{t('YouTube')}</span>
+                  </button>
+                  {/* Instagram — download video (no web upload API) */}
+                  <button
+                    type="button"
+                    title={activeDubbedVideoUrl ? t('Download for Instagram') : t('No dubbed video yet')}
+                    disabled={!activeDubbedVideoUrl}
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-gradient-to-br from-[#833AB4] via-[#E1306C] to-[#F77737] hover:opacity-90 text-white transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                    onClick={downloadDubbedVideo}
+                  >
+                    <Instagram className="h-4 w-4" />
+                    <span className="text-[9px] font-medium">{t('Instagram')}</span>
+                  </button>
+                </div>
+              </div>
+            </PopoverContent>
+          </Popover>
           <Button
             size="sm"
             variant="outline"
