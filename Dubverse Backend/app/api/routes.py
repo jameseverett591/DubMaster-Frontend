@@ -6909,17 +6909,34 @@ def _clear_stale_analysis_sentinel(sentinel: Path) -> bool:
 
 
 def _qc_gpu_available() -> bool:
-    """QC runs heavy models; on a CPU-only backend it piles up and starves the API."""
+    """QC needs GPU capacity — either local CUDA or the RunPod worker.
+
+    The backend container has no CUDA device; RunPod is the GPU provider for
+    QC re-transcription in production. QC never runs on the backend CPU: it
+    piles up and starves the API.
+    """
     try:
         import torch
-        return bool(torch.cuda.is_available())
+        if torch.cuda.is_available():
+            return True
     except Exception:
-        return False
+        pass
+    # The RunPod path hands the dubbed audio to the worker through R2 — without
+    # the bucket the retranscription can't run at all, so don't admit the job.
+    runpod_ok = bool(os.getenv("RUNPOD_API_KEY") and os.getenv("RUNPOD_ENDPOINT_ID"))
+    r2_ok = all(
+        os.getenv(k)
+        for k in ("R2_BUCKET_NAME", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ACCOUNT_ID")
+    )
+    return runpod_ok and r2_ok
 
 
 _QC_NO_GPU_MESSAGE = (
-    "QC requires a GPU. This backend has none, so quality analysis is disabled "
-    "until it runs on the GPU worker."
+    "QC needs GPU capacity: this backend has no CUDA device and the RunPod "
+    "worker path is not fully configured (RUNPOD_API_KEY / RUNPOD_ENDPOINT_ID "
+    "plus R2_BUCKET_NAME / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / "
+    "R2_ACCOUNT_ID for the audio handoff). Set the RunPod worker for this "
+    "deployment, or run QC on the GPU worker."
 )
 
 

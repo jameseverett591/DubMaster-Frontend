@@ -1,0 +1,160 @@
+"""QC on the RunPod GPU (PR 7).
+
+QC's re-transcription must run on the RunPod GPU worker (about 31 s on a feature
+film), never on the backend CPU (about 41 minutes, and it froze the API). These
+tests pin that down: the availability gate accepts RunPod only when fully
+configured, the re-transcription dispatches to RunPod and never starts the local
+Whisper path, results map back into the QC schema, and the R2 hand-off copy is
+cleaned up whether the worker succeeds or fails.
+
+Run from the backend root (inside the backend container):
+
+    python -m unittest tests.test_qc_runpod -v
+"""
+
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from unittest import mock
+
+RUNPOD_ENV = {"RUNPOD_API_KEY": "k", "RUNPOD_ENDPOINT_ID": "e"}
+R2_ENV = {"R2_BUCKET_NAME": "b", "R2_ACCESS_KEY_ID": "i",
+          "R2_SECRET_ACCESS_KEY": "s", "R2_ACCOUNT_ID": "a"}
+ALL_KEYS = list(RUNPOD_ENV) + list(R2_ENV)
+
+
+def _env(**extra):
+    """A clean environment holding only the given QC-related variables."""
+    base = {k: v for k, v in os.environ.items() if k not in ALL_KEYS}
+    base.update(extra)
+    return mock.patch.dict(os.environ, base, clear=True)
+
+
+class GateTests(unittest.TestCase):
+
+    def setUp(self):
+        from app.api import routes
+        self.routes = routes
+        # No local GPU: torch missing is the same as torch with no CUDA device.
+        p = mock.patch.dict(sys.modules, {"torch": None})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_runpod_and_r2_configured_is_available(self):
+        with _env(**RUNPOD_ENV, **R2_ENV):
+            self.assertTrue(self.routes._qc_gpu_available())
+
+    def test_nothing_configured_is_refused(self):
+        with _env():
+            self.assertFalse(self.routes._qc_gpu_available())
+
+    def test_runpod_without_r2_is_refused(self):
+        with _env(**RUNPOD_ENV):
+            self.assertFalse(self.routes._qc_gpu_available())
+
+    def test_r2_without_runpod_is_refused(self):
+        with _env(**R2_ENV):
+            self.assertFalse(self.routes._qc_gpu_available())
+
+    def test_local_cuda_is_available(self):
+        torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: True))
+        with mock.patch.dict(sys.modules, {"torch": torch}), _env():
+            self.assertTrue(self.routes._qc_gpu_available())
+
+
+class RetranscribeTests(unittest.TestCase):
+
+    def setUp(self):
+        from app.pipeline import analyze_dub
+        self.mod = analyze_dub
+        self.tmp = tempfile.mkdtemp(prefix="qcrunpod_")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        job_dir = Path(self.tmp) / "job_qcrp1"
+        job_dir.mkdir()
+        self.video = job_dir / "dubbed_en.mp4"
+        self.video.write_bytes(b"x")
+        self.opus = job_dir / "dubbed_en.qc.opus"
+
+    def test_dispatches_to_runpod_and_never_runs_local_whisper(self):
+        with _env(**RUNPOD_ENV, **R2_ENV), \
+             mock.patch.object(self.mod, "_retranscribe_via_runpod",
+                               return_value={"status": "ok", "engine": "runpod"}) as rp, \
+             mock.patch.object(self.mod.subprocess, "run") as sp:
+            out = self.mod._retranscribe_dubbed_audio(self.video, "en")
+        self.assertEqual(out["engine"], "runpod")
+        rp.assert_called_once()
+        sp.assert_not_called()  # the local path would start ffmpeg + CPU Whisper
+
+    def _run_via_runpod(self, poll):
+        """Run the RunPod path with every external service faked."""
+        s3 = mock.MagicMock()
+        s3.generate_presigned_url.return_value = "https://r2.example/get"
+        boto3 = ModuleType("boto3")
+        boto3.client = mock.MagicMock(return_value=s3)
+        botocore = ModuleType("botocore")
+        botocore_config = ModuleType("botocore.config")
+        botocore_config.Config = mock.MagicMock()
+        botocore.config = botocore_config
+        rp_service = mock.MagicMock()
+        rp_service.submit_job = mock.AsyncMock(return_value={"id": "rp-1"})
+        rp_service.poll_until_complete = poll
+
+        def fake_ffmpeg(cmd, **kw):
+            self.opus.write_bytes(b"o" * 5000)
+            return SimpleNamespace(returncode=0)
+
+        rp_mod = ModuleType("app.services.runpod_service")
+        rp_mod.runpod_service = rp_service
+        with _env(**RUNPOD_ENV, **R2_ENV), \
+             mock.patch.dict(sys.modules, {"boto3": boto3, "botocore": botocore,
+                                           "botocore.config": botocore_config,
+                                           "app.services.runpod_service": rp_mod}), \
+             mock.patch.object(self.mod.subprocess, "run", side_effect=fake_ffmpeg):
+            out = self.mod._retranscribe_via_runpod(self.video, "en")
+        return out, s3, rp_service
+
+    def test_runpod_result_maps_into_qc_schema(self):
+        poll = mock.AsyncMock(return_value={"segments": [
+            {"start": 0.0, "end": 1.5, "text": " hello ", "confidence": 0.9},
+            {"start": 2.0, "end": 3.0, "text": "   "},
+        ]})
+        out, s3, rp = self._run_via_runpod(poll)
+        self.assertEqual(out["status"], "ok")
+        self.assertEqual(out["engine"], "runpod")
+        self.assertEqual(out["segment_count"], 1)
+        self.assertEqual(out["segments"][0]["text"], "hello")
+        # transcribe-only: the worker must not separate stems or diarize for QC
+        self.assertEqual(rp.submit_job.call_args.kwargs["steps"], ["transcribe"])
+        s3.delete_object.assert_called_once()
+        self.assertFalse(self.opus.exists())
+
+    def test_r2_copy_cleaned_up_when_worker_fails(self):
+        poll = mock.AsyncMock(side_effect=RuntimeError("worker died"))
+        out, s3, _ = self._run_via_runpod(poll)
+        self.assertEqual(out["status"], "error")
+        self.assertIn("worker died", out["reason"])
+        s3.delete_object.assert_called_once()
+        self.assertFalse(self.opus.exists())
+
+    def test_worker_reported_error_is_an_error(self):
+        poll = mock.AsyncMock(return_value={"error": "boom"})
+        out, _, _ = self._run_via_runpod(poll)
+        self.assertEqual(out["status"], "error")
+        self.assertIn("boom", out["reason"])
+
+    def test_default_timeout_stays_under_stale_sentinel_age(self):
+        # A run still waiting on RunPod must not look dead to the stale-sentinel
+        # check (routes._ANALYSIS_SENTINEL_MAX_AGE_S) and get a duplicate started.
+        from app.api import routes
+        poll = mock.AsyncMock(return_value={"segments": []})
+        _, _, rp = self._run_via_runpod(poll)
+        timeout = rp.poll_until_complete.call_args.kwargs["timeout"]
+        self.assertLess(timeout, routes._ANALYSIS_SENTINEL_MAX_AGE_S)
+
+
+if __name__ == "__main__":
+    unittest.main()

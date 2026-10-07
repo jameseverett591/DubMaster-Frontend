@@ -79,7 +79,12 @@ class QcCpuGuardTests(unittest.TestCase):
         self._auto(True).assert_called_once_with(JOB, "en", "v.mp4")
 
     def test_gpu_probe_false_when_torch_missing(self):
-        with mock.patch.dict("sys.modules", {"torch": None}):
+        # No CUDA and no RunPod/R2 configuration anywhere in the environment.
+        keys = ("RUNPOD_API_KEY", "RUNPOD_ENDPOINT_ID", "R2_BUCKET_NAME",
+                "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ACCOUNT_ID")
+        env = {k: v for k, v in os.environ.items() if k not in keys}
+        with mock.patch.dict("sys.modules", {"torch": None}), \
+             mock.patch.dict(os.environ, env, clear=True):
             self.assertFalse(self.routes._qc_gpu_available())
 
 
