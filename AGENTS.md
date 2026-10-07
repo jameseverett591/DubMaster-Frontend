@@ -61,3 +61,33 @@
 
 - Before `git add` on any file: `git diff <file>` and confirm the diff matches
   the approved plan (see CLAUDE.md pre-staging rule).
+
+## Greptile round-3 batch (commit f0841a3)
+
+- **Payment gates** — the paywall covers every finished-film path, not just
+  `?attachment=1`: `/download` inline, `/dub/export/download`, and
+  `dubbed_*.mp4` via both the legacy and `/audio/` media routes → HTTP 402
+  unpaid.
+- **Vendor tokens** — `request.state.vendor_token` marks token-auth
+  requests; `/video`, `lip_in_*`, and `.mp3/.wav/.m4a` audio inputs are all
+  they can reach. Films, stems, waveforms, scrub-proxy → 403.
+- **Lip-sync billing** — scoped sync debits per range inside the runner
+  (post-cut, pre-vendor), refunding when the vendor never ran it.
+  `lipsync_synced_selection` records only the ids whose footage actually
+  synced — a partially-failed run no longer satisfies the export/billing
+  gate.
+- **Stripe dedup** — `recordPayment` uses ON CONFLICT DO NOTHING upsert; a
+  lost race is a no-op instead of a 500 retry storm, with a 42P10 fallback
+  + warning if the migration hasn't run.
+- **Captions** — `source_language` is REQUIRED when supplying captions
+  (both `/upload` and `/youtube/import` → 422 otherwise). `/youtube/import`
+  accepts the reviewed transcript and skips ASR; the frontend sends
+  `extractedLang` + the segments the user checked.
+- **Expired URLs** — `refreshMediaUrlAsync` re-mints the token on click;
+  download + Web Share file-fetch use it.
+- **Queued regen** — `handleGenerateSpeech` returns a promise that resolves
+  with the queued run's real outcome; waiters no longer mis-flag queued
+  segments.
+- **Cookie rotation** — `_YdlLogger` captures yt-dlp warnings
+  (`no_warnings` only silences stderr), so rotation surfaces as "cookies
+  need refreshing" instead of generic sign-in text.
