@@ -457,6 +457,7 @@ interface DubVerseEditorProps {
   qcFindings?: QCFinding[]
   qcAnalysis?: any
   qcLoading?: boolean
+  qcError?: string | null
   qcUpdatedAt?: string | null
   canReanalyze?: boolean
   onReanalyze?: () => void
@@ -1023,6 +1024,7 @@ export function DubVerseEditor({
   qcFindings = [],
   qcAnalysis,
   qcLoading = false,
+  qcError = null,
   qcUpdatedAt = null,
   canReanalyze = false,
   onReanalyze,
@@ -12628,6 +12630,11 @@ export function DubVerseEditor({
                     <div className="space-y-1.5"><div className="h-2.5 w-[80%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[65%] rounded-full bg-slate-800/60 animate-pulse" /></div>
                     <div className="space-y-1.5"><div className="h-2.5 w-[50%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[35%] rounded-full bg-slate-800/60 animate-pulse" /></div>
                   </div>
+                )}
+                {qcError && !qcLoading && (
+                  <p className="px-3 py-2 text-[11px] text-amber-300 border-b border-neutral-800">
+                    {qcError}
+                  </p>
                 )}
                 {qcFixNote && (
                   <p className="px-3 py-1.5 text-[10px] text-amber-300/90 border-b border-neutral-800">
