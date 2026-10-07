@@ -8804,7 +8804,9 @@ export function DubVerseEditor({
                         shareCopied === 'video' ? "text-emerald-400 border-emerald-500/40" : "text-slate-300"
                       )}
                       onClick={() => {
-                        if (typeof shareVideoLink !== 'string') return
+                        // 'pending'/'unavailable' are strings too — only a
+                        // real URL may reach the clipboard.
+                        if (!shareVideoLink?.startsWith('http')) return
                         navigator.clipboard.writeText(shareVideoLink)
                         setShareCopied('video')
                         setTimeout(() => setShareCopied(null), 2000)
@@ -8852,10 +8854,15 @@ export function DubVerseEditor({
                       recipient but the owner hits a sign-in wall on. */}
                   <button
                     type="button"
-                    title={typeof shareVideoLink === 'string' ? 'Share to X (Twitter)' : 'No public share link yet'}
-                    disabled={typeof shareVideoLink !== 'string'}
+                    title={shareVideoLink?.startsWith('http') ? 'Share to X (Twitter)' : 'No public share link yet'}
+                    disabled={!shareVideoLink?.startsWith('http')}
                     className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-black hover:bg-neutral-800 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                    onClick={() => window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(shareVideoLink as string)}&text=${encodeURIComponent(`Check out my dubbed video — ${title}`)}`, '_blank', 'width=600,height=400')}
+                    onClick={() => {
+                      // 'pending'/'unavailable' are strings — gate on a real
+                      // URL or the tweet carries a placeholder as its link.
+                      if (!shareVideoLink?.startsWith('http')) return
+                      window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(shareVideoLink)}&text=${encodeURIComponent(`Check out my dubbed video — ${title}`)}`, '_blank', 'width=600,height=400')
+                    }}
                   >
                     <Twitter className="h-4 w-4" />
                     <span className="text-[9px] font-medium">{t('X / Twitter')}</span>

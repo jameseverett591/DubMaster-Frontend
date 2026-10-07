@@ -5149,7 +5149,10 @@ async def _run_lipsync_postpass(
     elif ranges:
         # Scoped sync: one vendor job per merged range on cut subclips, then
         # splice each result back into the rendered film at the same offset.
-        lipres = await _run_lipsync_ranges(
+        # Runs through the chunk machinery — its per-chunk state file keeps
+        # the sync_job_id + charge key of every submitted generation, so a
+        # poll-timeout retry RESUMES the paid job instead of double-charging.
+        lipres = await _run_lipsync_chunks(
             job_id, dubbed_output_path, video_path, audio_path,
             ranges, _media_qs, _lip_provider, user_id,
         )
@@ -5666,118 +5669,6 @@ async def _run_lipsync_chunks(
         logger.warning(f"Job {job_id}: {len(ranges) - len(done)}/{len(ranges)} lip-sync chunk(s) "
                        f"not synced — those spans keep the dubbed footage")
     return {"status": "completed", "output_path": dubbed_output_path, **summary}
-
-
-async def _run_lipsync_ranges(
-    job_id: str,
-    dubbed_output_path: str,
-    video_path: str,
-    audio_path: str,
-    ranges: list,
-    media_qs: str,
-    provider: str,
-    user_id: str = "",
-) -> dict:
-    """Scoped lip-sync: cut each selected span, send it to the vendor as its
-    own generation, splice the results back into the rendered film.
-
-    vendor_attempted follows the whole-film rule: False only if EVERY range
-    was rejected before processing — the one case nothing was consumed."""
-    job_dir = os.path.join(settings.DUBBED_DIR, job_id)
-    os.makedirs(job_dir, exist_ok=True)
-    base = settings.PUBLIC_BASE_URL.rstrip("/")
-    qs = media_qs
-
-    good_idx = []
-    attempted = False
-    failed = []
-    charge_seconds = 0
-    run_nonce = uuid.uuid4().hex[:8]
-    for i, (s, e) in enumerate(ranges):
-        v_in = os.path.join(job_dir, f"lip_in_{i}.mp4")
-        a_in = os.path.join(job_dir, f"lip_in_{i}.wav")
-        out_i = os.path.join(job_dir, f"lip_out_{i}.mp4")
-        ok = await asyncio.to_thread(_cut_media_span, video_path, s, e, v_in, False)
-        ok = ok and await asyncio.to_thread(_cut_media_span, audio_path, s, e, a_in, True)
-        if not ok:
-            failed.append((s, e))
-            continue
-        # Per-range debit AFTER the cut succeeds — a range that fails before
-        # reaching the vendor costs nothing (the old up-front sum billed it).
-        range_key = None
-        range_seconds = 0
-        if user_id:
-            range_seconds = quota_service.seconds_for_lipsync(
-                float(e - s), _LIPSYNC_COST_PER_SECOND.get(provider, 0.0))
-            if range_seconds > 0:
-                range_key = f"{job_id}:lipsync:{run_nonce}:r{i}"
-                try:
-                    await asyncio.to_thread(
-                        quota_service.deduct_quota, user_id, range_seconds,
-                        range_key, "lipsync")
-                    charge_seconds += range_seconds
-                except quota_service.QuotaExceeded:
-                    logger.info(f"Job {job_id}: lip-sync range {i} skipped — insufficient credit")
-                    failed.append((s, e))
-                    continue
-                except quota_service.QuotaUnavailable:
-                    logger.error(f"Job {job_id}: lip-sync range {i} skipped — quota ledger unavailable")
-                    failed.append((s, e))
-                    continue
-        v_url = f"{base}/api/media/{job_id}/lip_in_{i}.mp4{qs}"
-        a_url = f"{base}/api/media/{job_id}/lip_in_{i}.wav{qs}"
-        res = await lipsync_service.lipsync_video(
-            job_id=job_id, video_path="", audio_path="",
-            output_path=out_i, media_qs=qs,
-            video_url=v_url, audio_url=a_url,
-            max_poll_seconds=int(float(
-                os.environ.get("SYNCLABS_POLL_MAX_SECONDS", "3600") or 3600)),
-        )
-        attempted = attempted or bool(res.get("vendor_attempted"))
-        if res.get("output_path") and os.path.exists(out_i):
-            good_idx.append(i)
-        else:
-            failed.append((s, e))
-            if range_key and not res.get("vendor_attempted"):
-                # The vendor provably never ran this range — reverse its debit.
-                rf = await asyncio.to_thread(quota_service.refund_quota, user_id, range_key)
-                if not rf.get("error"):
-                    charge_seconds -= range_seconds
-
-    if not good_idx:
-        return {"status": "failed", "output_path": None, "vendor_attempted": attempted,
-                "charge_seconds": charge_seconds}
-
-    # Splice only the ranges that actually produced output; failed ones keep
-    # their dubbed span, which is honest — the film stays watchable.
-    good = [ranges[i] for i in good_idx]
-    synced = [os.path.join(job_dir, f"lip_out_{i}.mp4") for i in good_idx]
-    duration = _probe_video_duration(dubbed_output_path) or 0
-    if not duration:
-        logger.error(f"[LIPSYNC-RANGE] job {job_id}: cannot probe rendered film")
-        return {"status": "failed", "output_path": None, "vendor_attempted": attempted,
-                "charge_seconds": charge_seconds}
-    spliced = await asyncio.to_thread(
-        _splice_lipsync_ranges, dubbed_output_path, synced, good, duration
-    )
-    if not spliced:
-        return {"status": "failed", "output_path": None, "vendor_attempted": attempted,
-                "charge_seconds": charge_seconds}
-
-    # Record only the ids whose footage actually synced — failed ranges keep
-    # dubbed spans and stay unpaid-looking to the export/share gate.
-    try:
-        with open(os.path.join(job_dir, "segments.json"), "r", encoding="utf-8") as _jf:
-            _segs = (_json.load(_jf) or {}).get("segments", [])
-    except Exception:
-        _segs = []
-    _persist_job_metadata_field(
-        job_id, "lipsync_synced_selection",
-        _lipsync_synced_ids(_segs, _load_lipsync_selection(job_id), good))
-    if failed:
-        logger.warning(f"Job {job_id}: {len(failed)}/{len(ranges)} lip-sync range(s) failed: {failed}")
-    return {"status": "completed", "output_path": dubbed_output_path,
-            "vendor_attempted": attempted, "charge_seconds": charge_seconds}
 
 
 # One render per job at a time. Two racing /dub clicks share the first
