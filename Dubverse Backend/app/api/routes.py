@@ -4955,6 +4955,55 @@ def _audio_fingerprint(path: str) -> str:
         return ""
 
 
+def _audio_fingerprint_legacy(path: str) -> str:
+    """The pre-upgrade format (size + first/last-MiB hash). Exists ONLY to
+    compare against state saved before fp_version 2 — a middle-edit can fool
+    it, so new state always stores the full-file fingerprint."""
+    try:
+        size = os.path.getsize(path)
+        import hashlib
+        h = hashlib.new("sha256")
+        with open(path, "rb") as f:
+            h.update(f.read(1 << 20))
+            if size > (1 << 20):
+                f.seek(max(1 << 20, size - (1 << 20)))
+                h.update(f.read())
+        return f"{size}:{h.hexdigest()[:24]}"
+    except OSError:
+        return ""
+
+
+def _audio_fp_current_matches(saved: dict, audio_path: str) -> bool:
+    """Does a saved lip-sync state describe the CURRENT dubbed audio?
+
+    Three generations of state must all work: fp_version 2 compares the
+    full-file fingerprint; a state saved by the previous build compares its
+    legacy head/tail fingerprint (the only time the weaker format may still
+    match — it was authoritative when that paid generation was submitted);
+    pre-fingerprint state falls back to the mtime heuristic. SYNC — callers
+    run it via asyncio.to_thread so the full-file read never stalls the
+    event loop."""
+    fp = _audio_fingerprint(audio_path)
+    saved_fp = saved.get("audio_fp") or ""
+    if saved.get("fp_version", 0) >= 2:
+        return saved_fp == fp
+    if saved_fp:
+        # Saved by the head/tail build: full-hash can't equal it, so a
+        # mismatch there only says the file isn't the OLD format's match —
+        # compare the legacy format too.
+        if saved_fp == fp:
+            return True
+        return saved_fp == _audio_fingerprint_legacy(audio_path)
+    _saved_mtime = saved.get("audio_mtime")
+    if _saved_mtime is None:
+        return True
+    try:
+        _cur_mtime = os.path.getmtime(audio_path)
+    except OSError:
+        _cur_mtime = None
+    return _cur_mtime is None or abs(_saved_mtime - _cur_mtime) <= 1.0
+
+
 def _lipsync_synced_ids(segments: list, selected: list, synced_spans: list) -> list:
     """The subset of the user's selected segment ids whose span is covered by
     a range the vendor actually returned. Recording the whole selection as
@@ -5103,20 +5152,8 @@ async def _run_lipsync_postpass(
     _film_state = None if (ranges or _chunk_ranges) else _load_film_lipsync_state(job_id)
     _resume_id = (_film_state or {}).get("sync_job_id") or ""
     if _resume_id and audio_path:
-        _saved_fp = (_film_state or {}).get("audio_fp")
-        _stale = False
-        if _saved_fp:
-            # Content, not mtime — see _audio_fingerprint.
-            _stale = _audio_fingerprint(audio_path) != _saved_fp
-        else:
-            _saved_mtime = (_film_state or {}).get("audio_mtime")
-            try:
-                _cur_mtime = os.path.getmtime(audio_path)
-            except OSError:
-                _cur_mtime = None
-            _stale = _saved_mtime is not None and _cur_mtime is not None and \
-                abs(_saved_mtime - _cur_mtime) > 1.0
-        if _stale:
+        if not await asyncio.to_thread(
+                _audio_fp_current_matches, _film_state, audio_path):
             logger.info(
                 f"Job {job_id}: saved lip-sync generation's audio differs from "
                 f"current dubbed mix — dropping it"
@@ -5211,9 +5248,8 @@ async def _run_lipsync_postpass(
             media_qs=_media_qs,
             sync_job_id=_resume_id,
             on_submitted=(
-                None if _resume_id else
-                lambda _sid: _save_film_lipsync_state(
-                    job_id, _sid, charge_key, charge_seconds, audio_path)
+                None if _resume_id else _make_film_state_saver(
+                    job_id, charge_key, charge_seconds, audio_path)
             ),
             max_poll_seconds=_film_poll,
         )
@@ -5442,7 +5478,7 @@ def _chunk_state_path(job_id: str) -> str:
     return os.path.join(settings.DUBBED_DIR, job_id, LIPSYNC_CHUNKS_NAME)
 
 
-def _load_chunk_state(job_id: str, ranges: list, audio_path: str = "") -> Optional[dict]:
+def _load_chunk_state(job_id: str, ranges: list) -> Optional[dict]:
     """The saved run, but only if it describes THESE ranges, was built from
     the CURRENT dubbed audio, and still has unfinished chunks — i.e. a run
     interrupted by a restart. A fully finished run is history; a new request
@@ -5460,33 +5496,9 @@ def _load_chunk_state(job_id: str, ranges: list, audio_path: str = "") -> Option
             return None
     if all(c.get("status") in _CHUNK_TERMINAL for c in chunks):
         return None
-    # Same staleness guard as the whole-film path: the saved clips were
-    # generated against a PREVIOUS dubbed mix, so after a rebuild they
-    # would splice the old audio's lips onto the new film.
-    if audio_path:
-        _saved_fp = st.get("audio_fp")
-        if _saved_fp:
-            # Content, not mtime: a rebuild that re-renders identical bytes
-            # still resumes the paid generation.
-            if _audio_fingerprint(audio_path) != _saved_fp:
-                logger.info(
-                    f"[LIPSYNC-CHUNKS] job {job_id}: saved run's audio differs "
-                    f"from current dubbed mix — starting a fresh run"
-                )
-                return None
-        else:
-            _saved_mtime = st.get("audio_mtime")
-            try:
-                _cur_mtime = os.path.getmtime(audio_path)
-            except OSError:
-                _cur_mtime = None
-            if _saved_mtime is not None and _cur_mtime is not None and \
-                    abs(_saved_mtime - _cur_mtime) > 1.0:
-                logger.info(
-                    f"[LIPSYNC-CHUNKS] job {job_id}: saved run predates current "
-                    f"dubbed audio — starting a fresh run"
-                )
-                return None
+    # Audio staleness is checked by the async caller via
+    # _audio_fp_current_matches (offloaded — the full-file read must not
+    # run on the event loop).
     return st
 
 
@@ -5504,6 +5516,18 @@ def _film_lipsync_state_path(job_id: str) -> str:
     return os.path.join(settings.DUBBED_DIR, job_id, LIPSYNC_FILM_NAME)
 
 
+def _make_film_state_saver(job_id: str, charge_key, charge_seconds: int,
+                           audio_path: str):
+    """Async on_submitted callback — the fingerprint hash is offloaded so a
+    full-file read never runs on the event loop mid-submission."""
+    async def _save(_sid: str):
+        _fp = (await asyncio.to_thread(_audio_fingerprint, audio_path)
+               if audio_path else "")
+        _save_film_lipsync_state(
+            job_id, _sid, charge_key, charge_seconds, audio_path, _fp)
+    return _save
+
+
 def _load_film_lipsync_state(job_id: str) -> Optional[dict]:
     """The saved generation, only if a prior run left one unfinished."""
     try:
@@ -5518,7 +5542,7 @@ def _load_film_lipsync_state(job_id: str) -> Optional[dict]:
 
 def _save_film_lipsync_state(job_id: str, sync_job_id: str,
                              charge_key: Optional[str], charge_seconds: int,
-                             audio_path: str = "") -> None:
+                             audio_path: str = "", audio_fp: str = "") -> None:
     os.makedirs(os.path.dirname(_film_lipsync_state_path(job_id)), exist_ok=True)
     try:
         audio_mtime = os.path.getmtime(audio_path) if audio_path else None
@@ -5529,7 +5553,8 @@ def _save_film_lipsync_state(job_id: str, sync_job_id: str,
         "charge_key": charge_key,
         "charge_seconds": charge_seconds,
         "audio_mtime": audio_mtime,
-        "audio_fp": _audio_fingerprint(audio_path) if audio_path else "",
+        "fp_version": 2,
+        "audio_fp": audio_fp,
         "saved_at": time.time(),
     })
 
@@ -5565,7 +5590,14 @@ async def _run_lipsync_chunks(
     poll_max = int(float(os.environ.get("SYNCLABS_POLL_MAX_SECONDS", "3600") or 3600))
     concurrency = max(1, int(os.environ.get("SYNCLABS_MAX_CONCURRENT", "3") or 3))
 
-    state = _load_chunk_state(job_id, ranges, audio_path)
+    state = _load_chunk_state(job_id, ranges)
+    if state and audio_path and not await asyncio.to_thread(
+            _audio_fp_current_matches, state, audio_path):
+        logger.info(
+            f"[LIPSYNC-CHUNKS] job {job_id}: saved run's audio differs "
+            f"from current dubbed mix — starting a fresh run"
+        )
+        state = None
     resumed = state is not None
     if not state:
         run_id = uuid.uuid4().hex[:8]
@@ -5576,7 +5608,9 @@ async def _run_lipsync_chunks(
         state = {
             "version": 1, "run_id": run_id, "provider": provider,
             "created_at": time.time(), "audio_mtime": _audio_mtime,
-            "audio_fp": _audio_fingerprint(audio_path) if audio_path else "",
+            "fp_version": 2,
+            "audio_fp": (await asyncio.to_thread(_audio_fingerprint, audio_path)
+                         if audio_path else ""),
             "chunks": [
                 {"i": i, "start": s, "end": e, "status": "pending", "sync_job_id": None,
                  "charge_key": f"{job_id}:lipsync:{run_id}:c{i}", "charge_seconds": 0,
