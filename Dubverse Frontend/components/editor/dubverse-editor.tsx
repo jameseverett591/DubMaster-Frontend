@@ -12631,7 +12631,7 @@ export function DubVerseEditor({
                     <div className="space-y-1.5"><div className="h-2.5 w-[50%] rounded-full bg-slate-800 animate-pulse" /><div className="h-1.5 w-[35%] rounded-full bg-slate-800/60 animate-pulse" /></div>
                   </div>
                 )}
-                {qcError && !qcAnalysis && !qcLoading && (
+                {qcError && !qcLoading && (
                   <p className="px-3 py-2 text-[11px] text-amber-300 border-b border-neutral-800">
                     {qcError}
                   </p>

@@ -49,6 +49,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   // most once per editor session — every extra POST is another chance to start
   // a duplicate multi-minute analysis.
   const qcTriggeredForRef = useRef<string | null>(null)
+  const qcTriggeredAtRef = useRef<number>(0)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [qcUpdatedAt, setQcUpdatedAt] = useState<string | null>(null)
   const [reanalyzeNonce, setReanalyzeNonce] = useState(0)
@@ -318,6 +319,8 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     // pending forever and each tick stacked another request behind the last.
     const MAX_CONSECUTIVE_FAILURES = 12
     const REQUEST_TIMEOUT_MS = 15000
+    // How long after a trigger a 404 is read as "still queued" not "finished".
+    const TRIGGER_GRACE_MS = 120000
     let failures = 0
     let inFlight = false
 
@@ -330,9 +333,12 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
 
     /** Terminal: stop polling and tell the user why. */
     function stopQc(message: string) {
+      // A superseded effect must not tear down the newer effect's poller.
+      if (cancelled) return
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
       reanalyzePendingRef.current = false
-      if (!cancelled) { setQcError(message); setQcLoading(false) }
+      setQcError(message)
+      setQcLoading(false)
     }
 
     async function checkQC() {
@@ -364,8 +370,11 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
           headers: await apiClient.ensureAuthHeaders(),
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         })
-        if (res.ok || res.status === 202 || res.status === 404) {
+        if (res.ok || res.status === 202) {
           failures = 0
+        } else if (res.status === 404) {
+          // Not reset here: a 404 followed by a failed trigger must still count
+          // toward the cap. It is reset once a trigger is actually answered.
         } else if (++failures >= MAX_CONSECUTIVE_FAILURES) {
           stopQc(`QC status is unavailable (backend returned ${res.status}). Use Re-analyze to try again.`)
           return
@@ -399,9 +408,15 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
           if (!cancelled) setQcLoading(true)
         } else if (res.status === 404) {
           if (qcTriggeredForRef.current === jobId) {
-            // We already asked for a run this session and the backend has neither
-            // a report nor a running analysis. Polling cannot change that — the
-            // run ended without producing a report. Terminal, not retried.
+            // The run only creates its "running" marker once its worker thread
+            // starts, so right after a trigger a 404 can just mean "queued".
+            if (Date.now() - qcTriggeredAtRef.current < TRIGGER_GRACE_MS) {
+              if (!cancelled) setQcLoading(true)
+              return
+            }
+            // We asked for a run a while ago and the backend has neither a
+            // report nor a running analysis: the run ended without producing a
+            // report. Terminal, not retried.
             stopQc('QC finished without producing a report. Use Re-analyze to try again.')
             return
           }
@@ -418,6 +433,8 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             // Only latch once the backend actually answered; a dropped request
             // may be retried on the next tick (bounded by the failure cap).
             qcTriggeredForRef.current = jobId
+            qcTriggeredAtRef.current = Date.now()
+            failures = 0
             if (!trigger.ok) {
               // Refused: 503 (backend has no GPU) or 404 (no dubbed video yet).
               const body = await trigger.json().catch(() => null)
@@ -480,6 +497,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     }
     // The poller must not POST again for a run we just requested.
     qcTriggeredForRef.current = jobId
+    qcTriggeredAtRef.current = Date.now()
     reanalyzePrevGenRef.current = qcAnalysis?.generated_at ?? null
     reanalyzePendingRef.current = true
     setQcUpdatedAt(null)
