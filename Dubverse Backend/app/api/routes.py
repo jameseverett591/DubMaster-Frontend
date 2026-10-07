@@ -4939,17 +4939,17 @@ def _audio_fingerprint(path: str) -> str:
     """Content fingerprint for dubbed audio. A Make Movie rebuild touches
     dubbed_audio.wav's mtime even when the bytes come out identical — but a
     resumable vendor generation is only reusable when the audio is THE SAME,
-    so the staleness check has to compare content, not timestamps. Size +
-    first/last-MiB sha256 is cheap on multi-hundred-MB stems."""
+    so the staleness check has to compare content, not timestamps. Full-file
+    sha256 + size; a couple of seconds on a feature-length wav, once per run."""
     try:
         size = os.path.getsize(path)
         import hashlib
         h = hashlib.new("sha256")
         with open(path, "rb") as f:
-            h.update(f.read(1 << 20))
-            if size > (1 << 20):
-                f.seek(max(1 << 20, size - (1 << 20)))
-                h.update(f.read())
+            # Full-file hash — head/tail sampling missed a middle edit with
+            # unchanged size, which would resume a stale paid generation.
+            while chunk := f.read(1 << 20):
+                h.update(chunk)
         return f"{size}:{h.hexdigest()[:24]}"
     except OSError:
         return ""
