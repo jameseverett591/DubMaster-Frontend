@@ -5788,7 +5788,10 @@ async def _run_dubbing_pipeline(
                         Path(settings.DUBBED_DIR) / job_id
                         / f"analysis_{target_lang.lower().strip()}.running"
                     )
-                    if _acquire_analysis_sentinel(_qc_sentinel):
+                    _qc_claimed = _claim_analysis_sentinel(_qc_sentinel)
+                    if not _qc_claimed and _clear_stale_analysis_sentinel(_qc_sentinel):
+                        _qc_claimed = _claim_analysis_sentinel(_qc_sentinel)
+                    if _qc_claimed:
                         from app.pipeline.analyze_dub import analyze_dub as _analyze_dub
                         asyncio.create_task(asyncio.to_thread(_analyze_dub, job_id, target_lang, video_path))
                         logger.info(f"Job {job_id}: QC analysis auto-triggered")
@@ -6289,7 +6292,17 @@ async def _job_share_unlocked(job_id: str, caller: str, job) -> bool:
     if await asyncio.to_thread(quota_service.tier_for, caller) == quota_service.TIER_PRO:
         return True
     if not getattr(job, "billed_seconds", None):
-        return False
+        # billed_seconds is in-memory only — a restart forgets it until the job
+        # rehydrates through a billing path, so a genuinely-paid customer would
+        # hit 402 on Share. The durable project.json stamp mirrors it; the
+        # projects list already reads the same source for the Share button.
+        try:
+            with open(_projects_base_dir() / job_id / "project.json",
+                      "r", encoding="utf-8") as _pf:
+                if not bool((_json.load(_pf) or {}).get("paid")):
+                    return False
+        except Exception:
+            return False
     sel = set(_load_lipsync_selection(job_id))
     if sel:
         try:

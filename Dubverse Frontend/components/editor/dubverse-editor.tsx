@@ -8841,12 +8841,15 @@ export function DubVerseEditor({
                     <Facebook className="h-4 w-4" />
                     <span className="text-[9px] font-medium">{t('Facebook')}</span>
                   </button>
-                  {/* Twitter / X */}
+                  {/* Twitter / X — the tweet must carry the public share
+                      link: window.location.href is the editor, which every
+                      recipient but the owner hits a sign-in wall on. */}
                   <button
                     type="button"
-                    title="Share to X (Twitter)"
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-black hover:bg-neutral-800 text-white transition-colors"
-                    onClick={() => window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}&text=${encodeURIComponent(`Check out my dubbed video — ${title}`)}`, '_blank', 'width=600,height=400')}
+                    title={typeof shareVideoLink === 'string' ? 'Share to X (Twitter)' : 'No public share link yet'}
+                    disabled={typeof shareVideoLink !== 'string'}
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-black hover:bg-neutral-800 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    onClick={() => window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(shareVideoLink as string)}&text=${encodeURIComponent(`Check out my dubbed video — ${title}`)}`, '_blank', 'width=600,height=400')}
                   >
                     <Twitter className="h-4 w-4" />
                     <span className="text-[9px] font-medium">{t('X / Twitter')}</span>

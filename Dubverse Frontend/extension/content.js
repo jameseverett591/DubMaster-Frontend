@@ -198,8 +198,3 @@ const retryTimer = setInterval(() => {
   }
   injectWatchButton();
 }, 1000);
-
-// Safety net: YouTube's re-renders can drop injected nodes without a
-// mutation we observe. The presence check inside injectThumbButton makes a
-// rescan cheap when nothing is missing.
-setInterval(() => scanThumbnails(document), 2000);
