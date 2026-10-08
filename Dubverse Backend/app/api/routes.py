@@ -5949,7 +5949,7 @@ async def _run_dubbing_pipeline(
                 _wm_src = Path(settings.DUBBED_DIR) / job_id / f"dubbed_{target_lang.lower().strip()}.mp4"
                 _wm_job = await _get_or_rehydrate_job(job_id)
                 if _wm_src.exists() and not await _job_share_unlocked(job_id, user_id, _wm_job):
-                    asyncio.create_task(_prewarm_watermark(str(_wm_src)))
+                    asyncio.create_task(_prewarm_watermark(str(_wm_src), job_id))
             except Exception as _wm_err:
                 logger.warning(f"Job {job_id}: watermark pre-build skipped: {_wm_err}")
         else:
@@ -6521,10 +6521,13 @@ def _build_watermarked_dub(dubbed_path: str, wm_path: str) -> None:
     os.replace(tmp, wm_path)
 
 
-async def _watermarked_dub(dubbed_path: str) -> str:
+async def _watermarked_dub(dubbed_path: str, job_id: str) -> str:
     """Return the watermarked copy of a finished dub, building it on first
-    request. Feature-film encode can take minutes — the lock serialises
-    concurrent downloads of the same language onto one encode."""
+    request. Feature-film encode can take minutes — the per-path lock
+    serialises concurrent downloads of the same language onto one encode,
+    and the job's render lock keeps a re-render from overwriting the
+    source mid-encode (the fingerprint check in _build_watermarked_dub is
+    the belt to these suspenders)."""
     def _fresh() -> bool:
         # A re-rendered dub must re-encode — never serve a watermark burned
         # from an older cut of the film.
@@ -6540,18 +6543,22 @@ async def _watermarked_dub(dubbed_path: str) -> str:
         return wm_path
     lock = _watermark_locks.setdefault(wm_path, asyncio.Lock())
     async with lock:
-        if _fresh():
-            return wm_path
-        async with _watermark_sem:
-            await asyncio.to_thread(_build_watermarked_dub, dubbed_path, wm_path)
+        # Freshness is re-checked inside BOTH locks: a re-render that ran
+        # while this encode queued for the render lock makes any queued
+        # intent stale.
+        async with _render_locks.setdefault(job_id, asyncio.Lock()):
+            if _fresh():
+                return wm_path
+            async with _watermark_sem:
+                await asyncio.to_thread(_build_watermarked_dub, dubbed_path, wm_path)
     return wm_path
 
 
-async def _prewarm_watermark(dubbed_path: str) -> None:
+async def _prewarm_watermark(dubbed_path: str, job_id: str) -> None:
     """Background watermark build — failures are logged, never raised into a
     fire-and-forget task."""
     try:
-        await _watermarked_dub(dubbed_path)
+        await _watermarked_dub(dubbed_path, job_id)
     except Exception as e:
         logger.warning(f"Watermark pre-build failed for {dubbed_path}: {e}")
 
@@ -6577,7 +6584,7 @@ async def download_dubbed_video(job_id: str, language: str, request: Request, at
     job = await _get_or_rehydrate_job(job_id)
     if job and not await _job_share_unlocked(job_id, _caller(request), job):
         try:
-            dubbed_path = await _watermarked_dub(dubbed_path)
+            dubbed_path = await _watermarked_dub(dubbed_path, job_id)
         except Exception as e:
             logger.error(f"Job {job_id}: watermark render failed: {e}")
             raise HTTPException(status_code=503, detail="Watermarked download unavailable right now — try again shortly.")

@@ -174,32 +174,48 @@ class RealEncodeTests(unittest.TestCase):
             f.write(b"v1" * 2048)
 
         def _fake_run(cmd, **_kw):
-            # Encoder "succeeds" and writes output, but the source moved
+            # Encoder "succeeds" and writes a FULL-SIZE output (>1KB, so only
+            # the fingerprint check can reject it), but the source moved
             # under it — the result must never be published as current.
             with open(cmd[-1], "wb") as f:
-                f.write(WM_BYTES)
+                f.write(WM_BYTES * 100)
             with open(src, "ab") as f:
                 f.write(b"changed")
             return SimpleNamespace(returncode=0, stderr=b"")
 
         with mock.patch.object(self.routes.subprocess, "run", side_effect=_fake_run):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(RuntimeError) as cm:
                 self.routes._build_watermarked_dub(src, out)
+        # rc=0 proves the fingerprint check — not the encode check — fired.
+        self.assertIn("rc=0", str(cm.exception))
         self.assertFalse(os.path.exists(out))
         self.assertFalse(os.path.exists(out + ".tmp.mp4"))
 
     def test_failed_encode_raises_and_leaves_no_partial_file(self):
-        import shutil as _sh
-        if not _sh.which("ffmpeg"):
-            self.skipTest("ffmpeg not installed")
+        # Source stays put; the encoder exits nonzero after writing a large
+        # partial file — the returncode check must reject it.
         src = os.path.join(self.tmp, "clip.mp4")
         out = os.path.join(self.tmp, "wm_clip.mp4")
-        self._make_clip(src)
-        os.unlink(src)  # encode a missing source → ffmpeg exits nonzero
-        with self.assertRaises(RuntimeError):
-            self.routes._build_watermarked_dub(src, out)
+        with open(src, "wb") as f:
+            f.write(b"v1" * 2048)
+
+        def _fake_run(cmd, **_kw):
+            with open(cmd[-1], "wb") as f:
+                f.write(b"x" * 4096)
+            return SimpleNamespace(returncode=1, stderr=b"boom")
+
+        with mock.patch.object(self.routes.subprocess, "run", side_effect=_fake_run):
+            with self.assertRaises(RuntimeError) as cm:
+                self.routes._build_watermarked_dub(src, out)
+        self.assertIn("rc=1", str(cm.exception))
         self.assertFalse(os.path.exists(out))
         self.assertFalse(os.path.exists(out + ".tmp.mp4"))
+
+    def test_missing_source_raises(self):
+        with self.assertRaises(RuntimeError):
+            self.routes._build_watermarked_dub(
+                os.path.join(self.tmp, "nope.mp4"),
+                os.path.join(self.tmp, "out.mp4"))
 
 
 if __name__ == "__main__":
