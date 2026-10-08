@@ -79,7 +79,13 @@ class QcCpuGuardTests(unittest.TestCase):
         self._auto(True).assert_called_once_with(JOB, "en", "v.mp4")
 
     def test_gpu_probe_false_when_torch_missing(self):
-        with mock.patch.dict("sys.modules", {"torch": None}):
+        # No capacity of any kind: torch absent AND the RunPod/R2 + CPU-opt-in
+        # env unset — otherwise a configured deployment makes this return True.
+        clear = ("QC_ALLOW_CPU", "RUNPOD_API_KEY", "RUNPOD_ENDPOINT_ID",
+                 "R2_BUCKET_NAME", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
+                 "R2_ACCOUNT_ID")
+        with mock.patch.dict("sys.modules", {"torch": None}), \
+             mock.patch.dict(os.environ, {k: "" for k in clear}):
             self.assertFalse(self.routes._qc_gpu_available())
 
 

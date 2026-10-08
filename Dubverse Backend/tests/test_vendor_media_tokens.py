@@ -118,8 +118,11 @@ class VendorTokenHttpTests(unittest.TestCase):
     # ---- the owner's own login still reaches everything (the editor depends on it)
     def test_owner_login_still_reaches_everything(self):
         r_job = SimpleNamespace(job_id=JOB, video_path=self.video, user_id="owner-1")
+        # The fixture has no payment row; the finished-film path is gated by
+        # _job_share_unlocked. Mock it paid so this tests login access, not billing.
         with mock.patch.object(self.routes, "verify_jwt", return_value="owner-1"), \
-                mock.patch.object(self.routes, "_require_job", mock.AsyncMock(return_value=r_job)):
+                mock.patch.object(self.routes, "_require_job", mock.AsyncMock(return_value=r_job)), \
+                mock.patch.object(self.routes, "_job_share_unlocked", mock.AsyncMock(return_value=True)):
             for path in ("dubbed_en.mp4", "audio/segment_0001.mp3", "scrub-proxy", "video"):
                 with self.subTest(path=path):
                     r = self.client.get(f"/api/media/{JOB}/{path}", params={"access_token": "owner-jwt"})

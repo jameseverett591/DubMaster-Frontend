@@ -338,17 +338,26 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     let inFlight = false
     let lastTriggerAttemptAt = 0
 
-    /** fetch with the timeout covering the AUTH wait too — AbortSignal alone
-     *  only bounds the request; a stalled session refresh in
-     *  ensureAuthHeaders() would otherwise leave inFlight set forever. */
+    /** fetch with the timeout covering the AUTH wait and the BODY read too —
+     *  AbortSignal alone only bounds the request; a stalled session refresh in
+     *  ensureAuthHeaders() or a stalled response body in res.json() would
+     *  otherwise leave inFlight set forever. The abort timer stays armed after
+     *  headers arrive so a hung body read is still killed at the deadline. */
     function qcFetch(url: string, init: RequestInit = {}): Promise<Response> {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
       return Promise.race([
         (async () => fetch(url, {
           ...init,
           headers: await apiClient.ensureAuthHeaders(),
+          signal: controller.signal,
         }))(),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new DOMException('timed out', 'TimeoutError')), REQUEST_TIMEOUT_MS)),
+          setTimeout(() => {
+            clearTimeout(timer)
+            controller.abort()
+            reject(new DOMException('timed out', 'TimeoutError'))
+          }, REQUEST_TIMEOUT_MS)),
       ])
     }
 

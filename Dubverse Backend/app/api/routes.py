@@ -5939,25 +5939,7 @@ async def _run_dubbing_pipeline(
             # the whole backend. Nothing compute-heavy runs on the backend CPU.
             # The atomic sentinel claim (same as POST /api/analyze) keeps a
             # dub-complete hook and an editor open from starting two runs at once.
-            try:
-                if not _qc_gpu_available():
-                    logger.info(f"Job {job_id}: QC auto-trigger skipped — {_QC_NO_GPU_MESSAGE}")
-                else:
-                    _qc_sentinel = (
-                        Path(settings.DUBBED_DIR) / job_id
-                        / f"analysis_{target_lang.lower().strip()}.running"
-                    )
-                    _qc_claimed = _claim_analysis_sentinel(_qc_sentinel)
-                    if not _qc_claimed and _clear_stale_analysis_sentinel(_qc_sentinel):
-                        _qc_claimed = _claim_analysis_sentinel(_qc_sentinel)
-                    if _qc_claimed:
-                        from app.pipeline.analyze_dub import analyze_dub as _analyze_dub
-                        asyncio.create_task(asyncio.to_thread(_analyze_dub, job_id, target_lang, video_path))
-                        logger.info(f"Job {job_id}: QC analysis auto-triggered")
-                    else:
-                        logger.info(f"Job {job_id}: QC auto-trigger skipped — analysis already running")
-            except Exception as _qc_err:
-                logger.warning(f"Job {job_id}: QC auto-trigger skipped: {_qc_err}")
+            _auto_trigger_qc(job_id, target_lang, video_path)
         else:
             if render_charge and user_id:
                 await _unmeter_render(job_id, user_id)
@@ -7861,6 +7843,31 @@ _QC_NO_GPU_MESSAGE = (
     "deployment, or set QC_ALLOW_CPU=1 to run QC on the backend CPU "
     "(acceptable for short clips on low-traffic hosts)."
 )
+
+
+def _auto_trigger_qc(job_id: str, target_lang: str, video_path: str) -> None:
+    """Fire-and-forget QC after dubbing completes. Same gates as the manual
+    POST /api/analyze: GPU capacity required, and the sentinel claim is atomic
+    so a dub-complete hook racing an editor-open can't start two runs."""
+    try:
+        if not _qc_gpu_available():
+            logger.info(f"Job {job_id}: QC auto-trigger skipped — {_QC_NO_GPU_MESSAGE}")
+            return
+        sentinel = (
+            Path(settings.DUBBED_DIR) / job_id
+            / f"analysis_{target_lang.lower().strip()}.running"
+        )
+        claimed = _claim_analysis_sentinel(sentinel)
+        if not claimed and _clear_stale_analysis_sentinel(sentinel):
+            claimed = _claim_analysis_sentinel(sentinel)
+        if claimed:
+            from app.pipeline.analyze_dub import analyze_dub
+            asyncio.create_task(asyncio.to_thread(analyze_dub, job_id, target_lang, video_path))
+            logger.info(f"Job {job_id}: QC analysis auto-triggered")
+        else:
+            logger.info(f"Job {job_id}: QC auto-trigger skipped — analysis already running")
+    except Exception as exc:
+        logger.warning(f"Job {job_id}: QC auto-trigger skipped: {exc}")
 
 
 @router.post("/analyze/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
