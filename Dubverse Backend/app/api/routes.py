@@ -6543,13 +6543,18 @@ async def _watermarked_dub(dubbed_path: str, job_id: str) -> str:
         return wm_path
     lock = _watermark_locks.setdefault(wm_path, asyncio.Lock())
     async with lock:
-        # Freshness is re-checked inside BOTH locks: a re-render that ran
-        # while this encode queued for the render lock makes any queued
-        # intent stale.
-        async with _render_locks.setdefault(job_id, asyncio.Lock()):
-            if _fresh():
-                return wm_path
-            async with _watermark_sem:
+        if _fresh():
+            return wm_path
+        # The global encode semaphore is taken BEFORE the render lock:
+        # while this encode queues behind another film's, a re-render of
+        # THIS job must stay free to run — holding the render lock during
+        # the sem wait would block re-renders behind a foreign encode.
+        async with _watermark_sem:
+            async with _render_locks.setdefault(job_id, asyncio.Lock()):
+                # Re-check inside the render lock too: a re-render that ran
+                # while we queued makes any earlier freshness verdict stale.
+                if _fresh():
+                    return wm_path
                 await asyncio.to_thread(_build_watermarked_dub, dubbed_path, wm_path)
     return wm_path
 
