@@ -45,4 +45,4 @@ the param so a refresh doesn't re-import.
 
 - You must be signed in to DubMaster — the import runs against your account.
 - Only import videos you own, have permission for, or that are public domain.
-- Private, age-restricted and DRM-protected videos can't be imported from a link.
+- Private and DRM-protected videos can't be imported from a link. Age-restricted videos can be imported when the backend has a signed-in YouTube session (cookies) configured — otherwise upload the file instead.

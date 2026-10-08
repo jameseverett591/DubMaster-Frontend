@@ -453,7 +453,7 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
                 {t('You can also extract captions and transcripts with full timestamps, or pair YouTube captions with a video file you upload yourself.')}
               </p>
               <p className="text-sm text-blue-300/80 mt-2">
-                <strong>{t('Note:')}</strong> {t("You're responsible for having the rights to any video you import. Private, age-restricted and DRM-protected (licensed TV/film) videos can't be imported from a link — upload the file instead.")}
+                <strong>{t('Note:')}</strong> {t("You're responsible for having the rights to any video you import. Private and DRM-protected (licensed TV/film) videos can't be imported from a link. Age-restricted videos can be imported when the server has a signed-in YouTube session configured — otherwise upload the file instead.")}
               </p>
             </div>
           </div>

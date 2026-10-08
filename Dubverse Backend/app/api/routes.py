@@ -11860,8 +11860,26 @@ async def get_video_notes(job_id: str, request: Request):
     fp = f"{len(all_segments)}:{all_segments[0].get('start')}:{all_segments[-1].get('end')}"
     cache_key = f"{preset}:{fp}"
     # regenerate=true bypasses the cache (panel's refresh button) — the fresh
-    # result still replaces the cached entry below.
-    if not body.get("regenerate") and cache_key in cache:
+    # result still replaces the cached entry below. Regenerations are billed
+    # work (Claude tokens, VT quota), so they're capped per job: beyond
+    # VIDEO_NOTES_REGEN_LIMIT a regen request serves the cached result if one
+    # exists, else 429. The count lives in video_notes.json's _meta so the cap
+    # survives restarts and can't be reset by deleting a result entry.
+    if body.get("regenerate"):
+        _meta = cache.setdefault("_meta", {})
+        _regens = int(_meta.get("regens", 0) or 0)
+        _cap = int(os.environ.get("VIDEO_NOTES_REGEN_LIMIT", "10") or 10)
+        if _regens >= _cap:
+            if cache_key in cache:
+                return cache[cache_key]
+            raise HTTPException(
+                status_code=429,
+                detail=f"video notes regeneration limit reached ({_cap})")
+        _meta["regens"] = _regens + 1
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            _json.dump(cache, f, ensure_ascii=False, indent=2)
+    elif cache_key in cache:
         return cache[cache_key]
 
     provider = (os.getenv("VIDEO_NOTES_PROVIDER") or "claude").strip().lower()

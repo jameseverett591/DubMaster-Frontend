@@ -75,12 +75,11 @@ def analyze_dub(
     # the owning `pid:token` (PID + process start time) so the API can tell a
     # crashed run from a live one without trusting timestamps across restarts
     # or tripping on recycled PIDs.
+    sentinel_id: Optional[str] = None
     try:
         from app.api.routes import _process_token
-        sentinel.write_text(
-            f"{os.getpid()}:{_process_token(os.getpid()) or ''}",
-            encoding="utf-8",
-        )
+        sentinel_id = f"{os.getpid()}:{_process_token(os.getpid()) or ''}"
+        sentinel.write_text(sentinel_id, encoding="utf-8")
         error_file.unlink(missing_ok=True)
     except Exception:
         pass
@@ -298,8 +297,17 @@ def analyze_dub(
         # so the QC monitor shows a real error instead of polling forever.
         return _fail(str(e))
     finally:
+        # Only remove OUR sentinel. If the slot was reclaimed while this run
+        # was still executing (stale-sweep or the GET escape hatch), the file
+        # on disk belongs to a NEWER run — unlinking it unconditionally would
+        # free the slot mid-run and admit a third.
         try:
-            sentinel.unlink(missing_ok=True)
+            if (sentinel_id is not None
+                    and sentinel.read_text(encoding="utf-8").strip()
+                        == sentinel_id.strip()):
+                sentinel.unlink(missing_ok=True)
+        except FileNotFoundError:
+            pass
         except Exception:
             pass
 

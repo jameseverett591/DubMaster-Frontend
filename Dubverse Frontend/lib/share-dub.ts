@@ -38,7 +38,8 @@ export async function shareDubbedVideo(opts: { jobId: string; url: string; title
   }
 
   // URL-level sharing requires the PUBLIC link — never the token URL.
-  const shareUrl = await apiClient.createShareLink(opts.jobId).catch(() => null)
+  const share = await apiClient.createShareLink(opts.jobId).catch(() => null)
+  const shareUrl = share?.url
   if (!shareUrl) return 'failed'
 
   if (navigator.share) {

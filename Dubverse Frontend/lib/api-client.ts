@@ -1179,13 +1179,20 @@ class DubVerseAPIClient {
    * must NOT fall back to the authenticated media URL, which carries the
    * owner's access token.
    */
-  async createShareLink(jobId: string): Promise<string | null> {
-    const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/share`, {
-      method: 'POST',
-    })
-    if (!response.ok) return null
-    const data = await response.json().catch(() => null)
-    return data?.share_url ?? null
+  /** Returns {url,status} rather than bare url — a 402 (unpaid) and a 500 or
+   *  network failure are different problems and must not render the same
+   *  "payment required" message. status 0 = request never completed. */
+  async createShareLink(jobId: string): Promise<{ url: string | null; status: number }> {
+    try {
+      const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/share`, {
+        method: 'POST',
+      })
+      if (!response.ok) return { url: null, status: response.status }
+      const data = await response.json().catch(() => null)
+      return { url: data?.share_url ?? null, status: response.status }
+    } catch {
+      return { url: null, status: 0 }
+    }
   }
 
   /**

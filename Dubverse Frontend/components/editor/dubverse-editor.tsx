@@ -1548,7 +1548,7 @@ export function DubVerseEditor({
   const [shareCopied, setShareCopied] = useState<'link' | 'video' | null>(null)
   // Minted public share URL for the dubbed video — the popover copies THIS,
   // never activeDubbedVideoUrl (an authenticated URL carrying access_token).
-  const [shareVideoLink, setShareVideoLink] = useState<'pending' | 'unavailable' | string | null>(null)
+  const [shareVideoLink, setShareVideoLink] = useState<'pending' | 'unavailable' | 'error' | string | null>(null)
   // The HTML `download` attribute is IGNORED for cross-origin URLs (UI on
   // :3001, API on :8000), so `<a download href=activeDubbedVideoUrl>` just
   // navigated and PLAYED the film inline instead of saving it. The backend's
@@ -1560,10 +1560,15 @@ export function DubVerseEditor({
       : url
   // The media URL serves Content-Disposition: inline so it can also back the
   // <video> player; ?attachment=1 is what actually triggers a browser save.
-  const downloadDubbedVideo = () => {
+  const downloadDubbedVideo = async () => {
     if (!activeDubbedVideoUrl) return
+    // Stored media URLs carry the token they were minted with — after a
+    // rotation that token 401s, so re-mint before the browser follows it.
+    // A refresh failure still tries the stored URL rather than dead-ending.
+    const fresh = await apiClient.refreshMediaUrlAsync(activeDubbedVideoUrl)
+      .catch(() => activeDubbedVideoUrl)
     const a = document.createElement('a')
-    a.href = withAttachment(activeDubbedVideoUrl)
+    a.href = withAttachment(fresh)
     a.download = `${title || 'dubbed_video'}.mp4`
     a.click()
   }
@@ -8735,8 +8740,8 @@ export function DubVerseEditor({
             if (open && activeDubbedVideoUrl) {
               setShareVideoLink('pending')
               apiClient.createShareLink(jobId)
-                .then(u => setShareVideoLink(u ?? 'unavailable'))
-                .catch(() => setShareVideoLink('unavailable'))
+                .then(r => setShareVideoLink(r.url ?? (r.status === 402 ? 'unavailable' : 'error')))
+                .catch(() => setShareVideoLink('error'))
             }
           }}>
             <PopoverTrigger asChild>
@@ -8791,14 +8796,16 @@ export function DubVerseEditor({
                           ? t('Creating share link…')
                           : shareVideoLink === 'unavailable'
                             ? t('Share link unavailable — payment required')
-                            : shareVideoLink
+                            : shareVideoLink === 'error'
+                              ? t('Share link failed — close and try again')
+                              : shareVideoLink
                       }
                       className="flex-1 text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 truncate focus:outline-none"
                     />
                     <Button
                       size="sm"
                       variant="outline"
-                      disabled={!shareVideoLink || shareVideoLink === 'pending' || shareVideoLink === 'unavailable'}
+                      disabled={!shareVideoLink || shareVideoLink === 'pending' || shareVideoLink === 'unavailable' || shareVideoLink === 'error'}
                       className={cn(
                         "h-7 px-2 text-xs border-slate-700 shrink-0 transition-colors",
                         shareCopied === 'video' ? "text-emerald-400 border-emerald-500/40" : "text-slate-300"
@@ -8818,11 +8825,10 @@ export function DubVerseEditor({
                       size="sm"
                       variant="outline"
                       className="h-7 px-2 text-xs border-slate-700 text-slate-300 shrink-0"
-                      asChild
+                      title={t('Download dubbed video')}
+                      onClick={() => { void downloadDubbedVideo() }}
                     >
-                      <a href={`${activeDubbedVideoUrl}${activeDubbedVideoUrl.includes('?') ? '&' : '?'}attachment=1`} download title={t('Download dubbed video')} target="_blank" rel="noreferrer">
-                        <Download className="h-3 w-3" />
-                      </a>
+                      <Download className="h-3 w-3" />
                     </Button>
                   </div>
                 </div>
