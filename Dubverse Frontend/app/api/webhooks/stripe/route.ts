@@ -8,13 +8,16 @@ import type { PlanType, SubscriptionStatus } from "@/lib/supabase/types"
 // backend reads subscriptions.status (active/trialing => pro, else free).
 const PRO_PLAN: PlanType = "pro"
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+const API_BASE =
+  process.env.INTERNAL_API_URL ||
+  process.env.NEXT_PUBLIC_API_URL ||
+  "http://localhost:8000"
 
 // Server-to-server: hand the completed wallet deposit to the backend, which
 // runs quota_add_credits. Idempotent on stripe_payment_id — Stripe may
 // redeliver this webhook. A non-2xx throws so Stripe retries; the backend
 // returns already_applied on the retry instead of double-crediting.
-async function creditWallet(userId: string, amountCents: number, paymentId: string) {
+async function creditWallet(userId: string, amountCents: number, paymentId: string, allowBelowMin = false) {
   const res = await fetch(`${API_BASE}/api/internal/quota/credit`, {
     method: "POST",
     headers: {
@@ -25,12 +28,60 @@ async function creditWallet(userId: string, amountCents: number, paymentId: stri
       user_id: userId,
       amount_cents: amountCents,
       stripe_payment_id: paymentId,
+      allow_below_min: allowBelowMin,
     }),
   })
   if (!res.ok) {
     throw new Error(`quota credit failed: HTTP ${res.status} ${await res.text()}`)
   }
   return res.json()
+}
+
+// Audit-trail insert, deduped on stripe_payment_id — Stripe redelivers
+// webhooks, and a plain insert logs the same payment once per delivery.
+// Belt-and-braces with the unique index in
+// supabase/migrations/20260925_payments_dedup.sql.
+async function recordPayment(
+  supabase: Awaited<ReturnType<typeof createServiceClient>>,
+  row: {
+    user_id: string
+    stripe_payment_id: string | null
+    amount: number
+    currency: string
+    status: string
+    invoice_url?: string | null
+  }
+) {
+  if (row.stripe_payment_id) {
+    const { data: existing } = await supabase
+      .from("payments")
+      .select("id")
+      .eq("stripe_payment_id", row.stripe_payment_id)
+      .eq("status", row.status)
+      .limit(1)
+    if (existing && existing.length > 0) return
+    // Atomic dedup: two concurrent deliveries can both pass the select above,
+    // so the conflict must be resolved by the unique index, not by us. A lost
+    // race is a no-op (ignoreDuplicates), NOT a 500 → no pointless Stripe
+    // retry storm.
+    const { error: upsertError } = await supabase
+      .from("payments")
+      .upsert(row, {
+        onConflict: "stripe_payment_id,status",
+        ignoreDuplicates: true,
+      })
+    if (!upsertError) return
+    if (upsertError.code === "23505") return
+    if (upsertError.code !== "42P10") throw upsertError
+    // 42P10: the dedup migration hasn't been applied — fall through to the
+    // plain insert (the old check-then-insert race window stays open until
+    // supabase/migrations/20260925_payments_dedup.sql runs).
+    console.warn(
+      "[STRIPE] payments dedup index missing — run migrations/20260925_payments_dedup.sql"
+    )
+  }
+  const { error } = await supabase.from("payments").insert(row)
+  if (error && error.code !== "23505") throw error
 }
 
 function subPeriod(subscription: Stripe.Subscription) {
@@ -83,9 +134,12 @@ export async function POST(request: Request) {
               ? session.payment_intent
               : session.payment_intent?.id) ?? session.id
           const amountCents = session.amount_total ?? 0
-          const result = await creditWallet(userId, amountCents, paymentId)
+          const result = await creditWallet(
+            userId, amountCents, paymentId,
+            session.metadata?.allow_below_min === "true"
+          )
 
-          await supabase.from("payments").insert({
+          await recordPayment(supabase, {
             user_id: userId,
             stripe_payment_id: paymentId,
             amount: amountCents,
@@ -205,7 +259,7 @@ export async function POST(request: Request) {
             typeof invoice.payment_intent === "string"
               ? invoice.payment_intent
               : invoice.payment_intent?.id ?? null
-          await supabase.from("payments").insert({
+          await recordPayment(supabase, {
             user_id: sub.user_id,
             stripe_payment_id: piId,
             amount: invoice.amount_paid ?? 0,
@@ -245,7 +299,7 @@ export async function POST(request: Request) {
             typeof invoice.payment_intent === "string"
               ? invoice.payment_intent
               : invoice.payment_intent?.id ?? null
-          await supabase.from("payments").insert({
+          await recordPayment(supabase, {
             user_id: sub.user_id,
             stripe_payment_id: piId,
             amount: invoice.amount_due ?? 0,

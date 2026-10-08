@@ -212,7 +212,7 @@ export default function LandingPage() {
             <div className="hidden md:flex items-center gap-8">
               <a href="#features" className="text-sm text-[#94A3B8] hover:text-[#C084FC] transition-colors duration-300">{t('navFeatures')}</a>
               <a href="#how-it-works" className="text-sm text-[#94A3B8] hover:text-[#C084FC] transition-colors duration-300">{t('navHowItWorks')}</a>
-              <Link href="/subscribe" className="text-sm text-[#94A3B8] hover:text-[#C084FC] transition-colors duration-300">{t('navPricing')}</Link>
+              <Link href="/pricing" className="text-sm text-[#94A3B8] hover:text-[#C084FC] transition-colors duration-300">{t('navPricing')}</Link>
               <a href="#faq" className="text-sm text-[#94A3B8] hover:text-[#C084FC] transition-colors duration-300">{t('navFaq')}</a>
             </div>
 
@@ -240,7 +240,7 @@ export default function LandingPage() {
             <div className="flex flex-col gap-4">
               <a href="#features" className="text-sm text-[#94A3B8] hover:text-[#C084FC]">{t('navFeatures')}</a>
               <a href="#how-it-works" className="text-sm text-[#94A3B8] hover:text-[#C084FC]">{t('navHowItWorks')}</a>
-              <Link href="/subscribe" className="text-sm text-[#94A3B8] hover:text-[#C084FC]">{t('navPricing')}</Link>
+              <Link href="/pricing" className="text-sm text-[#94A3B8] hover:text-[#C084FC]">{t('navPricing')}</Link>
               <a href="#faq" className="text-sm text-[#94A3B8] hover:text-[#C084FC]">{t('navFaq')}</a>
               <div className="flex items-center gap-2 pt-1">
                 <span className="text-sm text-[#64748B]">{tUi('Language:')}</span>
@@ -801,19 +801,15 @@ export default function LandingPage() {
           <h2 className="text-3xl md:text-5xl font-bold text-center mb-16 tracking-tight text-white">{t('faqTitle')}</h2>
 
           <Accordion type="single" collapsible className="space-y-4">
-            {[
-              { q: t('faq1Q'), a: t('faq1A') },
-              { q: t('faq2Q'), a: t('faq2A') },
-              { q: t('faq3Q'), a: t('faq3A') },
-              { q: t('faq4Q'), a: t('faq4A') },
-              { q: t('faq5Q'), a: t('faq5A') },
-              { q: t('faq6Q'), a: t('faq6A') },
-            ].map((item, i) => (
+            {Array.from({ length: 10 }, (_, i) => i + 1)
+              .filter((i) => t.has(`faq${i}Q`))
+              .map((i) => ({ q: t(`faq${i}Q`), a: t(`faq${i}A`) }))
+              .map((item, i) => (
               <AccordionItem key={i} value={`faq-${i}`} className="border border-[#A855F7]/15 rounded-lg px-6 bg-[#020817]/50 data-[state=open]:bg-[#0F0520]/30 data-[state=open]:border-[#A855F7]/30 transition-all duration-300">
                 <AccordionTrigger className="text-left hover:no-underline py-6 text-white hover:text-[#C084FC] cursor-pointer [&[data-state=open]]:text-[#C084FC] transition-colors duration-300">
                   {item.q}
                 </AccordionTrigger>
-                <AccordionContent className="text-[#10B981] pb-6 text-base leading-relaxed drop-shadow-[0_0_8px_rgba(16,185,129,0.15)]">
+                <AccordionContent className="text-[#10B981] pb-6 text-base leading-relaxed whitespace-pre-line drop-shadow-[0_0_8px_rgba(16,185,129,0.15)]">
                   {item.a}
                 </AccordionContent>
               </AccordionItem>
@@ -899,7 +895,7 @@ export default function LandingPage() {
             {[
               { title: t('footerProduct'), links: [
                 { label: "Features", href: "#features" },
-                { label: "Pricing", href: "/subscribe" },
+                { label: "Pricing", href: "/pricing" },
                 { label: "How It Works", href: "#how-it-works" },
               ]},
               { title: t('footerCompany'), links: [

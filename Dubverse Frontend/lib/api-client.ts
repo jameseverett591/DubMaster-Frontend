@@ -39,12 +39,17 @@ export interface VideoChapter {
 }
 
 export interface VideoNotes {
-  status: 'ok' | 'skipped' | 'error'
+  status: 'ok' | 'skipped' | 'error' | 'processing'
   reason?: string
   preset?: VideoNotesPreset
+  provider?: 'videotranscriber' | 'deepgram' | 'claude'
+  stage?: string
+  retry_after?: number
   video_title?: string
   notes?: VideoNote[]
   chapters?: VideoChapter[]
+  language?: string
+  duration?: number
 }
 
 // ============================================================================
@@ -59,6 +64,7 @@ export type RuleClass =
   | 'persona'          // speaker slot → character profile
   | 'stance'           // scene-style directive (register/stance)
   | 'translation_fix'  // exact source line → forced target line
+  | 'pronunciation'    // displayed term → spoken respelling (TTS only)
   | 'delivery'         // speaker → emotion/speed/pitch defaults
   | 'glossary'         // source term → canonical English term
 
@@ -265,9 +271,12 @@ export interface CustomVoice {
   name: string
   tags?: string[]
   custom?: boolean
+  cloned?: boolean
   /** Extension of the stored source clip. Absent on voices cloned before the
    *  upload was kept — those have no sample to preview. */
   sample_ext?: string
+  /** Absolute path of the stored source clip on the server, when one exists. */
+  sample_path?: string
 }
 
 export interface DubRequest {
@@ -282,8 +291,7 @@ export interface DubRequest {
     pitch?: number  // semitone shift, e.g. +8 for child-like voice
   }>
   source_language?: string
-  dubbing_engine?: 'dubmaster' | 'vozo'
-  vozo_user_prompt?: string
+  dubbing_engine?: 'dubmaster'
 }
 
 export interface DubResponse {
@@ -385,6 +393,12 @@ export interface RegenerateSegmentResponse {
     // True when the take was rendered in staged mode — path points at the
     // uncommitted _staged file, and nothing in segments.json changed.
     staged?: boolean
+    // Set only when the regenerated audio overran its slot — informational,
+    // never blocking (see the frontend's overlap badge for the real gate).
+    timing_exclusion?: boolean
+    timing_audio_duration?: number
+    timing_slot_duration?: number
+    timing_overlap?: number
   }
 }
 
@@ -457,17 +471,6 @@ export interface RetranscribedSegment {
   confidence: number
 }
 
-export interface ScreenAppInsight {
-  status: string
-  label?: string
-  summary?: string
-  segments?: Array<{ start: number; end: number; text: string }>
-  speakers?: Array<{ id: string; name?: string }>
-  key_moments?: Array<{ time: number; description: string }>
-  confidence_scores?: Array<{ start: number; end: number; confidence: number }>
-  reason?: string
-}
-
 export interface EmotionAnalysis {
   status: string
   emotion_variance?: number
@@ -516,7 +519,6 @@ export interface AnalysisSummary {
   component_scores: Record<string, number>
   weights_used: Record<string, number>
   services_available?: Record<string, boolean>
-  screenapp_available?: boolean
 }
 
 export interface QualityAnalysis {
@@ -554,8 +556,17 @@ export interface QualityAnalysis {
     reason?: string
   }
   loudness: LoudnessAnalysis
-  screenapp_original: ScreenAppInsight | null
-  screenapp_dubbed: ScreenAppInsight | null
+  source_quality?: {
+    status: string
+    warnings?: string[]
+    flags?: string[]
+    frame_stalls?: Array<{ start: number; end: number }>
+    black_spans?: Array<{ start: number; end: number }>
+    mean_volume_db?: number
+    max_volume_db?: number
+    re_recording_suspected?: boolean
+    reason?: string
+  }
   emotion?: EmotionAnalysis
   pronunciation?: PronunciationAssessment
   translation?: TranslationQuality
@@ -579,16 +590,21 @@ export interface LipSyncWindowResult {
     score?: number
     correlation?: number
     offset_ms?: number
+    abs_offset_ms?: number
     severity?: string
     reason?: string
+    method?: string
+    scored?: number
+    total?: number
   }
 }
 
 export type AnalysisStatus = 'idle' | 'running' | 'complete' | 'error'
 
 export interface AnalysisResponse {
-  status: 'started' | 'running' | 'complete'
+  status: 'started' | 'running' | 'complete' | 'failed'
   message?: string
+  error?: string
   analysis?: QualityAnalysis
 }
 
@@ -656,7 +672,17 @@ class DubVerseAPIClient {
     // is near expiry, so this is cheap to call per request.
     try {
       const { createClient } = await import('@/lib/supabase/client')
-      const { data } = await createClient().auth.getSession()
+      // getSession() takes the GoTrue auth-token lock; when that lock wedges
+      // ("auth-token lock was not released within 5000ms") the promise never
+      // resolves — and every API call behind _fetch hung with it, which is how
+      // the Save button spun forever. Cap it: on timeout keep whatever token
+      // we already hold and let the request 401 if it's stale.
+      const { data } = await Promise.race([
+        createClient().auth.getSession(),
+        new Promise<{ data: { session: null }; error: null }>((resolve) =>
+          setTimeout(() => resolve({ data: { session: null }, error: null }), 8000)
+        ),
+      ])
       if (data.session?.access_token) {
         this._token = data.session.access_token
       }
@@ -718,6 +744,15 @@ class DubVerseAPIClient {
     } catch {
       return url
     }
+  }
+
+  /** refreshMediaUrl with the token guaranteed loaded. Stored URLs carry the
+   *  access_token they were minted with; after rotation the stale token 401s.
+   *  Click handlers on persisted URLs (result card download/share) need the
+   *  async form — _ensureToken may not have run yet on a fresh page load. */
+  async refreshMediaUrlAsync(url: string): Promise<string> {
+    await this._ensureToken()
+    return this.refreshMediaUrl(url)
   }
 
   private _mediaUrl(path: string): string {
@@ -869,7 +904,13 @@ class DubVerseAPIClient {
     })
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }))
-      throw new Error(error.detail || `Failed to start dubbing: ${response.statusText}`)
+      // detail may be a structured object — the 402 quota response carries
+      // {code, message, shortfall_cents, balance} — so surface its message,
+      // not "[object Object]".
+      const detail = typeof error.detail === 'object' && error.detail !== null
+        ? (error.detail.message ?? JSON.stringify(error.detail))
+        : error.detail
+      throw new Error(detail || `Failed to start dubbing: ${response.statusText}`)
     }
     return response.json()
   }
@@ -912,7 +953,10 @@ class DubVerseAPIClient {
     })
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }))
-      throw new Error(error.detail || `Render failed: ${response.statusText}`)
+      const detail = typeof error.detail === 'object' && error.detail !== null
+        ? (error.detail.message ?? JSON.stringify(error.detail))
+        : error.detail
+      throw new Error(detail || `Render failed: ${response.statusText}`)
     }
     return response.json()
   }
@@ -1130,6 +1174,28 @@ class DubVerseAPIClient {
   }
 
   /**
+   * Create (or reuse) the public share link for a finished, paid dub.
+   * Returns null when the backend refuses (unpaid, no export) — callers
+   * must NOT fall back to the authenticated media URL, which carries the
+   * owner's access token.
+   */
+  /** Returns {url,status} rather than bare url — a 402 (unpaid) and a 500 or
+   *  network failure are different problems and must not render the same
+   *  "payment required" message. status 0 = request never completed. */
+  async createShareLink(jobId: string): Promise<{ url: string | null; status: number }> {
+    try {
+      const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/share`, {
+        method: 'POST',
+      })
+      if (!response.ok) return { url: null, status: response.status }
+      const data = await response.json().catch(() => null)
+      return { url: data?.share_url ?? null, status: response.status }
+    } catch {
+      return { url: null, status: 0 }
+    }
+  }
+
+  /**
    * Trigger quality analysis for a dubbed video
    */
   async triggerAnalysis(jobId: string, language: string): Promise<AnalysisResponse> {
@@ -1250,11 +1316,11 @@ class DubVerseAPIClient {
     return response.json()
   }
 
-  async getVideoNotes(jobId: string, preset: VideoNotesPreset = 'smart'): Promise<VideoNotes> {
+  async getVideoNotes(jobId: string, preset: VideoNotesPreset = 'smart', regenerate = false): Promise<VideoNotes> {
     const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/video-notes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
-      body: JSON.stringify({ preset }),
+      body: JSON.stringify({ preset, ...(regenerate ? { regenerate: true } : {}) }),
     })
     if (!response.ok) throw new Error('Failed to load video notes')
     return response.json()
@@ -1603,12 +1669,16 @@ class DubVerseAPIClient {
     numSpeakers?: number,
     targetLanguage?: string,
     signal?: AbortSignal,
+    transcript?: Array<{ text: string; start: number; end: number; speaker?: string }>,
   ): Promise<UploadResponse> {
     await this._ensureToken()
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
       const formData = new FormData()
       formData.append('file', file)
+      if (transcript && transcript.length) {
+        formData.append('transcript', JSON.stringify(transcript))
+      }
       if (sourceLanguage && sourceLanguage !== 'auto') {
         formData.append('source_language', sourceLanguage)
       }
@@ -1654,6 +1724,77 @@ class DubVerseAPIClient {
       }
       xhr.send(formData)
     })
+  }
+
+  /** Probe a YouTube URL — title, duration, thumbnail, caption languages. */
+  async getYouTubeInfo(url: string): Promise<{
+    video_id: string
+    title: string
+    duration: number
+    thumbnail: string
+    uploader: string
+    subtitle_languages: string[]
+    auto_caption_languages: string[]
+  }> {
+    const response = await this._fetch(
+      `${this.baseURL}/api/youtube/info?url=${encodeURIComponent(url)}`)
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `YouTube lookup failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  /** Fetch a video's caption track (no video) as timestamped segments. */
+  async getYouTubeCaptions(url: string, languages?: string[]): Promise<{
+    video_id: string
+    language: string
+    language_code: string
+    is_generated: boolean
+    languages: Array<{
+      language: string
+      language_code: string
+      is_generated: boolean
+      is_translatable: boolean
+    }>
+    segments: Array<{ start: number; end: number; text: string }>
+  }> {
+    const response = await this._fetch(`${this.baseURL}/api/youtube/captions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, languages }),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Caption download failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  /** Download a YouTube video into a new job and start the pipeline. */
+  async importYouTube(
+    url: string,
+    sourceLanguage?: string,
+    targetLanguage?: string,
+    numSpeakers?: number,
+    transcript?: Array<{ text: string; start: number; end: number; speaker?: string }>,
+  ): Promise<UploadResponse> {
+    const response = await this._fetch(`${this.baseURL}/api/youtube/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url,
+        source_language: sourceLanguage,
+        target_language: targetLanguage,
+        num_speakers: numSpeakers,
+        transcript,
+      }),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Import failed: ${response.statusText}`)
+    }
+    return response.json()
   }
 
 
@@ -1710,6 +1851,60 @@ class DubVerseAPIClient {
     return response.json()
   }
 
+  // ── Scoped lip-sync (pay per selected segment) ──────────────────────────
+  async getLipsyncSelection(jobId: string): Promise<string[]> {
+    const res = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/lipsync-selection`)
+    if (!res.ok) return []
+    const data = await res.json()
+    return (data.segment_ids || []).map(String)
+  }
+
+  async putLipsyncSelection(jobId: string, segmentIds: string[]): Promise<void> {
+    await this._fetch(`${this.baseURL}/api/jobs/${jobId}/lipsync-selection`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ segment_ids: segmentIds }),
+    })
+  }
+
+  // ── Page-level text lock — seal every line's words at once ───────────────
+  async getTextLock(jobId: string): Promise<boolean> {
+    const res = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/text-lock`)
+    if (!res.ok) return false
+    return !!(await res.json()).locked
+  }
+
+  async setTextLock(jobId: string, locked: boolean): Promise<void> {
+    await this._fetch(`${this.baseURL}/api/jobs/${jobId}/text-lock`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ locked }),
+    })
+  }
+
+  async getLipsyncQuote(jobId: string): Promise<{
+    available: boolean; scoped: boolean; range_count: number
+    selected_seconds: number; cost_usd: number; charge_seconds: number
+    wallet_seconds: number; shortfall_seconds: number; shortfall_cents: number
+    bypassed?: boolean
+    synced_selection: string[] | null; current_selection: string[]
+  } | null> {
+    const res = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/lipsync-quote`)
+    if (!res.ok) return null
+    return res.json()
+  }
+
+  /** Render cost quote for the cost counter — needed_seconds is 0 when the
+   *  job was already billed (re-renders are free). */
+  async getQuotaEstimate(jobId: string): Promise<{
+    already_billed: boolean; needed_seconds: number; ok: boolean
+    shortfall_cents: number; bypassed?: boolean
+  } | null> {
+    const res = await this._fetch(`${this.baseURL}/api/quota/estimate/${jobId}`)
+    if (!res.ok) return null
+    return res.json()
+  }
+
   async remixDub(jobId: string, opts?: { lipsync?: boolean }): Promise<RemixResponse> {
     const qs = opts?.lipsync ? '?lipsync=true' : ''
     const response = await this._fetch(`${this.baseURL}/api/dub/remix/${jobId}${qs}`, {
@@ -1761,6 +1956,8 @@ class DubVerseAPIClient {
     start?: number; end?: number
     sync_score?: number; correlation?: number; offset_ms?: number
     face_coverage?: number; severity?: string; reason?: string
+    visual?: LipSyncWindowResult['visual']
+    audio?: LipSyncWindowResult['audio']
   }> {
     const res = await this._fetch(`${this.baseURL}/api/analyze-lipsync/${jobId}`, {
       method: 'POST',
@@ -1785,11 +1982,19 @@ class DubVerseAPIClient {
       paired_with_next?: boolean
       text?: string
       text_locked?: boolean
+      text_edit_locked?: boolean
       fade_in?: number
       fade_out?: number
       // Promote a staged take: backend sets BOTH path and committed_audio_url
       // so the next rebuild merges the auditioned audio.
       staged_path?: string
+      // Explicit human-review signal: releases a translation_flagged segment
+      // to TTS. Never inferred from other fields — see routes.py commit notes.
+      clear_translation_flag?: boolean
+      // Re-arms the TTS gate after a failed "Clear & dub" so the segment
+      // stays in the review queue instead of going silent.
+      set_translation_flag?: boolean
+      flag_reason?: string | null
     }
   ): Promise<void> {
     // Edits commit as they are made, so this call IS the save — a failure here
@@ -1800,6 +2005,10 @@ class DubVerseAPIClient {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify(data),
+      // A small JSON PATCH has no business taking 30s; without a ceiling a hung
+      // connection held handleSaveStaged's sequential await open forever and
+      // the Save spinner with it.
+      signal: AbortSignal.timeout(30000),
     })
     if (!res.ok) {
       const detail = await this._detail(res).catch(() => res.statusText)

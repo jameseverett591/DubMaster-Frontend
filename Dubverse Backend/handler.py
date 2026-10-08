@@ -818,7 +818,7 @@ def handler(event):
     def _run_transcribe():
         t0 = time.time()
         if _lang_norm in _CHINESE_LANGS:
-            # Multi-engine pipeline: Deepgram → Tencent → Paraformer → Whisper
+            # Multi-engine pipeline: Deepgram → Paraformer → Whisper
             # Passes separated vocals so the engines get the cleanest signal.
             logger.info(f"[TRANSCRIBE] Chinese language '{language}' — using multi-engine Chinese pipeline")
             result = transcribe_cantonese(

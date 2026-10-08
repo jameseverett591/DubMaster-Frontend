@@ -36,11 +36,12 @@ const CLASS_META: Record<RuleClass, { label: string; hint: string }> = {
   persona:         { label: 'Speaker persona', hint: 'Pin a character profile to a speaker' },
   stance:          { label: 'Register / stance', hint: 'Scene-style directive (e.g. dismissal language in confrontations)' },
   translation_fix: { label: 'Translation fix', hint: 'Force an exact target line for a recurring source line' },
+  pronunciation:   { label: 'Pronunciation',   hint: 'How a term is SPOKEN — display text unchanged (e.g. Ip Man → Yip Man)' },
   delivery:        { label: 'Voice / delivery', hint: 'Emotion / speed / pitch defaults for a speaker' },
 }
 
 const CLASS_ORDER: RuleClass[] = [
-  'translation_fix', 'name_mapping', 'glossary', 'persona', 'stance', 'delivery',
+  'translation_fix', 'pronunciation', 'name_mapping', 'glossary', 'persona', 'stance', 'delivery',
 ]
 
 function RuleRow({
@@ -459,7 +460,11 @@ export function AddRuleForm({
         <input
           value={source}
           onChange={e => setSource(e.target.value)}
-          placeholder={cls === 'stance' ? 'Scene description (optional)' : 'Source text / name / term'}
+          placeholder={
+            cls === 'stance' ? 'Scene description (optional)'
+              : cls === 'pronunciation' ? 'As displayed (e.g. Ip Man)'
+              : 'Source text / name / term'
+          }
           className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-[11px] text-white outline-none focus:border-slate-500"
         />
       )}
@@ -470,6 +475,7 @@ export function AddRuleForm({
         placeholder={
           cls === 'stance' ? 'Directive (e.g. "use dismissal language, never invitation")'
             : cls === 'delivery' ? 'Defaults (e.g. emotion=calm, speed=0.95)'
+            : cls === 'pronunciation' ? 'Speak it as (e.g. Yip Man)'
             : 'Target / forced rendering'
         }
         className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-[11px] text-white outline-none focus:border-slate-500"

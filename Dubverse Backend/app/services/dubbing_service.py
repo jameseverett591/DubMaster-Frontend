@@ -28,6 +28,13 @@ from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
 from app.services.respeecher_service import respeecher_tts, SEED_HISTORY_MAX
 from app.services import tts_usage
+from app.services import path_safety
+from app.services.rulebook import (
+    apply_pronunciations,
+    load_global_rules,
+    load_job_rules,
+    resolve_rules,
+)
 from app.services.translation_service import (
     translation_service,
     natural_duration,
@@ -163,6 +170,60 @@ MEANING_DIVERGENCE_THRESHOLD = 0.7
 # keep their full music-and-effects bed. Remove this once the RunPod worker
 # returns the stems it already produces on GPU.
 ACCOMPANIMENT_MAX_DURATION_S = 600
+
+# Bounds concurrent emotion2vec inference during the auto-emotion pre-pass —
+# unbounded gather would fire one ffmpeg + model call per segment at once.
+_EMOTION2VEC_MAX_CONCURRENT = 4
+_emotion2vec_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _get_emotion2vec_semaphore() -> asyncio.Semaphore:
+    global _emotion2vec_semaphore
+    if _emotion2vec_semaphore is None:
+        _emotion2vec_semaphore = asyncio.Semaphore(_EMOTION2VEC_MAX_CONCURRENT)
+    return _emotion2vec_semaphore
+
+
+def _phonetic_respelling(
+    text: str,
+    pronunciations: Optional[Dict[str, str]] = None,
+    label: str = "",
+) -> str:
+    """Spoken-form respelling for TTS — the display/transcript text is never
+    touched. Built-in defaults (Ip Man → "Yip Man", stray Master Jin
+    romanisations → "Master Jin") apply first; rulebook `pronunciation` rules
+    then layer on top, so the director's explicit decision wins.
+    """
+    out = re.sub(r'\bIp Man\b', 'Yip Man', text, flags=re.IGNORECASE)
+    out = re.sub(
+        r'\bMaster (?:Shin|Sheen|Xin|Xing|Kin|Gam)\b',
+        'Master Jin', out, flags=re.IGNORECASE,
+    )
+    out = apply_pronunciations(out, pronunciations)
+    if out != text:
+        logger.info(f"[PHONETIC]{label}: {text!r} -> {out!r}")
+    return out
+
+
+def stamp_job_edited(data) -> None:
+    """Record, on the server's clock, that this job changed in a way the film
+    does not yet contain.
+
+    Export compares this against the rendered film's timestamp to refuse a stale
+    export. It has to be stamped here rather than trusted from the browser: the
+    editor stamps committed_at in its own store, but no route persists it, so a
+    reload or a direct call would find nothing and let a stale film through. A
+    server stamp also removes any dependence on the client's clock.
+
+    Nothing clears it: the comparison is by time, so the next render simply
+    writes a newer film and the job reads as current again.
+    """
+    # A legacy segments.json is a bare LIST of segments with nowhere to put a
+    # document field. Stamping one raised TypeError and lost the write, so skip
+    # it: those jobs fall back to the committed_at comparison in the guard.
+    if not isinstance(data, dict):
+        return
+    data["last_edit_at"] = datetime.utcnow().isoformat() + "Z"
 
 
 def atomic_write_json(path: str, data, indent: int = 2) -> None:
@@ -902,6 +963,133 @@ class DubbingService:
 
         return speaker_to_voice
 
+    # emotion2vec labels that map directly onto the manual emotion picker's
+    # vocabulary (dubverse-editor.tsx EMOTIONS). "neutral"/"other"/"unknown"
+    # are deliberately left out — no tag is the correct output for flat
+    # delivery, not a forced label.
+    _E2V_TO_FISH_EMOTION = {
+        "angry": "Angry",
+        "disgusted": "Disgusted",
+        "fearful": "Fearful",
+        "happy": "Happy",
+        "sad": "Sad",
+        "surprised": "Surprised",
+    }
+    # Below this score the top label isn't distinguishable enough from noise
+    # to justify overriding a line with a forced emotional performance —
+    # 9-way softmax baseline is ~0.11, so 0.35 requires real dominance.
+    _E2V_MIN_CONFIDENCE = 0.35
+    # On acoustically out-of-distribution input (e.g. a screen re-recording or
+    # phone-filmed TV) emotion2vec does not fail soft - the softmax collapses to
+    # ~1.0 on one label for nearly every segment (observed: 18/23 segments at
+    # angry=1.0000 incl. calm lines, while clean Cantonese/English sources give
+    # distributed 0.3-0.8 scores). Distrust the pass only when the collapse is
+    # near-total: a genuinely hostile scene can saturate ~65-70% of lines and
+    # be correct (verified: Ip Man 3 confrontation = 68%), while OOD audio
+    # collapses to ~85%+ (verified: screen re-recording = 87%).
+    _E2V_SATURATION_SCORE = 0.98
+    _E2V_SATURATION_FRAC = 0.8
+
+    async def _detect_segment_emotions_auto(
+        self,
+        transcript: List[Dict],
+        audio_path: str,
+    ) -> None:
+        """Run emotion2vec on every segment's source audio and stamp
+        ``segment["auto_emotion"]`` in place.
+
+        This is the automatic fallback for the Fish Audio emotion directive
+        when no manual per-line override exists and Velma's STT emotion
+        signal is unavailable (i.e. every Chinese/Cantonese job today — see
+        AGENTS.md/dubbing_service.py history). Runs BEFORE segment_id
+        stamping/translation so the field rides along through split/merge via
+        the ``{**seg, ...}`` copy pattern used throughout translation_service.
+
+        Best-effort only: any failure (model unavailable, ffmpeg failure,
+        one bad segment) must never block or slow the dub beyond the bounded
+        per-segment timeout — segments simply keep no auto_emotion, same as
+        today.
+        """
+        try:
+            from app.services import emotion2vec_service
+        except Exception as _imp_err:
+            logger.warning(f"[AUTO-EMOTION] emotion2vec_service unavailable: {_imp_err}")
+            return
+
+        if not audio_path or not os.path.exists(audio_path):
+            logger.info("[AUTO-EMOTION] No source audio available — skipping")
+            return
+
+        if not emotion2vec_service.is_enabled():
+            logger.info("[AUTO-EMOTION] emotion2vec dependencies not installed — skipping")
+            return
+
+        semaphore = _get_emotion2vec_semaphore()
+        candidates: List[tuple] = []
+
+        async def _detect_one(segment: Dict) -> None:
+            start = float(segment.get("start", 0.0))
+            end = float(segment.get("end", start))
+            duration = end - start
+            if duration < 0.5:
+                return
+
+            async with semaphore:
+                tmp_path = None
+                try:
+                    fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+                    os.close(fd)
+                    cmd = [
+                        "ffmpeg", "-y", "-ss", str(start), "-t", str(duration),
+                        "-i", audio_path, "-vn", "-ar", "16000", "-ac", "1",
+                        "-f", "wav", tmp_path,
+                    ]
+                    proc = await asyncio.to_thread(
+                        subprocess.run, cmd, capture_output=True, timeout=30
+                    )
+                    if proc.returncode != 0 or os.path.getsize(tmp_path) < 1000:
+                        return
+
+                    result = await asyncio.to_thread(
+                        emotion2vec_service.analyze_single_segment, tmp_path
+                    )
+                    if not result or not result.get("emotions"):
+                        return
+
+                    top = result["emotions"][0]
+                    label = top.get("label")
+                    score = float(top.get("score", 0.0))
+                    fish_emotion = self._E2V_TO_FISH_EMOTION.get(label)
+                    if fish_emotion and score >= self._E2V_MIN_CONFIDENCE:
+                        candidates.append((segment, fish_emotion, score))
+                except Exception as _seg_err:
+                    logger.warning(
+                        f"[AUTO-EMOTION] segment {start:.2f}-{end:.2f}s failed: {_seg_err}"
+                    )
+                finally:
+                    if tmp_path:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+
+        t0 = time.monotonic()
+        await asyncio.gather(*[_detect_one(seg) for seg in transcript])
+        saturated = sum(1 for _, _, s in candidates if s >= self._E2V_SATURATION_SCORE)
+        if candidates and saturated / len(candidates) > self._E2V_SATURATION_FRAC:
+            logger.warning(
+                f"[AUTO-EMOTION] {saturated}/{len(candidates)} predictions saturated "
+                "(~1.0 confidence) - audio likely out-of-distribution for emotion2vec "
+                "(re-recorded/low-quality capture); discarding all auto tags"
+            )
+            return
+        for segment, fish_emotion, _ in candidates:
+            segment["auto_emotion"] = fish_emotion
+        logger.info(
+            f"[AUTO-EMOTION] Tagged {len(candidates)}/{len(transcript)} segments "
+            f"in {time.monotonic() - t0:.1f}s"
+        )
+
     def _extract_speaker_references(
         self,
         transcript: List[Dict],
@@ -1063,6 +1251,8 @@ class DubbingService:
         character_profiles: Optional[List[Dict]] = None,
         dubbing_style: Optional[str] = None,
         localized_aliases: Optional[Dict[str, str]] = None,
+        pronunciations: Optional[Dict[str, str]] = None,
+        user_id: Optional[str] = None,
     ) -> Optional[Dict[str, str]]:
         logger.info(f"Starting dubbing for job {job_id}")
         logger.info(f"Voice mapping received: {voice_mapping}")
@@ -1075,6 +1265,21 @@ class DubbingService:
 
             # Normalize source language early so pre-translation cleanup can use it.
             source_norm = normalize_language_code(source_language, allow_auto=True)
+
+            # Rulebook pronunciation rules — resolve here so every caller gets
+            # them (the rulebook kwargs helper is not wired to all call sites).
+            # An explicitly passed map wins over resolved rules of the same key.
+            try:
+                _rb = resolve_rules(
+                    job_rules=load_job_rules(job_id),
+                    global_rules=load_global_rules(user_id) if user_id else [],
+                    source_language=source_norm,
+                )
+                pronunciations = {**(_rb.get("pronunciations") or {}), **(pronunciations or {})}
+                if pronunciations:
+                    logger.info(f"[PHONETIC] {len(pronunciations)} pronunciation rule(s) active")
+            except Exception as _rb_err:
+                logger.warning(f"[PHONETIC] rulebook resolve failed: {_rb_err}")
 
             # --- Recover per-segment voice assignments from a previous dub ---
             # This makes the speaker->voice mapping survive re-diarization or
@@ -1240,7 +1445,57 @@ class DubbingService:
                     logger.warning(f"[VOICE-CLONE] Extraction failed, using presets: {_ref_err}")
                     speaker_voice_refs = {}
             else:
-                logger.info("[VOICE-CLONE] Preset-only mode — no vocals or non-Fish provider")
+                logger.info("[VOICE-CLONE] Preset-only mode - no vocals or non-Fish provider")
+
+            # --- Upload clone refs as persistent Fish voice models ---
+            # Inline zero-shot refs force the msgpack request on s2-pro --
+            # the older model, where composed [bracket] directives never
+            # parse. A persistent model is just a reference_id: it takes
+            # the JSON /v1/tts path on s2.1-pro, so emotion directives
+            # (incl. auto_emotion) reach cloned voices too, and Fish
+            # documents pre-uploaded models as higher quality and lower
+            # latency than inline cloning. speaker_models.json persists
+            # per job so re-dubs and regens reuse the same model instead
+            # of re-uploading.
+            speaker_models: Dict[str, str] = {}
+            _sm_path = os.path.join(output_dir, "speaker_models.json")
+            try:
+                if os.path.exists(_sm_path):
+                    with open(_sm_path, encoding="utf-8") as _sf:
+                        speaker_models = {
+                            str(k): str(v) for k, v in json.load(_sf).items()
+                        }
+            except Exception:
+                speaker_models = {}
+            if provider_name_check == "fish-audio" and speaker_voice_refs:
+                for _spk, _r in speaker_voice_refs.items():
+                    if self._explicit_voice_for_speaker(_spk, voice_mapping):
+                        continue  # user-assigned voice wins - no clone needed
+                    if speaker_models.get(_spk):
+                        continue  # reuse the model uploaded for a prior pass
+                    _mid = await fish_audio_tts.create_voice_model(
+                        [ref["audio"] for ref in _r], f"dub-{job_id[:8]}-{_spk}"
+                    )
+                    if _mid:
+                        speaker_models[_spk] = _mid
+                        logger.info(f"[VOICE-CLONE] {_spk} -> uploaded model {_mid}")
+                try:
+                    with open(_sm_path, "w", encoding="utf-8") as _sf:
+                        json.dump(speaker_models, _sf)
+                except Exception as _w:
+                    logger.warning(f"[VOICE-CLONE] could not persist speaker_models: {_w}")
+
+            # --- Auto-detect per-segment emotion from the source audio ---
+            # Must also happen BEFORE translation/segment_id stamping so
+            # auto_emotion rides along through split/merge via the
+            # {**seg, ...} copy pattern in translation_service.py. Runs
+            # regardless of TTS provider — cheap enough, and future
+            # providers can read it too.
+            if provider_name_check == "fish-audio" and video_path and os.path.exists(video_path):
+                try:
+                    await self._detect_segment_emotions_auto(transcript, video_path)
+                except Exception as _emo_err:
+                    logger.warning(f"[AUTO-EMOTION] Pre-pass failed, continuing without it: {_emo_err}")
 
             target_norm = normalize_language_code(target_language, strict=True)
 
@@ -1513,21 +1768,10 @@ class DubbingService:
                         logger.warning(f"[TTS] Segment {i}: text was entirely a placeholder — skipping")
                         return {"index": i, "skipped": True, "reason": "unresolved_placeholder"}
 
-                # TTS-only phonetic substitutions — display/transcript text unchanged
-                tts_text = re.sub(r'\bIp Man\b', 'Yip Man', text, flags=re.IGNORECASE)
-                # Canonical name is "Master Jin", matching the full name
-                # "Jin Shan Zhao" used on his introduction. English TTS already
-                # says "Jin" as /dʒɪn/, which is correct for 金, so no
-                # respelling is needed. Normalise any stray romanisation that
-                # slipped past the glossary so the spoken name matches the
-                # subtitle instead of diverging from it.
-                tts_text = re.sub(
-                    r'\bMaster (?:Shin|Sheen|Xin|Xing|Kin|Gam)\b',
-                    'Master Jin', tts_text, flags=re.IGNORECASE,
-                )
-                tts_text = re.sub(r'\bWing Chun\b', 'Wing Chun', tts_text)  # already correct
-                if tts_text != text:
-                    logger.info(f"[PHONETIC] seg {i}: {text!r} -> {tts_text!r}")
+                # TTS-only phonetic substitutions — display/transcript text
+                # unchanged. Built-in respellings first, then any rulebook
+                # `pronunciation` rules for this job.
+                tts_text = _phonetic_respelling(text, pronunciations, f" seg {i}")
 
                 tts_provider, provider_name = self._get_tts_provider(target_norm)
                 voice_key = _voice_key
@@ -1579,7 +1823,17 @@ class DubbingService:
                             tts_kwargs = None
 
                 if provider_name == "fish-audio" and tts_kwargs is not None:
-                    seg_emotion = segment.get("emotion")
+                    # emotion: an explicit per-line editor override wins; otherwise
+                    # fall back to Velma's STT emotion_signal (skipped for all
+                    # Chinese/Cantonese jobs today, so normally empty there);
+                    # otherwise fall back to the emotion2vec auto-detection
+                    # pre-pass run on the separated source vocals above, which
+                    # actually does fire for Cantonese content.
+                    seg_emotion = (
+                        segment.get("emotion")
+                        or segment.get("velma_emotion")
+                        or segment.get("auto_emotion")
+                    )
                     # Character traits (per-speaker) + emotion (per-line) fold into ONE
                     # composed S2 directive rather than separate stacked brackets.
                     speaker_traits = (traits_mapping or {}).get(speaker) or []
@@ -1591,9 +1845,12 @@ class DubbingService:
                     #   1. EXPLICIT user/library assignment -> reference_id -> JSON
                     #      /v1/tts -> s2.1-pro, composed directive PARSES. Costs no
                     #      Fish voice slot: the model already lives on Fish's side.
-                    #   2. Zero-shot clone of the source actor -> SDK msgpack ->
-                    #      s2-pro, directive inert. Preserves the ORIGINAL actor's
-                    #      timbre, so it stays the default when nothing is assigned.
+                    #   2. Uploaded persistent clone model -> reference_id -> JSON
+                    #      /v1/tts -> s2.1-pro, directive PARSES. Same actor
+                    #      timbre as zero-shot, newer model, emotion live.
+                    #   3. Zero-shot clone of the source actor -> SDK msgpack ->
+                    #      s2-pro, directive inert. Fallback only, when model
+                    #      upload failed for this speaker.
                     #
                     # Previously the explicit assignment was resolved into
                     # tts_kwargs["voice_id"] and then unconditionally overridden by
@@ -1603,11 +1860,19 @@ class DubbingService:
                     # Must test against raw voice_mapping, NOT speaker_to_voice: the
                     # latter is gender-pool-filled for every speaker (Passes 2/3), so
                     # it reports "assigned" for everyone and would kill cloning.
-                    # A per-segment committed_voice_id is also a deliberate assignment.
-                    _explicit = (
-                        segment.get("committed_voice_id")
-                        or self._explicit_voice_for_speaker(speaker, voice_mapping)
-                    )
+                    #
+                    # segment["committed_voice_id"] is NOT used here, even though it
+                    # looks like the same signal: PATCH /segment/commit sets it on
+                    # every ordinary review-and-approve save, not only when a voice
+                    # was deliberately picked. A job dubbed once, reviewed, then
+                    # re-dubbed would otherwise have every speaker permanently
+                    # locked out of zero-shot cloning after that first pass —
+                    # confirmed on a real job: extraction succeeded ("Extracted
+                    # references for 4 speakers") but every segment still logged
+                    # "assigned ... no voice slot used" because each one already
+                    # carried a committed_voice_id from the prior review pass.
+                    _explicit = self._explicit_voice_for_speaker(speaker, voice_mapping)
+                    _model_id = speaker_models.get(speaker)
                     _refs = speaker_voice_refs.get(speaker)
                     if _explicit:
                         # voice_id was already resolved from this same assignment at
@@ -1617,15 +1882,50 @@ class DubbingService:
                             f"[VOICE-PATH] {speaker}: assigned {_explicit!r} "
                             f"(Path A / s2.1-pro, directives live, no voice slot used)"
                         )
+                    elif _model_id:
+                        tts_kwargs["voice_id"] = _model_id
+                        voice_id = _model_id
+                        logger.info(
+                            f"[VOICE-PATH] {speaker}: uploaded clone {_model_id[:8]}... "
+                            "(Path B2 / s2.1-pro, directives live)"
+                        )
                     elif _refs:
                         tts_kwargs["speaker_references"] = _refs
                         logger.info(
-                            f"[VOICE-PATH] {speaker}: zero-shot clone (Path B / s2-pro)"
+                            f"[VOICE-PATH] {speaker}: zero-shot clone (Path B / s2-pro,"
+                            " model upload unavailable)"
                         )
+
+                    # Generation pace: Fish's default cadence is measured —
+                    # slower than film dialogue — and the Phase B fit only
+                    # speeds up takes that overflow full_room, so a slow take
+                    # that fits its window stays slow. Request the speed that
+                    # lands the predicted duration inside the same comfortable
+                    # window Phase B sanctions (segment span + up to 80% of the
+                    # trailing gap), so the take arrives at dialogue pace and
+                    # seg["speed"] records a real number instead of always 1.0.
+                    _seg_dur = max(
+                        0.2,
+                        float(segment.get("end", 0) or 0) - float(segment.get("start", 0) or 0),
+                    )
+                    _pred_dur = natural_duration(tts_text or text, _voice_key)
+                    if i + 1 < len(transcript):
+                        _gap = float(transcript[i + 1].get("start", 0) or 0) - float(segment.get("end", 0) or 0)
+                        _expand = min(max(_pred_dur - _seg_dur, 0.0), _gap * 0.8) if _gap > 0 else 0.0
+                        _gen_window = _seg_dur + _expand
+                    else:
+                        _gen_window = _seg_dur
+                    _gen_speed = max(
+                        MIN_SPEED_RATIO,
+                        min(self._FIT_MAX_SPEED, _pred_dur / max(0.2, _gen_window)),
+                    )
+                    tts_kwargs["speed"] = round(_gen_speed, 3)
+                    fish_speed_applied = abs(_gen_speed - 1.0) > 0.01
 
                     logger.info(
                         f"[FISH-TTS] seg {i} speaker={speaker} gender={speaker_gender} "
-                        f"voice_id={voice_id!r} text={text[:60]!r}"
+                        f"voice_id={voice_id!r} speed={tts_kwargs['speed']:.2f} "
+                        f"text={text[:60]!r}"
                     )
                 elif tts_kwargs is not None:
                     # ElevenLabs path: pass through user pitch_shift for SSML / post-processing
@@ -2039,7 +2339,19 @@ class DubbingService:
                 )
 
                 # --- Flag generation ---
-                _flags = []
+                _flags = list(segment.get("flags") or [])
+                # Translation-stage flags (provider_failed, untranslated_source,
+                # empty_source) must reach the review queue — they only
+                # propagate as fields otherwise.
+                if segment.get("translation_flagged"):
+                    _flags.append({
+                        "code": segment.get("flag_reason") or "translation_flagged",
+                        "reason": next(
+                            (f.get("reason") for f in (segment.get("qc_findings") or [])
+                             if isinstance(f, dict)),
+                            "Translation flagged for human review",
+                        ),
+                    })
                 _adapted = segment.get("adapted_text") or text
                 if len(_adapted.split()) >= 2:
                     _conf = segment.get("confidence")
@@ -3239,6 +3551,18 @@ class DubbingService:
             copy_len = end - offset
             seg_data = data[:copy_len].copy()
 
+            # Clip gain from the block's top-edge drag. A plain multiplier, not
+            # an envelope — composes with the fades below exactly as the browser
+            # stitch does, and unlike a fade it leaves the level flat across the
+            # whole take.
+            _vraw = seg.get("volume")
+            # volume=0 is a director-set MUTE — `or 1.0` would revive it at
+            # full level. Only an absent value defaults to unity.
+            _vol = float(1.0 if _vraw is None else _vraw)
+            _vol = max(0.0, min(1.0, _vol))
+            if _vol < 1.0:
+                seg_data *= _vol
+
             # Apply per-segment fade handles. fade_in/fade_out are seconds, stored
             # in segments.json by the editor. They are independent of overlap — a
             # segment with a long fade_out fades out over its own tail regardless of
@@ -3352,6 +3676,13 @@ class DubbingService:
                 fade_in = float(seg.get("fade_in") or 0)
                 fade_out = float(seg.get("fade_out") or 0)
                 fade_filters = []
+                # Clip gain from the top-edge drag — a level, not an envelope,
+                # so it orders before the fades and multiplies through them.
+                _vraw = seg.get("volume")
+                # volume=0 is a director-set MUTE — `or 1.0` would revive it.
+                _vol = float(1.0 if _vraw is None else _vraw)
+                if 0.0 <= _vol < 1.0:
+                    fade_filters.append(f"volume={_vol:.3f}")
                 if fade_in > 0:
                     fade_filters.append(f"afade=t=in:st=0:d={fade_in:.3f}:curve=qsin")
                 if fade_out > 0 and fade_out < slot_dur:
@@ -3828,11 +4159,17 @@ class DubbingService:
                 continue
             if seg_end <= start or seg_start >= end:
                 continue
-            seg_path = audio_url
-            if not os.path.isabs(seg_path):
-                if seg_path.startswith("/media/"):
-                    seg_path = seg_path.split("/")[-1]
-                seg_path = os.path.join(output_dir, seg_path)
+            # The URL/path comes from segments.json, which the client can write.
+            # Resolve it and refuse anything outside this job's folder — absolute
+            # paths and "../" included — instead of handing it to ffmpeg.
+            try:
+                seg_path = path_safety.resolve_job_file(output_dir, audio_url)
+            except path_safety.UnsafePath:
+                logger.warning(
+                    f"[SCENE-PREVIEW] job={job_id}: skipping segment audio outside the job folder "
+                    f"(transcript_index={seg.get('transcript_index')})"
+                )
+                continue
             merge_segments.append({
                 "path": seg_path,
                 "start": seg_start,
@@ -4225,6 +4562,7 @@ class DubbingService:
         stage: bool = False,
         text: Optional[str] = None,
         allow_adapt_fit: bool = False,
+        user_id: Optional[str] = None,
     ) -> Dict:
         output_dir = os.path.join(self.dubbed_dir, job_id)
         segments_path = os.path.join(output_dir, "segments.json")
@@ -4407,6 +4745,23 @@ class DubbingService:
             tts_text_processed = self._nuance_translator.apply_markers_to_text(
                 tts_text_processed, nuance_markers, engine="fish_audio"
             )
+        # Rulebook pronunciation rules resolve once, before the verbatim fork —
+        # Respeecher sources its text from tts_text_processed (not speak_text),
+        # so the map must be in scope on both sides. Built-in respellings
+        # (Ip Man → "Yip Man") plus job/global rules; applied after marker/pause
+        # processing so marker char offsets stay valid against the displayed
+        # text. use_text is never touched, so the seg["text"] write-back keeps
+        # the canonical spelling.
+        _pron: Dict[str, str] = {}
+        try:
+            _rb = resolve_rules(
+                job_rules=load_job_rules(job_id),
+                global_rules=load_global_rules(user_id) if user_id else [],
+            )
+            _pron = _rb.get("pronunciations") or {}
+        except Exception as _pron_err:
+            logger.warning(f"[PHONETIC] seg {segment_index}: rulebook resolve failed: {_pron_err}")
+
         # Verbatim override: the user authored the exact line to synthesise, so the
         # composed directive is skipped. Engine-agnostic — Fish parses [tags] in it,
         # Respeecher reads the punctuation and structure as written.
@@ -4414,7 +4769,9 @@ class DubbingService:
             speak_text = tts_text
             directive = ""
         else:
-            speak_text = tts_text_processed
+            speak_text = _phonetic_respelling(
+                tts_text_processed, _pron, f" seg {segment_index}"
+            )
             # One composed S2 directive: traits + emotion + nuance delivery/cadence
             # clauses + the free-text write-in from the Nuances panel (last).
             directive = compose_fish_directive(
@@ -4535,8 +4892,19 @@ class DubbingService:
         # A performed segment re-renders from its stored recording. If that file
         # is gone there is nothing to convert — fall back rather than fail, since
         # the text is still there and Fish can speak it.
+        # perf_path is a stored recording that is later opened and uploaded to
+        # ElevenLabs. It can be set from the client (a synced new segment carries
+        # arbitrary keys), so only a file inside this job's folder may be used.
+        _perf = None
+        if seg.get("perf_path"):
+            try:
+                _perf = path_safety.resolve_job_file(output_dir, seg["perf_path"])
+            except path_safety.UnsafePath as _perf_err:
+                logger.warning(
+                    f"[ENGINE] seg {segment_index}: refused perf_path outside the job folder "
+                    f"({_perf_err}) — treating the performance as missing"
+                )
         if use_engine == "elevenlabs-sts":
-            _perf = seg.get("perf_path")
             if not _perf or not os.path.exists(_perf):
                 logger.warning(
                     f"[ENGINE] seg {segment_index}: no stored performance -> fish-audio"
@@ -4586,6 +4954,9 @@ class DubbingService:
             # marker pass, which Respeecher would otherwise read aloud.
             resp_text = re.sub(r"\[[^\]]*\]", " ", tts_text_processed)
             resp_text = re.sub(r"\s+", " ", resp_text).strip() or tts_text_processed
+            # Pronunciation rules apply to every engine, not just Fish —
+            # Respeecher voices "Ip Man" as "eye-pee" just the same.
+            resp_text = _phonetic_respelling(resp_text, _pron, f" seg {segment_index} (resp)")
             # Respeecher exposes no directive, speed or pitch parameters. Its only
             # lever on duration is which take we keep, so hand it the slot and let
             # it choose; staged speed is applied separately below.
@@ -4622,7 +4993,7 @@ class DubbingService:
             # of truth here, so text edits, emotion pills and Delivery Scripts do
             # NOT reach this engine — same as Respeecher, for the same reason:
             # there is no directive channel to put them through.
-            with open(seg["perf_path"], "rb") as _pf:
+            with open(_perf, "rb") as _pf:
                 _perf_bytes = _pf.read()
             _payload = await elevenlabs_tts.speech_to_speech(
                 audio_bytes=_perf_bytes,
@@ -4632,7 +5003,7 @@ class DubbingService:
                 # Replay the isolation setting the take was made with, or the
                 # re-render would differ from the audio it is meant to reproduce.
                 remove_background_noise=bool(seg.get("perf_denoise")),
-                filename=os.path.basename(seg["perf_path"]),
+                filename=os.path.basename(_perf),
             )
             result = {"path": audio_path, "engine": "elevenlabs-sts"} if _payload else None
         else:
@@ -4745,10 +5116,16 @@ class DubbingService:
             if user_committed_timing and actual_dur > slot_dur + 0.05:
                 target = max(0.2, slot_dur)
                 stretched_path = os.path.join(output_dir, f"segment_{segment_index:04d}{_take_suffix}_fit.mp3")
+                # Same 1.5x quality ceiling as the non-committed-timing branch
+                # below (and the main dub loop's _FIT_MAX_SPEED) — this branch
+                # used to allow up to 2.0x, which is audibly degraded (clipped
+                # attacks, robotic/"transistorized" artifacts). A ratio that
+                # still can't fit at 1.5x falls through to the hard-trim
+                # fallback right below, same as everywhere else in this file.
                 stretched = await asyncio.to_thread(
                     self._adjust_audio_duration,
                     final_path, stretched_path, target,
-                    min_speed=0.5, max_speed=2.0,
+                    min_speed=0.5, max_speed=self._FIT_MAX_SPEED,
                 )
                 if stretched and os.path.exists(stretched_path):
                     final_path = stretched_path
@@ -5101,6 +5478,7 @@ class DubbingService:
 
         if not stage:
             data["regenerated_at"] = datetime.utcnow().isoformat() + "Z"
+            stamp_job_edited(data)  # a new take means the rendered film is out of date
             atomic_write_json(segments_path, data)
 
             try:
@@ -5167,10 +5545,44 @@ class DubbingService:
         if not video_duration:
             video_duration = await asyncio.to_thread(self._get_video_duration, video_path)
 
-        merge_segments = [
-            {"path": seg["path"], "start": seg["start"], "end": seg["end"]}
-            for seg in segments
-        ]
+        # A segment with no renderable audio must not kill the film. Rows reach
+        # segments.json without a usable path — a staged text edit synced before
+        # TTS ran, or a commit that carried committed_audio_url but never
+        # stamped path back. Recover the file from the media URL first; when
+        # nothing points at a real file, the line renders as silence and the
+        # build carries on — a missing line is fixable in the editor, a dead
+        # render is not.
+        # Both `path` and the media URLs are client-writable (PATCH /segment/commit,
+        # PUT /segments), so resolution goes through path_safety: a candidate outside
+        # this job's folder is skipped as if it did not exist, never opened.
+        def _resolve_segment_audio(seg: Dict) -> Optional[str]:
+            return path_safety.resolve_segment_audio(seg, output_dir, label=f"[REMIX] job={job_id}")
+
+        merge_segments = []
+        silent_indices = []
+        for seg in segments:
+            p = _resolve_segment_audio(seg)
+            if p is None:
+                silent_indices.append(seg.get("transcript_index"))
+                continue
+            merge_segments.append({
+                "path": p,
+                "start": seg.get("start") or seg.get("start_time") or 0,
+                "end": seg.get("end") or seg.get("end_time") or 0,
+                # Fades and clip gain are part of the mix the director approved.
+                # The mixdown reads them — dropping them here made the export
+                # ignore what the preview played.
+                "fade_in": seg.get("fade_in"),
+                "fade_out": seg.get("fade_out"),
+                "volume": seg.get("volume"),
+            })
+        if silent_indices:
+            logger.warning(
+                f"[REMIX] job={job_id}: {len(silent_indices)} segment(s) have no audio — "
+                f"rendered silent (transcript_index={silent_indices})"
+            )
+        if not merge_segments:
+            raise RuntimeError(f"Remix failed: no segments have audio for job {job_id}")
 
         merged_audio = os.path.join(output_dir, "dubbed_audio.wav")
         ok = await asyncio.to_thread(
@@ -5244,6 +5656,10 @@ class DubbingService:
             "status": "ok",
             "remix_duration_ms": elapsed_ms,
             "segments_used": len(merge_segments),
+            # Lines that had no audio to mix — rendered silent. The frontend
+            # surfaces this so "the film rendered" does not read as "every
+            # line made it in".
+            "segments_silent": silent_indices,
         }
 
 

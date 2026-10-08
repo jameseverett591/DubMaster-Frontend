@@ -373,12 +373,13 @@ function getVelmaVoiceRecommendations(
 
   if (segment.velma_accent && voices.length > 0) {
     const accentLower = segment.velma_accent.toLowerCase()
-    const match = voices.find(
-      (v) => v.accent && v.accent.toLowerCase().includes(accentLower)
-    )
+    const match = voices.find((v) => {
+      const accent = v.labels?.accent
+      return accent && accent.toLowerCase().includes(accentLower)
+    })
     if (match) {
       recs.push({
-        id: match.id,
+        id: match.voice_id,
         name: match.name,
         reason: `Matches original ${segment.velma_accent} accent`,
       })
@@ -387,10 +388,10 @@ function getVelmaVoiceRecommendations(
 
   if (typeof segment.velma_deepfake_score === 'number' && segment.velma_deepfake_score > 0.55) {
     const current = segment.speaker_id
-    const alt = voices.find((v) => v.id !== current)
+    const alt = voices.find((v) => v.voice_id !== current)
     if (alt) {
       recs.push({
-        id: alt.id,
+        id: alt.voice_id,
         name: alt.name,
         reason: 'Lower deepfake risk — current voice sounds synthetic',
       })

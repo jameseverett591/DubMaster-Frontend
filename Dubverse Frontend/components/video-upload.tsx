@@ -25,39 +25,76 @@ const TARGET_LANG_STORAGE_KEY = "dubverse_target_language"
 // Source languages the ASR pipeline supports. "auto" lets Whisper detect.
 // "yue" (Cantonese) is critical — it's distinct from "zh" (Mandarin) and the
 // backend uses it to disable Paraformer and run Whisper-only for accuracy.
-const SOURCE_LANGUAGES: { code: string; name: string; flag: string }[] = [
-  { code: "auto", name: "Auto-detect", flag: "🌐" },
-  { code: "en", name: "English", flag: "🇺🇸" },
-  { code: "yue", name: "Cantonese", flag: "🇭🇰" },
-  { code: "zh", name: "Mandarin", flag: "🇨🇳" },
-  { code: "ja", name: "Japanese", flag: "🇯🇵" },
-  { code: "ko", name: "Korean", flag: "🇰🇷" },
-  { code: "es", name: "Spanish", flag: "🇪🇸" },
-  { code: "fr", name: "French", flag: "🇫🇷" },
-  { code: "de", name: "German", flag: "🇩🇪" },
-  { code: "it", name: "Italian", flag: "🇮🇹" },
-  { code: "pt", name: "Portuguese", flag: "🇵🇹" },
-  { code: "ar", name: "Arabic", flag: "🇸🇦" },
-  { code: "hi", name: "Hindi", flag: "🇮🇳" },
-  { code: "ru", name: "Russian", flag: "🇷🇺" },
-  { code: "nl", name: "Dutch", flag: "🇳🇱" },
+// Same catalogue the editor's language tab offers — keep the two in sync.
+//
+// Flags are generated from ISO 3166 alpha-2 codes at module load instead of
+// embedding regional-indicator emoji literals — surrogate pairs get corrupted
+// by editing tools on this checkout.
+const flagOf = (iso: string): string =>
+  String.fromCodePoint(...iso.split('').map((c) => 0x1f1e6 + c.charCodeAt(0) - 65))
+
+const DUB_LANGUAGES: { code: string; name: string; flag: string }[] = [
+  { code: 'yue', name: 'Cantonese', flag: flagOf('HK') },
+  { code: 'zh', name: 'Mandarin', flag: flagOf('CN') },
+  { code: 'en', name: 'English', flag: flagOf('US') },
+  { code: 'es', name: 'Spanish', flag: flagOf('ES') },
+  { code: 'fr', name: 'French', flag: flagOf('FR') },
+  { code: 'de', name: 'German', flag: flagOf('DE') },
+  { code: 'ja', name: 'Japanese', flag: flagOf('JP') },
+  { code: 'ko', name: 'Korean', flag: flagOf('KR') },
+  { code: 'vi', name: 'Vietnamese', flag: flagOf('VN') },
+  { code: 'th', name: 'Thai', flag: flagOf('TH') },
+  { code: 'hi', name: 'Hindi', flag: flagOf('IN') },
+  { code: 'gu', name: 'Gujarati', flag: flagOf('IN') },
+  { code: 'ta', name: 'Tamil', flag: flagOf('IN') },
+  { code: 'ar', name: 'Arabic', flag: flagOf('SA') },
+  { code: 'pt', name: 'Portuguese', flag: flagOf('PT') },
+  { code: 'ru', name: 'Russian', flag: flagOf('RU') },
+  { code: 'it', name: 'Italian', flag: flagOf('IT') },
+  { code: 'id', name: 'Indonesian', flag: flagOf('ID') },
+  { code: 'ms', name: 'Malay', flag: flagOf('MY') },
+  { code: 'tr', name: 'Turkish', flag: flagOf('TR') },
+  { code: 'tl', name: 'Filipino', flag: flagOf('PH') },
+  { code: 'km', name: 'Khmer', flag: flagOf('KH') },
+  { code: 'my', name: 'Burmese', flag: flagOf('MM') },
+  { code: 'bn', name: 'Bengali', flag: flagOf('BD') },
+  { code: 'ur', name: 'Urdu', flag: flagOf('PK') },
+  { code: 'te', name: 'Telugu', flag: flagOf('IN') },
+  { code: 'mr', name: 'Marathi', flag: flagOf('IN') },
+  { code: 'pa', name: 'Punjabi', flag: flagOf('IN') },
+  { code: 'si', name: 'Sinhala', flag: flagOf('LK') },
+  { code: 'fa', name: 'Persian', flag: flagOf('IR') },
+  { code: 'he', name: 'Hebrew', flag: flagOf('IL') },
+  { code: 'nl', name: 'Dutch', flag: flagOf('NL') },
+  { code: 'sv', name: 'Swedish', flag: flagOf('SE') },
+  { code: 'no', name: 'Norwegian', flag: flagOf('NO') },
+  { code: 'da', name: 'Danish', flag: flagOf('DK') },
+  { code: 'fi', name: 'Finnish', flag: flagOf('FI') },
+  { code: 'el', name: 'Greek', flag: flagOf('GR') },
+  { code: 'uk', name: 'Ukrainian', flag: flagOf('UA') },
+  { code: 'pl', name: 'Polish', flag: flagOf('PL') },
+  { code: 'cs', name: 'Czech', flag: flagOf('CZ') },
+  { code: 'sk', name: 'Slovak', flag: flagOf('SK') },
+  { code: 'hu', name: 'Hungarian', flag: flagOf('HU') },
+  { code: 'ro', name: 'Romanian', flag: flagOf('RO') },
+  { code: 'bg', name: 'Bulgarian', flag: flagOf('BG') },
+  { code: 'hr', name: 'Croatian', flag: flagOf('HR') },
+  { code: 'sr', name: 'Serbian', flag: flagOf('RS') },
+  { code: 'sw', name: 'Swahili', flag: flagOf('KE') },
+  { code: 'am', name: 'Amharic', flag: flagOf('ET') },
+  { code: 'yo', name: 'Yoruba', flag: flagOf('NG') },
+  { code: 'ig', name: 'Igbo', flag: flagOf('NG') },
+  { code: 'zu', name: 'Zulu', flag: flagOf('ZA') },
+  { code: 'pt-br', name: 'Portuguese, Brazil', flag: flagOf('BR') },
+  { code: 'es-mx', name: 'Spanish, Mexico', flag: flagOf('MX') },
 ]
 
-const TARGET_LANGUAGES: { code: string; name: string; flag: string }[] = [
-  { code: "en", name: "English", flag: "🇺🇸" },
-  { code: "es", name: "Spanish", flag: "🇪🇸" },
-  { code: "fr", name: "French", flag: "🇫🇷" },
-  { code: "de", name: "German", flag: "🇩🇪" },
-  { code: "it", name: "Italian", flag: "🇮🇹" },
-  { code: "pt", name: "Portuguese", flag: "🇵🇹" },
-  { code: "ja", name: "Japanese", flag: "🇯🇵" },
-  { code: "ko", name: "Korean", flag: "🇰🇷" },
-  { code: "zh", name: "Mandarin", flag: "🇨🇳" },
-  { code: "ar", name: "Arabic", flag: "🇸🇦" },
-  { code: "hi", name: "Hindi", flag: "🇮🇳" },
-  { code: "ru", name: "Russian", flag: "🇷🇺" },
-  { code: "nl", name: "Dutch", flag: "🇳🇱" },
+const SOURCE_LANGUAGES: { code: string; name: string; flag: string }[] = [
+  { code: 'auto', name: 'Auto-detect', flag: '🌐' },
+  ...DUB_LANGUAGES,
 ]
+
+const TARGET_LANGUAGES = DUB_LANGUAGES
 
 type PersistedFile = {
   id: string

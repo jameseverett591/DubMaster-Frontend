@@ -276,20 +276,21 @@ def _split_segment(
     seg: Dict[str, Any],
     split_sentence_idx: int,
     sentences: List[Tuple[str, int]],
+    new_speaker: bool = True,
 ) -> List[Dict[str, Any]]:
     """Split a segment at the given sentence boundary.
 
-    Returns two segments with alternating speaker labels. The first
-    segment keeps the original speaker; the second gets a new speaker
-    label (incrementing the speaker number).
+    With new_speaker=True (conversational rules) returns two segments with
+    alternating speaker labels. With new_speaker=False (the readability-only
+    "long-segment" split) both halves keep the original speaker — splitting a
+    monologue must not fabricate a second speaker who then gets a TTS voice.
     """
     original_speaker = seg.get("speaker", "speaker-1")
     # Extract speaker number from "speaker-N"
     speaker_match = re.search(r"speaker-(\d+)", original_speaker)
     base_num = int(speaker_match.group(1)) if speaker_match else 1
-    other_num = base_num + 1 if base_num == 1 else base_num - 1
     # Use base_num + 1 for the second speaker to avoid collision
-    other_speaker = f"speaker-{base_num + 1}"
+    other_speaker = f"speaker-{base_num + 1}" if new_speaker else original_speaker
 
     # Calculate the time offset for the split point
     # We split proportionally based on character position
@@ -391,7 +392,9 @@ def detect_turn_splits(
                 rule = "long-segment"
 
         if split_idx is not None and 0 < split_idx < len(sentences):
-            result = _split_segment(seg, split_idx, sentences)
+            result = _split_segment(
+                seg, split_idx, sentences, new_speaker=(rule != "long-segment")
+            )
             if len(result) == 2:
                 logger.info(
                     f"[TURN-DETECT] job={job_id} {rule} rule fired on "

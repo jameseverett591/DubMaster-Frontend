@@ -181,6 +181,13 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
   const [isAnalyzing, setIsAnalyzing] = useState(true)
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
   const [detectedVoices, setDetectedVoices] = useState<DetectedVoice[]>([])
+  // Speaker ids whose voice was deliberately changed via handleVoiceChange
+  // below, as opposed to still sitting at buildDetectedVoices' gender-pool
+  // default. Without this, every speaker's untouched default ("male-1",
+  // "female-1", ...) looked identical to a real pick once it reached the
+  // backend, permanently disabling zero-shot voice cloning for anyone who
+  // never touched the dropdown — which in practice was everyone.
+  const [userAssignedVoices, setUserAssignedVoices] = useState<Set<string>>(new Set())
   const [transcript, setTranscript] = useState<Transcript | null>(null)
   const [speakerGenders, setSpeakerGenders] = useState<Record<string, string> | null>(null)
   const [availableVoices, setAvailableVoices] = useState<Voice[]>([])
@@ -222,15 +229,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
       .catch(() => {})
   }, [])
 
-  // ── Load dubbing engines from backend ────────────────────────────────────
-  const [dubbingEngine, setDubbingEngine] = useState<'dubmaster' | 'vozo'>('dubmaster')
-  const [engineInfo, setEngineInfo] = useState<Record<string, { available: boolean; description: string; features: string[] }>>({})
 
-  useEffect(() => {
-    apiClient.getDubbingEngines()
-      .then(({ engines }) => setEngineInfo(engines))
-      .catch(() => {})
-  }, [])
 
   const handleSwitchProvider = async (provider: string) => {
     if (provider === ttsProvider || switchingProvider) return
@@ -445,6 +444,7 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
 
   const handleVoiceChange = (voiceId: string, newVoice: string) => {
     setDetectedVoices((prev) => prev.map((v) => (v.id === voiceId ? { ...v, selectedVoice: newVoice } : v)))
+    setUserAssignedVoices((prev) => new Set(prev).add(voiceId))
   }
 
   // Reset to original when switching sources
@@ -559,12 +559,22 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
       // Merge workspace detectedVoices with editor store speakerVoiceMap
       // Editor store takes priority because the Speaker Voice Panel is the
       // canonical voice assignment UI.
-      const { speakerVoiceMap, speakerPitchMap } = useEditorStore.getState()
+      const { speakerVoiceMap, speakerPitchMap, speakerVoiceSource } = useEditorStore.getState()
 
+      // Only send a speaker's voice if it was actually a deliberate pick —
+      // via the Speaker Voice Panel (speakerVoiceSource === 'user') or this
+      // workspace's own dropdown (userAssignedVoices). Sending every
+      // speaker's untouched gender-pool default is indistinguishable from a
+      // real choice once it reaches the backend, and the backend treats any
+      // populated entry as "the user picked this," which permanently
+      // disables zero-shot voice cloning for that speaker. Omitting the key
+      // lets the backend assign its own default AND clone the source voice.
       const voiceMapping: Record<string, string> = {}
       for (const v of detectedVoices) {
-        // Prefer editor store assignment; fall back to workspace default
-        voiceMapping[v.id] = speakerVoiceMap[v.id] || v.selectedVoice
+        const isDeliberate = speakerVoiceSource[v.id] === 'user' || userAssignedVoices.has(v.id)
+        if (isDeliberate) {
+          voiceMapping[v.id] = speakerVoiceMap[v.id] || v.selectedVoice
+        }
       }
 
       const transcriptSegments = transcript
@@ -608,7 +618,6 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
         target_language: targetLanguage,
         transcript: transcriptSegments,
         voice_mapping: voiceMapping,
-        dubbing_engine: dubbingEngine,
         ...(Object.keys(voiceSettings).length > 0 && { voice_settings: voiceSettings }),
       })
 
@@ -695,37 +704,20 @@ export function DubbingWorkspace({ video, onClose }: DubbingWorkspaceProps) {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
-              <DropdownMenuLabel>{t('Dubbing Engine')}</DropdownMenuLabel>
+              <DropdownMenuLabel>{t('TTS Engine')}</DropdownMenuLabel>
               <DropdownMenuSeparator />
-              <DropdownMenuRadioGroup value={dubbingEngine} onValueChange={(v) => setDubbingEngine(v as 'dubmaster' | 'vozo')}>
-                <DropdownMenuRadioItem value="dubmaster">
-                  DubMaster (Local)
+              <DropdownMenuRadioGroup value={ttsProvider} onValueChange={handleSwitchProvider}>
+                <DropdownMenuRadioItem value="elevenlabs" disabled={!providerInfo.elevenlabs?.available}>
+                  {t('ElevenLabs')}
                 </DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="vozo" disabled={!engineInfo.vozo?.available}>
-                  Vozo AI (Cloud)
+                <DropdownMenuRadioItem value="fish-audio" disabled={!providerInfo["fish-audio"]?.available}>
+                  Fish Audio S1 {providerInfo["fish-audio"]?.voice_cloning && "(Voice Clone)"}
                 </DropdownMenuRadioItem>
               </DropdownMenuRadioGroup>
-              {dubbingEngine === "dubmaster" && (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuLabel>{t('TTS Engine')}</DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuRadioGroup value={ttsProvider} onValueChange={handleSwitchProvider}>
-                    <DropdownMenuRadioItem value="elevenlabs" disabled={!providerInfo.elevenlabs?.available}>
-                      {t('ElevenLabs')}
-                    </DropdownMenuRadioItem>
-                    <DropdownMenuRadioItem value="fish-audio" disabled={!providerInfo["fish-audio"]?.available}>
-                      Fish Audio S1 {providerInfo["fish-audio"]?.voice_cloning && "(Voice Clone)"}
-                    </DropdownMenuRadioItem>
-                  </DropdownMenuRadioGroup>
-                </>
-              )}
             </DropdownMenuContent>
           </DropdownMenu>
           <Badge variant="outline" className={`text-xs h-6 font-normal ${switchingProvider ? "animate-pulse" : ""}`}>
-            {dubbingEngine === "vozo"
-              ? "Vozo AI"
-              : ttsProvider === "fish-audio" ? t('Fish Audio S1') : t('ElevenLabs')}
+            {ttsProvider === "fish-audio" ? t('Fish Audio S1') : t('ElevenLabs')}
           </Badge>
           <Button
             onClick={handleStartDubbing}

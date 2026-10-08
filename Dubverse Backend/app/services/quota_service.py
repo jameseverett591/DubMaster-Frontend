@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 from typing import Any, Dict, Optional
 
@@ -41,6 +42,19 @@ TIER_FREE = "free"
 TIER_PRO = "pro"
 
 LIPSYNC_MARKUP = 1.25           # vendor cost + 25% platform fee
+
+# Accounts that are never billed — owner/tester ids running the system end to
+# end (rebuilds, exports, lip-sync) without paying themselves. Comma-separated
+# Supabase user ids via BILLING_BYPASS_USER_IDS. The ledger is untouched for
+# these callers: no debit rows, no refund rows, nothing to reconcile.
+_BYPASS_USER_IDS = {
+    u.strip() for u in os.environ.get("BILLING_BYPASS_USER_IDS", "").split(",")
+    if u.strip()
+}
+
+
+def is_billing_bypassed(user_id: str) -> bool:
+    return bool(user_id) and user_id in _BYPASS_USER_IDS
 
 
 class QuotaExceeded(Exception):
@@ -97,12 +111,16 @@ def seconds_for_lipsync(duration_seconds: float, cost_per_second_usd: float) -> 
 
 # --- Tier ----------------------------------------------------------------------
 
-def tier_for(user_id: str) -> str:
+def tier_for(user_id: str, strict: bool = False) -> str:
     """'pro' when the user has an active/trialing subscription, else 'free'.
 
     During the migration off the three legacy tiers, ANY active subscription
     counts as Pro — a Basic/Premium subscriber whose product was archived is
     still paying, and there is only one paid tier to map them to.
+
+    strict=True (billing paths): a failed lookup raises QuotaUnavailable
+    instead of returning 'free' — debiting a Pro user at free-tier rates on a
+    flaky read burns their paid wallet for what their plan included.
     """
     try:
         from app.services.supabase_client import supabase_writer
@@ -116,6 +134,8 @@ def tier_for(user_id: str) -> str:
         )
         return TIER_PRO if res.data else TIER_FREE
     except Exception as e:
+        if strict:
+            raise QuotaUnavailable(f"tier lookup failed: {e}") from e
         # Read failure: the safe direction for the CUSTOMER is pro (more
         # included minutes); the safe direction for US is free. Choose free —
         # the wallet still works, so a paying user is never fully blocked,
@@ -146,6 +166,19 @@ def _first(res) -> Dict[str, Any]:
 def get_balance(user_id: str) -> Dict[str, Any]:
     """Balance for the UI. Never raises; a failed read returns zeros with
     `available: False` so the widget can say so instead of showing 0 min."""
+    if is_billing_bypassed(user_id):
+        return {
+            # Report the REAL tier — usePlan reads tier off this response and a
+            # synthetic value would strip Pro from a bypassed Pro account.
+            "tier": tier_for(user_id), "included_seconds": 0,
+            "included_remaining_seconds": 10 ** 9,
+            "credit_balance_seconds": 0, "credit_balance_cents": 0,
+            "total_remaining_seconds": 10 ** 9,
+            "low_balance": False, "period_start": None,
+            "rate_cents_per_minute": CENTS_PER_MINUTE,
+            "min_deposit_cents": MIN_DEPOSIT_CENTS,
+            "bypassed": True, "available": True,
+        }
     tier = tier_for(user_id)
     try:
         row = _first(_rpc("quota_touch", {"p_user_id": user_id, "p_tier": tier}))
@@ -212,7 +245,13 @@ def deduct_quota(user_id: str, actual_seconds: int, job_id: str, kind: str = "re
     need = int(actual_seconds or 0)
     if need <= 0:
         return {"included_seconds": 0, "credit_seconds": 0}
-    tier = tier_for(user_id)
+    if is_billing_bypassed(user_id):
+        logger.info(f"[QUOTA] {user_id} job={job_id}: bypassed account — {kind} {need}s not debited")
+        return {"included_seconds": 0, "credit_seconds": 0,
+                "tier": "bypassed", "billed_seconds": need, "bypassed": True}
+    # strict: a Pro user misread as free would burn paid wallet seconds for
+    # what their subscription included. No debit on an unknown tier.
+    tier = tier_for(user_id, strict=True)
     try:
         row = _first(_rpc("quota_deduct", {
             "p_user_id": user_id, "p_tier": tier,
@@ -228,10 +267,16 @@ def deduct_quota(user_id: str, actual_seconds: int, job_id: str, kind: str = "re
             raise QuotaExceeded(need, short) from e
         logger.error(f"[QUOTA] deduct failed for {user_id} job={job_id}: {e}")
         raise QuotaUnavailable(msg) from e
-    logger.info(
-        f"[QUOTA] {user_id} job={job_id}: -{row.get('included_seconds', 0)}s included, "
-        f"-{row.get('credit_seconds', 0)}s wallet (tier={tier})"
-    )
+    if row.get("already_billed"):
+        logger.info(
+            f"[QUOTA] {user_id} job={job_id}: {kind} already debited "
+            f"({row.get('included_seconds', 0)}s incl + {row.get('credit_seconds', 0)}s wallet) — no double charge"
+        )
+    else:
+        logger.info(
+            f"[QUOTA] {user_id} job={job_id}: -{row.get('included_seconds', 0)}s included, "
+            f"-{row.get('credit_seconds', 0)}s wallet (tier={tier})"
+        )
     return {**row, "tier": tier, "billed_seconds": need}
 
 
@@ -253,17 +298,23 @@ def refund_quota(user_id: str, job_id: str) -> Dict[str, Any]:
         return {"included_seconds": 0, "credit_seconds": 0, "error": str(e)}
 
 
-def add_credits(user_id: str, amount_cents: int, stripe_payment_id: Optional[str]) -> Dict[str, Any]:
+def add_credits(user_id: str, amount_cents: int, stripe_payment_id: Optional[str],
+                allow_below_min: bool = False) -> Dict[str, Any]:
     """Wallet top-up from a completed Stripe payment. Returns credited_seconds.
     Idempotent on stripe_payment_id. Raises QuotaUnavailable on failure so the
-    webhook returns non-2xx and Stripe retries."""
-    if amount_cents < MIN_DEPOSIT_CENTS:
+    webhook returns non-2xx and Stripe retries.
+
+    allow_below_min: the user-facing deposit floor is $10, but the lip-sync
+    shortfall checkout charges EXACTLY what's owed — often under $10 — and
+    crediting less than Stripe collected would strand paid money."""
+    if amount_cents < MIN_DEPOSIT_CENTS and not allow_below_min:
         raise ValueError(f"deposit {amount_cents}c is below the ${MIN_DEPOSIT_CENTS / 100:.0f} minimum")
     tier = tier_for(user_id)
     try:
         row = _first(_rpc("quota_add_credits", {
             "p_user_id": user_id, "p_tier": tier,
             "p_amount_cents": int(amount_cents), "p_stripe_payment_id": stripe_payment_id,
+            "p_allow_below_min": bool(allow_below_min),
         }))
     except Exception as e:
         logger.error(f"[QUOTA] add_credits failed for {user_id} ({amount_cents}c): {e}")

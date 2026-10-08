@@ -7,7 +7,6 @@ import { Progress } from "@/components/ui/progress"
 import Link from "next/link"
 import {
   Download,
-  Share2,
   CheckCircle2,
   RefreshCw,
   FileVideo,
@@ -17,8 +16,27 @@ import {
   AlertCircle,
   Pencil,
 } from "lucide-react"
+import { useEffect, useState } from "react"
 import type { VideoSource, DetectedVoice } from "@/components/dashboard"
+import { apiClient } from "@/lib/api-client"
+import { usePlan } from "@/lib/use-plan"
 import { useT } from '@/lib/use-t'
+
+// Paywall basis for sharing/downloading a finished dub: active subscription
+// unlocks outright; otherwise the job's render must already be billed (or the
+// caller is a bypassed test account). Mirrors the editor gate and the
+// backend's /download attachment 402.
+function useShareUnlocked(jobId?: string): boolean {
+  const { isPro } = usePlan()
+  const [jobPaid, setJobPaid] = useState(false)
+  useEffect(() => {
+    if (!jobId) return
+    apiClient.getQuotaEstimate(jobId)
+      .then(q => setJobPaid(!!q && (q.bypassed === true || q.already_billed === true)))
+      .catch(() => {})
+  }, [jobId])
+  return isPro || jobPaid
+}
 
 interface DubbedVideoResultProps {
   originalVideo: VideoSource
@@ -60,29 +78,25 @@ export function DubbedVideoResult({
 }: DubbedVideoResultProps) {
   const t = useT()
   const isComplete = !isDubbing && dubbingProgress >= 100
+  const shareUnlocked = useShareUnlocked(originalVideo.jobId)
+  const lockedTitle = t('Available after payment')
 
-  const handleDownload = () => {
-    const url = dubbedVideoUrl ?? originalVideo.url
+  const handleDownload = async () => {
+    // The stored URL was minted when the job completed — its access_token may
+    // have rotated since. Re-mint against the live token before using it.
+    let url = await apiClient.refreshMediaUrlAsync(dubbedVideoUrl ?? originalVideo.url)
+    // Cross-origin (UI :3001 → API :8000) ignores the `download` attribute and
+    // plays the file inline; the API's attachment=1 switch answers
+    // Content-Disposition: attachment, which is what actually saves the file.
+    if (url.includes("/api/download/")) {
+      url += `${url.includes("?") ? "&" : "?"}attachment=1`
+    }
     const link = document.createElement("a")
     link.href = url
     link.download = `${originalVideo.title}_dubbed_${targetLanguage}.mp4`
     link.target = "_blank"
     link.rel = "noopener noreferrer"
     link.click()
-  }
-
-  const handleShare = async () => {
-    if (navigator.share) {
-      try {
-        await navigator.share({
-          title: `${originalVideo.title} - Dubbed in ${LANGUAGE_NAMES[targetLanguage]}`,
-          text: "Check out this dubbed video!",
-          url: window.location.href,
-        })
-      } catch {
-        // User cancelled share
-      }
-    }
   }
 
   // ── In-progress view ──────────────────────────────────────────────────────
@@ -235,12 +249,9 @@ export function DubbedVideoResult({
           </Button>
         )}
         <div className="flex gap-2">
-          <Button className="flex-1 gap-1.5 h-8 text-xs" onClick={handleDownload} disabled={!dubbedVideoUrl}>
+          <Button className="flex-1 gap-1.5 h-8 text-xs" onClick={handleDownload} disabled={!dubbedVideoUrl || !shareUnlocked} title={shareUnlocked ? undefined : lockedTitle}>
             <Download className="h-3.5 w-3.5" />
             {t('Download')}
-          </Button>
-          <Button variant="outline" className="gap-1.5 h-8 text-xs bg-transparent" onClick={handleShare}>
-            <Share2 className="h-3.5 w-3.5" />
           </Button>
           <Button variant="outline" className="gap-1.5 h-8 text-xs bg-transparent" onClick={onRegenerate}>
             <RefreshCw className="h-3.5 w-3.5" />
@@ -251,7 +262,7 @@ export function DubbedVideoResult({
         <div className="rounded-lg bg-muted/50 p-3">
           <h4 className="text-xs font-medium text-foreground">{t('Export Formats')}</h4>
           <div className="mt-2 flex flex-wrap gap-1.5">
-            <Button variant="outline" size="sm" className="gap-1 text-[10px] h-6 bg-transparent" onClick={handleDownload} disabled={!dubbedVideoUrl}>
+            <Button variant="outline" size="sm" className="gap-1 text-[10px] h-6 bg-transparent" onClick={handleDownload} disabled={!dubbedVideoUrl || !shareUnlocked} title={shareUnlocked ? undefined : lockedTitle}>
               <FileVideo className="h-3 w-3" />
               MP4
             </Button>

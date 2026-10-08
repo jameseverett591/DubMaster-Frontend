@@ -459,6 +459,110 @@ def transcribe_with_deepgram(
     return {"status": "ok", "segments": segments}
 
 
+def summarize_media_url(
+    media_url: str,
+    job_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fetch a media URL and return Deepgram's summary + topics + utterances.
+
+    Used as the Summary-panel fallback when VideoTranscriber.ai can't serve a
+    job. Everything returned is measured from the audio — Deepgram's own
+    transcript, its `summarize=v2` blurb, and its topic segmentation — so the
+    fallback can't invent content the way a generative summarizer can.
+
+    summarize/topics language support is narrower than ASR's; a language
+    Deepgram can't summarize still returns transcript + utterances, which the
+    caller maps into honest timestamped sections rather than dropping.
+    """
+    import requests
+
+    api_key = _get_api_key()
+    if not api_key:
+        return {"status": "skipped", "reason": "no_api_key"}
+
+    params = {
+        "model": os.getenv("DEEPGRAM_MODEL", "nova-3").strip() or "nova-3",
+        "detect_language": "true",
+        "summarize": "v2",
+        "topics": "true",
+        "utterances": "true",
+        "diarize": "true",
+        "punctuate": "true",
+        "paragraphs": "true",
+        "smart_format": "true",
+    }
+
+    try:
+        resp = requests.post(
+            _API_BASE,
+            params=params,
+            headers={
+                "Authorization": f"Token {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"url": media_url},
+            timeout=_TIMEOUT_S,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.exceptions.HTTPError as e:
+        body = ""
+        try:
+            body = e.response.text[:300]
+        except Exception:
+            pass
+        logger.error(f"[DEEPGRAM-SUMMARY] job={job_id} HTTP error: {e} body={body}")
+        return {"status": "error", "reason": f"http_{e.response.status_code if e.response is not None else 'error'}"}
+    except Exception as e:
+        logger.error(f"[DEEPGRAM-SUMMARY] job={job_id} request failed: {e}")
+        return {"status": "error", "reason": "request_failed"}
+
+    results = data.get("results", {})
+    summary = (results.get("summary") or {}).get("short", "").strip()
+
+    # results.topics[]: {text, start, end, topics:[{topic, confidence}]}
+    topics = []
+    for t in results.get("topics", []) or []:
+        labels = [x.get("topic", "") for x in t.get("topics", []) if x.get("topic")]
+        topics.append({
+            "start": float(t.get("start", 0.0) or 0.0),
+            "end": float(t.get("end", 0.0) or 0.0),
+            "excerpt": (t.get("text") or "").strip(),
+            "labels": labels,
+        })
+
+    utterances = []
+    for utt in results.get("utterances", []) or []:
+        text = (utt.get("transcript") or "").strip()
+        if not text:
+            continue
+        utterances.append({
+            "start": round(float(utt.get("start", 0.0)), 3),
+            "end": round(float(utt.get("end", 0.0)), 3),
+            "text": text,
+            "speaker": f"speaker-{int(utt.get('speaker', 0)) + 1}",
+            "confidence": float(utt.get("confidence", 0.0)),
+        })
+
+    detected_lang = (
+        results.get("channels", [{}])[0]
+        .get("detected_language")
+        or data.get("metadata", {}).get("detected_language")
+    )
+
+    if not summary and not topics and not utterances:
+        return {"status": "error", "reason": "empty_result"}
+
+    return {
+        "status": "ok",
+        "summary": summary,
+        "topics": topics,
+        "utterances": utterances,
+        "language": detected_lang,
+        "duration": float(data.get("metadata", {}).get("duration", 0.0) or 0.0),
+    }
+
+
 def _write_temp_wav(extract_result: Dict[str, Any]) -> Optional[str]:
     """Write the audio tensor from extract_result to a temp WAV file."""
     import tempfile

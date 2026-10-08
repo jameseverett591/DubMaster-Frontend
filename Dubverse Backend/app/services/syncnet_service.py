@@ -232,7 +232,100 @@ def analyze_segment_lip_sync(
         return {"status": "error", "reason": str(e)}
 
 
-def _dubbed_energy_window(segments: List[Dict], w0: float, w1: float, fps: int = 25) -> Optional[Any]:
+def _job_dir_hints(job_id: Optional[str]) -> List[str]:
+    """Directories to search for a segment file whose stored path no longer
+    resolves: THIS job's own folder and its projects-layout twin.
+
+    Built from the job id the request is about — never from the text of a stored
+    path. A client can spell a path to name another job's folder (the old code
+    pulled the job name out of `data/dubbed/<job>/...` and searched
+    `data/projects/<that job>/dubbed`), so path text must not choose where we look.
+    """
+    if not job_id or os.path.basename(job_id) != job_id or job_id in (".", ".."):
+        return []
+    from app.config import get_settings
+    candidates = [
+        os.path.join(get_settings().DUBBED_DIR, job_id),
+        os.path.join("data", "projects", job_id, "dubbed"),
+    ]
+    return [d for d in candidates if os.path.isdir(d)]
+
+
+def _resolve_seg_audio(seg: Dict, dir_hints: List[str]) -> Optional[str]:
+    """The segment's audio file on disk: seg['path'] when it exists, else the
+    committed/audio URL's basename inside a directory that does."""
+    p = seg.get("path")
+    if p and os.path.exists(p):
+        return p
+    for key in ("committed_audio_url", "audio_url"):
+        u = seg.get(key)
+        if not u:
+            continue
+        rel = str(u).split("?", 1)[0]
+        if os.path.exists(rel):
+            return rel
+        base = os.path.basename(rel)
+        for d in dir_hints:
+            cand = os.path.join(d, base)
+            if os.path.exists(cand):
+                return cand
+    return None
+
+
+def _first_onset_frame(energy, lo: int, hi: int) -> Optional[int]:
+    """First frame in energy[lo:hi] where the envelope rises clearly above the
+    LOCAL floor — the moment a line actually starts sounding. Span-local stats,
+    so dialogue under a ducked music bed still registers."""
+    import numpy as np
+    if hi - lo < 5:
+        return None
+    seg = energy[lo:hi]
+    fl = float(np.percentile(seg, 40))
+    pk = float(seg.max())
+    if pk < fl * 1.25 + 1e-4:
+        return None
+    thr = fl + (pk - fl) * 0.35
+    return lo + int(np.argmax(seg > thr))
+
+
+def _onset_deltas(segments: List[Dict], w0: float, w1: float, source_energy, fps: int,
+                  job_id: Optional[str] = None) -> List[float]:
+    """Per-line sync error in ms: where the dubbed audio actually STARTS
+    (committed position + the file's own lead-in) minus the source onset near
+    the original line's start. Robust where envelope correlation is not —
+    sparse dialogue under a music bed."""
+    hints = _job_dir_hints(job_id)
+    deltas: List[float] = []
+    for seg in segments or []:
+        o = seg.get("start_time")
+        o = float(o) if o is not None else float(seg.get("start") or 0)
+        oe = float(seg.get("end_time") or seg.get("end") or o + 1)
+        c = seg.get("committed_start_time")
+        c = float(c) if c is not None else o
+        _ce = seg.get("committed_end_time")
+        ce = float(_ce) if _ce is not None else oe
+        if not (o < w1 and oe > w0) and not (c < w1 and ce > w0):
+            continue
+        p = _resolve_seg_audio(seg, hints)
+        if not p:
+            continue
+        lo = max(0, int((o - 0.4) * fps))
+        hi = min(len(source_energy), int(min(oe + 0.4, o + 1.5) * fps))
+        s_on = _first_onset_frame(source_energy, lo, hi)
+        if s_on is None:
+            continue
+        e = _extract_audio_energy(p)
+        if e is None or len(e) < 5:
+            continue
+        d_on = _first_onset_frame(e, 0, len(e))
+        if d_on is None:
+            continue
+        deltas.append(((c + d_on / fps) - s_on / fps) * 1000.0)
+    return deltas
+
+
+def _dubbed_energy_window(segments: List[Dict], w0: float, w1: float, fps: int = 25,
+                          job_id: Optional[str] = None) -> Optional[Any]:
     """Per-frame audio energy of the DUBBED track inside [w0, w1].
 
     There is no rendered dub to measure against pre-render — so the signal is
@@ -246,10 +339,11 @@ def _dubbed_energy_window(segments: List[Dict], w0: float, w1: float, fps: int =
     n = max(1, int(round((w1 - w0) * fps)))
     out = np.zeros(n, dtype=np.float32)
     any_audio = False
+    hints = _job_dir_hints(job_id)
 
     for seg in segments or []:
-        p = seg.get("path")
-        if not p or not os.path.exists(p):
+        p = _resolve_seg_audio(seg, hints)
+        if not p:
             continue
         s = seg.get("committed_start_time")
         s = float(s) if s is not None else float(seg.get("start_time") or seg.get("start") or 0)
@@ -277,6 +371,7 @@ def score_lipsync_range(
     segments: List[Dict],
     start_s: float,
     end_s: float,
+    job_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Lip-sync score for one span of the timeline: mouth movement from the
     original video in [start_s, end_s] vs the dubbed track built from the
@@ -287,7 +382,7 @@ def score_lipsync_range(
                 "status": "error", "reason": "span too short to score"}
 
     mm = _extract_mouth_movement_window(video_path, start_s, end_s)
-    energy = _dubbed_energy_window(segments, start_s, end_s)
+    energy = _dubbed_energy_window(segments, start_s, end_s, job_id=job_id)
     return _score_span(video_path, energy, mm, start_s, end_s)
 
 
@@ -331,6 +426,7 @@ def score_lipsync_windows(
     segments: List[Dict],
     duration_s: float,
     window_s: float = 60.0,
+    job_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Minute-by-minute lip-sync scores across the whole timeline — the
     upfront pass the QC monitor shows on entry.
@@ -341,7 +437,7 @@ def score_lipsync_windows(
     import numpy as np
 
     fps = 25
-    track = _dubbed_energy_window(segments, 0.0, duration_s, fps)
+    track = _dubbed_energy_window(segments, 0.0, duration_s, fps, job_id=job_id)
 
     out = []
     t = 0.0
@@ -432,12 +528,18 @@ def score_lipsync_audio_range(
     start_s: float,
     end_s: float,
     source_energy: Optional[Any] = None,
+    job_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Audio-vs-audio timing: source speech envelope vs the dubbed track in
-    [start_s, end_s]. The dub should track the source's speech rhythm almost
-    exactly, so the peak-correlation offset IS the sync error — no face
-    needed. This is the trusted timing metric; the visual scorer stays for
-    footage where face detection works."""
+    """Audio-vs-audio timing: source speech vs the dubbed track in
+    [start_s, end_s]. No face needed — the trusted timing metric; the visual
+    scorer stays for footage where face detection works.
+
+    Two methods, tried in order:
+    1. ONSET DELTA — per segment, when the dub actually starts sounding vs when
+       the source line started. Works on sparse dialogue under a music bed,
+       where the envelope mix can't see speech at all.
+    2. ENVELOPE CORRELATION — whole-window cross-correlation, the original
+       metric; still the fallback for ranges with too few scored lines."""
     base = {"start": round(start_s, 2), "end": round(end_s, 2)}
     if end_s - start_s < 0.2:
         return {**base, "status": "error", "reason": "span too short to score"}
@@ -448,8 +550,41 @@ def score_lipsync_audio_range(
         if source_energy is None:
             return {**base, "status": "error", "reason": "source audio extraction failed"}
 
+    deltas = _onset_deltas(segments, start_s, end_s, source_energy, fps, job_id=job_id)
+
+    def _seg_time(seg, *keys):
+        # `or` chains would skip a legitimately committed 0.0 and fall through
+        # to a stale pre-drag value — pick the first present field instead.
+        for k in keys:
+            v = seg.get(k)
+            if v is not None:
+                return float(v)
+        return 0.0
+
+    total_in_range = sum(
+        1 for seg in segments or []
+        if _seg_time(seg, "committed_start_time", "start_time", "start") < end_s
+        and _seg_time(seg, "committed_end_time", "end_time", "end") > start_s
+    )
+    if deltas:
+        import numpy as np
+        med = float(np.median(deltas))
+        med_abs = float(np.median(np.abs(deltas)))
+        return {
+            **base, "status": "ok",
+            "offset_ms": int(round(med)),
+            # The honest per-line magnitude: errors scatter both directions, so
+            # the signed median can sit near zero while lines are wildly off.
+            "abs_offset_ms": int(round(med_abs)),
+            "score": max(0, min(100, int(100 - med_abs / 8))),   # 0ms=100, 800ms+=0
+            "severity": "good" if med_abs <= 40 else "fair" if med_abs <= 150 else "poor",
+            "method": "onset",
+            "scored": len(deltas),
+            "total": total_in_range,
+        }
+
     src = source_energy[int(start_s * fps): int(end_s * fps)]
-    dub = _dubbed_energy_window(segments, start_s, end_s, fps)
+    dub = _dubbed_energy_window(segments, start_s, end_s, fps, job_id=job_id)
     if dub is None:
         return {**base, "status": "error",
                 "reason": "no segment audio in this window — generate the dub first"}
@@ -484,6 +619,7 @@ def score_lipsync_audio_windows(
     segments: List[Dict],
     duration_s: float,
     window_s: float = 60.0,
+    job_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Minute-by-minute audio-vs-audio offsets. Source envelope is extracted
     ONCE and sliced per window — same cost discipline as the visual pass."""
@@ -492,7 +628,7 @@ def score_lipsync_audio_windows(
     t = 0.0
     while t < duration_s - 0.5:
         w1 = min(t + window_s, duration_s)
-        out.append(score_lipsync_audio_range(video_path, segments, t, w1, source))
+        out.append(score_lipsync_audio_range(video_path, segments, t, w1, source, job_id=job_id))
         t += window_s
     return out
 

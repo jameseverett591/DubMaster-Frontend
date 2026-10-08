@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import subprocess
+import uuid
 import re
 import time
 from datetime import datetime
@@ -29,7 +30,6 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
-
 
 def analyze_dub(
     job_id: str,
@@ -47,7 +47,7 @@ def analyze_dub(
     below need. This is what lets the existing automatic trigger-on-editor-
     open (page.tsx) succeed instead of permanently 404ing until Export runs.
 
-    lip_sync/emotion_preservation/pronunciation/screenapp_dubbed/gemini_review
+    lip_sync/emotion_preservation/pronunciation/gemini_review
     all need real video frames or are otherwise video-dependent -- they report
     "skipped" (same graceful pattern already used for a missing API key) until
     an export exists. A proper no-export lip-sync path via
@@ -76,12 +76,12 @@ def analyze_dub(
     # the owning `pid:token` (PID + process start time) so the API can tell a
     # crashed run from a live one without trusting timestamps across restarts
     # or tripping on recycled PIDs.
+    sentinel_id: Optional[str] = None
     try:
         from app.api.routes import _process_token
-        sentinel.write_text(
-            f"{os.getpid()}:{_process_token(os.getpid()) or ''}",
-            encoding="utf-8",
-        )
+        sentinel_id = (f"{os.getpid()}:{_process_token(os.getpid()) or ''}:"
+                       f"{uuid.uuid4().hex}")
+        sentinel.write_text(sentinel_id, encoding="utf-8")
         error_file.unlink(missing_ok=True)
     except Exception:
         pass
@@ -118,10 +118,19 @@ def analyze_dub(
             with open(segments_file, "r", encoding="utf-8") as f:
                 seg_data = json.load(f)
             segs = seg_data.get("segments", [])
-            merge_segments = [
-                {"path": s["path"], "start": s["start"], "end": s["end"]}
-                for s in segs if s.get("path")
-            ]
+            # seg["path"] is client-writable (PATCH /segment/commit, PUT /segments):
+            # only a file inside this job's folder may reach ffmpeg.
+            from app.services import path_safety
+            merge_segments = []
+            for s in segs:
+                if not s.get("path"):
+                    continue
+                safe = path_safety.resolve_segment_audio(
+                    {"transcript_index": s.get("transcript_index"), "path": s["path"]},
+                    str(dubbed_dir), label=f"[ANALYSIS] job={job_id}",
+                )
+                if safe:
+                    merge_segments.append({"path": safe, "start": s["start"], "end": s["end"]})
             if not merge_segments:
                 return _fail("No generated audio yet")
 
@@ -162,21 +171,32 @@ def analyze_dub(
 
         # --- 5 local analyses -- work identically whether audio_source is the
         # exported mp4 or the internal audio-only stitch; none read video frames. ---
-        analysis["retranscription"] = _retranscribe_dubbed_audio(audio_source, lang_norm)
-        analysis["timing"] = _compare_timing(timing_data, original_transcript)
-        analysis["silences"] = _detect_silences(audio_source, original_transcript)
-        analysis["speed"] = _detect_speed_anomalies(timing_data)
-        analysis["loudness"] = _analyze_loudness(audio_source)
+        # These are advisory probes (each internally bounded) but SEQUENTIAL
+        # they stacked ~15min of ffmpeg on top of the RunPod round-trip.
+        # They are independent — overlap them so the report's wall time is
+        # the slowest scan, not their sum.
+        from concurrent.futures import ThreadPoolExecutor
 
-        # ScreenApp analyses (optional — graceful skip if not configured, or if
-        # no export exists yet: screenapp_dubbed needs real video frames)
-        analysis["screenapp_original"] = _screenapp_analyze(
-            original_video_path, "original"
-        )
-        analysis["screenapp_dubbed"] = (
-            _screenapp_analyze(str(dubbed_video), "dubbed") if has_export
-            else {"status": "skipped", "reason": "video not yet exported"}
-        )
+        def _fut(fut, name):
+            try:
+                return fut.result()
+            except Exception as e:
+                logger.warning(f"[ANALYSIS] {name} failed: {e}")
+                return {"status": "error", "reason": str(e)}
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            f_retr = pool.submit(_retranscribe_dubbed_audio, audio_source, lang_norm)
+            f_sil = pool.submit(_detect_silences, audio_source, original_transcript)
+            f_loud = pool.submit(_analyze_loudness, audio_source)
+            f_sq = pool.submit(_probe_source_quality, original_video_path)
+            # Cheap in-process analyses run inline while the ffmpeg/RunPod
+            # work is in flight.
+            analysis["timing"] = _compare_timing(timing_data, original_transcript)
+            analysis["speed"] = _detect_speed_anomalies(timing_data)
+            analysis["retranscription"] = _fut(f_retr, "retranscription")
+            analysis["silences"] = _fut(f_sil, "silence detection")
+            analysis["loudness"] = _fut(f_loud, "loudness")
+            analysis["source_quality"] = _fut(f_sq, "source-quality probe")
 
         # --- New AI-powered analyses (optional — graceful skip) ---
         # Get original segments and dubbed transcript for the new analyses
@@ -201,9 +221,9 @@ def analyze_dub(
             _assess_pronunciation(str(dubbed_video), dubbed_text) if has_export
             else {"status": "skipped", "reason": "video not yet exported"}
         )
-        analysis["translation"] = _evaluate_translation(
-            orig_segments, dubbed_segments, source_lang, lang_norm
-        )
+        # Translation-quality evaluation used to run via Azure OpenAI — vendor
+        # cut as redundant spend. Slot stays so the report schema is stable.
+        analysis["translation"] = {"status": "skipped", "reason": "eval provider removed"}
 
         # --- New QC Stack analyses ---
         # SyncNet lip-sync scoring (local, free) -- no-export path is a
@@ -238,10 +258,12 @@ def analyze_dub(
             }
         # emotion2vec emotion preservation (local, free) -- needs real video
         # frames for its dubbed-side extraction as currently implemented;
-        # skipped until export exists, same as pronunciation/screenapp above.
+        # skipped until export exists, same as pronunciation above.
         analysis["emotion_preservation"] = (
             _analyze_emotion_preservation(original_video_path, str(dubbed_video), timing_data)
-            if has_export else {"status": "skipped", "reason": "video not yet exported"}
+            if has_export and _has_local_gpu()
+            else {"status": "skipped", "reason": "video not yet exported" if not has_export
+                  else "no local GPU — emotion2vec skipped (retranscription runs via RunPod)"}
         )
         # Gemini 2.5 Pro holistic review (optional, ~$0.12/video) -- needs real
         # video frames; skipped until export exists.
@@ -277,9 +299,17 @@ def analyze_dub(
         # so the QC monitor shows a real error instead of polling forever.
         return _fail(str(e))
     finally:
-        # Remove sentinel
+        # Only remove OUR sentinel. If the slot was reclaimed while this run
+        # was still executing (stale-sweep or the GET escape hatch), the file
+        # on disk belongs to a NEWER run — unlinking it unconditionally would
+        # free the slot mid-run and admit a third.
         try:
-            sentinel.unlink(missing_ok=True)
+            if (sentinel_id is not None
+                    and sentinel.read_text(encoding="utf-8").strip()
+                        == sentinel_id.strip()):
+                sentinel.unlink(missing_ok=True)
+        except FileNotFoundError:
+            pass
         except Exception:
             pass
 
@@ -287,6 +317,159 @@ def analyze_dub(
 # ---------------------------------------------------------------------------
 # Sub-analyses
 # ---------------------------------------------------------------------------
+
+
+def _has_local_gpu() -> bool:
+    try:
+        import torch as _t
+        return bool(_t.cuda.is_available())
+    except Exception:
+        return False
+
+
+def _runpod_handoff_configured() -> bool:
+    """The QC offload needs RunPod to run the job AND R2 to hand it the audio.
+    Checking RunPod keys alone admitted hosts that then errored in the upload
+    step instead of falling back to their own GPU."""
+    if not (os.getenv("RUNPOD_API_KEY") and os.getenv("RUNPOD_ENDPOINT_ID")):
+        return False
+    return all(
+        os.getenv(v)
+        for v in ("R2_BUCKET_NAME", "R2_ACCESS_KEY_ID",
+                  "R2_SECRET_ACCESS_KEY", "R2_ACCOUNT_ID")
+    )
+
+
+def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> Dict[str, Any]:
+    """Offload the QC re-transcription to the RunPod GPU worker.
+
+    The backend has no GPU, and the local CPU Whisper pass this replaces took
+    45+ minutes on a feature film while starving every other request. The
+    worker already transcribes on GPU for source ASR — QC just sends it the
+    DUBBED audio with a transcribe-only step and maps its segments back into
+    the QC schema (start/end/text/confidence).
+    """
+    audio_path: Optional[Path] = None
+    s3 = None
+    r2_bucket = ""
+    object_key = ""
+    rp_id: Optional[str] = None
+    finished = False
+    try:
+        import asyncio as _asyncio
+
+        from app.services.runpod_service import runpod_service
+
+        # 16kHz mono opus — Whisper needs nothing more, and at 96kbps a
+        # feature film is ~55MB instead of ~150MB of PCM.
+        audio_path = dubbed_video.with_suffix(".qc.opus")
+        cmd = [
+            "ffmpeg", "-y", "-i", str(dubbed_video),
+            "-vn", "-acodec", "libopus", "-b:a", "96k", "-ar", "16000", "-ac", "1",
+            str(audio_path),
+        ]
+        subprocess.run(cmd, capture_output=True, timeout=600)
+        if not audio_path.exists() or audio_path.stat().st_size < 1000:
+            return {"status": "error", "reason": "audio extraction failed"}
+
+        # Upload to R2 so the worker can pull it (same handoff pattern the
+        # dub pipeline uses — presigned GET).
+        r2_bucket = os.getenv("R2_BUCKET_NAME", "")
+        r2_key_id = os.getenv("R2_ACCESS_KEY_ID", "")
+        r2_secret = os.getenv("R2_SECRET_ACCESS_KEY", "")
+        r2_account = os.getenv("R2_ACCOUNT_ID", "")
+        if not (r2_bucket and r2_key_id and r2_secret and r2_account):
+            return {"status": "error",
+                    "reason": "RunPod offload needs R2 configured (R2_BUCKET_NAME etc.)"}
+
+        import boto3
+        from botocore.config import Config
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=f"https://{r2_account}.r2.cloudflarestorage.com",
+            aws_access_key_id=r2_key_id,
+            aws_secret_access_key=r2_secret,
+            config=Config(signature_version="s3v4"),
+            region_name="auto",
+        )
+        job_id = dubbed_video.parent.name
+        object_key = f"{job_id}/qc_{audio_path.name}"
+        s3.upload_file(str(audio_path), r2_bucket, object_key,
+                       ExtraArgs={"ContentType": "audio/ogg"})
+        file_url = s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": r2_bucket, "Key": object_key},
+            ExpiresIn=7200,
+        )
+
+        async def _submit_and_poll() -> Dict[str, Any]:
+            nonlocal rp_id, finished
+            submitted = await runpod_service.submit_job(
+                file_url=file_url,
+                job_id=f"{job_id}_qc",
+                language=target_language,
+                steps=["transcribe"],
+            )
+            rp_id = submitted.get("id")
+            if not rp_id:
+                raise RuntimeError(f"RunPod returned no job id: {submitted}")
+            out = await runpod_service.poll_until_complete(
+                rp_id,
+                timeout=int(os.getenv("QC_RUNPOD_TIMEOUT_SEC", "1800")),
+                interval=5,
+            )
+            finished = True
+            return out
+
+        try:
+            output = _asyncio.run(_submit_and_poll())
+        finally:
+            # A timed-out submit can leave the job still queued — cancel it
+            # BEFORE deleting its R2 input or the worker wakes to a missing
+            # file and burns a paid job for nothing.
+            if rp_id and not finished:
+                try:
+                    _asyncio.run(runpod_service.cancel_job(rp_id))
+                except Exception:
+                    pass
+        if output.get("error"):
+            return {"status": "error", "reason": f"RunPod: {output['error']}"}
+        raw_segments = output.get("segments") or []
+        segments = [
+            {
+                "start": round(float(s.get("start", 0.0)), 3),
+                "end": round(float(s.get("end", 0.0)), 3),
+                "text": (s.get("text") or "").strip(),
+                "confidence": s.get("confidence"),
+            }
+            for s in raw_segments
+            if (s.get("text") or "").strip()
+        ]
+
+        return {
+            "status": "ok",
+            "language": target_language,
+            "segment_count": len(segments),
+            "segments": segments,
+            "engine": "runpod",
+        }
+    except Exception as e:
+        logger.warning(f"[ANALYSIS] RunPod retranscription failed: {e}")
+        return {"status": "error", "reason": str(e)}
+    finally:
+        # The R2 handoff copy and the local opus are single-use — clean both
+        # on EVERY exit path (extraction failure, R2 misconfig, upload or
+        # presign failure, poll timeout), not only after a successful poll.
+        if s3 is not None and object_key:
+            try:
+                s3.delete_object(Bucket=r2_bucket, Key=object_key)
+            except Exception as e:
+                logger.warning(f"[ANALYSIS] R2 QC cleanup failed for {object_key}: {e}")
+        if audio_path is not None:
+            try:
+                audio_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def _retranscribe_dubbed_audio(dubbed_video: Path, target_language: str = "") -> Dict[str, Any]:
@@ -299,6 +482,13 @@ def _retranscribe_dubbed_audio(dubbed_video: Path, target_language: str = "") ->
     meaningless near-zero pronunciation_clarity score that has nothing to do
     with actual pronunciation quality.
     """
+    # GPU offload first — the local CPU Whisper pass below took 45+ minutes on
+    # a feature film and starved the backend. RunPod is the same worker pool
+    # the dub's own ASR already uses. Only dispatch when the whole handoff
+    # (RunPod AND R2) is configured — a GPU host without R2 must fall through
+    # to its own Whisper instead of erroring in the upload step.
+    if _runpod_handoff_configured():
+        return _retranscribe_via_runpod(dubbed_video, target_language)
     try:
         # Extract audio from dubbed video
         audio_path = dubbed_video.with_suffix(".wav")
@@ -644,32 +834,126 @@ def _analyze_loudness(dubbed_video: Path) -> Dict[str, Any]:
         return {"status": "error", "reason": str(e)}
 
 
-def _screenapp_analyze(video_path: str, label: str) -> Optional[Dict[str, Any]]:
-    """Run ScreenApp analysis on a video (original or dubbed)."""
+def _probe_source_quality(video_path: str) -> Dict[str, Any]:
+    """Probe the SOURCE video for capture-quality defects the pipeline cannot
+    fix — frame stalls, long black/fade-out spans, and very low audio level.
+    These are the signature of screen re-recordings and other OOD sources;
+    surfacing them early explains otherwise mysterious QC fallout (frozen
+    picture, hallucination-prone ASR, clone timbre artifacts).
+    """
+    result: Dict[str, Any] = {"status": "ok", "warnings": [], "flags": []}
+    if not video_path or not os.path.exists(video_path):
+        return {"status": "skipped", "reason": "source video not found"}
+
+    # The frame scans below are full-video decodes (300s timeouts each) — on a
+    # CPU-only backend they starve the request workers, so they only run where
+    # a local GPU host would be doing the QC anyway. The audio-level probe
+    # further down is cheap enough to keep everywhere.
+    video_scans = _has_local_gpu()
+    if not video_scans:
+        result["flags"].append("video_scans_skipped")
+        result["warnings"].append(
+            "Source frame scans skipped — no local GPU (full-video decode "
+            "would starve this backend)"
+        )
+
+    if video_scans:
+        # --- Frame stalls (held/frozen picture) ---
+        stalls: List[Dict[str, float]] = []
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-i", video_path,
+                 "-vf", "freezedetect=n=0.001:d=0.6",
+                 "-an", "-f", "null", "-"],
+                capture_output=True, text=True, timeout=300,
+            )
+            start = None
+            for m in re.finditer(
+                r"lavfi\.freezedetect\.(freeze_start|freeze_duration|freeze_end):\s*([\d.]+)",
+                proc.stderr,
+            ):
+                kind, val = m.group(1), float(m.group(2))
+                if kind == "freeze_start":
+                    start = val
+                elif kind == "freeze_end" and start is not None:
+                    stalls.append({"start": round(start, 2), "end": round(val, 2)})
+                    start = None
+            result["frame_stalls"] = stalls
+            if stalls:
+                span = ", ".join(f"{s['start']}-{s['end']}s" for s in stalls[:5])
+                result["flags"].append("frame_stall")
+                result["warnings"].append(
+                    f"Source video freezes {len(stalls)}x ({span}) — held frames "
+                    "baked into the recording; cannot be repaired"
+                )
+        except Exception as e:
+            logger.warning(f"[ANALYSIS] freezedetect probe failed: {e}")
+
+        # --- Long black spans (fade-out tail / dead picture) ---
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-i", video_path,
+                 "-vf", "blackdetect=d=2.0:pix_th=0.10",
+                 "-an", "-f", "null", "-"],
+                capture_output=True, text=True, timeout=300,
+            )
+            blacks = [
+                {"start": round(float(m.group(1)), 2),
+                 "end": round(float(m.group(2)), 2)}
+                for m in re.finditer(
+                    r"black_start:([\d.]+)\s+black_end:([\d.]+)", proc.stderr
+                )
+            ]
+            result["black_spans"] = blacks
+            if blacks:
+                span = ", ".join(f"{s['start']}-{s['end']}s" for s in blacks[:5])
+                result["flags"].append("black_span")
+                result["warnings"].append(
+                    f"Source has {len(blacks)} black/fade span(s) ({span}) — "
+                    "lines inside these windows have no visible speaker"
+                )
+        except Exception as e:
+            logger.warning(f"[ANALYSIS] blackdetect probe failed: {e}")
+
+    # --- Audio level (re-recordings run far below normal mix level) ---
     try:
-        from app.services.screenapp_service import is_enabled, analyze_video
-
-        if not is_enabled():
-            return {"status": "skipped", "reason": "ScreenApp not configured"}
-
-        if not Path(video_path).exists():
-            return {"status": "skipped", "reason": f"Video not found: {video_path}"}
-
-        logger.info(f"[ANALYSIS] Running ScreenApp analysis on {label} video")
-        result = analyze_video(video_path, summary_length="detailed")
-        if result is None:
-            return {"status": "error", "reason": "ScreenApp returned no results"}
-
-        return {"status": "ok", "label": label, **result}
-    except ImportError:
-        return {"status": "skipped", "reason": "screenapp_service not available"}
+        proc = subprocess.run(
+            ["ffmpeg", "-i", video_path, "-af", "volumedetect",
+             "-vn", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=300,
+        )
+        mean_m = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", proc.stderr)
+        max_m = re.search(r"max_volume:\s*([-\d.]+)\s*dB", proc.stderr)
+        mean_db = float(mean_m.group(1)) if mean_m else None
+        max_db = float(max_m.group(1)) if max_m else None
+        result["mean_volume_db"] = mean_db
+        result["max_volume_db"] = max_db
+        if mean_db is not None and mean_db < -40:
+            result["flags"].append("low_audio_level")
+            result["warnings"].append(
+                f"Source audio is very quiet ({mean_db:.1f} dB mean) — "
+                "typical of camera/screen re-recordings; expect degraded "
+                "transcription confidence and clone fidelity"
+            )
     except Exception as e:
-        logger.warning(f"[ANALYSIS] ScreenApp {label} failed: {e}")
-        return {"status": "error", "reason": str(e)}
+        logger.warning(f"[ANALYSIS] volumedetect probe failed: {e}")
+
+    if {"frame_stall", "low_audio_level"} & set(result["flags"]):
+        result["re_recording_suspected"] = True
+        result["warnings"].append(
+            "Capture-quality signature suggests a re-recording — treat "
+            "low-confidence ASR and edge-case QC findings accordingly"
+        )
+    else:
+        result["re_recording_suspected"] = False
+
+    for w in result["warnings"]:
+        logger.warning(f"[SOURCE-QC] {w}")
+    return result
 
 
 # ---------------------------------------------------------------------------
-# AI-powered analyses (Azure Speech, Azure OpenAI)
+# AI-powered analyses (Azure Speech)
 # ---------------------------------------------------------------------------
 
 
@@ -697,37 +981,6 @@ def _assess_pronunciation(
         return {"status": "skipped", "reason": "azure_speech_service not available"}
     except Exception as e:
         logger.warning(f"[ANALYSIS] Pronunciation assessment failed: {e}")
-        return {"status": "error", "reason": str(e)}
-
-
-def _evaluate_translation(
-    original_segments: list,
-    dubbed_segments: list,
-    source_lang: str,
-    target_lang: str,
-) -> Dict[str, Any]:
-    """Evaluate translation quality using Azure OpenAI GPT-4."""
-    try:
-        from app.services.azure_openai_service import is_enabled, evaluate_translation
-
-        if not is_enabled():
-            return {"status": "skipped", "reason": "Azure OpenAI not configured"}
-
-        if not original_segments or not dubbed_segments:
-            return {"status": "skipped", "reason": "Missing original or dubbed segments"}
-
-        logger.info("[ANALYSIS] Running Azure OpenAI translation evaluation")
-        result = evaluate_translation(
-            original_segments, dubbed_segments, source_lang, target_lang
-        )
-        if result is None:
-            return {"status": "error", "reason": "Azure OpenAI returned no results"}
-
-        return {"status": "ok", **result}
-    except ImportError:
-        return {"status": "skipped", "reason": "azure_openai_service not available"}
-    except Exception as e:
-        logger.warning(f"[ANALYSIS] Translation evaluation failed: {e}")
         return {"status": "error", "reason": str(e)}
 
 
@@ -944,8 +1197,8 @@ def _compute_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
     # Track which AI services contributed
     services_available = {
         "azure_speech": pronunciation.get("status") == "ok",
-        "azure_openai": translation.get("status") == "ok",
-        "screenapp": (analysis.get("screenapp_dubbed") or {}).get("status") == "ok",
+        "translation_eval": translation.get("status") == "ok",
+
         "retranscription": retrans.get("status") == "ok",
         "syncnet": lip_sync.get("status") == "ok",
         "emotion2vec": emotion_pres.get("status") == "ok",
@@ -953,22 +1206,51 @@ def _compute_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
         "claude_report": (analysis.get("qc_report") or {}).get("status") == "ok",
     }
 
-    # Use Claude's holistic synthesis score as authoritative when available — but only
-    # the genuine Claude synthesis, not the template fallback. The template only averages
-    # whichever raw sub-scores happen to be available at this point (missing timing/speed/
-    # silences, and giving lip_sync equal weight to emotion), which is cruder than the
+    # Authoritative-score priority: Gemini (watches the actual video+audio) >
+    # Claude holistic synthesis (transcript-level) > weighted pipeline score.
+    # Claude's template fallback is never accepted — it only averages whichever
+    # raw sub-scores happen to be available (missing timing/speed/silences, and
+    # giving lip_sync equal weight to emotion), which is cruder than the
     # properly-weighted pipeline score above and must never override it.
     qc_report = analysis.get("qc_report") or {}
     is_claude_synthesis = qc_report.get("status") == "ok" and qc_report.get("method") == "claude"
     synthesis_score = qc_report.get("overall_score") if is_claude_synthesis else None
     synthesis_grade = qc_report.get("overall_grade") if is_claude_synthesis else None
-    score_source = "synthesis" if synthesis_score is not None else "pipeline"
+
+    gemini_score = gemini.get("overall_score") if gemini.get("status") == "ok" else None
+    gemini_grade = gemini.get("overall_grade") if gemini.get("status") == "ok" else None
+    # Normalize a Gemini letter grade the parser couldn't produce ("?" default)
+    if gemini_grade in ("", "?", None):
+        gemini_grade = None
+    if gemini_score is not None and gemini_grade is None:
+        if gemini_score >= 90:
+            gemini_grade = "A"
+        elif gemini_score >= 80:
+            gemini_grade = "B"
+        elif gemini_score >= 70:
+            gemini_grade = "C"
+        elif gemini_score >= 60:
+            gemini_grade = "D"
+        else:
+            gemini_grade = "F"
+
+    if gemini_score is not None:
+        score_source = "gemini"
+        final_score, final_grade = gemini_score, gemini_grade
+    elif synthesis_score is not None:
+        score_source = "synthesis"
+        final_score, final_grade = synthesis_score, synthesis_grade
+    else:
+        score_source = "pipeline"
+        final_score, final_grade = score, grade
 
     return {
-        "score": synthesis_score if synthesis_score is not None else score,
-        "grade": synthesis_grade if synthesis_grade is not None else grade,
+        "score": final_score,
+        "grade": final_grade,
         "pipeline_score": score,
         "pipeline_grade": grade,
+        "gemini_score": gemini_score,
+        "gemini_grade": gemini_grade,
         "synthesis_score": synthesis_score,
         "synthesis_grade": synthesis_grade,
         "score_source": score_source,
@@ -1049,7 +1331,8 @@ def _gemini_review(
         if not is_enabled():
             return {"status": "skipped", "reason": "GEMINI_API_KEY not configured"}
 
-        logger.info("[ANALYSIS] Running Gemini 2.5 Pro holistic review")
+        from app.services.gemini_service import GEMINI_MODEL
+        logger.info(f"[ANALYSIS] Running {GEMINI_MODEL} holistic review")
 
         context = {}
         if timing_data:
