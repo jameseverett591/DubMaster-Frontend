@@ -5767,6 +5767,10 @@ async def _run_lipsync_chunks(
 # second sees the final billed state before deciding whether to debit.
 _render_locks: Dict[str, asyncio.Lock] = {}
 
+# Per-job lock for video-notes regenerations — serializes the cap check and
+# the billed provider call so concurrent refreshes can't overshoot the limit.
+_video_notes_regen_locks: Dict[str, asyncio.Lock] = {}
+
 
 async def process_dubbing_pipeline(
     job_id: str,
@@ -7762,7 +7766,9 @@ def _clear_stale_analysis_sentinel(sentinel: Path) -> bool:
             if token:
                 # Identity check: equal tokens mean the same live process;
                 # anything else (dead PID, recycled PID) means the run died.
-                if current == token:
+                # The third field (when present) is the run's unique nonce —
+                # process identity lives in the first two.
+                if current == token.split(":")[0]:
                     return False
                 sentinel.unlink(missing_ok=True)
                 return True
@@ -7800,8 +7806,12 @@ def _qc_gpu_available() -> bool:
     """QC needs GPU capacity — either local CUDA or the RunPod worker.
 
     The backend container has no CUDA device; RunPod is the GPU provider for
-    QC re-transcription in production.
+    QC re-transcription in production. QC_ALLOW_CPU=1 opts a deployment back
+    into local CPU QC (frame scans + CPU Whisper — fine for short clips or
+    low-traffic hosts, too slow for feature-length dubs in production).
     """
+    if os.getenv("QC_ALLOW_CPU", "").strip().lower() in ("1", "true", "yes"):
+        return True
     try:
         import torch
         if torch.cuda.is_available():
@@ -7823,7 +7833,8 @@ _QC_NO_GPU_MESSAGE = (
     "worker path is not fully configured (RUNPOD_API_KEY / RUNPOD_ENDPOINT_ID "
     "plus R2_BUCKET_NAME / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / "
     "R2_ACCOUNT_ID for the audio handoff). Set the RunPod worker for this "
-    "deployment, or run QC on the GPU worker."
+    "deployment, or set QC_ALLOW_CPU=1 to run QC on the backend CPU "
+    "(acceptable for short clips on low-traffic hosts)."
 )
 
 
@@ -11636,6 +11647,9 @@ def _vt_video_notes(job_id: str, token: str, preset: str, duration_sec: float = 
             return None
         st2 = vt.load_task_state(job_id) or {}
         st2["auto_retried"] = True
+        # create_task rewrites the state file — carry the failed-chain count
+        # forward or the NEXT request restarts the billing cap from zero.
+        st2["chains"] = int((state_entry or {}).get("chains", 0))
         vt._save_task_state(job_id, st2)
         return {"status": "processing", "provider": "videotranscriber",
                 "stage": "resubmitted", "retry_after": created.get("retry_after", 5)}
@@ -11861,26 +11875,31 @@ async def get_video_notes(job_id: str, request: Request):
     cache_key = f"{preset}:{fp}"
     # regenerate=true bypasses the cache (panel's refresh button) — the fresh
     # result still replaces the cached entry below. Regenerations are billed
-    # work (Claude tokens, VT quota), so they're capped per job: beyond
-    # VIDEO_NOTES_REGEN_LIMIT a regen request serves the cached result if one
-    # exists, else 429. The count lives in video_notes.json's _meta so the cap
-    # survives restarts and can't be reset by deleting a result entry.
-    if body.get("regenerate"):
-        _meta = cache.setdefault("_meta", {})
-        _regens = int(_meta.get("regens", 0) or 0)
-        _cap = int(os.environ.get("VIDEO_NOTES_REGEN_LIMIT", "10") or 10)
-        if _regens >= _cap:
-            if cache_key in cache:
-                return cache[cache_key]
-            raise HTTPException(
-                status_code=429,
-                detail=f"video notes regeneration limit reached ({_cap})")
-        _meta["regens"] = _regens + 1
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        with open(cache_path, "w", encoding="utf-8") as f:
-            _json.dump(cache, f, ensure_ascii=False, indent=2)
-    elif cache_key in cache:
+    # work, so they're capped per job with the count persisted in
+    # video_notes.json's _meta (survives restarts and cache-entry deletion).
+    # Successful refreshes count toward VIDEO_NOTES_REGEN_LIMIT; failures get
+    # their own smaller allowance (VIDEO_NOTES_REGEN_FAIL_LIMIT) — a transient
+    # provider error must not strand a user with stale notes, but a doomed
+    # source still can't burn unlimited billed calls. The lock serializes
+    # regens per job on this worker so racing requests can't both pass the
+    # cap check (uvicorn runs a single process — see Dockerfile).
+    _regen = bool(body.get("regenerate"))
+    if not _regen and cache_key in cache:
         return cache[cache_key]
+    _meta = cache.setdefault("_meta", {})
+    _regens = _failures = 0
+    _cap = int(os.environ.get("VIDEO_NOTES_REGEN_LIMIT", "10") or 10)
+    _fcap = int(os.environ.get("VIDEO_NOTES_REGEN_FAIL_LIMIT", "5") or 5)
+    if _regen:
+        async with _video_notes_regen_locks.setdefault(job_id, asyncio.Lock()):
+            _regens = int(_meta.get("regens", 0) or 0)
+            _failures = int(_meta.get("regen_failures", 0) or 0)
+            if _regens >= _cap or _failures >= _fcap:
+                if cache_key in cache:
+                    return cache[cache_key]
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"video notes regeneration limit reached")
 
     provider = (os.getenv("VIDEO_NOTES_PROVIDER") or "claude").strip().lower()
 
@@ -11906,6 +11925,15 @@ async def get_video_notes(job_id: str, request: Request):
         if result.get("status") == "ok":
             result["provider"] = name
             cache[cache_key] = result
+            if _regen:
+                _meta["regens"] = _regens + 1
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path, "w", encoding="utf-8") as f:
+                _json.dump(cache, f, ensure_ascii=False, indent=2)
+        elif _regen and result.get("status") == "error":
+            # A failed refresh still billed the provider call — count it
+            # toward the failure allowance and persist it immediately.
+            _meta["regen_failures"] = _failures + 1
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
             with open(cache_path, "w", encoding="utf-8") as f:
                 _json.dump(cache, f, ensure_ascii=False, indent=2)

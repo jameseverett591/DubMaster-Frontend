@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import subprocess
+import uuid
 import re
 import time
 from datetime import datetime
@@ -78,7 +79,8 @@ def analyze_dub(
     sentinel_id: Optional[str] = None
     try:
         from app.api.routes import _process_token
-        sentinel_id = f"{os.getpid()}:{_process_token(os.getpid()) or ''}"
+        sentinel_id = (f"{os.getpid()}:{_process_token(os.getpid()) or ''}:"
+                       f"{uuid.uuid4().hex}")
         sentinel.write_text(sentinel_id, encoding="utf-8")
         error_file.unlink(missing_ok=True)
     except Exception:
