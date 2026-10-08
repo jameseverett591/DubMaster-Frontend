@@ -58,6 +58,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
   // (the GET endpoint can serve the prior result mid-run).
   const reanalyzePendingRef = useRef(false)
   const reanalyzePrevGenRef = useRef<string | null>(null)
+  // Server-side claim time of the current retry (from the POST response).
+  // Lets a poll tell a stale in-flight 'failed' response (stamped before
+  // the claim) from the new run's own failure (stamped after).
+  const reanalyzeClaimedAtRef = useRef<number | null>(null)
 
   useEffect(() => {
     localStorage.setItem('dubverse.lastEditorJobId', jobId)
@@ -203,6 +207,12 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             flags: seg.flags ?? [],
             flag_status: seg.flag_status ?? 'unreviewed',
             correction_type: seg.correction_type ?? null,
+            // Pre-translation confidence gate: TTS was withheld for these until
+            // human review. They carry no `flags` entry, so without mapping
+            // these fields they were completely invisible — silent segments
+            // with no explanation and no way to release them.
+            translation_flagged: seg.translation_flagged ?? false,
+            flag_reason: seg.flag_reason ?? null,
             qc_findings: seg.qc_findings ?? [],
             // TTS engine + Respeecher take metadata. This mapper is a whitelist,
             // so anything not named here is dropped on load — these were, which
@@ -321,8 +331,35 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     const REQUEST_TIMEOUT_MS = 15000
     // How long after a trigger a 404 is read as "still queued" not "finished".
     const TRIGGER_GRACE_MS = 120000
+    // A trigger-POST that 404s (video still rendering) is re-asked at most
+    // this often — not once per poll tick.
+    const TRIGGER_RETRY_MS = 30000
     let failures = 0
     let inFlight = false
+    let lastTriggerAttemptAt = 0
+
+    /** fetch with the timeout covering the AUTH wait and the BODY read too —
+     *  AbortSignal alone only bounds the request; a stalled session refresh in
+     *  ensureAuthHeaders() or a stalled response body in res.json() would
+     *  otherwise leave inFlight set forever. The abort timer stays armed after
+     *  headers arrive so a hung body read is still killed at the deadline. */
+    function qcFetch(url: string, init: RequestInit = {}): Promise<Response> {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+      return Promise.race([
+        (async () => fetch(url, {
+          ...init,
+          headers: await apiClient.ensureAuthHeaders(),
+          signal: controller.signal,
+        }))(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => {
+            clearTimeout(timer)
+            controller.abort()
+            reject(new DOMException('timed out', 'TimeoutError'))
+          }, REQUEST_TIMEOUT_MS)),
+      ])
+    }
 
     setQcError(null)
 
@@ -331,9 +368,10 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
       pollRef.current = setInterval(checkQC, intervalMs)
     }
 
-    /** Terminal: stop polling and tell the user why. */
+    /** Terminal: stop polling and tell the user why. A stale async return
+     *  from a CANCELLED effect must not clear the NEW effect's poller or
+     *  reanalyze latch — check `cancelled` before touching shared refs. */
     function stopQc(message: string) {
-      // A superseded effect must not tear down the newer effect's poller.
       if (cancelled) return
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
       reanalyzePendingRef.current = false
@@ -360,16 +398,14 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
       // Final safety cap so a genuinely wedged job (bad data, backend down)
       // can't poll forever if the tab is left open.
       if (attempts >= FAST_ATTEMPTS + SLOW_ATTEMPTS) {
+        if (cancelled) return  // stale tick — the new effect owns the refs now
         if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
         reanalyzePendingRef.current = false
-        if (!cancelled) setQcLoading(false)
+        setQcLoading(false)
         return
       }
       try {
-        const res = await fetch(`${API_BASE}/api/analysis/${jobId}/${lang}`, {
-          headers: await apiClient.ensureAuthHeaders(),
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-        })
+        const res = await qcFetch(`${API_BASE}/api/analysis/${jobId}/${lang}`)
         if (res.ok || res.status === 202) {
           failures = 0
         } else if (res.status === 404) {
@@ -390,22 +426,46 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             }
             if (!cancelled) {
               setQcAnalysis(data.analysis)
+              setQcError(null)
               if (reanalyzePendingRef.current) {
                 setQcUpdatedAt(new Date().toISOString())
                 reanalyzePendingRef.current = false
               }
               setQcLoading(false)
-              setQcError(null)
+              if (pollRef.current) {
+                clearInterval(pollRef.current)
+                pollRef.current = null
+              }
+            }
+          } else if (data.status === 'failed') {
+            // While a retry is armed, only a failure stamped at/after the
+            // server-side claim belongs to the new run: a poll issued before
+            // the retry POST cleared the old error can still deliver that
+            // older failure afterwards — clearing the file can't retract a
+            // response already in flight. Both timestamps come from the
+            // server, so the comparison is immune to client clock skew.
+            const claimedAt = reanalyzeClaimedAtRef.current
+            if (reanalyzePendingRef.current && claimedAt != null
+                && (typeof data.failed_at !== 'number' || data.failed_at < claimedAt)) {
+              if (!cancelled) setQcLoading(true)
+              return
+            }
+            // Terminal state — the run wrote its reason to disk. Stop
+            // polling and show it; infinite retries here were the old wedge.
+            if (!cancelled) {
+              setQcError(data.reason || 'QC analysis failed')
+              setQcLoading(false)
+              reanalyzePendingRef.current = false
               if (pollRef.current) {
                 clearInterval(pollRef.current)
                 pollRef.current = null
               }
             }
           } else if (data.status === 'running') {
-            if (!cancelled) setQcLoading(true)
+            if (!cancelled) { setQcLoading(true); setQcError(null) }
           }
         } else if (res.status === 202) {
-          if (!cancelled) setQcLoading(true)
+          if (!cancelled) { setQcLoading(true); setQcError(null) }
         } else if (res.status === 404) {
           if (qcTriggeredForRef.current === jobId) {
             // The run only creates its "running" marker once its worker thread
@@ -421,14 +481,26 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             return
           }
           // No report and no run yet — ask for one, once.
+          // Rate-limit trigger retries: a still-rendering video answers 404,
+          // and re-asking every poll tick would spam POSTs for the whole
+          // render. Every TRIGGER_RETRY_MS is plenty — the outer attempt cap
+          // (~2h) still bounds the total wait.
+          if (Date.now() - lastTriggerAttemptAt < TRIGGER_RETRY_MS) {
+            if (!cancelled) setQcLoading(true)
+            return
+          }
+          lastTriggerAttemptAt = Date.now()
           let trigger: Response | null = null
           try {
-            trigger = await fetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, {
-              method: 'POST',
-              headers: await apiClient.ensureAuthHeaders(),
-              signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-            })
+            trigger = await qcFetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, { method: 'POST' })
           } catch {}
+          if (trigger && trigger.status === 404) {
+            // Video still rendering — nothing was queued, so DON'T latch the
+            // trigger and DON'T stop: the next window re-asks, and once the
+            // film lands the POST answers 202 and QC proceeds normally.
+            if (!cancelled) setQcLoading(true)
+            return
+          }
           if (trigger) {
             // Only latch once the backend actually answered; a dropped request
             // may be retried on the next tick (bounded by the failure cap).
@@ -436,7 +508,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             qcTriggeredAtRef.current = Date.now()
             failures = 0
             if (!trigger.ok) {
-              // Refused: 503 (backend has no GPU) or 404 (no dubbed video yet).
+              // Refused (e.g. 503 — backend has no GPU capacity).
               const body = await trigger.json().catch(() => null)
               stopQc(body?.detail || `QC could not start (backend returned ${trigger.status}).`)
               return
@@ -495,11 +567,14 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
       }
       return
     }
+    const body = await res.json().catch(() => null)
     // The poller must not POST again for a run we just requested.
     qcTriggeredForRef.current = jobId
     qcTriggeredAtRef.current = Date.now()
     reanalyzePrevGenRef.current = qcAnalysis?.generated_at ?? null
     reanalyzePendingRef.current = true
+    reanalyzeClaimedAtRef.current =
+      body && typeof body.claimed_at === 'number' ? body.claimed_at : null
     setQcUpdatedAt(null)
     setReanalyzeNonce((n) => n + 1)
   }, [editorProps, jobId, qcLoading, qcAnalysis])

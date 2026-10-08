@@ -78,19 +78,21 @@ def resolve_job_file(job_dir: str, value: Any) -> str:
         if name in (".", "..") or "\\" in name:
             raise UnsafePath("invalid file name")
         candidate = os.path.join(job_dir, name)
-    elif os.path.isabs(value):
-        candidate = value
-    elif "/" in value or "\\" in value:
+    elif os.path.isabs(path_part):
+        candidate = path_part
+    elif "/" in path_part or "\\" in path_part:
         # A path with directories. The server writes these relative to its working
         # directory ("data/dubbed/<job>/segment_0013.mp3"), and every other reader
         # of a stored value opens it that way — so that is the ONLY reading that
         # counts. Accepting "whichever reading lands inside the job folder" let
         # "dubbed/<other job>/x.mp3" through: harmless when read as job-relative,
         # but it names another job's file everywhere else the value is used.
-        candidate = os.path.abspath(value)
+        # path_part (query/fragment stripped) — the editor cache-busts stored
+        # URLs with ?ts=…; the query is not part of the filename.
+        candidate = os.path.abspath(path_part)
     else:
         # A bare filename ("segment_0013.mp3"): lives in the job folder.
-        candidate = os.path.join(job_dir, value)
+        candidate = os.path.join(job_dir, path_part)
 
     real = os.path.realpath(candidate)
     if not _inside(root_real, real):

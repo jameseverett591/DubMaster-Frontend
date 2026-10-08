@@ -7,7 +7,6 @@ import { Progress } from "@/components/ui/progress"
 import Link from "next/link"
 import {
   Download,
-  Share2,
   CheckCircle2,
   RefreshCw,
   FileVideo,
@@ -79,13 +78,13 @@ export function DubbedVideoResult({
 }: DubbedVideoResultProps) {
   const t = useT()
   const isComplete = !isDubbing && dubbingProgress >= 100
-  const [linkCopied, setLinkCopied] = useState(false)
-  const [isSharing, setIsSharing] = useState(false)
   const shareUnlocked = useShareUnlocked(originalVideo.jobId)
   const lockedTitle = t('Available after payment')
 
-  const handleDownload = () => {
-    let url = dubbedVideoUrl ?? originalVideo.url
+  const handleDownload = async () => {
+    // The stored URL was minted when the job completed — its access_token may
+    // have rotated since. Re-mint against the live token before using it.
+    let url = await apiClient.refreshMediaUrlAsync(dubbedVideoUrl ?? originalVideo.url)
     // Cross-origin (UI :3001 → API :8000) ignores the `download` attribute and
     // plays the file inline; the API's attachment=1 switch answers
     // Content-Disposition: attachment, which is what actually saves the file.
@@ -98,61 +97,6 @@ export function DubbedVideoResult({
     link.target = "_blank"
     link.rel = "noopener noreferrer"
     link.click()
-  }
-
-  // Fetch-into-memory cap: above this we share the authenticated link
-  // instead of materialising the file.
-  const SHARE_FILE_MAX_BYTES = 250 * 1024 * 1024
-
-  const handleShare = async () => {
-    const fileName = `${originalVideo.title}_dubbed_${targetLanguage}.mp4`
-
-    // Prefer Web Share Level 2: hand the OS the actual video FILE so share
-    // targets (Save, Mail, Nearby Share, installed apps) receive the video
-    // itself. The old code shared window.location.href — a link back into
-    // DubMaster — so the video never left the app.
-    if (dubbedVideoUrl && navigator.canShare) {
-      setIsSharing(true)
-      try {
-        const resp = await fetch(dubbedVideoUrl)
-        if (resp.ok) {
-          const blob = await resp.blob()
-          if (blob.size <= SHARE_FILE_MAX_BYTES) {
-            const file = new File([blob], fileName, { type: blob.type || "video/mp4" })
-            if (navigator.canShare({ files: [file] })) {
-              await navigator.share({ files: [file], title: fileName })
-              return
-            }
-          }
-        }
-      } catch {
-        // File fetch/share failed or was cancelled — fall through to link share.
-      } finally {
-        setIsSharing(false)
-      }
-    }
-
-    // Fallback: share the direct video URL (never the DubMaster page URL).
-    const shareUrl = dubbedVideoUrl ?? window.location.href
-    if (navigator.share) {
-      try {
-        await navigator.share({
-          title: `${originalVideo.title} - Dubbed in ${LANGUAGE_NAMES[targetLanguage]}`,
-          text: "Check out this dubbed video!",
-          url: shareUrl,
-        })
-      } catch {
-        // User cancelled share
-      }
-      return
-    }
-    try {
-      await navigator.clipboard.writeText(shareUrl)
-      setLinkCopied(true)
-      setTimeout(() => setLinkCopied(false), 2000)
-    } catch {
-      // Clipboard unavailable
-    }
   }
 
   // ── In-progress view ──────────────────────────────────────────────────────
@@ -308,9 +252,6 @@ export function DubbedVideoResult({
           <Button className="flex-1 gap-1.5 h-8 text-xs" onClick={handleDownload} disabled={!dubbedVideoUrl || !shareUnlocked} title={shareUnlocked ? undefined : lockedTitle}>
             <Download className="h-3.5 w-3.5" />
             {t('Download')}
-          </Button>
-          <Button variant="outline" className="gap-1.5 h-8 text-xs bg-transparent" onClick={handleShare} disabled={isSharing || !shareUnlocked} title={shareUnlocked ? (linkCopied ? t('Link copied!') : t('Share')) : lockedTitle}>
-            {isSharing ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : linkCopied ? <CheckCircle2 className="h-3.5 w-3.5 text-green-500" /> : <Share2 className="h-3.5 w-3.5" />}
           </Button>
           <Button variant="outline" className="gap-1.5 h-8 text-xs bg-transparent" onClick={onRegenerate}>
             <RefreshCw className="h-3.5 w-3.5" />

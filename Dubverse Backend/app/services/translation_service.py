@@ -868,9 +868,27 @@ class TranslationService:
         # regardless of which translation engine handles the segment.
         for seg in segments:
             conf = seg.get("confidence")
-            if conf is None:
+            # Empty/placeholder source ("..", punctuation only): nothing was
+            # actually heard, so any translated text is an invention. Flag it
+            # regardless of confidence — the ASR score measures nothing here.
+            if not re.sub(r"[\s\W]+", "", seg.get("text") or ""):
                 seg["translation_flagged"] = True
-                seg["flag_reason"] = "unknown_asr_provenance"
+                seg["flag_reason"] = "empty_source_text"
+            elif conf is None:
+                # No ASR score to check against — typically a Velma primary
+                # transcript whose window the worker ASR never covered, so no
+                # confidence could be borrowed. The text is often perfectly
+                # good; it just can't be *verified*. On real films this bucket
+                # was muting nearly half the dialogue, so it no longer
+                # withholds TTS — it stays visible as an advisory flag for the
+                # review queue instead.
+                seg.setdefault("flags", []).append({
+                    "code": "unknown_asr_provenance",
+                    "reason": "No ASR confidence score available — translation "
+                              "not independently verified.",
+                })
+                seg.setdefault("translation_flagged", False)
+                seg.setdefault("flag_reason", None)
             elif seg.get("gap_filled"):
                 # Fallback engine filled a hole the primary left — usually the
                 # noisy stretch at the scene's tail. Whisper's self-reported

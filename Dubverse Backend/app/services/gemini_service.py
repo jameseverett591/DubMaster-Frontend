@@ -16,6 +16,9 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# gemini-2.5-pro was retired for new users; Google points at the preview line.
+GEMINI_MODEL = "gemini-3.1-pro-preview"
+
 
 def is_enabled() -> bool:
     """Check if Gemini API is configured."""
@@ -66,7 +69,7 @@ async def analyze_dubbed_video(
         # Parse structured response
         parsed = _parse_response(result)
         parsed["status"] = "ok"
-        parsed["method"] = "gemini-2.5-pro"
+        parsed["method"] = GEMINI_MODEL
 
         return parsed
 
@@ -172,7 +175,7 @@ async def _call_gemini(
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key={api_key}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}",
                 json={
                     "contents": [
                         {

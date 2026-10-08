@@ -10,8 +10,7 @@
 // YouTube is an SPA — injection runs on yt-navigate-finish plus a
 // MutationObserver for lazily-rendered thumbnails.
 
-const DUBMASTER_URL = "http://localhost:3001"; // change to the deployed origin in production
-const EXT_VERSION = "0.7"; // bump on every change — shown in console + toast
+const DUBMASTER_URL = "https://dubmasterai.com";
 const BUTTON_ID = "dubmaster-import-btn";
 const THUMB_BTN_CLASS = "dubmaster-thumb-btn";
 
@@ -163,52 +162,12 @@ function scanThumbnails(root) {
   }
 }
 
-function reportCount() {
-  const n = document.querySelectorAll("." + THUMB_BTN_CLASS).length;
-  console.log(`[DubMaster] ${n} thumbnail buttons injected`);
-}
-
 // ── Wiring ────────────────────────────────────────────────────────────────
 
-console.log("[DubMaster] content script loaded v" + EXT_VERSION);
 document.documentElement.dataset.dubmasterImport = "1";
-function showPing() {
-  if (document.getElementById('dubmaster-import-ping')) return
-  const el = document.createElement('div')
-  el.id = 'dubmaster-import-ping'
-  el.style.cssText = [
-    'position:fixed',
-    'bottom:20px',
-    'left:20px',
-    'z-index:99999',
-    'padding:8px 10px',
-    'border-radius:10px',
-    'font-family:Roboto,Arial,sans-serif',
-    'font-size:12px',
-    'font-weight:700',
-    'color:#fff',
-    'background:linear-gradient(90deg,#A855F7,#22D3EE)',
-    'box-shadow:0 4px 14px rgba(0,0,0,.4)',
-    'opacity:.95',
-    'cursor:pointer',
-  ].join(';')
-  // Click to dismiss — it stays so the live count is visible in screenshots.
-  el.addEventListener('click', () => el.remove())
-  document.body.appendChild(el)
-  const update = () => {
-    if (!el.isConnected) return
-    const n = document.querySelectorAll('.' + THUMB_BTN_CLASS).length
-    el.textContent = `DubMaster v${EXT_VERSION} · ${n} buttons`
-  }
-  update()
-  setInterval(update, 2000)
-}
-
 injectThumbStyles();
 injectWatchButton();
 scanThumbnails(document);
-showPing();
-setTimeout(reportCount, 1500);
 
 window.addEventListener("yt-navigate-finish", () => {
   setTimeout(() => {

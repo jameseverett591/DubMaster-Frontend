@@ -24,7 +24,9 @@ from unittest import mock
 RUNPOD_ENV = {"RUNPOD_API_KEY": "k", "RUNPOD_ENDPOINT_ID": "e"}
 R2_ENV = {"R2_BUCKET_NAME": "b", "R2_ACCESS_KEY_ID": "i",
           "R2_SECRET_ACCESS_KEY": "s", "R2_ACCOUNT_ID": "a"}
-ALL_KEYS = list(RUNPOD_ENV) + list(R2_ENV)
+# QC_ALLOW_CPU is a gate input too — a host env that has it would make every
+# "refused" test silently pass.
+ALL_KEYS = list(RUNPOD_ENV) + list(R2_ENV) + ["QC_ALLOW_CPU"]
 
 
 def _env(**extra):
@@ -161,6 +163,18 @@ class RetranscribeTests(unittest.TestCase):
         s3.upload_file.assert_called_once()
         s3.delete_object.assert_called_once()
 
+    def test_transcribe_only_nested_transcript_is_read(self):
+        # The transcribe-only worker returns text under output.transcript.
+        # segments — reading only the flat shape silently produced an empty
+        # transcript and zeroed pronunciation_clarity.
+        poll = mock.AsyncMock(return_value={"transcript": {"segments": [
+            {"start": 0.0, "end": 1.5, "text": "nested line", "confidence": 0.9},
+        ]}})
+        out, _, _ = self._run_via_runpod(poll)
+        self.assertEqual(out["status"], "ok")
+        self.assertEqual(out["segment_count"], 1)
+        self.assertEqual(out["segments"][0]["text"], "nested line")
+
     def test_runpod_result_maps_into_qc_schema(self):
         poll = mock.AsyncMock(return_value={"segments": [
             {"start": 0.0, "end": 1.5, "text": " hello ", "confidence": 0.9},
@@ -190,14 +204,18 @@ class RetranscribeTests(unittest.TestCase):
         self.assertEqual(out["status"], "error")
         self.assertIn("boom", out["reason"])
 
-    def test_default_timeout_stays_under_stale_sentinel_age(self):
-        # A run still waiting on RunPod must not look dead to the stale-sentinel
-        # check (routes._ANALYSIS_SENTINEL_MAX_AGE_S) and get a duplicate started.
+    def test_live_sentinel_is_never_stale_regardless_of_age(self):
+        # A long RunPod wait must not let a second run start: staleness is
+        # decided by PROCESS identity (pid:token), not age — a sentinel whose
+        # writer is alive stays claimed even past any time limit.
         from app.api import routes
-        poll = mock.AsyncMock(return_value={"segments": []})
-        _, _, rp = self._run_via_runpod(poll)
-        timeout = rp.poll_until_complete.call_args.kwargs["timeout"]
-        self.assertLess(timeout, routes._ANALYSIS_SENTINEL_MAX_AGE_S)
+        sentinel = Path(self.tmp) / "analysis_en.running"
+        token = routes._process_token(os.getpid()) or ""
+        sentinel.write_text(f"{os.getpid()}:{token}")
+        stale = os.path.getmtime(sentinel) - 25 * 3600
+        os.utime(sentinel, (stale, stale))   # "a day old" — must still be live
+        self.assertFalse(routes._clear_stale_analysis_sentinel(sentinel))
+        self.assertTrue(sentinel.exists())
 
 
 if __name__ == "__main__":

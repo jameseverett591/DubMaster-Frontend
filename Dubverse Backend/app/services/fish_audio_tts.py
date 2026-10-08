@@ -144,6 +144,37 @@ class FishAudioTTS:
                 raise
         return self._client
 
+    async def create_voice_model(
+        self, audio_clips: List[bytes], title: str
+    ) -> Optional[str]:
+        """Upload reference clips as a persistent private Fish voice model.
+
+        The inline ``references`` path forces msgpack on ``s2-pro`` — the older
+        model, and composed [bracket] directives never parse there. A persistent
+        model is just a ``reference_id``: it synthesizes over JSON on
+        ``s2.1-pro`` so directives reach cloned voices too, and Fish documents
+        it as higher quality and lower latency than inline cloning.
+
+        Returns the new voice id, or None on failure (caller falls back to
+        inline references).
+        """
+        if not self.enabled or not audio_clips:
+            return None
+        try:
+            voice = await self._get_client().voices.create(
+                title=title,
+                voices=list(audio_clips),
+                visibility="private",
+                train_mode="fast",
+            )
+            voice_id = getattr(voice, "id", None)
+            if voice_id:
+                logger.info(f"[FISH-TTS] uploaded voice model '{title}' -> {voice_id}")
+                return str(voice_id)
+        except Exception as e:
+            logger.warning(f"[FISH-TTS] voice model upload failed for '{title}': {e}")
+        return None
+
     # ----- voices --------------------------------------------------------- #
 
     async def get_voices(self) -> List[Dict]:

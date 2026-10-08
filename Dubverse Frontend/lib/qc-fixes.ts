@@ -78,7 +78,7 @@ function fixTiming(
 ): QCFixResult {
   // Best-effort heuristic: bump speed 10%, cap at 1.5×. Not guaranteed to solve
   // every timing gap — caller should surface "best guess" copy alongside this fix.
-  const current = segment.committed_speed ?? 1.0
+  const current = segment.committed_speed ?? segment.speed ?? 1.0
   const nudged = Math.min(+(current * 1.1).toFixed(2), 1.5)
 
   return {
@@ -98,7 +98,7 @@ function fixSync(
 ): QCFixResult {
   // Lip-sync drift: same speed-nudge heuristic as timing. Precision fix requires
   // a full re-render with tighter segment bounds, which is outside client scope.
-  const current = segment.committed_speed ?? 1.0
+  const current = segment.committed_speed ?? segment.speed ?? 1.0
   const nudged = Math.min(+(current * 1.1).toFixed(2), 1.5)
 
   return {

@@ -142,4 +142,7 @@ opencv-python-headless>=4.8.0
 boto3>=1.34.0
 supabase
 yt-dlp>=2024.10.7
+# JS challenge solver for yt-dlp — required for signed-in (cookie)
+# sessions; without it YouTube returns "No video formats found"
+yt-dlp-ejs>=0.8.0
 youtube-transcript-api>=0.6.2

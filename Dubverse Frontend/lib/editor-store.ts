@@ -160,7 +160,7 @@ interface EditorState {
   clearStagedEdits: () => void
   /** Drop specific staged entries (the ones that committed successfully). */
   clearStagedEditsFor: (transcriptIndices: number[]) => void
-  setFailedSegments: (failed: Record<number, string>) => void
+  setFailedSegments: (failed: Record<number, string> | ((prev: Record<number, string>) => Record<number, string>)) => void
   clearFailedSegment: (transcriptIndex: number) => void
   setSaveProgress: (progress: { done: number; total: number } | null) => void
   setChunkStatusMap: (map: Record<string, ChunkStatus>) => void
@@ -353,7 +353,11 @@ export const useEditorStore = create<EditorState>()(
     for (const ti of transcriptIndices) delete next[ti]
     return { stagedEdits: next }
   }),
-  setFailedSegments: (failed) => set({ failedSegments: failed }),
+  setFailedSegments: (failed) => set((state) => ({
+    // Updater form merges on the LIVE map — a value built from a render-time
+    // snapshot erases failures recorded while the caller was awaiting.
+    failedSegments: typeof failed === 'function' ? failed(state.failedSegments) : failed,
+  })),
   clearFailedSegment: (transcriptIndex) => set((state) => {
     const next = { ...state.failedSegments }
     delete next[transcriptIndex]

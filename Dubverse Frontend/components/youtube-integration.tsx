@@ -281,12 +281,20 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
   // ── Video import ─────────────────────────────────────────────────────────
 
   const handleImportVideo = async (url: string, title?: string,
-                                   thumbnail?: string, duration?: string) => {
+                                   thumbnail?: string, duration?: string,
+                                   transcript?: TranscriptLine[], lang?: string | null) => {
     if (!url.trim() || isImporting) return
     setIsImporting(true)
     setImportError(null)
     try {
-      const res = await apiClient.importYouTube(url)
+      // Pass the reviewed captions through so the job uses THEM as the
+      // transcript — a fresh ASR pass would discard the text the user just
+      // checked and can produce different words/timings.
+      const res = await apiClient.importYouTube(
+        url, lang || undefined, undefined, undefined,
+        transcript?.map(l => ({
+          text: l.text, start: l.start, end: l.end, speaker: l.speaker,
+        })))
       // The import returns 'accepted' while yt-dlp downloads server-side —
       // the media URL and segment manifest 404 until it lands, and the
       // workspace loads data once. Poll until the download finishes (status
@@ -397,7 +405,12 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
       // as the job transcript and skips ASR entirely.
       const res = await apiClient.uploadVideo(
         ownVideoFile,
-        undefined, undefined, undefined, undefined, undefined,
+        undefined,
+        // The caption track's real language — without it the backend stores
+        // the transcript as English and every dub translates from the wrong
+        // source.
+        extractedLang || undefined,
+        undefined, undefined, undefined,
         extractedTranscript.map(l => ({
           text: l.text, start: l.start, end: l.end, speaker: l.speaker,
         })),
@@ -440,7 +453,7 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
                 {t('You can also extract captions and transcripts with full timestamps, or pair YouTube captions with a video file you upload yourself.')}
               </p>
               <p className="text-sm text-blue-300/80 mt-2">
-                <strong>{t('Note:')}</strong> {t("You're responsible for having the rights to any video you import. Private and age-restricted videos are not supported.")}
+                <strong>{t('Note:')}</strong> {t("You're responsible for having the rights to any video you import. Private and DRM-protected (licensed TV/film) videos can't be imported from a link. Age-restricted videos can be imported when the server has a signed-in YouTube session configured — otherwise upload the file instead.")}
               </p>
             </div>
           </div>
@@ -584,7 +597,10 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
                     disabled={isImporting}
                     onClick={() => handleImportVideo(
                       extractUrl,
-                      extractedTitle || undefined)}
+                      extractedTitle || undefined,
+                      undefined, undefined,
+                      extractedTranscript || undefined,
+                      extractedLang)}
                   >
                     {isImporting
                       ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -830,6 +846,22 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
                               alt={video.title}
                               className="h-full w-full object-cover"
                             />
+                            <button
+                              type="button"
+                              title={t('Import to DubMaster')}
+                              disabled={isImporting}
+                              onClick={() => {
+                                setImportingVideoId(video.id)
+                                handleImportVideo(
+                                  `https://www.youtube.com/watch?v=${video.id}`,
+                                  video.title,
+                                  video.thumbnail,
+                                  video.duration)
+                              }}
+                              className="absolute top-1.5 right-1.5 rounded-xl px-2.5 py-1 text-xs font-bold text-white shadow-[0_2px_8px_rgba(0,0,0,0.5)] bg-gradient-to-r from-[#A855F7] to-[#22D3EE] opacity-90 hover:opacity-100 transition-opacity disabled:opacity-50"
+                            >
+                              DubMaster
+                            </button>
                             {video.duration && (
                               <div className="absolute bottom-2 right-2 flex items-center gap-1 rounded bg-black/80 px-2 py-1 text-xs text-white">
                                 <Clock className="h-3 w-3" />

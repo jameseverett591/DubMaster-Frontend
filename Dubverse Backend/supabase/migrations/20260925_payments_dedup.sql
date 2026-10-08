@@ -13,6 +13,9 @@ where a.stripe_payment_id is not null
   and a.status = b.status
   and a.id > b.id;
 
-create unique index if not exists payments_stripe_payment_id_status_key
-    on public.payments (stripe_payment_id, status)
-    where stripe_payment_id is not null;
+-- NOT partial: Postgres can't use a WHERE-qualified index as an ON CONFLICT
+-- arbiter, and NULLs are already exempt from uniqueness — the predicate was
+-- both harmful and redundant. New name (drop the old partial one if applied).
+drop index if exists payments_stripe_payment_id_status_key;
+create unique index if not exists payments_stripe_payment_id_status_uq
+    on public.payments (stripe_payment_id, status);

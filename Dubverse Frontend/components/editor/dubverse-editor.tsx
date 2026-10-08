@@ -85,6 +85,7 @@ import PerformPanel from '@/components/editor/perform-panel'
 import { HeatmapBar } from '@/components/timeline/HeatmapBar'
 import { SpeakerVoicePanel } from '@/components/editor/speaker-voice-panel'
 import { ExportModal } from '@/components/editor/export-modal'
+import { DubReadyDialog } from '@/components/dub-ready-dialog'
 import { ReviewQueuePanel } from '@/components/editor/review-queue-panel'
 import { stitchRPT, stitchRPTWindow, overlayStagedEdits, clearCache, scheduleRPTPlayback, effStart, effEnd, CROSSFADE_MAX_SEC, CROSSFADE_WARN_SEC, type CrosslayerRange } from '@/lib/rpt-engine'
 import { LanguageSwitcher } from '@/components/language-switcher'
@@ -126,7 +127,7 @@ import {
 } from '@/components/ui/context-menu'
 
 // Additional QC tab icons not in main import block
-import { LayoutList, AudioLines, Zap, GitBranch, Sliders, MessageCircle, ArrowUp, AlertCircle } from 'lucide-react'
+import { LayoutList, AudioLines, Zap, GitBranch, Sliders, MessageCircle, ArrowUp, AlertCircle, Flag } from 'lucide-react'
 import { usePlan } from '@/lib/use-plan'
 import { useUsage } from '@/hooks/use-usage'
 import { useT } from '@/lib/use-t'
@@ -1543,7 +1544,11 @@ export function DubVerseEditor({
     segmentIndex: number
   } | null>(null)
   const [addSegmentFeedback, setAddSegmentFeedback] = useState<'success' | 'error' | null>(null)
+  const [showDubReady, setShowDubReady] = useState(false)
   const [shareCopied, setShareCopied] = useState<'link' | 'video' | null>(null)
+  // Minted public share URL for the dubbed video — the popover copies THIS,
+  // never activeDubbedVideoUrl (an authenticated URL carrying access_token).
+  const [shareVideoLink, setShareVideoLink] = useState<'pending' | 'unavailable' | 'error' | string | null>(null)
   // The HTML `download` attribute is IGNORED for cross-origin URLs (UI on
   // :3001, API on :8000), so `<a download href=activeDubbedVideoUrl>` just
   // navigated and PLAYED the film inline instead of saving it. The backend's
@@ -1553,6 +1558,20 @@ export function DubVerseEditor({
     url.includes('/api/download/')
       ? `${url}${url.includes('?') ? '&' : '?'}attachment=1`
       : url
+  // The media URL serves Content-Disposition: inline so it can also back the
+  // <video> player; ?attachment=1 is what actually triggers a browser save.
+  const downloadDubbedVideo = async () => {
+    if (!activeDubbedVideoUrl) return
+    // Stored media URLs carry the token they were minted with — after a
+    // rotation that token 401s, so re-mint before the browser follows it.
+    // A refresh failure still tries the stored URL rather than dead-ending.
+    const fresh = await apiClient.refreshMediaUrlAsync(activeDubbedVideoUrl)
+      .catch(() => activeDubbedVideoUrl)
+    const a = document.createElement('a')
+    a.href = withAttachment(fresh)
+    a.download = `${title || 'dubbed_video'}.mp4`
+    a.click()
+  }
   const [askAiOpen, setAskAiOpen] = useState(false)
   const [askAiModel, setAskAiModel] = useState<'haiku' | 'sonnet' | 'opus'>('sonnet')
   const [characterProfileOpen, setCharacterProfileOpen] = useState<{
@@ -2171,19 +2190,23 @@ export function DubVerseEditor({
   // AudioContext.currentTime when the latest RPT playback started, so the
   // playhead can follow the audio even if the video element stalls.
   const audioStartTimeRef = useRef<number | null>(null)
-  // Pending regen while one is in flight (depth 1, last-write-wins).
+  // Pending regens while one is in flight — a FIFO, not a single slot. The old
+  // depth-1 last-write-wins queue dropped every intermediate request, so two
+  // rapid approvals released BOTH flags while only the latest ever rendered
+  // audio (a released-but-silent segment is the worst state to leave).
   // engineOverride and extraPayload ride along: a deferred regen replayed without
   // them silently falls back to the segment's stored engine and loses any pinned
   // seed, so a voice drop or a library recall issued while another regen was in
   // flight would come back on the wrong engine or as a fresh race.
-  const regenQueueRef = useRef<{
+  const regenQueueRef = useRef<Array<{
     segIdx?: number
     voiceOverride?: string
     textOverride?: string
     ttsTextOverride?: string
     engineOverride?: string
     extraPayload?: Partial<RegenerateSegmentRequest>
-  } | null>(null)
+    resolve?: (ok: boolean) => void
+  }>>([])
   const autoRegenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingAutoRegenRef = useRef<number | null>(null)
   const [editingText, setEditingText] = useState('')
@@ -2432,6 +2455,17 @@ export function DubVerseEditor({
     if (i == null) return ''
     const s = displaySegments[i]
     return s ? getSegmentKey(s) : ''
+  }, [displaySegments])
+
+  // Pace this segment's audio was actually rendered at — the committed choice,
+  // else the generation speed the backend stored on the segment. stagedSpeeds
+  // layers on top; controls that read 1.0 instead would show "1.00" on a take
+  // that was really rendered at 1.4x and regenerate it slower than it sounded.
+  const renderedSpeedAt = useCallback((i: number | null | undefined): number => {
+    if (i == null) return 1.0
+    const s = displaySegments[i]
+    const v = s ? (s.committed_speed ?? s.speed) : undefined
+    return typeof v === 'number' && isFinite(v) && v > 0 ? v : 1.0
   }, [displaySegments])
 
   // Bounds of the current group selection: the first/last selected segment (only
@@ -5621,11 +5655,15 @@ export function DubVerseEditor({
     console.log('[REGEN] called', { segIdx, voiceOverride, textOverride, activeIndex, isRegenerating, selectedSegmentIndex })
     if (activeIndex === null) { console.warn('[REGEN] aborted — activeIndex null'); return false }
     if (isRegeneratingRef.current) {
-      // Queue instead of dropping (depth 1, last-write-wins); drained in finally.
-      regenQueueRef.current = { segIdx, voiceOverride, textOverride, ttsTextOverride, engineOverride, extraPayload }
-      setQueuedSegmentIndex(activeIndex)
-      console.warn('[REGEN] queued — regen already in flight', { segIdx, voiceOverride })
-      return false
+      // FIFO — drained one-per-completion in finally; nothing is dropped.
+      // The caller resolves with the QUEUED run's real outcome, not a bare
+      // "busy" false — waiters that re-flag on false were mis-flagging work
+      // that was merely queued and could generate successfully.
+      console.warn('[REGEN] queued — regen already in flight', { segIdx, voiceOverride, depth: regenQueueRef.current.length + 1 })
+      return new Promise<boolean>((resolve) => {
+        regenQueueRef.current.push({ segIdx, voiceOverride, textOverride, ttsTextOverride, engineOverride, extraPayload, resolve })
+        setQueuedSegmentIndex(activeIndex)
+      })
     }
     const segment = displaySegments[activeIndex]
     if (!segment) { console.warn('[REGEN] aborted — no segment at index', activeIndex); return false }
@@ -5693,7 +5731,7 @@ export function DubVerseEditor({
       }, undefined)
       const regenPayload = {
         text: regenerateText,
-        speed: stagedSpeeds[keyAt(activeIndex)] ?? 1.0,
+        speed: stagedSpeeds[keyAt(activeIndex)] ?? renderedSpeedAt(activeIndex),
         // '' = explicit clear (backend pops seg["emotion"]); undefined = unset → use committed
         emotion: stagedEmotions[keyAt(activeIndex)] ?? segment.committed_emotion,
         // attached_traits = frozen on first keystroke. undefined = no change; [] = clear; non-empty = set
@@ -5874,7 +5912,7 @@ export function DubVerseEditor({
       })
       setPlaybackMode('preview')
       const _committedVoice = response.segment.voice_id ?? voiceOverride ?? stagedVoices[keyAt(activeIndex)] ?? speakerVoiceMap[segment.speaker_id]
-      const _committedSpeed = stagedSpeeds[keyAt(activeIndex)] ?? 1.0
+      const _committedSpeed = stagedSpeeds[keyAt(activeIndex)] ?? renderedSpeedAt(activeIndex)
       commitSegmentChanges(activeIndex, {
         committed_audio_url: audio_url,
         committed_voice_id: _committedVoice,
@@ -5938,15 +5976,18 @@ export function DubVerseEditor({
       // Two-pulse confirmation
       setConfirmingSegmentIndex(activeIndex)
       setTimeout(() => setConfirmingSegmentIndex(null), 1200)
-      // Drain queued regen. The ref guard above is already false, so the next
-      // invocation proceeds regardless of React render timing.
-      const queued = regenQueueRef.current
+      // Drain queued regen (FIFO — each completion runs the oldest pending
+      // request, which in turn drains the next). The ref guard above is
+      // already false, so the invocation proceeds regardless of render timing.
+      const queued = regenQueueRef.current.shift()
       if (queued) {
-        regenQueueRef.current = null
-        setQueuedSegmentIndex(null)
+        setQueuedSegmentIndex(regenQueueRef.current.length ? (regenQueueRef.current[0].segIdx ?? null) : null)
         setTimeout(() => {
           handleGenerateSpeechRef.current(queued.segIdx, queued.voiceOverride, queued.textOverride, queued.ttsTextOverride, queued.engineOverride, queued.extraPayload)
+            .then(ok => queued.resolve?.(ok))
         }, 0)
+      } else {
+        setQueuedSegmentIndex(null)
       }
     }
   }, [selectedSegmentIndex, isRegenerating, displaySegments, jobId, updateSegment, stagedSpeeds, lockedSegments, selectSegment, setImportedSegments, setPlaybackMode, keyAt])
@@ -6096,16 +6137,14 @@ export function DubVerseEditor({
   // fire-and-forget. api-client announces failures globally; catching them here
   // routes them into the same failedSegments banner and MAKE MOVIE gate that
   // already exist, so a silent loss becomes a visible one.
-  const failedSegmentsRef = useRef(failedSegments)
-  failedSegmentsRef.current = failedSegments
   useEffect(() => {
     const onCommitFailed = (e: Event) => {
       const { index, error } = (e as CustomEvent).detail ?? {}
       if (typeof index !== 'number') return
-      setFailedSegments({
-        ...failedSegmentsRef.current,
+      setFailedSegments(prev => ({
+        ...prev,
         [index]: error || 'Edit failed to save',
-      })
+      }))
     }
     window.addEventListener('segment-commit-failed', onCommitFailed)
     return () => window.removeEventListener('segment-commit-failed', onCommitFailed)
@@ -6656,12 +6695,15 @@ export function DubVerseEditor({
     // Drop segments that have now committed. Merging failures alone meant one
     // transient error marked a segment failed forever — the red banner stayed
     // up and MAKE MOVIE stayed blocked even after a successful retry.
-    const nextFailed = { ...failedSegments }
-    succeeded.forEach(ti => { delete nextFailed[ti] })
-    setFailedSegments({ ...nextFailed, ...failed })
+    setFailedSegments(prev => {
+      const next = { ...prev }
+      succeeded.forEach(ti => { delete next[ti] })
+      Object.assign(next, failed)
+      return next
+    })
     setSaveProgress(null)
     return { succeeded, failed }
-  }, [stagedEdits, jobId, failedSegments, clearStagedEditsFor, setFailedSegments, setSaveProgress])
+  }, [stagedEdits, jobId, clearStagedEditsFor, setFailedSegments, setSaveProgress])
 
   /** Resolve the switch-chunk guard. Defined here because it calls
    *  handleSaveStaged above. */
@@ -6711,14 +6753,31 @@ export function DubVerseEditor({
     // PATCH sends the client's committed_audio_url, which for a staged segment
     // still points at the pre-audition take — sending it would overwrite the
     // take that was just promoted and silently discard the audition.
-    const { succeeded: promotedIndices } = await handleSaveStaged()
-    const promoted = new Set(promotedIndices)
-    const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-    // Resolved once, not per segment — a Save can fan out to dozens of PATCHes.
-    const authHeaders = await apiClient.ensureAuthHeaders()
+    //
+    // Everything awaited lives INSIDE the try: handleSaveStaged and
+    // ensureAuthHeaders used to run before it, so a hang or throw up there
+    // skipped the finally entirely and left the Save spinner on forever.
     try {
+      const { succeeded: promotedIndices } = await handleSaveStaged()
+      const promoted = new Set(promotedIndices)
+      const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+      // Resolved once, not per segment — a Save can fan out to dozens of PATCHes.
+      // Capped because ensureAuthHeaders can wedge on the GoTrue auth-token
+      // lock (the "lock was not released" console warning): fall back to the
+      // last known token rather than spin the button forever.
+      const authHeaders = await Promise.race([
+        apiClient.ensureAuthHeaders(),
+        new Promise<Record<string, string>>((resolve) =>
+          setTimeout(() => resolve(apiClient.authHeaders()), 10000)
+        ),
+      ])
+      // Per-segment failures accumulate here and merge into failedSegments once
+      // after the fan-out — the store setter takes a value, not an updater, so
+      // concurrent writes inside .map would race on a stale snapshot.
+      const saveFailures: Record<number, string> = {}
+      const savedTis: number[] = []
       await Promise.all(
-        toSave.map((seg, i) => {
+        toSave.map(async (seg, i) => {
           // Chunk mode saves the window you are working in, not the whole film.
           // Un-scoped this fired one PATCH per segment — 839 on a feature — which
           // looked like a hang and wrote back values that had not changed.
@@ -6732,30 +6791,59 @@ export function DubVerseEditor({
           // Just promoted from a staged take — the server already holds the
           // authoritative state for it.
           if (promoted.has(seg.transcript_index ?? seg.index)) return null
-          return (
           // Address by transcript_index (the stable id the commit endpoint matches
           // on) — seg.index is array position and drifts after splits/inserts.
           // `locked` is written for every segment so Save is the authoritative
           // checkpoint for lock state, not just the fire-and-forget per-lock write.
-          fetch(`${base}/api/segment/commit/${jobId}/${seg.transcript_index ?? seg.index}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json', ...authHeaders },
-            body: JSON.stringify({
-              committed_audio_url: seg.committed_audio_url,
-              committed_adapted_text: seg.committed_adapted_text,
-              committed_start_time: seg.committed_start_time,
-              committed_end_time: seg.committed_end_time,
-              flag_status: seg.flag_status,
-              correction_type: seg.correction_type,
-              locked: lockedSegments.has(keyAt(i)),
-              // Persist the display text too so a plain edit doesn't revert on
-              // reopen — the loader reads `text` back into target/active text.
-              text: seg.active_text ?? seg.target_text,
-            }),
-          })
-          )
+          const ti = seg.transcript_index ?? seg.index
+          // A timed-out or refused request records the segment instead of
+          // rejecting Promise.all — one bad PATCH must not abort the save.
+          let res: Response
+          try {
+            res = await fetch(`${base}/api/segment/commit/${jobId}/${ti}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json', ...authHeaders },
+              signal: AbortSignal.timeout(30000),
+              body: JSON.stringify({
+                committed_audio_url: seg.committed_audio_url,
+                committed_adapted_text: seg.committed_adapted_text,
+                committed_start_time: seg.committed_start_time,
+                committed_end_time: seg.committed_end_time,
+                flag_status: seg.flag_status,
+                correction_type: seg.correction_type,
+                locked: lockedSegments.has(keyAt(i)),
+                // Persist the display text too so a plain edit doesn't revert on
+                // reopen — the loader reads `text` back into target/active text.
+                text: seg.active_text ?? seg.target_text,
+              }),
+            })
+          } catch (err) {
+            saveFailures[ti] = 'Save failed (no response)'
+            console.error(`[save] segment ${ti} commit failed:`, err)
+            return null
+          }
+          // The response used to be ignored entirely: a rejected PATCH was
+          // indistinguishable from a saved one. Record it so the failed-save
+          // banner can surface it before MAKE MOVIE, same as staged commits.
+          if (!res.ok) {
+            saveFailures[ti] = `Save failed (HTTP ${res.status})`
+            console.error(`[save] segment ${ti} commit failed: HTTP ${res.status}`)
+          } else {
+            savedTis.push(ti)
+          }
         })
       )
+      // A retried PATCH that now succeeds must clear its earlier failure —
+      // otherwise the failed-save banner and the MAKE MOVIE gate stay armed
+      // for segments that saved fine.
+      if (Object.keys(saveFailures).length || savedTis.length) {
+        setFailedSegments(prev => {
+          const next = { ...prev }
+          for (const ti of savedTis) delete next[ti]
+          Object.assign(next, saveFailures)
+          return next
+        })
+      }
       // Mark the window saved so its chip turns green and survives a reload.
       // The bulk Save wrote committed_* for every segment but never recorded
       // chunk_status, so nothing in the chunk bar ever went green.
@@ -6779,7 +6867,8 @@ export function DubVerseEditor({
       setIsSaving(false)
     }
   }, [isSaving, displaySegments, jobId, title, targetLanguage, lockedSegments, keyAt,
-      chunkMode, chunkStart, chunkEnd, activeChunk, chunkStatusMap, setChunkStatusMap])
+      chunkMode, chunkStart, chunkEnd, activeChunk, chunkStatusMap, setChunkStatusMap,
+      handleSaveStaged, failedSegments, setFailedSegments])
 
   // Flag outcome helpers — set both flag_status and correction_type together,
   // only on segments that are currently unreviewed and have flags.
@@ -6790,16 +6879,124 @@ export function DubVerseEditor({
   }, [displaySegments, updateSegment])
 
   const handleMarkOk = useCallback((idx: number) => {
+    const seg = displaySegments[idx]
+    const ti = seg?.transcript_index ?? idx
+    if (seg?.translation_flagged) {
+      // Translation-gate review: the explicit clear_translation_flag commit
+      // releases the segment to TTS, then generate the withheld audio. Until
+      // now this flag never reached the editor at all, so muted segments sat
+      // silent with no way to release them.
+      updateSegment(idx, {
+        translation_flagged: false, flag_reason: null,
+        flag_status: 'reviewed_no_change', correction_type: null,
+      })
+      setImportedSegments(prev => prev ? prev.map((s, i) =>
+        i === idx ? { ...s, translation_flagged: false, flag_reason: null, flag_status: 'reviewed_no_change', correction_type: null } : s
+      ) : prev)
+      apiClient.commitSegmentTiming(jobId, ti, {
+        clear_translation_flag: true,
+        flag_status: 'reviewed_no_change',
+        correction_type: null,
+      })
+        .then(async () => {
+          // A call while another regen runs returns false for "queued", not
+          // "failed" — wait out the in-flight render so false is honest.
+          while (isRegeneratingRef.current) {
+            await new Promise(r => setTimeout(r, 400))
+          }
+          return handleGenerateSpeechRef.current(idx)
+        })
+        .then((ok) => {
+          // Generation genuinely failed after the flag was cleared — re-arm
+          // the gate so the segment stays visible in the queue (and silent)
+          // instead of disappearing.
+          if (ok !== false) return
+          apiClient.commitSegmentTiming(jobId, ti, {
+            set_translation_flag: true,
+            flag_status: 'unreviewed',
+          }).catch(err => console.warn('[REVIEW-QUEUE] re-flag persist failed:', err))
+          updateSegment(idx, {
+            translation_flagged: true, flag_status: 'unreviewed', correction_type: null,
+          })
+        })
+        .catch(err => console.warn('[REVIEW-QUEUE] flag-clear persist failed:', err))
+      return
+    }
     updateSegment(idx, { flag_status: 'reviewed_no_change', correction_type: null })
-    apiClient.commitSegmentTiming(jobId, displaySegments[idx]?.transcript_index ?? idx, { flag_status: 'reviewed_no_change', correction_type: null })
+    apiClient.commitSegmentTiming(jobId, ti, { flag_status: 'reviewed_no_change', correction_type: null })
       .catch(err => console.warn('[REVIEW-QUEUE] mark-ok persist failed:', err))
-  }, [jobId, updateSegment, displaySegments])
+  }, [jobId, updateSegment, displaySegments, setImportedSegments])
+
+  // Bulk release of TTS-withheld segments. Sequential on purpose:
+  // handleGenerateSpeech serializes through isRegeneratingRef (a concurrent
+  // second call queues last-write-wins and would drop 100+ requests to one),
+  // and awaiting each iteration also keeps the commit-then-regen order per
+  // segment. Rows leave the queue as each clears — no separate progress UI.
+  const handleClearAllFlagged = useCallback(async (indices: number[]) => {
+    for (const idx of indices) {
+      const seg = displaySegmentsRef.current[idx]
+      if (!seg?.translation_flagged) continue
+      const ti = seg.transcript_index ?? idx
+      try {
+        await apiClient.commitSegmentTiming(jobId, ti, {
+          clear_translation_flag: true,
+          flag_status: 'reviewed_no_change',
+          correction_type: null,
+        })
+        updateSegment(idx, {
+          translation_flagged: false, flag_reason: null,
+          flag_status: 'reviewed_no_change', correction_type: null,
+        })
+        setImportedSegments(prev => prev ? prev.map((s, i) =>
+          i === idx ? { ...s, translation_flagged: false, flag_reason: null, flag_status: 'reviewed_no_change', correction_type: null } : s
+        ) : prev)
+        // Wait out any in-flight regen: a call made while one runs returns
+        // `false` for "queued", not "failed" — don't re-flag a queued render.
+        while (isRegeneratingRef.current) {
+          await new Promise(r => setTimeout(r, 400))
+        }
+        const ok = await handleGenerateSpeechRef.current(idx)
+        if (!ok) {
+          // Regen failed AFTER the flag was cleared — without re-arming the
+          // gate the segment is silent AND gone from the review queue, even
+          // after reload. Re-flag it (server + local) and record the failure
+          // so the failed-save banner / MAKE MOVIE gate still see it.
+          console.warn(`[REVIEW-QUEUE] dub failed for segment ${ti} — re-flagging`)
+          apiClient.commitSegmentTiming(jobId, ti, {
+            set_translation_flag: true,
+            flag_reason: seg.flag_reason ?? 'clear_all_regen_failed',
+            flag_status: 'unreviewed',
+          }).catch(err => console.warn('[REVIEW-QUEUE] re-flag persist failed:', err))
+          updateSegment(idx, {
+            translation_flagged: true, flag_reason: seg.flag_reason,
+            flag_status: 'unreviewed', correction_type: null,
+          })
+          setImportedSegments(prev => prev ? prev.map((s, i) =>
+            i === idx ? { ...s, translation_flagged: true, flag_status: 'unreviewed' } : s
+          ) : prev)
+          setFailedSegments(prev => ({
+            ...prev,
+            [ti]: 'Dub generation failed — segment re-flagged for review',
+          }))
+        }
+      } catch (err) {
+        console.warn(`[REVIEW-QUEUE] clear+dub failed for segment ${ti}:`, err)
+      }
+    }
+  }, [jobId, updateSegment, setImportedSegments, setFailedSegments])
 
   // MAKE MOVIE is never blocked by judgement calls — only by the two states
   // where a click is meaningless (a render already running, a save mid-flight).
   // Everything else becomes a warning on click. A disabled button tells the user
   // "no" without telling them why or what to do about it, and the reason lived
   // in a tooltip, which is undiscoverable. See renderWarnings below.
+  // Display-only dismiss for the failed-save banner. The failure record itself
+  // (failedSegments) is untouched — MAKE MOVIE still gates on it. A NEW failure
+  // after dismissal re-arms the banner via the key-change effect below.
+  const [failedBannerDismissed, setFailedBannerDismissed] = useState(false)
+  const failedSegmentsKey = Object.keys(failedSegments).join(',')
+  useEffect(() => { setFailedBannerDismissed(false) }, [failedSegmentsKey])
+
   const [confirmRender, setConfirmRender] = useState<null | {
     staged: number; unreviewed: number; failed: string[]
     /** Sections still lifted to the layover track. They are excluded from the
@@ -6920,6 +7117,12 @@ export function DubVerseEditor({
     (lipQuote?.current_selection ?? []).every(id => (lipQuote?.synced_selection ?? []).includes(id))
   const shareUnlocked = isPro || (renderQuote !== null && renderSettled && lipSyncSettled)
 
+  // Payment-success moment: the only place in the editor that offers Share.
+  // Opens once per finished Make Movie, and only when the job is paid.
+  useEffect(() => {
+    if (rebuildStatus === 'complete' && shareUnlocked && activeDubbedVideoUrl) setShowDubReady(true)
+  }, [rebuildStatus, shareUnlocked, activeDubbedVideoUrl])
+
   const handleRebuildVideo = useCallback(async () => {
     // Lip-sync is paid BEFORE the vendor runs — if the wallet can't cover the
     // selected scope, stop here and hand off to the checkout modal instead of
@@ -6960,14 +7163,30 @@ export function DubVerseEditor({
       const absUrl = apiClient.toAbsoluteUrl(response.dubbed_video_url)
       setActiveDubbedVideoUrl(absUrl)
       const lip = (response as any).lipsync
+      // Lip sync was requested but never ran. A vendor rejection (suspended
+      // account, refused job) is NOT a footnote — it's a hard banner that
+      // stays until dismissed. Auto-hide is skipped for it below.
+      const lipFailed = lip && (lip.vendor_error || lip.applied === false)
       if (lip?.refunded) {
         setLipSyncNote('lip-sync charge refunded — provider rejected the job')
       } else if (lip?.charge_seconds) {
         setLipSyncNote(`lip sync billed ~$${(lip.charge_seconds * 2.5 / 60).toFixed(2)}`)
-      } else if (lip && lip.applied === false) {
+      } else if (lipFailed) {
         setLipSyncNote('lip sync not applied — video kept as dubbed')
       }
-      setRebuildStatus('complete')
+      if (lipFailed) {
+        const detail = lip.vendor_error || (lip.skipped ? String(lip.skipped).replace(/_/g, ' ') : 'the provider did not run the job')
+        // charge_seconds can be nonzero here even with applied=false — the
+        // vendor ran but produced no usable output, so the charge stands.
+        // Saying "nothing was billed" would misstate the bill.
+        const billedText = lip?.charge_seconds && !lip?.refunded
+          ? `~$${(lip.charge_seconds * 2.5 / 60).toFixed(2)} was billed — the provider ran but produced no usable output`
+          : 'nothing was billed for lip sync'
+        setRebuildError(`Lip sync did NOT run — ${detail}. The film is the un-synced dub; ${billedText}.`)
+        setRebuildStatus('error')
+      } else {
+        setRebuildStatus('complete')
+      }
       // Keep any edit made WHILE the rebuild ran. The remix read segments.json
       // when it started, so work committed after that is not in the finished
       // film; clearing every flag would tell the user it was.
@@ -6987,7 +7206,9 @@ export function DubVerseEditor({
       // by ear before it leaves the building, so a rebuild ends in the editor
       // with the finished film loaded for review. Export is a separate, deliberate
       // press once the review passes.
-      setTimeout(() => setRebuildStatus('idle'), 5000)
+      // Auto-hide on success only — a lip-sync failure banner must stay up
+      // until the user dismisses it, or a rejected paid pass reads as done.
+      if (!lipFailed) setTimeout(() => setRebuildStatus('idle'), 5000)
       if (videoRef.current) {
         videoRef.current.volume = isMuted ? 0 : masterVolume / 100
       }
@@ -8402,32 +8623,6 @@ export function DubVerseEditor({
             </Button>
           </Link>
           <h1 className="text-sm font-medium truncate max-w-[300px]">{title}</h1>
-
-          {/* Failed-save warning, beside the filename in the sub-header — it
-              used to sit in the top nav before MAKE MOVIE, where the job id
-              and the lip-sync checkbox made it unreadable. A save is
-              commit-what-you-can, so a failed segment is NOT in the render —
-              the user has to know that before spending a full render on an
-              incomplete film. */}
-          {Object.keys(failedSegments).length > 0 && (
-            <div className={cn(
-              "ml-2 flex items-center gap-2 rounded-md border px-3 py-1.5 shrink-0",
-              releasedForRender
-                ? "border-amber-500/60 bg-amber-500/15"
-                : "border-red-500/60 bg-red-500/15"
-            )}>
-              <AlertCircle className={cn("h-4 w-4 shrink-0", releasedForRender ? "text-amber-400" : "text-red-400")} />
-              <span className={cn("text-xs font-semibold whitespace-nowrap", releasedForRender ? "text-amber-200" : "text-red-200")}>
-                {Object.keys(failedSegments).length === 1
-                  ? `Segment ${Object.keys(failedSegments)[0]} FAILED`
-                  : `Segments ${Object.keys(failedSegments).join(', ')} FAILED`}
-                {' — '}
-                {releasedForRender
-                  ? 'RELEASED: this render will not contain them.'
-                  : `${Object.keys(failedSegments).length === 1 ? 'segment' : 'segments'} will be re-loaded at the end for re-editing.`}
-              </span>
-            </div>
-          )}
         </div>
 
         {/* Live cost counter + budget — the big panel in the middle of the
@@ -8537,7 +8732,18 @@ export function DubVerseEditor({
           <Button variant="ghost" size="sm" className="h-8" onClick={handleGlobalUndo} title={t('Undo last edit')}>
             <RotateCcw className="h-4 w-4" />
           </Button>
-          <Popover onOpenChange={() => setShareCopied(null)}>
+          <Popover onOpenChange={(open) => {
+            setShareCopied(null)
+            // Mint the public share link when the popover opens — the copied
+            // URL must be the paid share-link, never the authenticated media
+            // URL with the owner's access_token baked in.
+            if (open && activeDubbedVideoUrl) {
+              setShareVideoLink('pending')
+              apiClient.createShareLink(jobId)
+                .then(r => setShareVideoLink(r.url ?? (r.status === 402 ? 'unavailable' : 'error')))
+                .catch(() => setShareVideoLink('error'))
+            }
+          }}>
             <PopoverTrigger asChild>
               <Button variant="ghost" size="sm" className="h-8">
                 <Share2 className="h-4 w-4" />
@@ -8549,11 +8755,7 @@ export function DubVerseEditor({
                 {t('Share Project')}
               </p>
 
-              {shareUnlocked ? (
-              <>
-              {/* Editor link — collaboration access rides the same payment
-                  gate as video sharing: an unpaid job's edit page (which plays
-                  the dub) does not leave the app either. */}
+              {/* Editor link */}
               <div className="space-y-1.5">
                 <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Editor link')}</p>
                 <div className="flex gap-2">
@@ -8589,18 +8791,30 @@ export function DubVerseEditor({
                     <input
                       readOnly
                       aria-label={t('Dubbed video link')}
-                      value={activeDubbedVideoUrl}
+                      value={
+                        shareVideoLink === 'pending' || shareVideoLink === null
+                          ? t('Creating share link…')
+                          : shareVideoLink === 'unavailable'
+                            ? t('Share link unavailable — payment required')
+                            : shareVideoLink === 'error'
+                              ? t('Share link failed — close and try again')
+                              : shareVideoLink
+                      }
                       className="flex-1 text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-300 truncate focus:outline-none"
                     />
                     <Button
                       size="sm"
                       variant="outline"
+                      disabled={!shareVideoLink || shareVideoLink === 'pending' || shareVideoLink === 'unavailable' || shareVideoLink === 'error'}
                       className={cn(
                         "h-7 px-2 text-xs border-slate-700 shrink-0 transition-colors",
                         shareCopied === 'video' ? "text-emerald-400 border-emerald-500/40" : "text-slate-300"
                       )}
                       onClick={() => {
-                        navigator.clipboard.writeText(activeDubbedVideoUrl)
+                        // 'pending'/'unavailable' are strings too — only a
+                        // real URL may reach the clipboard.
+                        if (!shareVideoLink?.startsWith('http')) return
+                        navigator.clipboard.writeText(shareVideoLink)
                         setShareCopied('video')
                         setTimeout(() => setShareCopied(null), 2000)
                       }}
@@ -8611,11 +8825,10 @@ export function DubVerseEditor({
                       size="sm"
                       variant="outline"
                       className="h-7 px-2 text-xs border-slate-700 text-slate-300 shrink-0"
-                      asChild
+                      title={t('Download dubbed video')}
+                      onClick={() => { void downloadDubbedVideo() }}
                     >
-                      <a href={withAttachment(apiClient.refreshMediaUrl(activeDubbedVideoUrl))} title={t('Download dubbed video')}>
-                        <Download className="h-3 w-3" />
-                      </a>
+                      <Download className="h-3 w-3" />
                     </Button>
                   </div>
                 </div>
@@ -8627,22 +8840,35 @@ export function DubVerseEditor({
               <div className="space-y-1.5 pt-1 border-t border-slate-800">
                 <p className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">{t('Share to')}</p>
                 <div className="flex gap-2">
-                  {/* Facebook */}
+                  {/* Facebook — download video then open Facebook. Its sharer
+                      URL only carries a link, so a file has to go in by hand. */}
                   <button
                     type="button"
-                    title={t('Share to Facebook')}
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#1877F2] hover:bg-[#1565C0] text-white transition-colors"
-                    onClick={() => window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}`, '_blank', 'width=600,height=400')}
+                    title={activeDubbedVideoUrl ? t('Download for Facebook') : t('No dubbed video yet')}
+                    disabled={!activeDubbedVideoUrl}
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#1877F2] hover:bg-[#1565C0] text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[#1877F2]"
+                    onClick={() => {
+                      downloadDubbedVideo()
+                      window.open('https://www.facebook.com/', '_blank')
+                    }}
                   >
                     <Facebook className="h-4 w-4" />
                     <span className="text-[9px] font-medium">{t('Facebook')}</span>
                   </button>
-                  {/* Twitter / X */}
+                  {/* Twitter / X — the tweet must carry the public share
+                      link: window.location.href is the editor, which every
+                      recipient but the owner hits a sign-in wall on. */}
                   <button
                     type="button"
-                    title="Share to X (Twitter)"
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-black hover:bg-neutral-800 text-white transition-colors"
-                    onClick={() => window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(typeof window !== 'undefined' ? window.location.href : '')}&text=${encodeURIComponent(`Check out my dubbed video — ${title}`)}`, '_blank', 'width=600,height=400')}
+                    title={shareVideoLink?.startsWith('http') ? 'Share to X (Twitter)' : 'No public share link yet'}
+                    disabled={!shareVideoLink?.startsWith('http')}
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-black hover:bg-neutral-800 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    onClick={() => {
+                      // 'pending'/'unavailable' are strings — gate on a real
+                      // URL or the tweet carries a placeholder as its link.
+                      if (!shareVideoLink?.startsWith('http')) return
+                      window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(shareVideoLink)}&text=${encodeURIComponent(`Check out my dubbed video — ${title}`)}`, '_blank', 'width=600,height=400')
+                    }}
                   >
                     <Twitter className="h-4 w-4" />
                     <span className="text-[9px] font-medium">{t('X / Twitter')}</span>
@@ -8650,14 +8876,11 @@ export function DubVerseEditor({
                   {/* YouTube — download video then open YouTube Studio */}
                   <button
                     type="button"
-                    title={t('Download for YouTube')}
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#FF0000] hover:bg-[#CC0000] text-white transition-colors"
+                    title={activeDubbedVideoUrl ? t('Download for YouTube') : t('No dubbed video yet')}
+                    disabled={!activeDubbedVideoUrl}
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-[#FF0000] hover:bg-[#CC0000] text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[#FF0000]"
                     onClick={() => {
-                      if (activeDubbedVideoUrl) {
-                        const a = document.createElement('a')
-                        a.href = withAttachment(apiClient.refreshMediaUrl(activeDubbedVideoUrl))
-                        a.click()
-                      }
+                      downloadDubbedVideo()
                       window.open('https://studio.youtube.com/channel/upload', '_blank')
                     }}
                   >
@@ -8667,33 +8890,16 @@ export function DubVerseEditor({
                   {/* Instagram — download video (no web upload API) */}
                   <button
                     type="button"
-                    title={t('Download for Instagram')}
-                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-gradient-to-br from-[#833AB4] via-[#E1306C] to-[#F77737] hover:opacity-90 text-white transition-opacity"
-                    onClick={() => {
-                      if (activeDubbedVideoUrl) {
-                        const a = document.createElement('a')
-                        a.href = withAttachment(apiClient.refreshMediaUrl(activeDubbedVideoUrl))
-                        a.click()
-                      }
-                    }}
+                    title={activeDubbedVideoUrl ? t('Download for Instagram') : t('No dubbed video yet')}
+                    disabled={!activeDubbedVideoUrl}
+                    className="flex-1 flex flex-col items-center gap-1 py-2 rounded-lg bg-gradient-to-br from-[#833AB4] via-[#E1306C] to-[#F77737] hover:opacity-90 text-white transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                    onClick={downloadDubbedVideo}
                   >
                     <Instagram className="h-4 w-4" />
                     <span className="text-[9px] font-medium">{t('Instagram')}</span>
                   </button>
                 </div>
               </div>
-              </>
-              ) : (
-                <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
-                  <Lock className="h-4 w-4 shrink-0 mt-0.5 text-amber-400" />
-                  <div className="text-xs">
-                    <p className="font-medium text-amber-200">{t('Available after payment')}</p>
-                    <p className="text-amber-200/70 mt-0.5">
-                      {t('Sharing and downloads unlock once this job is paid in full — see the Render / Lip sync totals in the budget tracker above.')}
-                    </p>
-                  </div>
-                </div>
-              )}
             </PopoverContent>
           </Popover>
           <Button
@@ -8727,7 +8933,7 @@ export function DubVerseEditor({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48 bg-slate-900 border-slate-700">
               {(() => {
-                const unreviewedCount = displaySegments.filter(s => s.flags?.length && s.flag_status === 'unreviewed').length
+                const unreviewedCount = displaySegments.filter(s => (s.flags?.length || s.translation_flagged) && (s.flag_status ?? 'unreviewed') === 'unreviewed').length
                 return (
                   <DropdownMenuItem
                     onClick={() => setShowReviewQueue(true)}
@@ -9865,29 +10071,37 @@ export function DubVerseEditor({
                           )
                         })()}
                         {/* Speed chip */}
-                        <span
-                          className={cn(
-                            'inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full border transition-colors cursor-pointer select-none font-mono',
-                            stagedSpeeds[keyAt(index)] !== undefined && stagedSpeeds[keyAt(index)] !== 1.0
-                              ? 'bg-orange-500/20 text-orange-300 border-orange-500/40 hover:bg-red-500/20 hover:text-red-300'
-                              : 'text-slate-600 border-slate-800 hover:text-orange-400 hover:border-orange-500/30'
-                          )}
-                          title={t('Adjust segment speed')}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-                            setSpeedPopupPos({
-                              x: Math.min(rect.left, window.innerWidth - 300),
-                              y: Math.max(10, rect.top - 260),
-                            })
-                            setSpeedPopupIndex(prev => prev === index ? null : index)
-                          }}
-                        >
-                          {stagedSpeeds[keyAt(index)] !== undefined && stagedSpeeds[keyAt(index)] !== 1.0
-                            ? `${stagedSpeeds[keyAt(index)].toFixed(2)}×`
-                            : <><Gauge className="h-2 w-2" />speed</>
-                          }
-                        </span>
+                        {(() => {
+                          const _stagedSpeed = stagedSpeeds[keyAt(index)]
+                          const _pillSpeed = _stagedSpeed ?? renderedSpeedAt(index)
+                          return (
+                            <span
+                              className={cn(
+                                'inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full border transition-colors cursor-pointer select-none font-mono',
+                                _stagedSpeed !== undefined && _stagedSpeed !== 1.0
+                                  ? 'bg-orange-500/20 text-orange-300 border-orange-500/40 hover:bg-red-500/20 hover:text-red-300'
+                                  : _pillSpeed !== 1.0
+                                  ? 'text-slate-300 border-slate-600 hover:text-orange-400 hover:border-orange-500/30'
+                                  : 'text-slate-600 border-slate-800 hover:text-orange-400 hover:border-orange-500/30'
+                              )}
+                              title={t('Adjust segment speed')}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                                setSpeedPopupPos({
+                                  x: Math.min(rect.left, window.innerWidth - 300),
+                                  y: Math.max(10, rect.top - 260),
+                                })
+                                setSpeedPopupIndex(prev => prev === index ? null : index)
+                              }}
+                            >
+                              {_pillSpeed !== 1.0
+                                ? `${_pillSpeed.toFixed(2)}×`
+                                : <><Gauge className="h-2 w-2" />speed</>
+                              }
+                            </span>
+                          )
+                        })()}
                         {splitWordMode === index ? (
                           <div
                             className="text-sm flex flex-wrap gap-x-1 gap-y-1 px-3 py-2 rounded-2xl border-2 border-amber-500 bg-amber-500/10 shadow-[0_0_10px_rgba(251,191,36,0.4)] select-none"
@@ -10518,7 +10732,7 @@ export function DubVerseEditor({
                   className={cn(
                     'shrink-0 whitespace-nowrap text-xs px-3 py-1 rounded-md transition-colors',
                     rightPanelTab === tab.id
-                      ? 'bg-slate-700 text-white'
+                      ? tab.id === 'scene' ? 'bg-slate-700 text-white ring-2 ring-amber-400' : 'bg-slate-700 text-white'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
                   )}
                 >
@@ -11598,7 +11812,7 @@ export function DubVerseEditor({
                   className={cn(
                     'shrink-0 w-full px-1 py-2 text-[10px] leading-tight font-medium text-center break-words transition-colors border-b border-neutral-800/60',
                     rightPanelTab === tab.id
-                      ? 'bg-slate-700 text-white'
+                      ? tab.id === 'scene' ? 'bg-slate-700 text-white ring-2 ring-inset ring-amber-400' : 'bg-slate-700 text-white'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
                   )}
                 >
@@ -12129,26 +12343,26 @@ export function DubVerseEditor({
                 type="button"
                 className="h-9 w-9 rounded-full bg-slate-700 hover:bg-slate-600 text-white text-lg font-bold flex items-center justify-center transition-colors"
                 onClick={() => setSpeedPopupIndex(idx => {
-                  if (idx !== null) setStagedSpeeds(prev => ({ ...prev, [keyAt(idx)]: Math.max(0.5, parseFloat(((prev[keyAt(idx)] ?? 1.0) - 0.1).toFixed(2))) }))
+                  if (idx !== null) setStagedSpeeds(prev => ({ ...prev, [keyAt(idx)]: Math.max(0.5, parseFloat(((prev[keyAt(idx)] ?? renderedSpeedAt(idx)) - 0.1).toFixed(2))) }))
                   return idx
                 })}
               >−</button>
               <span
                 className={cn(
                   "text-4xl font-mono w-28 text-center cursor-pointer select-none transition-colors",
-                  (stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0) !== 1.0 ? "text-orange-400" : "text-white"
+                  (stagedSpeeds[keyAt(speedPopupIndex)] ?? renderedSpeedAt(speedPopupIndex)) !== 1.0 ? "text-orange-400" : "text-white"
                 )}
                 title={t('Click to reset')}
                 onClick={() => setStagedSpeeds(prev => { const n = { ...prev }; delete n[keyAt(speedPopupIndex)]; return n })}
               >
-                {(stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0).toFixed(2)}
+                {(stagedSpeeds[keyAt(speedPopupIndex)] ?? renderedSpeedAt(speedPopupIndex)).toFixed(2)}
                 <span className="text-lg ml-0.5 text-slate-400">×</span>
               </span>
               <button
                 type="button"
                 className="h-9 w-9 rounded-full bg-slate-700 hover:bg-slate-600 text-white text-lg font-bold flex items-center justify-center transition-colors"
                 onClick={() => setSpeedPopupIndex(idx => {
-                  if (idx !== null) setStagedSpeeds(prev => ({ ...prev, [keyAt(idx)]: Math.min(2.0, parseFloat(((prev[keyAt(idx)] ?? 1.0) + 0.1).toFixed(2))) }))
+                  if (idx !== null) setStagedSpeeds(prev => ({ ...prev, [keyAt(idx)]: Math.min(2.0, parseFloat(((prev[keyAt(idx)] ?? renderedSpeedAt(idx)) + 0.1).toFixed(2))) }))
                   return idx
                 })}
               >+</button>
@@ -12156,7 +12370,7 @@ export function DubVerseEditor({
 
             {/* Slider */}
             <Slider
-              value={[stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0]}
+              value={[stagedSpeeds[keyAt(speedPopupIndex)] ?? renderedSpeedAt(speedPopupIndex)]}
               onValueChange={([v]) => setStagedSpeeds(prev => ({ ...prev, [keyAt(speedPopupIndex)]: v }))}
               min={0.5}
               max={2.0}
@@ -12176,7 +12390,7 @@ export function DubVerseEditor({
                   onClick={() => setStagedSpeeds(prev => ({ ...prev, [keyAt(speedPopupIndex)]: preset }))}
                   className={cn(
                     'text-[10px] px-2 py-1 rounded-md border transition-colors font-mono',
-                    (stagedSpeeds[keyAt(speedPopupIndex)] ?? 1.0) === preset
+                    (stagedSpeeds[keyAt(speedPopupIndex)] ?? renderedSpeedAt(speedPopupIndex)) === preset
                       ? 'bg-orange-500/20 text-orange-300 border-orange-500/40'
                       : 'bg-slate-700 text-slate-400 border-slate-600 hover:bg-slate-600'
                   )}
@@ -12291,6 +12505,37 @@ export function DubVerseEditor({
                     .sort((a, b) => a - b)
                     .join(", ")}
                 </span>
+              )}
+              {/* Failed-save warning, in the transport bar next to the locked
+                  readout — it used to sit beside the filename in the sub-header,
+                  crowding the title. A save is commit-what-you-can, so a failed
+                  segment is NOT in the render — the user has to know that before
+                  spending a full render on an incomplete film. */}
+              {Object.keys(failedSegments).length > 0 && !failedBannerDismissed && (
+                <div className={cn(
+                  "ml-3 flex items-center gap-2 rounded-md border px-3 py-1 shrink-0",
+                  releasedForRender
+                    ? "border-amber-500/60 bg-amber-500/15"
+                    : "border-red-500/60 bg-red-500/15"
+                )}>
+                  <AlertCircle className={cn("h-4 w-4 shrink-0", releasedForRender ? "text-amber-400" : "text-red-400")} />
+                  <span className={cn("text-xs font-semibold whitespace-nowrap", releasedForRender ? "text-amber-200" : "text-red-200")}>
+                    {Object.keys(failedSegments).length === 1
+                      ? `Segment ${Object.keys(failedSegments)[0]} FAILED`
+                      : `Segments ${Object.keys(failedSegments).join(', ')} FAILED`}
+                    {' — '}
+                    {releasedForRender
+                      ? 'RELEASED: this render will not contain them.'
+                      : `${Object.keys(failedSegments).length === 1 ? 'segment' : 'segments'} will be re-loaded at the end for re-editing.`}
+                  </span>
+                  <button
+                    className="ml-1 shrink-0 rounded p-0.5 hover:bg-white/10"
+                    title={t('Dismiss warning — the failed segment is still not saved')}
+                    onClick={() => setFailedBannerDismissed(true)}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               )}
             </div>
           </div>
@@ -14203,6 +14448,10 @@ export function DubVerseEditor({
                         (index === groupBounds?.firstIdx || index === groupBounds?.lastIdx)
                           ? 'border-yellow-400/90 shadow-[0_0_14px_rgba(250,204,21,0.6)] ring-2 ring-yellow-400/80'
                           : blockMuted ? 'border-neutral-600' : hasDroppedTranslation ? 'border-amber-400' : spColor.border,
+                        // Withheld by the confidence gate (no audio, flagged):
+                        // dashed amber ring so it reads as a review item, not
+                        // just another ungenerated block.
+                        segment.translation_flagged && !(segment.committed_audio_url || segment.audio_url) && 'border-dashed ring-1 ring-amber-500/70',
                         genAnim.get(index) === 'trace' && 'dm-gen-trace',
                         genAnim.get(index) === 'pulse' && 'dm-gen-pulse',
                         // "This line has a take" — a standing speaker-coloured
@@ -14476,8 +14725,9 @@ export function DubVerseEditor({
                             other handles, so there is always something to grab. */}
                         {(() => {
                           const staged = stagedSpeeds[keyAt(index)]
-                          const live = dragSpeedPreview?.index === index ? dragSpeedPreview.speed : staged
-                          const isSet = live !== undefined
+                          const rendered = renderedSpeedAt(index)
+                          const live = dragSpeedPreview?.index === index ? dragSpeedPreview.speed : (staged ?? rendered)
+                          const isSet = staged !== undefined
                           return (
                             <span
                               data-speed-label
@@ -14485,7 +14735,7 @@ export function DubVerseEditor({
                               title="Drag up to speed this line up, down to slow it down"
                               className={cn(
                                 'font-mono shrink-0 cursor-ns-resize select-none px-1 rounded transition-opacity hover:bg-white/10',
-                                isSet ? 'text-amber-400' : 'text-white/50 opacity-0 group-hover:opacity-100'
+                                isSet ? 'text-amber-400' : rendered !== 1.0 ? 'text-white/60' : 'text-white/50 opacity-0 group-hover:opacity-100'
                               )}
                               onClick={(e) => { e.preventDefault(); e.stopPropagation() }}
                               onMouseDown={(e) => {
@@ -14494,7 +14744,7 @@ export function DubVerseEditor({
                                 if (layoutLocked || lockedSegments.has(keyAt(index))) return
                                 const startY = e.clientY
                                 const originalDuration = effEnd(segment) - effStart(segment)
-                                const initialSpeed = staged ?? 1.0
+                                const initialSpeed = staged ?? rendered
                                 // Same direct-DOM rule as the edge handles: resize
                                 // this segment's block on every track per move and
                                 // write state once, on release.
@@ -14508,7 +14758,7 @@ export function DubVerseEditor({
                                   const raw = initialSpeed + (startY - ev.clientY) / 200
                                   const snapped = Math.round(raw / 0.05) * 0.05
                                   lastSpeed = Math.min(1.5, Math.max(0.5, snapped))
-                                  const w = Math.max((originalDuration / lastSpeed) * PIXELS_PER_SECOND, 2)
+                                  const w = Math.max((originalDuration * rendered / lastSpeed) * PIXELS_PER_SECOND, 2)
                                   for (const el of els) el.style.width = `${w}px`
                                   labelEls?.forEach(el => { el.textContent = `${lastSpeed.toFixed(2)}x` })
                                 }
@@ -14632,6 +14882,8 @@ export function DubVerseEditor({
                         'absolute top-1 bottom-1 rounded opacity-70 transition-colors group',
                         voiceDragOverIndex === i
                           ? 'bg-emerald-500/70 border-2 border-emerald-400 ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.7)] animate-pulse'
+                          : !hasAudio && seg.translation_flagged
+                          ? 'bg-amber-500/25 border border-amber-500/60 border-dashed'
                           : !hasAudio
                           ? 'bg-neutral-500/30 border border-neutral-600/50'
                           : regeneratingSegmentIndex === i
@@ -14651,15 +14903,24 @@ export function DubVerseEditor({
                         width: Math.max(
                           (() => {
                             const dur = endT - startT
-                            const spd = dragSpeedPreview?.index === i ? dragSpeedPreview.speed : (stagedSpeeds[keyAt(i)] ?? 1.0)
-                            return (dur / spd) * PIXELS_PER_SECOND
+                            const rendered = renderedSpeedAt(i)
+                            const spd = dragSpeedPreview?.index === i ? dragSpeedPreview.speed : (stagedSpeeds[keyAt(i)] ?? rendered)
+                            return (dur * rendered / spd) * PIXELS_PER_SECOND
                           })(),
                           2
                         )
                       }}
-                      title={seg.committed_adapted_text ?? seg.active_text ?? seg.target_text}
+                      title={!hasAudio && seg.translation_flagged
+                        ? `${t('Dub withheld — needs review')} (${seg.flag_reason || 'flagged'}): ${seg.committed_adapted_text ?? seg.active_text ?? seg.target_text}`
+                        : seg.committed_adapted_text ?? seg.active_text ?? seg.target_text}
                       onClick={(e) => handleSegmentClick(i, e)}
                     >
+                      {/* Withheld-by-gate marker — amber dashed block is
+                          ambiguous at a glance; the flag glyph says "this is a
+                          review item, not missing work". */}
+                      {!hasAudio && seg.translation_flagged && (
+                        <Flag className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 h-3.5 w-3.5 text-amber-400 pointer-events-none" />
+                      )}
                       {/* Left speed handle (blue) */}
                       <div
                         data-resize-handle={true}
@@ -14674,14 +14935,15 @@ export function DubVerseEditor({
                           const els: HTMLElement[] = []
                           timelineRef.current?.querySelectorAll<HTMLElement>(`[data-drag-block="${i}"]`).forEach(el => els.push(el))
                           const labelEl = timelineRef.current?.querySelector<HTMLElement>(`[data-drag-block="${i}"] [data-speed-label]`)
-                          let lastSpeed = stagedSpeeds[keyAt(i)] ?? 1.0
+                          const rendered = renderedSpeedAt(i)
+                          let lastSpeed = stagedSpeeds[keyAt(i)] ?? rendered
                           setDragSpeedPreview({ index: i, speed: lastSpeed })
                           const onMouseMove = (ev: MouseEvent) => {
                             const dx = ev.clientX - startX
                             const newDuration = Math.max(0.1, originalDuration - dx / PIXELS_PER_SECOND)
-                            const newSpeed = Math.min(2.0, Math.max(0.5, originalDuration / newDuration))
+                            const newSpeed = Math.min(2.0, Math.max(0.5, rendered * originalDuration / newDuration))
                             lastSpeed = newSpeed
-                            const w = Math.max((originalDuration / newSpeed) * PIXELS_PER_SECOND, 2)
+                            const w = Math.max((originalDuration * rendered / newSpeed) * PIXELS_PER_SECOND, 2)
                             for (const el of els) el.style.width = `${w}px`
                             if (labelEl) labelEl.textContent = `${newSpeed.toFixed(2)}x`
                           }
@@ -14715,14 +14977,15 @@ export function DubVerseEditor({
                           const els: HTMLElement[] = []
                           timelineRef.current?.querySelectorAll<HTMLElement>(`[data-drag-block="${i}"]`).forEach(el => els.push(el))
                           const labelEl = timelineRef.current?.querySelector<HTMLElement>(`[data-drag-block="${i}"] [data-speed-label]`)
-                          let lastSpeed = stagedSpeeds[keyAt(i)] ?? 1.0
+                          const rendered = renderedSpeedAt(i)
+                          let lastSpeed = stagedSpeeds[keyAt(i)] ?? rendered
                           setDragSpeedPreview({ index: i, speed: lastSpeed })
                           const onMouseMove = (ev: MouseEvent) => {
                             const dx = ev.clientX - startX
                             const newDuration = Math.max(0.1, originalDuration + dx / PIXELS_PER_SECOND)
-                            const newSpeed = Math.min(2.0, Math.max(0.5, originalDuration / newDuration))
+                            const newSpeed = Math.min(2.0, Math.max(0.5, rendered * originalDuration / newDuration))
                             lastSpeed = newSpeed
-                            const w = Math.max((originalDuration / newSpeed) * PIXELS_PER_SECOND, 2)
+                            const w = Math.max((originalDuration * rendered / newSpeed) * PIXELS_PER_SECOND, 2)
                             for (const el of els) el.style.width = `${w}px`
                             if (labelEl) labelEl.textContent = `${newSpeed.toFixed(2)}x`
                           }
@@ -15098,7 +15361,7 @@ export function DubVerseEditor({
                   setRegeneratingSegmentIndex(idx)
                   try {
                     const response = await apiClient.regenerateSegment(jobId, seg.transcript_index ?? idx, {
-                      speed: stagedSpeeds[keyAt(idx)] ?? 1.0,
+                      speed: stagedSpeeds[keyAt(idx)] ?? renderedSpeedAt(idx),
                       emotion: stagedEmotions[keyAt(idx)] ?? seg.committed_emotion,
                       voice_key: stagedVoices[keyAt(idx)] ?? speakerVoiceMap[seg.speaker_id],
                       pitch: stagedPitches[keyAt(idx)] ?? speakerPitchMap[seg.speaker_id] ?? 0,
@@ -15225,6 +15488,16 @@ export function DubVerseEditor({
           </div>
         </div>
       )}
+      {activeDubbedVideoUrl && (
+        <DubReadyDialog
+          open={showDubReady}
+          onClose={() => setShowDubReady(false)}
+          title={title}
+          jobId={jobId}
+          videoUrl={apiClient.refreshMediaUrl(activeDubbedVideoUrl)}
+          downloadUrl={withAttachment(apiClient.refreshMediaUrl(activeDubbedVideoUrl))}
+        />
+      )}
       {showExportModal && jobId && (
         <ExportModal
           jobId={jobId}
@@ -15241,6 +15514,7 @@ export function DubVerseEditor({
             setCurrentTime(displaySegments[idx] ? effStart(displaySegments[idx]) : 0)
           }}
           onMarkOk={handleMarkOk}
+          onClearAll={handleClearAllFlagged}
         />
       )}
     </div>
