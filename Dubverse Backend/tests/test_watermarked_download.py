@@ -134,5 +134,73 @@ class WatermarkedDownloadTests(unittest.TestCase):
         self.assertEqual(r.status_code, 404)
 
 
+class RealEncodeTests(unittest.TestCase):
+    """The mocked tests above prove the route plumbing; this one proves the
+    encoder itself — the drawtext command and the font file it names must
+    actually work in the deployed image (fonts-dejavu-core is pinned in the
+    Dockerfile for exactly this)."""
+
+    def setUp(self):
+        from app.api import routes
+        self.routes = routes
+        self.tmp = tempfile.mkdtemp(prefix="wmenc_")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _make_clip(self, path):
+        import subprocess
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i",
+             "testsrc=duration=1:size=320x240:rate=10",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+             "-c:v", "libx264", "-c:a", "aac", "-shortest", path],
+            check=True, capture_output=True)
+
+    def test_drawtext_encode_produces_real_output(self):
+        import shutil as _sh
+        if not _sh.which("ffmpeg"):
+            self.skipTest("ffmpeg not installed")
+        if not os.path.exists(self.routes._WATERMARK_FONT):
+            self.skipTest("watermark font not installed")
+        src = os.path.join(self.tmp, "clip.mp4")
+        out = os.path.join(self.tmp, "wm_clip.mp4")
+        self._make_clip(src)
+        self.routes._build_watermarked_dub(src, out)
+        self.assertGreater(os.path.getsize(out), 1000)
+
+    def test_source_changed_during_encode_is_not_published(self):
+        src = os.path.join(self.tmp, "clip.mp4")
+        out = os.path.join(self.tmp, "wm_clip.mp4")
+        with open(src, "wb") as f:
+            f.write(b"v1" * 2048)
+
+        def _fake_run(cmd, **_kw):
+            # Encoder "succeeds" and writes output, but the source moved
+            # under it — the result must never be published as current.
+            with open(cmd[-1], "wb") as f:
+                f.write(WM_BYTES)
+            with open(src, "ab") as f:
+                f.write(b"changed")
+            return SimpleNamespace(returncode=0, stderr=b"")
+
+        with mock.patch.object(self.routes.subprocess, "run", side_effect=_fake_run):
+            with self.assertRaises(RuntimeError):
+                self.routes._build_watermarked_dub(src, out)
+        self.assertFalse(os.path.exists(out))
+        self.assertFalse(os.path.exists(out + ".tmp.mp4"))
+
+    def test_failed_encode_raises_and_leaves_no_partial_file(self):
+        import shutil as _sh
+        if not _sh.which("ffmpeg"):
+            self.skipTest("ffmpeg not installed")
+        src = os.path.join(self.tmp, "clip.mp4")
+        out = os.path.join(self.tmp, "wm_clip.mp4")
+        self._make_clip(src)
+        os.unlink(src)  # encode a missing source → ffmpeg exits nonzero
+        with self.assertRaises(RuntimeError):
+            self.routes._build_watermarked_dub(src, out)
+        self.assertFalse(os.path.exists(out))
+        self.assertFalse(os.path.exists(out + ".tmp.mp4"))
+
+
 if __name__ == "__main__":
     unittest.main()

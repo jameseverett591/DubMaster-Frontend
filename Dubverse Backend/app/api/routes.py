@@ -5949,7 +5949,7 @@ async def _run_dubbing_pipeline(
                 _wm_src = Path(settings.DUBBED_DIR) / job_id / f"dubbed_{target_lang.lower().strip()}.mp4"
                 _wm_job = await _get_or_rehydrate_job(job_id)
                 if _wm_src.exists() and not await _job_share_unlocked(job_id, user_id, _wm_job):
-                    asyncio.create_task(_watermarked_dub(str(_wm_src)))
+                    asyncio.create_task(_prewarm_watermark(str(_wm_src)))
             except Exception as _wm_err:
                 logger.warning(f"Job {job_id}: watermark pre-build skipped: {_wm_err}")
         else:
@@ -6474,14 +6474,23 @@ async def _job_share_unlocked(job_id: str, caller: str, job) -> bool:
 # racing the same encode.
 _WATERMARK_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 _watermark_locks: Dict[str, asyncio.Lock] = {}
+# One encode at a time across ALL jobs — several films finishing together
+# would otherwise pile libx264 onto the backend CPU (the same starvation
+# that broke QC before it moved to RunPod). Encoder threads are also capped.
+_watermark_sem = asyncio.Semaphore(1)
 
 
 def _build_watermarked_dub(dubbed_path: str, wm_path: str) -> None:
     """Burn a dim 'DubMaster' trademark across the full video (drawtext runs
     the whole duration — this is a brand overlay, not a corner stamp).
     Writes via a temp + rename so a request mid-encode never gets a
-    half-written file."""
+    half-written file. The source fingerprint is re-checked after the
+    encode so a re-render mid-flight can never publish a stale cut."""
     tmp = wm_path + ".tmp.mp4"
+    try:
+        src_stat = os.stat(dubbed_path)
+    except OSError as e:
+        raise RuntimeError(f"watermark source missing: {e}")
     cmd = [
         "ffmpeg", "-y", "-i", dubbed_path,
         "-vf",
@@ -6489,16 +6498,26 @@ def _build_watermarked_dub(dubbed_path: str, wm_path: str) -> None:
         "fontcolor=white@0.32:fontsize=h/10:borderw=2:bordercolor=black@0.4:"
         "x=(w-text_w)/2:y=h-text_h-(h/14)",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+        "-threads", "2",
         "-c:a", "copy",
         tmp,
     ]
-    subprocess.run(cmd, capture_output=True, timeout=3600)
-    if not (os.path.exists(tmp) and os.path.getsize(tmp) > 1000):
+    proc = subprocess.run(cmd, capture_output=True, timeout=3600)
+    ok = proc.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 1000
+    # A re-render overwriting the source mid-encode must not publish —
+    # its fresher mtime would let _fresh() accept the old cut forever.
+    if ok:
+        now = os.stat(dubbed_path)
+        if now.st_mtime_ns != src_stat.st_mtime_ns or now.st_size != src_stat.st_size:
+            ok = False
+    if not ok:
         try:
             os.unlink(tmp)
         except OSError:
             pass
-        raise RuntimeError("watermark encode produced no output")
+        raise RuntimeError(
+            f"watermark encode failed (rc={proc.returncode}): "
+            f"{proc.stderr.decode(errors='replace')[-400:]}")
     os.replace(tmp, wm_path)
 
 
@@ -6523,8 +6542,18 @@ async def _watermarked_dub(dubbed_path: str) -> str:
     async with lock:
         if _fresh():
             return wm_path
-        await asyncio.to_thread(_build_watermarked_dub, dubbed_path, wm_path)
+        async with _watermark_sem:
+            await asyncio.to_thread(_build_watermarked_dub, dubbed_path, wm_path)
     return wm_path
+
+
+async def _prewarm_watermark(dubbed_path: str) -> None:
+    """Background watermark build — failures are logged, never raised into a
+    fire-and-forget task."""
+    try:
+        await _watermarked_dub(dubbed_path)
+    except Exception as e:
+        logger.warning(f"Watermark pre-build failed for {dubbed_path}: {e}")
 
 
 @router.get("/download/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
