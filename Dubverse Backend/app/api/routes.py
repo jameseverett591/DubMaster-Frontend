@@ -5949,7 +5949,7 @@ async def _run_dubbing_pipeline(
                 _wm_src = Path(settings.DUBBED_DIR) / job_id / f"dubbed_{target_lang.lower().strip()}.mp4"
                 _wm_job = await _get_or_rehydrate_job(job_id)
                 if _wm_src.exists() and not await _job_share_unlocked(job_id, user_id, _wm_job):
-                    asyncio.create_task(_prewarm_watermark(str(_wm_src), job_id))
+                    asyncio.create_task(_prewarm_watermark(str(_wm_src)))
             except Exception as _wm_err:
                 logger.warning(f"Job {job_id}: watermark pre-build skipped: {_wm_err}")
         else:
@@ -6491,6 +6491,10 @@ def _build_watermarked_dub(dubbed_path: str, wm_path: str) -> None:
         src_stat = os.stat(dubbed_path)
     except OSError as e:
         raise RuntimeError(f"watermark source missing: {e}")
+
+    def _source_unchanged() -> bool:
+        now = os.stat(dubbed_path)
+        return now.st_mtime_ns == src_stat.st_mtime_ns and now.st_size == src_stat.st_size
     cmd = [
         "ffmpeg", "-y", "-i", dubbed_path,
         "-vf",
@@ -6506,10 +6510,8 @@ def _build_watermarked_dub(dubbed_path: str, wm_path: str) -> None:
     ok = proc.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 1000
     # A re-render overwriting the source mid-encode must not publish —
     # its fresher mtime would let _fresh() accept the old cut forever.
-    if ok:
-        now = os.stat(dubbed_path)
-        if now.st_mtime_ns != src_stat.st_mtime_ns or now.st_size != src_stat.st_size:
-            ok = False
+    if ok and not _source_unchanged():
+        ok = False
     if not ok:
         try:
             os.unlink(tmp)
@@ -6519,15 +6521,26 @@ def _build_watermarked_dub(dubbed_path: str, wm_path: str) -> None:
             f"watermark encode failed (rc={proc.returncode}): "
             f"{proc.stderr.decode(errors='replace')[-400:]}")
     os.replace(tmp, wm_path)
+    # The stat→replace gap is tiny, but check once more after publish: a
+    # source that moved in that window leaves a stale watermark cached
+    # with the newest mtime. Roll it back rather than serve an old cut.
+    if not _source_unchanged():
+        try:
+            os.unlink(wm_path)
+        except OSError:
+            pass
+        raise RuntimeError("watermark source changed during publish")
 
 
-async def _watermarked_dub(dubbed_path: str, job_id: str) -> str:
+async def _watermarked_dub(dubbed_path: str) -> str:
     """Return the watermarked copy of a finished dub, building it on first
     request. Feature-film encode can take minutes — the per-path lock
     serialises concurrent downloads of the same language onto one encode,
-    and the job's render lock keeps a re-render from overwriting the
-    source mid-encode (the fingerprint check in _build_watermarked_dub is
-    the belt to these suspenders)."""
+    and the global semaphore caps encode CPU. A mid-encode re-render is
+    detected by the source fingerprint in _build_watermarked_dub rather
+    than by holding _render_locks: nesting the encode sem under/over the
+    render lock either blocks re-renders behind foreign encodes or
+    reserves the single encode slot while a render runs."""
     def _fresh() -> bool:
         # A re-rendered dub must re-encode — never serve a watermark burned
         # from an older cut of the film.
@@ -6545,25 +6558,18 @@ async def _watermarked_dub(dubbed_path: str, job_id: str) -> str:
     async with lock:
         if _fresh():
             return wm_path
-        # The global encode semaphore is taken BEFORE the render lock:
-        # while this encode queues behind another film's, a re-render of
-        # THIS job must stay free to run — holding the render lock during
-        # the sem wait would block re-renders behind a foreign encode.
         async with _watermark_sem:
-            async with _render_locks.setdefault(job_id, asyncio.Lock()):
-                # Re-check inside the render lock too: a re-render that ran
-                # while we queued makes any earlier freshness verdict stale.
-                if _fresh():
-                    return wm_path
-                await asyncio.to_thread(_build_watermarked_dub, dubbed_path, wm_path)
+            if _fresh():
+                return wm_path
+            await asyncio.to_thread(_build_watermarked_dub, dubbed_path, wm_path)
     return wm_path
 
 
-async def _prewarm_watermark(dubbed_path: str, job_id: str) -> None:
+async def _prewarm_watermark(dubbed_path: str) -> None:
     """Background watermark build — failures are logged, never raised into a
     fire-and-forget task."""
     try:
-        await _watermarked_dub(dubbed_path, job_id)
+        await _watermarked_dub(dubbed_path)
     except Exception as e:
         logger.warning(f"Watermark pre-build failed for {dubbed_path}: {e}")
 
@@ -6589,7 +6595,7 @@ async def download_dubbed_video(job_id: str, language: str, request: Request, at
     job = await _get_or_rehydrate_job(job_id)
     if job and not await _job_share_unlocked(job_id, _caller(request), job):
         try:
-            dubbed_path = await _watermarked_dub(dubbed_path, job_id)
+            dubbed_path = await _watermarked_dub(dubbed_path)
         except Exception as e:
             logger.error(f"Job {job_id}: watermark render failed: {e}")
             raise HTTPException(status_code=503, detail="Watermarked download unavailable right now — try again shortly.")
