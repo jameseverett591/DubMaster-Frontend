@@ -127,7 +127,7 @@ import {
 } from '@/components/ui/context-menu'
 
 // Additional QC tab icons not in main import block
-import { LayoutList, AudioLines, Zap, GitBranch, Sliders, MessageCircle, ArrowUp, AlertCircle } from 'lucide-react'
+import { LayoutList, AudioLines, Zap, GitBranch, Sliders, MessageCircle, ArrowUp, AlertCircle, Flag } from 'lucide-react'
 import { usePlan } from '@/lib/use-plan'
 import { useUsage } from '@/hooks/use-usage'
 import { useT } from '@/lib/use-t'
@@ -8933,7 +8933,7 @@ export function DubVerseEditor({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48 bg-slate-900 border-slate-700">
               {(() => {
-                const unreviewedCount = displaySegments.filter(s => s.flags?.length && s.flag_status === 'unreviewed').length
+                const unreviewedCount = displaySegments.filter(s => (s.flags?.length || s.translation_flagged) && (s.flag_status ?? 'unreviewed') === 'unreviewed').length
                 return (
                   <DropdownMenuItem
                     onClick={() => setShowReviewQueue(true)}
@@ -14448,6 +14448,10 @@ export function DubVerseEditor({
                         (index === groupBounds?.firstIdx || index === groupBounds?.lastIdx)
                           ? 'border-yellow-400/90 shadow-[0_0_14px_rgba(250,204,21,0.6)] ring-2 ring-yellow-400/80'
                           : blockMuted ? 'border-neutral-600' : hasDroppedTranslation ? 'border-amber-400' : spColor.border,
+                        // Withheld by the confidence gate (no audio, flagged):
+                        // dashed amber ring so it reads as a review item, not
+                        // just another ungenerated block.
+                        segment.translation_flagged && !(segment.committed_audio_url || segment.audio_url) && 'border-dashed ring-1 ring-amber-500/70',
                         genAnim.get(index) === 'trace' && 'dm-gen-trace',
                         genAnim.get(index) === 'pulse' && 'dm-gen-pulse',
                         // "This line has a take" — a standing speaker-coloured
@@ -14878,6 +14882,8 @@ export function DubVerseEditor({
                         'absolute top-1 bottom-1 rounded opacity-70 transition-colors group',
                         voiceDragOverIndex === i
                           ? 'bg-emerald-500/70 border-2 border-emerald-400 ring-2 ring-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.7)] animate-pulse'
+                          : !hasAudio && seg.translation_flagged
+                          ? 'bg-amber-500/25 border border-amber-500/60 border-dashed'
                           : !hasAudio
                           ? 'bg-neutral-500/30 border border-neutral-600/50'
                           : regeneratingSegmentIndex === i
@@ -14904,9 +14910,17 @@ export function DubVerseEditor({
                           2
                         )
                       }}
-                      title={seg.committed_adapted_text ?? seg.active_text ?? seg.target_text}
+                      title={!hasAudio && seg.translation_flagged
+                        ? `${t('Dub withheld — needs review')} (${seg.flag_reason || 'flagged'}): ${seg.committed_adapted_text ?? seg.active_text ?? seg.target_text}`
+                        : seg.committed_adapted_text ?? seg.active_text ?? seg.target_text}
                       onClick={(e) => handleSegmentClick(i, e)}
                     >
+                      {/* Withheld-by-gate marker — amber dashed block is
+                          ambiguous at a glance; the flag glyph says "this is a
+                          review item, not missing work". */}
+                      {!hasAudio && seg.translation_flagged && (
+                        <Flag className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 h-3.5 w-3.5 text-amber-400 pointer-events-none" />
+                      )}
                       {/* Left speed handle (blue) */}
                       <div
                         data-resize-handle={true}

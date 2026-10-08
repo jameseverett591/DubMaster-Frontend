@@ -65,8 +65,11 @@ export function ReviewQueuePanel({
         .map((seg, arrayIndex) => ({ seg, arrayIndex }))
         .filter(
           ({ seg }) =>
+            // The confidence gate sets translation_flagged without ever
+            // writing flag_status — treat absent as unreviewed or withheld
+            // segments would be invisible here while their audio sits muted.
             (seg.flags && seg.flags.length > 0 || seg.translation_flagged) &&
-            seg.flag_status === 'unreviewed'
+            (seg.flag_status ?? 'unreviewed') === 'unreviewed'
         ),
     [segments]
   )
