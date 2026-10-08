@@ -471,22 +471,47 @@ def _media_token_valid(job_id: str, token: str) -> bool:
 
 
 def _vendor_media_qs(job_id: str, access_token: str = "") -> str:
-    """Credential query-string for URLs handed to vendors. Prefers the scoped
-    media token; falls back to the JWT only when no signing secret is
-    configured (dev environments without INTERNAL_API_SECRET)."""
+    """Credential query-string for URLs handed to vendors: the scoped media
+    token, or NOTHING.
+
+    It used to fall back to the caller's own login token when no signing secret
+    was configured, which put a full login credential into vendor URLs and
+    vendor logs. A missing secret now yields no credential at all, so the
+    vendor's fetch fails with 401 (loudly in our log) instead of leaking a
+    login. `access_token` is accepted only so existing call sites keep working.
+    """
     if _media_token_secret():
         return f"?media_token={_mint_media_token(job_id)}"
-    return f"?access_token={access_token}" if access_token else ""
+    logger.error(
+        "[MEDIA-TOKEN] neither MEDIA_TOKEN_SECRET nor INTERNAL_API_SECRET is set — "
+        "vendor media URLs carry NO credential (the caller's login token is never "
+        "used as a fallback); lip-sync and video notes will be refused until it is set"
+    )
+    return ""
+
+
+# The ONLY files an outside service may fetch with a media token. Vendors need
+# exactly: the original video (video notes, lip-sync), the merged dubbed audio
+# (lip-sync) and the cut sub-clips (scoped lip-sync). Everything else — the
+# finished film, other stems, segment files, waveform / proxy routes, any other
+# file in the job folder — needs the owner's login. Anchored, so "..", extra
+# path parts and look-alike names do not match.
+_VENDOR_MEDIA_PATHS = re.compile(
+    r"^(?:/api)?/media/[^/]+/(?:video|audio/dubbed_audio\.wav|lip_in_\d+\.(?:mp4|wav))$"
+)
 
 
 async def _dep_media_access(job_id: str, request: Request):
-    """Media-serving guard: the job owner's JWT, or a scoped vendor media
-    token (?media_token=). The token only ever unlocks media bytes for the
-    one job it was minted for — never mutating routes, never other jobs."""
+    """Media-serving guard: the job owner's login, or a scoped vendor media
+    token (?media_token=). The token unlocks only the job it was minted for AND
+    only the few files vendors actually fetch (see _VENDOR_MEDIA_PATHS) —
+    never mutating routes, never other jobs, never the finished film."""
     mt = request.query_params.get("media_token", "")
     if mt:
         if not _media_token_valid(job_id, mt):
             raise HTTPException(status_code=401, detail="Invalid or expired media token")
+        if not _VENDOR_MEDIA_PATHS.match(request.url.path):
+            raise HTTPException(status_code=403, detail="This media token does not cover that file")
         job = await _get_or_rehydrate_job(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
