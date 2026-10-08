@@ -434,7 +434,10 @@ def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> D
                     pass
         if output.get("error"):
             return {"status": "error", "reason": f"RunPod: {output['error']}"}
-        raw_segments = output.get("segments") or []
+        # The transcribe-only worker returns text under transcript.segments;
+        # keep the flat output.segments as a fallback for the other step shapes.
+        transcript = output.get("transcript") or {}
+        raw_segments = transcript.get("segments") or output.get("segments") or []
         segments = [
             {
                 "start": round(float(s.get("start", 0.0)), 3),
