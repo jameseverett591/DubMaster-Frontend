@@ -381,6 +381,93 @@ def transcribe_cantonese(
         merged = _filter_repetition_loops(merged)
         merged = _filter_hallucinations(merged, strict=False, source_language=language, whisper_source=False)
 
+        # ── Tail rescue ──
+        # Both engines can return nothing for the final seconds of a clip —
+        # Deepgram on quiet/faded tails, Whisper's VAD on music-covered
+        # dialogue. If coverage ends >2s before the audio does and the tail
+        # isn't silence, run one VAD-off Whisper pass over the uncovered
+        # window on the raw waveform. Survivors are marked gap_filled, so
+        # translation flags them for human review rather than auto-voicing
+        # unverified text.
+        audio_tensor = extract_result.get("audio")
+        sample_rate = int(extract_result.get("sample_rate", 16000))
+        duration = float(audio_tensor.shape[-1]) / sample_rate if audio_tensor is not None else 0.0
+        last_end = max((float(s.get("end") or 0) for s in merged), default=0.0)
+        if duration - last_end > 2.0:
+            try:
+                import numpy as _np
+                from app.pipeline.transcribe_audio import (
+                    _get_whisper_model,
+                    _filter_hallucinations as _filter_tail,
+                    INITIAL_PROMPT,
+                )
+
+                waveform = audio_tensor.squeeze().cpu().numpy().astype(_np.float32)
+                # 0.5s of context before the gap; never more than 15s of audio.
+                tail_start = max(0.0, min(last_end - 0.5, duration - 15.0))
+                tail = waveform[int(tail_start * sample_rate):]
+                rms = float(_np.sqrt(_np.mean(tail * tail))) if tail.size else 0.0
+                if tail.size >= sample_rate and rms > 5e-4:
+                    logger.info(
+                        f"[CANTONESE-ASR] Tail rescue: coverage ends {last_end:.1f}s, "
+                        f"audio is {duration:.1f}s — transcribing final "
+                        f"{duration - tail_start:.1f}s (VAD off)"
+                    )
+                    _model = _get_whisper_model(language)
+                    _gen, _info = _model.transcribe(
+                        tail,
+                        language=language,
+                        beam_size=5,
+                        word_timestamps=True,
+                        condition_on_previous_text=False,
+                        initial_prompt=INITIAL_PROMPT,
+                        vad_filter=False,
+                    )
+                    tail_segs = []
+                    for ws in _gen:
+                        words = getattr(ws, "words", None) or []
+                        seg_start = tail_start + (words[0].start if words else ws.start)
+                        seg_end = tail_start + (words[-1].end if words else ws.end)
+                        text = (ws.text or "").strip()
+                        if not text:
+                            continue
+                        tail_segs.append({
+                            "start": round(seg_start, 3),
+                            "end": round(min(seg_end, duration), 3),
+                            "text": text,
+                            "confidence": round(1.0 - abs(getattr(ws, "avg_logprob", -0.5) or -0.5), 3),
+                            "avg_logprob": getattr(ws, "avg_logprob", None),
+                            "no_speech_prob": getattr(ws, "no_speech_prob", None),
+                            "source": "whisper_tail",
+                            "gap_filled": True,
+                        })
+                    tail_segs = _filter_tail(
+                        tail_segs, strict=False, source_language=language,
+                        whisper_source=True,
+                    )
+                    if tail_segs:
+                        merged = fill_gaps_with_fallbacks(
+                            primary_segments=merged,
+                            fallback_segments=tail_segs,
+                            job_id=job_id,
+                        )
+                        logger.info(
+                            f"[CANTONESE-ASR] Tail rescue merged "
+                            f"{len(tail_segs)} segment(s) past {last_end:.1f}s"
+                        )
+                    else:
+                        logger.info(
+                            "[CANTONESE-ASR] Tail rescue: nothing survived "
+                            "filtering — tail treated as non-speech"
+                        )
+                else:
+                    logger.info(
+                        f"[CANTONESE-ASR] Tail rescue skipped: {duration - last_end:.1f}s "
+                        f"tail is silence (rms={rms:.5f})"
+                    )
+            except Exception as e:
+                logger.warning(f"[CANTONESE-ASR] Tail rescue failed: {e}")
+
         # ── Persist output ──
         import json
         from pathlib import Path

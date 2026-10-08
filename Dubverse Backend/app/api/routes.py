@@ -70,6 +70,21 @@ def _projects_base_dir() -> Path:
     return Path(settings.PROJECTS_DIR)
 
 
+def _stamp_project_paid(job_id: str, paid: bool) -> None:
+    """Mirror the Make Movie paid stamp into project.json. billed_seconds
+    lives on the in-memory job — a backend restart forgets it, and without
+    this the projects list reports paid=false, hiding a paid project's
+    Share button until something happens to rehydrate the job."""
+    meta_path = _projects_base_dir() / job_id / "project.json"
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = _json.load(f)
+        meta["paid"] = paid
+        atomic_write_json(str(meta_path), meta)
+    except (OSError, ValueError):
+        pass
+
+
 def _safe_copytree(src: Path, dst: Path):
     import shutil
     if not src.exists():
@@ -507,6 +522,7 @@ async def _dep_media_access(job_id: str, request: Request):
     only the few files vendors actually fetch (see _VENDOR_MEDIA_PATHS) —
     never mutating routes, never other jobs, never the finished film."""
     mt = request.query_params.get("media_token", "")
+    request.state.vendor_token = False
     if mt:
         if not _media_token_valid(job_id, mt):
             raise HTTPException(status_code=401, detail="Invalid or expired media token")
@@ -515,8 +531,15 @@ async def _dep_media_access(job_id: str, request: Request):
         job = await _get_or_rehydrate_job(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+        request.state.vendor_token = True
         return job
     return await _require_job(job_id, _caller(request))
+
+
+def _vendor_limited(request: Request) -> bool:
+    """True when the media request is authenticated by a vendor media_token
+    rather than the owner's JWT."""
+    return bool(getattr(request.state, "vendor_token", False))
 
 
 
@@ -3299,6 +3322,17 @@ async def upload_video(
         # dubbing still re-separates audio itself at render time.
         provided = None
         if transcript:
+            # Supplied captions skip ASR entirely, so nothing re-detects the
+            # language later — a missing source_language would stamp the
+            # transcript "en" and every dub would translate from the wrong
+            # source. Require it rather than guess.
+            if not src_lang:
+                os.remove(video_path)
+                await job_manager.delete_job(job_id)
+                raise HTTPException(
+                    status_code=422,
+                    detail="source_language is required when supplying captions",
+                )
             try:
                 provided = youtube_service.parse_caption_segments(
                     _json.loads(transcript), max_end=_dur
@@ -3376,6 +3410,7 @@ async def youtube_info(url: str):
     except Exception as e:
         logger.error(f"YouTube info failed: {e}")
         raise HTTPException(status_code=502, detail="Could not reach YouTube")
+    info.pop("_needs_cookies", None)  # internal download hint — not client data
     return info
 
 
@@ -3410,6 +3445,15 @@ async def youtube_import(body: YouTubeImportRequest,
         normalized = normalize_language_code(body.source_language, allow_auto=True)
         if normalized and normalized != "auto":
             src_lang = normalized
+
+    # Supplied captions skip ASR entirely — without their language the
+    # transcript gets stamped "en" and every dub translates from the wrong
+    # source. Same requirement as /upload's transcript field.
+    if body.transcript and not src_lang:
+        raise HTTPException(
+            status_code=422,
+            detail="source_language is required when supplying captions",
+        )
 
     tgt_lang: Optional[str] = None
     if body.target_language:
@@ -3451,7 +3495,8 @@ async def youtube_import(body: YouTubeImportRequest,
         # several minutes and holding the HTTP request open for it invites
         # proxy timeouts. Status polling carries the progress instead.
         background_tasks.add_task(
-            _youtube_download_then_pipeline, job_id, body.url, dest_stem)
+            _youtube_download_then_pipeline, job_id, body.url, dest_stem,
+            body.transcript, src_lang)
 
         return UploadResponse(
             job_id=job_id,
@@ -3470,9 +3515,14 @@ async def youtube_import(body: YouTubeImportRequest,
 
 
 async def _youtube_download_then_pipeline(job_id: str, url: str,
-                                          dest_stem: str):
+                                          dest_stem: str,
+                                          transcript: Optional[list] = None,
+                                          src_lang: Optional[str] = None):
     """Background leg of /youtube/import: download, enforce the same caps as
-    /upload on the real bytes, then hand off to the normal pipeline."""
+    /upload on the real bytes, then hand off to the normal pipeline. When the
+    caller supplied reviewed captions they become the transcript instead —
+    the pipeline would only spend GPU re-deriving words the user already
+    checked."""
     try:
         video_path, yt_info = await asyncio.to_thread(
             youtube_service.download_video,
@@ -3519,7 +3569,47 @@ async def _youtube_download_then_pipeline(job_id: str, url: str,
         f"YouTube import: {yt_info.get('title')!r} "
         f"({file_size} bytes, {_dur:.1f}s) -> Job {job_id}")
 
-    await process_video_pipeline(job_id, video_path)
+    provided = None
+    if transcript:
+        try:
+            provided = youtube_service.parse_caption_segments(
+                transcript, max_end=_dur)
+        except ValueError as e:
+            await job_manager.update_job_status(
+                job_id, JobStatus.FAILED, error_message=f"Invalid transcript: {e}")
+            return
+
+    if provided:
+        # Same supplied-captions contract as /upload: store the reviewed
+        # segments as the transcript and mark complete — no ASR pass.
+        await job_manager.update_job_transcript(
+            job_id,
+            Transcript(
+                language=src_lang or "en",
+                duration=_dur,
+                text=" ".join(s["text"] for s in provided),
+                segments=[
+                    TranscriptSegment(
+                        text=s["text"],
+                        start=s["start"],
+                        end=s["end"],
+                        speaker=s["speaker"],
+                        source="youtube_captions",
+                    )
+                    for s in provided
+                ],
+            ),
+        )
+        await job_manager.update_job_status(
+            job_id, JobStatus.COMPLETED, progress=100,
+            current_stage="Ready — using supplied captions",
+        )
+        logger.info(
+            f"Job {job_id}: {len(provided)} supplied caption segments stored; "
+            f"analysis pipeline skipped"
+        )
+    else:
+        await process_video_pipeline(job_id, video_path)
 
 
 def _build_ref_segments(raw_segments: list, ref_id: str, lang: str) -> list:
@@ -4609,6 +4699,12 @@ async def list_projects(request: Request):
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = _json.load(f)
                 if meta.get("user_id") == caller:
+                    _pj = await job_manager.get_job(meta.get("job_id", ""))
+                    # In-memory billed_seconds wins; the durable stamp in
+                    # project.json covers jobs not yet rehydrated after a
+                    # backend restart.
+                    meta["paid"] = bool(_pj and getattr(_pj, "billed_seconds", None)) \
+                        or bool(meta.get("paid"))
                     projects.append(meta)
                 continue
             except Exception:
@@ -4648,12 +4744,14 @@ async def save_project(job_id: str, request: Request, body: SaveProjectBody = Sa
 
     # Preserve created_at if project already exists
     existing_created_at = now
+    existing_paid = False
     meta_path = base / "project.json"
     if meta_path.exists():
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 existing = _json.load(f)
                 existing_created_at = existing.get("created_at", now)
+                existing_paid = bool(existing.get("paid"))
         except Exception:
             pass
 
@@ -4674,6 +4772,10 @@ async def save_project(job_id: str, request: Request, body: SaveProjectBody = Sa
         "progress": getattr(job, "progress", 100),
         "created_at": existing_created_at,
         "updated_at": now,
+        # Paid state mirrors the job's billed_seconds; the durable stamp is
+        # what /projects reads after a restart. Stamped again at billing
+        # transitions by _stamp_project_paid.
+        "paid": bool(getattr(job, "billed_seconds", None)) or existing_paid,
     }
 
     # Copy canonical artifacts
@@ -4858,6 +4960,108 @@ async def put_text_lock(job_id: str, request: Request):
     return {"status": "ok", "locked": _load_text_lock(job_id)}
 
 
+def _audio_fingerprint(path: str) -> str:
+    """Content fingerprint for dubbed audio. A Make Movie rebuild touches
+    dubbed_audio.wav's mtime even when the bytes come out identical — but a
+    resumable vendor generation is only reusable when the audio is THE SAME,
+    so the staleness check has to compare content, not timestamps. Full-file
+    sha256 + size; a couple of seconds on a feature-length wav, once per run."""
+    try:
+        size = os.path.getsize(path)
+        import hashlib
+        h = hashlib.new("sha256")
+        with open(path, "rb") as f:
+            # Full-file hash — head/tail sampling missed a middle edit with
+            # unchanged size, which would resume a stale paid generation.
+            while chunk := f.read(1 << 20):
+                h.update(chunk)
+        return f"{size}:{h.hexdigest()[:24]}"
+    except OSError:
+        return ""
+
+
+def _audio_fingerprint_legacy(path: str) -> str:
+    """The pre-upgrade format (size + first/last-MiB hash). Exists ONLY to
+    compare against state saved before fp_version 2 — a middle-edit can fool
+    it, so new state always stores the full-file fingerprint."""
+    try:
+        size = os.path.getsize(path)
+        import hashlib
+        h = hashlib.new("sha256")
+        with open(path, "rb") as f:
+            h.update(f.read(1 << 20))
+            if size > (1 << 20):
+                f.seek(max(1 << 20, size - (1 << 20)))
+                h.update(f.read())
+        return f"{size}:{h.hexdigest()[:24]}"
+    except OSError:
+        return ""
+
+
+def _audio_fp_current_matches(saved: dict, audio_path: str) -> bool:
+    """Does a saved lip-sync state describe the CURRENT dubbed audio?
+
+    Three generations of state must all work: fp_version 2 compares the
+    full-file fingerprint; a state saved by the previous build compares its
+    legacy head/tail fingerprint (the only time the weaker format may still
+    match — it was authoritative when that paid generation was submitted);
+    pre-fingerprint state falls back to the mtime heuristic. SYNC — callers
+    run it via asyncio.to_thread so the full-file read never stalls the
+    event loop."""
+    fp = _audio_fingerprint(audio_path)
+    saved_fp = saved.get("audio_fp") or ""
+    if saved.get("fp_version", 0) >= 2:
+        return saved_fp == fp
+    if saved_fp:
+        # Saved by the head/tail build: full-hash can't equal it, so a
+        # mismatch there only says the file isn't the OLD format's match —
+        # compare the legacy format too.
+        if saved_fp == fp:
+            return True
+        return saved_fp == _audio_fingerprint_legacy(audio_path)
+    _saved_mtime = saved.get("audio_mtime")
+    if _saved_mtime is None:
+        return True
+    try:
+        _cur_mtime = os.path.getmtime(audio_path)
+    except OSError:
+        _cur_mtime = None
+    return _cur_mtime is None or abs(_saved_mtime - _cur_mtime) <= 1.0
+
+
+def _lipsync_synced_ids(segments: list, selected: list, synced_spans: list) -> list:
+    """The subset of the user's selected segment ids whose span is covered by
+    a range the vendor actually returned. Recording the whole selection as
+    synced — the old behavior — let a partially-failed run satisfy the export
+    gate and the billing check for footage that never got lips."""
+    sel = {str(i) for i in (selected or [])}
+    if not sel or not synced_spans:
+        return []
+    out = []
+    for seg in segments:
+        keys = {str(seg.get("id")), str(seg.get("segment_id")), str(seg.get("transcript_index"))}
+        hit = next(iter(keys & sel), None)
+        if hit is None:
+            continue
+        st = _first_time(seg.get("committed_start_time"), seg.get("start_time"), seg.get("start"))
+        en = _first_time(seg.get("committed_end_time"), seg.get("end_time"), seg.get("end"))
+        try:
+            st, en = float(st), float(en)
+        except (TypeError, ValueError):
+            continue
+        if en <= st:
+            continue
+        # Synced ranges are merged/non-overlapping, so a simple overlap sum
+        # measures coverage. 0.5s slack for the 0.75s merge gap and boundary
+        # fuzz; a midpoint check let a segment straddling a FAILED range read
+        # as synced and satisfy the paid gate.
+        covered = sum(
+            max(0.0, min(en, re_) - max(st, rs)) for rs, re_ in synced_spans)
+        if covered >= (en - st) - 0.5:
+            out.append(hit)
+    return out
+
+
 def _lipsync_selected_ranges(job_id: str, segments: list) -> list:
     """Resolve the stored per-segment selection to merged [start, end] ranges
     on the committed timeline. Returns [] when nothing is selected — callers
@@ -4941,19 +5145,63 @@ async def _run_lipsync_postpass(
         return {"provider": _lip_provider, "applied": False,
                 "skipped": "empty_selection", "charge_seconds": 0}
 
+    # Chunked mode: any scope longer than the vendor's per-generation cap is
+    # cut at silent gaps and run as bounded-concurrency chunks, billed per
+    # chunk inside the runner (so the single up-front charge below is skipped).
+    _chunk_ranges = None
+    _limit = _lipsync_limit_seconds()
+    if ranges:
+        _scope = list(ranges)
+    else:
+        _full = await asyncio.to_thread(_probe_video_duration, dubbed_output_path)
+        if not _full:
+            _lj0 = await job_manager.get_job(job_id)
+            _full = float(getattr(_lj0, "video_duration", 0) or 0)
+        _scope = [(0.0, float(_full))] if _full else []
+    if _scope and any(e - s > _limit + 1e-6 for s, e in _scope):
+        _segs = []
+        try:
+            with open(os.path.join(settings.DUBBED_DIR, job_id, "segments.json"), "r", encoding="utf-8") as _f:
+                _segs = (_json.load(_f) or {}).get("segments", [])
+        except Exception:
+            _segs = []
+        _chunk_ranges = _split_ranges_by_limit(_scope, _limit, _lipsync_cut_points(_segs))
+        logger.info(f"Job {job_id}: lip sync split into {len(_chunk_ranges)} chunk(s) "
+                    f"(limit {_limit:.0f}s)")
+
+    # Whole-film resume: a prior attempt that timed out while the vendor was
+    # still running saved its generation id (lipsync_film.json). Resuming it
+    # re-polls the SAME paid generation — the charge below must NOT run again.
+    # The saved generation syncs the audio it was submitted with; if the film
+    # was re-rendered since, the old result would mismatch — discard it.
+    _film_state = None if (ranges or _chunk_ranges) else _load_film_lipsync_state(job_id)
+    _resume_id = (_film_state or {}).get("sync_job_id") or ""
+    if _resume_id and audio_path:
+        if not await asyncio.to_thread(
+                _audio_fp_current_matches, _film_state, audio_path):
+            logger.info(
+                f"Job {job_id}: saved lip-sync generation's audio differs from "
+                f"current dubbed mix — dropping it"
+            )
+            _clear_film_lipsync_state(job_id)
+            _film_state, _resume_id = None, ""
+
     # --- Charge up front; refund below only if the vendor never ran it. ---
     # Scoped mode bills the sum of the selected ranges; whole-film bills the
     # rendered duration — same seconds_for_lipsync conversion either way.
     charge_seconds = 0
     charge_key = None
-    if user_id:
-        if ranges:
-            _dur = float(sum(max(0.0, e - s) for s, e in ranges))
-        else:
-            _dur = await asyncio.to_thread(_probe_video_duration, dubbed_output_path)
-            if not _dur:
-                _lj = await job_manager.get_job(job_id)
-                _dur = float(getattr(_lj, "video_duration", 0) or 0)
+    if _resume_id:
+        # The original attempt already debited (and kept) this charge.
+        charge_key = _film_state.get("charge_key")
+        charge_seconds = int(_film_state.get("charge_seconds") or 0)
+    elif user_id and not _chunk_ranges and not ranges:
+        # Whole-film only: scoped sync bills per range inside the runner, so
+        # a range that fails before the vendor is never debited.
+        _dur = await asyncio.to_thread(_probe_video_duration, dubbed_output_path)
+        if not _dur:
+            _lj = await job_manager.get_job(job_id)
+            _dur = float(getattr(_lj, "video_duration", 0) or 0)
         charge_seconds = quota_service.seconds_for_lipsync(
             _dur, _LIPSYNC_COST_PER_SECOND.get(_lip_provider, 0.0)
         )
@@ -4987,21 +5235,54 @@ async def _run_lipsync_postpass(
     # vendor log entry can then only read this job's media, briefly.
     _media_qs = _vendor_media_qs(job_id, access_token)
 
-    if ranges:
+    if _chunk_ranges:
+        lipres = await _run_lipsync_chunks(
+            job_id, dubbed_output_path, video_path, audio_path,
+            _chunk_ranges, _media_qs, _lip_provider, user_id,
+        )
+        charge_seconds = int(lipres.get("charge_seconds") or 0)
+    elif ranges:
         # Scoped sync: one vendor job per merged range on cut subclips, then
         # splice each result back into the rendered film at the same offset.
-        lipres = await _run_lipsync_ranges(
+        # Runs through the chunk machinery — its per-chunk state file keeps
+        # the sync_job_id + charge key of every submitted generation, so a
+        # poll-timeout retry RESUMES the paid job instead of double-charging.
+        lipres = await _run_lipsync_chunks(
             job_id, dubbed_output_path, video_path, audio_path,
-            ranges, _media_qs, _lip_provider,
+            ranges, _media_qs, _lip_provider, user_id,
         )
+        charge_seconds = int(lipres.get("charge_seconds") or 0)
     else:
+        # Whole-film pass. Persist the generation id the moment the vendor
+        # accepts it (parity with the chunked path): if the poll window runs
+        # out or the backend restarts mid-sync, the saved id is resumed on
+        # the next attempt instead of paying for a second generation.
+        # Poll window matches the chunked path — vendor render time scales
+        # with video length and a 10-minute cap orphaned paid generations.
+        _film_poll = int(float(os.environ.get("SYNCLABS_POLL_MAX_SECONDS", "3600") or 3600))
+        if _resume_id:
+            logger.info(
+                f"Job {job_id}: resuming saved lip-sync generation {_resume_id} "
+                f"(no new vendor charge)"
+            )
         lipres = await lipsync_service.lipsync_video(
             job_id=job_id,
             video_path=video_path,      # original video for clean faces
             audio_path=audio_path,       # merged dubbed audio
             output_path=dubbed_output_path,  # overwrites dubbed video in-place
             media_qs=_media_qs,
+            sync_job_id=_resume_id,
+            on_submitted=(
+                None if _resume_id else _make_film_state_saver(
+                    job_id, charge_key, charge_seconds, audio_path)
+            ),
+            max_poll_seconds=_film_poll,
         )
+        # Drop the saved generation only when it can no longer recover:
+        # output downloaded, or the vendor reached a dead terminal state.
+        # A poll timeout keeps the file so a retry resumes the same job.
+        if lipres.get("output_path") or not lipres.get("resumable"):
+            _clear_film_lipsync_state(job_id)
     lipsync_ok = bool(lipres.get("output_path"))
     attempted = bool(lipres.get("vendor_attempted"))
 
@@ -5050,6 +5331,9 @@ async def _run_lipsync_postpass(
         "charge_seconds": charge_seconds,
         "refunded": refunded,
         "vendor_attempted": attempted,
+        # Why the vendor said no (e.g. suspended account on HTTP 402) — the
+        # editor turns this into a hard banner instead of a quiet footnote.
+        "vendor_error": lipres.get("vendor_error"),
     }
     if refund_error:
         result["refund_pending"] = True
@@ -5164,7 +5448,159 @@ def _splice_lipsync_ranges(out_path: str, synced: list, ranges: list, duration: 
         return False
 
 
-async def _run_lipsync_ranges(
+# --- Chunked lip sync (films longer than the vendor's per-generation cap) ----
+# Sync.Labs caps one generation (Creator: 5 min). A longer scope is cut into
+# chunks at silent gaps between dubbed segments, each chunk is its own vendor
+# generation, and the results are spliced back with the same helper scoped
+# sync uses. State lives in lipsync_chunks.json so a backend restart re-polls
+# the generations that were already submitted instead of paying for them twice.
+
+LIPSYNC_CHUNKS_NAME = "lipsync_chunks.json"
+_CHUNK_TERMINAL = {"completed", "failed", "rejected", "skipped_credit"}
+
+
+def _lipsync_limit_seconds() -> float:
+    try:
+        return float(os.environ.get("SYNCLABS_MAX_SECONDS", "285") or 285)
+    except ValueError:
+        return 285.0
+
+
+def _lipsync_cut_points(segments: list) -> list:
+    """Midpoints of the silent gaps between dubbed segments — the places a long
+    range can be cut without slicing through speech."""
+    spans = []
+    for s in segments:
+        st = _first_time(s.get("committed_start_time"), s.get("start_time"), s.get("start"))
+        en = _first_time(s.get("committed_end_time"), s.get("end_time"), s.get("end"))
+        try:
+            st, en = float(st), float(en)
+        except (TypeError, ValueError):
+            continue
+        if en > st:
+            spans.append((st, en))
+    spans.sort()
+    return [(a_e + b_s) / 2.0 for (_, a_e), (b_s, _) in zip(spans, spans[1:]) if b_s - a_e >= 0.25]
+
+
+def _split_ranges_by_limit(ranges: list, limit: float, cut_points: list) -> list:
+    """Split every range longer than `limit` into pieces of at most `limit`.
+    Each cut prefers the latest silent gap in the back half of the window; only
+    when there is none does it hard-cut at the limit."""
+    out = []
+    for s, e in ranges:
+        cur = float(s)
+        while e - cur > limit + 1e-6:
+            cands = [p for p in cut_points if cur + limit * 0.5 <= p <= cur + limit]
+            cut = max(cands) if cands else cur + limit
+            out.append((cur, cut))
+            cur = cut
+        out.append((cur, float(e)))
+    return out
+
+
+def _chunk_state_path(job_id: str) -> str:
+    return os.path.join(settings.DUBBED_DIR, job_id, LIPSYNC_CHUNKS_NAME)
+
+
+def _load_chunk_state(job_id: str, ranges: list) -> Optional[dict]:
+    """The saved run, but only if it describes THESE ranges, was built from
+    the CURRENT dubbed audio, and still has unfinished chunks — i.e. a run
+    interrupted by a restart. A fully finished run is history; a new request
+    starts a fresh run (fresh ledger keys)."""
+    try:
+        with open(_chunk_state_path(job_id), "r", encoding="utf-8") as f:
+            st = _json.load(f)
+    except (OSError, ValueError):
+        return None
+    chunks = st.get("chunks") or []
+    if len(chunks) != len(ranges):
+        return None
+    for c, (s, e) in zip(chunks, ranges):
+        if abs(c.get("start", -1) - s) > 0.05 or abs(c.get("end", -1) - e) > 0.05:
+            return None
+    if all(c.get("status") in _CHUNK_TERMINAL for c in chunks):
+        return None
+    # Audio staleness is checked by the async caller via
+    # _audio_fp_current_matches (offloaded — the full-file read must not
+    # run on the event loop).
+    return st
+
+
+# --- Whole-film lip sync state -------------------------------------------------
+# Same purpose as lipsync_chunks.json but for the single-generation path: a
+# backend restart or a poll timeout must not orphan a paid vendor generation.
+# lipsync_film.json holds {sync_job_id, charge_key, charge_seconds} from the
+# moment the vendor accepts the job; a timed-out run keeps the file so the
+# next attempt RESUMES that generation instead of paying for a second one.
+
+LIPSYNC_FILM_NAME = "lipsync_film.json"
+
+
+def _film_lipsync_state_path(job_id: str) -> str:
+    return os.path.join(settings.DUBBED_DIR, job_id, LIPSYNC_FILM_NAME)
+
+
+def _make_film_state_saver(job_id: str, charge_key, charge_seconds: int,
+                           audio_path: str):
+    """Async on_submitted callback — the fingerprint hash is offloaded so a
+    full-file read never runs on the event loop mid-submission."""
+    async def _save(_sid: str):
+        # Persist the generation id BEFORE the hash: a shutdown between
+        # vendor-accept and hash-complete must not orphan a paid job.
+        # Empty audio_fp reads as pre-fingerprint state on resume — the
+        # mtime fallback still validates it.
+        _save_film_lipsync_state(
+            job_id, _sid, charge_key, charge_seconds, audio_path, "")
+        _fp = (await asyncio.to_thread(_audio_fingerprint, audio_path)
+               if audio_path else "")
+        if _fp:
+            _save_film_lipsync_state(
+                job_id, _sid, charge_key, charge_seconds, audio_path, _fp)
+    return _save
+
+
+def _load_film_lipsync_state(job_id: str) -> Optional[dict]:
+    """The saved generation, only if a prior run left one unfinished."""
+    try:
+        with open(_film_lipsync_state_path(job_id), "r", encoding="utf-8") as f:
+            st = _json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(st, dict) or not st.get("sync_job_id"):
+        return None
+    return st
+
+
+def _save_film_lipsync_state(job_id: str, sync_job_id: str,
+                             charge_key: Optional[str], charge_seconds: int,
+                             audio_path: str = "", audio_fp: str = "") -> None:
+    os.makedirs(os.path.dirname(_film_lipsync_state_path(job_id)), exist_ok=True)
+    try:
+        audio_mtime = os.path.getmtime(audio_path) if audio_path else None
+    except OSError:
+        audio_mtime = None
+    atomic_write_json(_film_lipsync_state_path(job_id), {
+        "sync_job_id": sync_job_id,
+        "charge_key": charge_key,
+        "charge_seconds": charge_seconds,
+        "audio_mtime": audio_mtime,
+        # Version describes the fingerprint actually stored — an empty fp is
+        # a pre-fingerprint state, so the matcher can use its mtime fallback.
+        "fp_version": 2 if audio_fp else 0,
+        "audio_fp": audio_fp,
+        "saved_at": time.time(),
+    })
+
+
+def _clear_film_lipsync_state(job_id: str) -> None:
+    try:
+        os.unlink(_film_lipsync_state_path(job_id))
+    except OSError:
+        pass
+
+
+async def _run_lipsync_chunks(
     job_id: str,
     dubbed_output_path: str,
     video_path: str,
@@ -5172,65 +5608,181 @@ async def _run_lipsync_ranges(
     ranges: list,
     media_qs: str,
     provider: str,
+    user_id: str,
 ) -> dict:
-    """Scoped lip-sync: cut each selected span, send it to the vendor as its
-    own generation, splice the results back into the rendered film.
+    """Run every chunk as its own vendor generation (bounded concurrency),
+    bill per chunk, persist state after every transition, then splice.
 
-    vendor_attempted follows the whole-film rule: False only if EVERY range
-    was rejected before processing — the one case nothing was consumed."""
+    Billing: each chunk is debited under a deterministic ledger key
+    (<job>:lipsync:<run_id>:c<i>). The debit RPC is idempotent on that key, so a
+    retry after a crash between debit and save cannot double-charge. A chunk is
+    refunded only if the vendor provably never ran it."""
     job_dir = os.path.join(settings.DUBBED_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
     base = settings.PUBLIC_BASE_URL.rstrip("/")
-    qs = media_qs
+    rate = _LIPSYNC_COST_PER_SECOND.get(provider, 0.0)
+    poll_max = int(float(os.environ.get("SYNCLABS_POLL_MAX_SECONDS", "3600") or 3600))
+    concurrency = max(1, int(os.environ.get("SYNCLABS_MAX_CONCURRENT", "3") or 3))
 
-    good_idx = []
-    attempted = False
-    failed = []
-    for i, (s, e) in enumerate(ranges):
-        v_in = os.path.join(job_dir, f"lip_in_{i}.mp4")
-        a_in = os.path.join(job_dir, f"lip_in_{i}.wav")
-        out_i = os.path.join(job_dir, f"lip_out_{i}.mp4")
-        ok = await asyncio.to_thread(_cut_media_span, video_path, s, e, v_in, False)
-        ok = ok and await asyncio.to_thread(_cut_media_span, audio_path, s, e, a_in, True)
-        if not ok:
-            failed.append((s, e))
-            continue
-        v_url = f"{base}/api/media/{job_id}/lip_in_{i}.mp4{qs}"
-        a_url = f"{base}/api/media/{job_id}/lip_in_{i}.wav{qs}"
-        res = await lipsync_service.lipsync_video(
-            job_id=job_id, video_path="", audio_path="",
-            output_path=out_i, media_qs=qs,
-            video_url=v_url, audio_url=a_url,
+    state = _load_chunk_state(job_id, ranges)
+    if state and audio_path and not await asyncio.to_thread(
+            _audio_fp_current_matches, state, audio_path):
+        logger.info(
+            f"[LIPSYNC-CHUNKS] job {job_id}: saved run's audio differs "
+            f"from current dubbed mix — starting a fresh run"
         )
-        attempted = attempted or bool(res.get("vendor_attempted"))
-        if res.get("output_path") and os.path.exists(out_i):
-            good_idx.append(i)
-        else:
-            failed.append((s, e))
+        state = None
+    resumed = state is not None
+    if not state:
+        run_id = uuid.uuid4().hex[:8]
+        try:
+            _audio_mtime = os.path.getmtime(audio_path) if audio_path else None
+        except OSError:
+            _audio_mtime = None
+        state = {
+            "version": 1, "run_id": run_id, "provider": provider,
+            "created_at": time.time(), "audio_mtime": _audio_mtime,
+            "fp_version": 2,
+            "audio_fp": (await asyncio.to_thread(_audio_fingerprint, audio_path)
+                         if audio_path else ""),
+            "chunks": [
+                {"i": i, "start": s, "end": e, "status": "pending", "sync_job_id": None,
+                 "charge_key": f"{job_id}:lipsync:{run_id}:c{i}", "charge_seconds": 0,
+                 "charged": False, "refunded": False, "attempted": False,
+                 "submitted_at": None, "completed_at": None, "processing_seconds": None}
+                for i, (s, e) in enumerate(ranges)
+            ],
+        }
+    logger.info(f"[LIPSYNC-CHUNKS] job {job_id}: {len(ranges)} chunk(s), "
+                f"{'RESUMING run ' if resumed else 'new run '}{state['run_id']}")
 
-    if not good_idx:
-        return {"status": "failed", "output_path": None, "vendor_attempted": attempted}
+    state_lock = asyncio.Lock()
+    sem = asyncio.Semaphore(concurrency)
 
-    # Splice only the ranges that actually produced output; failed ones keep
-    # their dubbed span, which is honest — the film stays watchable.
-    good = [ranges[i] for i in good_idx]
-    synced = [os.path.join(job_dir, f"lip_out_{i}.mp4") for i in good_idx]
+    async def save():
+        async with state_lock:
+            await asyncio.to_thread(atomic_write_json, _chunk_state_path(job_id), state)
+
+    await save()
+
+    async def refund(ch: dict):
+        if ch["charged"] and not ch["refunded"]:
+            rf = await asyncio.to_thread(quota_service.refund_quota, user_id, ch["charge_key"])
+            ch["refunded"] = not rf.get("error")
+
+    async def work(ch: dict):
+        async with sem:
+            i, s, e = ch["i"], ch["start"], ch["end"]
+            out_i = os.path.join(job_dir, f"lip_out_{i}.mp4")
+            if ch["status"] in _CHUNK_TERMINAL:
+                return
+
+            if user_id and not ch["charged"]:
+                secs = quota_service.seconds_for_lipsync(e - s, rate)
+                if secs > 0:
+                    # The ledger sits behind Supabase, which returns transient 5xx
+                    # under load. Retry (the key makes a retry safe), and if it
+                    # stays down leave the chunk "unbilled" — NOT terminal, so a
+                    # resume picks it up rather than dropping the chunk for good.
+                    for attempt in range(4):
+                        try:
+                            await asyncio.to_thread(
+                                quota_service.deduct_quota, user_id, secs, ch["charge_key"], "lipsync")
+                            ch["charged"], ch["charge_seconds"] = True, secs
+                            break
+                        except quota_service.QuotaExceeded:
+                            ch["status"] = "skipped_credit"
+                            await save()
+                            return
+                        except quota_service.QuotaUnavailable:
+                            if attempt == 3:
+                                ch["status"] = "unbilled"
+                                await save()
+                                return
+                            await asyncio.sleep(2 * (attempt + 1))
+                    await save()
+
+            async def persist_id(sid: str):
+                ch["sync_job_id"], ch["status"], ch["submitted_at"] = sid, "submitted", time.time()
+                await save()
+
+            if ch["sync_job_id"]:
+                res = await lipsync_service.lipsync_video(
+                    job_id=job_id, video_path="", audio_path="", output_path=out_i,
+                    media_qs=media_qs, sync_job_id=ch["sync_job_id"], max_poll_seconds=poll_max)
+            else:
+                v_in = os.path.join(job_dir, f"lip_in_{i}.mp4")
+                a_in = os.path.join(job_dir, f"lip_in_{i}.wav")
+                ok = await asyncio.to_thread(_cut_media_span, video_path, s, e, v_in, False)
+                ok = ok and await asyncio.to_thread(_cut_media_span, audio_path, s, e, a_in, True)
+                if not ok:
+                    ch["status"] = "failed"
+                    await refund(ch)
+                    await save()
+                    return
+                res = await lipsync_service.lipsync_video(
+                    job_id=job_id, video_path="", audio_path="", output_path=out_i,
+                    media_qs=media_qs,
+                    video_url=f"{base}/api/media/{job_id}/lip_in_{i}.mp4{media_qs}",
+                    audio_url=f"{base}/api/media/{job_id}/lip_in_{i}.wav{media_qs}",
+                    on_submitted=persist_id, max_poll_seconds=poll_max)
+
+            ch["attempted"] = bool(res.get("vendor_attempted"))
+            ch["completed_at"] = time.time()
+            if ch["submitted_at"]:
+                ch["processing_seconds"] = round(ch["completed_at"] - ch["submitted_at"], 1)
+            if res.get("output_path") and os.path.exists(out_i):
+                ch["status"] = "completed"
+                logger.info(f"[LIPSYNC-CHUNK] job {job_id} chunk {i}: {e - s:.1f}s of video "
+                            f"processed in {ch['processing_seconds']}s")
+            else:
+                if res.get("resumable") and ch["sync_job_id"]:
+                    # The poll window ran out or the finished clip could not
+                    # be downloaded, but the vendor says this generation can
+                    # still be resumed. "submitted" is non-terminal: the next
+                    # attempt re-polls THIS paid job instead of opening a new
+                    # charge for the same span.
+                    ch["status"] = "submitted"
+                else:
+                    ch["status"] = "failed" if ch["attempted"] else "rejected"
+                    if not ch["attempted"]:
+                        await refund(ch)
+            await save()
+
+    await asyncio.gather(*(work(ch) for ch in state["chunks"]))
+
+    net_charge = sum(c["charge_seconds"] for c in state["chunks"] if c["charged"] and not c["refunded"])
+    attempted = any(c["attempted"] for c in state["chunks"])
+    done = [c for c in state["chunks"] if c["status"] == "completed"
+            and os.path.exists(os.path.join(job_dir, f"lip_out_{c['i']}.mp4"))]
+    summary = {"chunks_total": len(ranges), "chunks_synced": len(done),
+               "charge_seconds": net_charge, "vendor_attempted": attempted}
+    if not done:
+        return {"status": "failed", "output_path": None, **summary}
+
     duration = _probe_video_duration(dubbed_output_path) or 0
     if not duration:
-        logger.error(f"[LIPSYNC-RANGE] job {job_id}: cannot probe rendered film")
-        return {"status": "failed", "output_path": None, "vendor_attempted": attempted}
+        logger.error(f"[LIPSYNC-CHUNKS] job {job_id}: cannot probe rendered film")
+        return {"status": "failed", "output_path": None, **summary}
     spliced = await asyncio.to_thread(
-        _splice_lipsync_ranges, dubbed_output_path, synced, good, duration
-    )
+        _splice_lipsync_ranges, dubbed_output_path,
+        [os.path.join(job_dir, f"lip_out_{c['i']}.mp4") for c in done],
+        [(c["start"], c["end"]) for c in done], duration)
     if not spliced:
-        return {"status": "failed", "output_path": None, "vendor_attempted": attempted}
-
-    # The synced selection is now in the film — record which ids it covered so
-    # the export gate can tell a paid render from a stale one.
-    _persist_job_metadata_field(job_id, "lipsync_synced_selection", _load_lipsync_selection(job_id))
-    if failed:
-        logger.warning(f"Job {job_id}: {len(failed)}/{len(ranges)} lip-sync range(s) failed: {failed}")
-    return {"status": "completed", "output_path": dubbed_output_path, "vendor_attempted": attempted}
+        return {"status": "failed", "output_path": None, **summary}
+    try:
+        with open(os.path.join(job_dir, "segments.json"), "r", encoding="utf-8") as _jf:
+            _segs = (_json.load(_jf) or {}).get("segments", [])
+    except Exception:
+        _segs = []
+    _persist_job_metadata_field(
+        job_id, "lipsync_synced_selection",
+        _lipsync_synced_ids(_segs, _load_lipsync_selection(job_id),
+                            [(c["start"], c["end"]) for c in done]))
+    if len(done) < len(ranges):
+        logger.warning(f"Job {job_id}: {len(ranges) - len(done)}/{len(ranges)} lip-sync chunk(s) "
+                       f"not synced — those spans keep the dubbed footage")
+    return {"status": "completed", "output_path": dubbed_output_path, **summary}
 
 
 # One render per job at a time. Two racing /dub clicks share the first
@@ -5239,6 +5791,10 @@ async def _run_lipsync_ranges(
 # the completed film goes out uncharged. The lock orders them: whoever runs
 # second sees the final billed state before deciding whether to debit.
 _render_locks: Dict[str, asyncio.Lock] = {}
+
+# Per-job lock for video-notes regenerations — serializes the cap check and
+# the billed provider call so concurrent refreshes can't overshoot the limit.
+_video_notes_regen_locks: Dict[str, asyncio.Lock] = {}
 
 
 async def process_dubbing_pipeline(
@@ -5377,8 +5933,31 @@ async def _run_dubbing_pipeline(
             )
             logger.info(f"Job {job_id} dubbing completed successfully")
 
-            # Auto-trigger QC analysis concurrently — non-blocking fire-and-forget
-            _auto_trigger_qc(job_id, target_lang, video_path)
+            # Auto-trigger QC analysis concurrently — non-blocking fire-and-forget.
+            # Never on a CPU-only host: QC (Whisper large-v3, emotion2vec, SyncNet)
+            # on the backend CPU ran for 45+ minutes on a feature film and starved
+            # the whole backend. Nothing compute-heavy runs on the backend CPU.
+            # The atomic sentinel claim (same as POST /api/analyze) keeps a
+            # dub-complete hook and an editor open from starting two runs at once.
+            try:
+                if not _qc_gpu_available():
+                    logger.info(f"Job {job_id}: QC auto-trigger skipped — {_QC_NO_GPU_MESSAGE}")
+                else:
+                    _qc_sentinel = (
+                        Path(settings.DUBBED_DIR) / job_id
+                        / f"analysis_{target_lang.lower().strip()}.running"
+                    )
+                    _qc_claimed = _claim_analysis_sentinel(_qc_sentinel)
+                    if not _qc_claimed and _clear_stale_analysis_sentinel(_qc_sentinel):
+                        _qc_claimed = _claim_analysis_sentinel(_qc_sentinel)
+                    if _qc_claimed:
+                        from app.pipeline.analyze_dub import analyze_dub as _analyze_dub
+                        asyncio.create_task(asyncio.to_thread(_analyze_dub, job_id, target_lang, video_path))
+                        logger.info(f"Job {job_id}: QC analysis auto-triggered")
+                    else:
+                        logger.info(f"Job {job_id}: QC auto-trigger skipped — analysis already running")
+            except Exception as _qc_err:
+                logger.warning(f"Job {job_id}: QC auto-trigger skipped: {_qc_err}")
         else:
             if render_charge and user_id:
                 await _unmeter_render(job_id, user_id)
@@ -5872,7 +6451,17 @@ async def _job_share_unlocked(job_id: str, caller: str, job) -> bool:
     if await asyncio.to_thread(quota_service.tier_for, caller) == quota_service.TIER_PRO:
         return True
     if not getattr(job, "billed_seconds", None):
-        return False
+        # billed_seconds is in-memory only — a restart forgets it until the job
+        # rehydrates through a billing path, so a genuinely-paid customer would
+        # hit 402 on Share. The durable project.json stamp mirrors it; the
+        # projects list already reads the same source for the Share button.
+        try:
+            with open(_projects_base_dir() / job_id / "project.json",
+                      "r", encoding="utf-8") as _pf:
+                if not bool((_json.load(_pf) or {}).get("paid")):
+                    return False
+        except Exception:
+            return False
     sel = set(_load_lipsync_selection(job_id))
     if sel:
         try:
@@ -5895,20 +6484,22 @@ async def download_dubbed_video(job_id: str, language: str, request: Request, at
     the API, so a plain link only ever played the file. Content-Disposition is
     the only thing that actually makes the browser save it.
 
-    attachment=1 is also the paywall boundary: taking the film OUT of the app
-    requires the job to be paid in full (see _job_share_unlocked)."""
+    The paywall covers BOTH responses, not just attachment=1 — inline bytes
+    save to disk exactly as well, so gating only the attachment left the
+    whole film one header short of free (see _job_share_unlocked)."""
     dubbed_path = os.path.join(settings.DUBBED_DIR, job_id, f"dubbed_{language}.mp4")
 
     if not os.path.exists(dubbed_path):
         raise HTTPException(status_code=404, detail="Dubbed video not found")
 
+    job = await _get_or_rehydrate_job(job_id)
+    if job and not await _job_share_unlocked(job_id, _caller(request), job):
+        raise HTTPException(
+            status_code=402,
+            detail="Download unlocks when this job is paid in full.",
+        )
+
     if attachment:
-        job = await _get_or_rehydrate_job(job_id)
-        if job and not await _job_share_unlocked(job_id, _caller(request), job):
-            raise HTTPException(
-                status_code=402,
-                detail="Download unlocks when this job is paid in full.",
-            )
         filename = f"dubbed_{language}_{job_id[:8]}.mp4"
         return FileResponse(
             dubbed_path,
@@ -5923,6 +6514,137 @@ async def download_dubbed_video(job_id: str, language: str, request: Request, at
     )
 
 
+# --- Public share links -----------------------------------------------------
+# A share link is a random 32-hex token mapped to one job. Creating it needs
+# the job owner AND a paid job; viewing it needs nothing. The video itself is
+# served through a separate HMAC-signed URL that expires after an hour and is
+# re-minted on every view, so a leaked video URL dies on its own while the
+# share link keeps working. Storage is plain JSON files in the data volume.
+
+_SHARE_LINK_TTL_SECONDS = 90 * 24 * 3600
+_SHARE_VIDEO_URL_TTL_SECONDS = 3600
+_SHARE_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _share_links_dir() -> str:
+    return os.path.join(os.path.dirname(os.path.normpath(settings.DUBBED_DIR)), "share_links")
+
+
+def _share_sig(token: str, exp: int) -> str:
+    return hmac.new(
+        _media_token_secret().encode(), f"share:{token}:{exp}".encode(), hashlib.sha256
+    ).hexdigest()
+
+
+def _load_share_link(token: str) -> Optional[dict]:
+    if not _SHARE_TOKEN_RE.match(token or ""):
+        return None
+    path = os.path.join(_share_links_dir(), f"{token}.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            link = _json.load(f)
+    except (OSError, ValueError):
+        return None
+    if link.get("expires_at", 0) < time.time():
+        return None
+    return link
+
+
+def _share_video_path(job_id: str, target_language: Optional[str]) -> Optional[str]:
+    job_dir = os.path.join(settings.DUBBED_DIR, job_id)
+    if target_language:
+        exact = os.path.join(job_dir, f"dubbed_{target_language}.mp4")
+        if os.path.exists(exact):
+            return exact
+    candidates = sorted(Path(job_dir).glob("dubbed_*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(candidates[0]) if candidates else None
+
+
+@router.post("/jobs/{job_id}/share", dependencies=[Depends(_dep_job_access)])
+async def create_share_link(job_id: str, request: Request):
+    """Create (or return the existing) public share link for a paid, finished dub."""
+    caller = _caller(request)
+    job = await _get_or_rehydrate_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not await _job_share_unlocked(job_id, caller, job):
+        raise HTTPException(status_code=402, detail="Sharing unlocks when this job is paid in full.")
+    if not _share_video_path(job_id, job.target_language):
+        raise HTTPException(status_code=404, detail="No finished dub to share yet")
+
+    os.makedirs(_share_links_dir(), exist_ok=True)
+    token_file = os.path.join(settings.DUBBED_DIR, job_id, "share_token.txt")
+    token = None
+    try:
+        with open(token_file, "r", encoding="utf-8") as f:
+            existing = f.read().strip()
+        if _load_share_link(existing):
+            token = existing
+    except OSError:
+        pass
+
+    if not token:
+        token = uuid.uuid4().hex
+        link = {
+            "token": token,
+            "job_id": job_id,
+            "user_id": caller,
+            "created_at": time.time(),
+            "expires_at": time.time() + _SHARE_LINK_TTL_SECONDS,
+        }
+        with open(os.path.join(_share_links_dir(), f"{token}.json"), "w", encoding="utf-8") as f:
+            _json.dump(link, f)
+        with open(token_file, "w", encoding="utf-8") as f:
+            f.write(token)
+
+    base = (
+        os.environ.get("FRONTEND_BASE_URL")
+        or request.headers.get("origin")
+        or "https://dubmaster.ai"
+    ).rstrip("/")
+    return {"share_url": f"{base}/share/{token}"}
+
+
+@router.get("/share/{token}")
+async def view_share_link(token: str):
+    """Public: metadata plus a fresh one-hour signed URL for the dubbed video."""
+    link = _load_share_link(token)
+    if not link:
+        raise HTTPException(status_code=404, detail="Share link not found or expired")
+    job = await _get_or_rehydrate_job(link["job_id"])
+    if not job or not _share_video_path(link["job_id"], job.target_language):
+        raise HTTPException(status_code=404, detail="Share link not found or expired")
+
+    exp = int(time.time()) + _SHARE_VIDEO_URL_TTL_SECONDS
+    sig = _share_sig(token, exp)
+    video_url = f"/api/share/{token}/video?exp={exp}&sig={sig}"
+    return {
+        "title": os.path.splitext(os.path.basename(job.video_path or ""))[0] or "Dubbed video",
+        "source_language": job.source_language,
+        "target_language": job.target_language,
+        "video_url": video_url,
+        "download_url": f"{video_url}&dl=1",
+        "expires_in": _SHARE_VIDEO_URL_TTL_SECONDS,
+    }
+
+
+@router.get("/share/{token}/video")
+async def serve_share_video(token: str, exp: int, sig: str, dl: bool = False):
+    """Public: the dubbed video, gated by a short-lived HMAC signature."""
+    if exp < time.time() or not hmac.compare_digest(sig, _share_sig(token, exp)):
+        raise HTTPException(status_code=403, detail="This link has expired — reload the share page.")
+    link = _load_share_link(token)
+    if not link:
+        raise HTTPException(status_code=404, detail="Share link not found or expired")
+    job = await _get_or_rehydrate_job(link["job_id"])
+    path = _share_video_path(link["job_id"], job.target_language if job else None)
+    if not path:
+        raise HTTPException(status_code=404, detail="Dubbed video not found")
+    if dl:
+        return FileResponse(path, media_type="video/mp4", filename=os.path.basename(path))
+    return FileResponse(path, media_type="video/mp4", headers={"Content-Disposition": "inline"})
+
+
 @router.get("/projects/{project_id}/thumbnail", dependencies=[Depends(_dep_auth)])
 async def serve_project_thumbnail(project_id: str):
     """Serve a saved project's generated thumbnail image."""
@@ -5932,7 +6654,10 @@ async def serve_project_thumbnail(project_id: str):
     return FileResponse(thumb_path, media_type="image/jpeg")
 
 
-@router.get("/media/{job_id}/video", dependencies=[Depends(_dep_media_access)])
+# HEAD included: vendors (VideoTranscriber.ai, Sync.Labs) run a HEAD
+# reachability preflight before fetching — a GET-only route 405s and the
+# vendor reports the URL as unreachable without ever trying to download.
+@router.api_route("/media/{job_id}/video", methods=["GET", "HEAD"], dependencies=[Depends(_dep_media_access)])
 async def serve_job_video(job_id: str, request: Request):
     """Serve the original uploaded video so Sync.Labs can fetch it by URL."""
     job = await _get_or_rehydrate_job(job_id)
@@ -6105,6 +6830,8 @@ _scrub_proxy_locks: Dict[str, asyncio.Lock] = {}
 
 @router.get("/media/{job_id}/scrub-proxy", dependencies=[Depends(_dep_media_access)])
 async def serve_scrub_proxy(job_id: str, background_tasks: BackgroundTasks, request: Request):
+    if _vendor_limited(request):
+        raise HTTPException(status_code=403, detail="Media token is scoped to vendor inputs only")
     """Serve the all-keyframe scrub proxy.
 
     202 while it is being generated — transcoding a feature in the request path
@@ -6159,11 +6886,22 @@ async def serve_scrub_proxy(job_id: str, background_tasks: BackgroundTasks, requ
     return Response(status_code=202)
 
 
-@router.get("/media/{job_id}/audio/{filename}", dependencies=[Depends(_dep_media_access)])
-async def serve_job_audio(job_id: str, filename: str):
+@router.api_route("/media/{job_id}/audio/{filename}", methods=["GET", "HEAD"], dependencies=[Depends(_dep_media_access)])
+async def serve_job_audio(job_id: str, filename: str, request: Request):
     """Serve a dubbed audio file so Sync.Labs can fetch it by URL."""
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
+    if _vendor_limited(request) and Path(filename).suffix.lower() not in (".mp3", ".wav", ".m4a"):
+        raise HTTPException(status_code=403, detail="Media token is scoped to audio inputs only")
+    if not _vendor_limited(request) and filename.startswith("dubbed_") and filename.endswith(".mp4"):
+        # Same film gate as the other finished-film routes — /audio/ resolves
+        # the same job directory.
+        job = await _get_or_rehydrate_job(job_id)
+        if job and not await _job_share_unlocked(job_id, _caller(request), job):
+            raise HTTPException(
+                status_code=402,
+                detail="Download unlocks when this job is paid in full.",
+            )
     audio_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
     if not os.path.exists(audio_path):
         raise HTTPException(status_code=404, detail="Audio file not found")
@@ -6174,7 +6912,9 @@ async def serve_job_audio(job_id: str, filename: str):
 
 
 @router.get("/media/{job_id}/separated/{audio_type}", dependencies=[Depends(_dep_media_access)])
-async def get_separated_audio(job_id: str, audio_type: str):
+async def get_separated_audio(job_id: str, audio_type: str, request: Request):
+    if _vendor_limited(request):
+        raise HTTPException(status_code=403, detail="Media token is scoped to vendor inputs only")
     """Serve a separated audio track (vocals or accompaniment) for waveform rendering."""
     if audio_type not in ("vocals", "accompaniment"):
         raise HTTPException(status_code=400, detail="audio_type must be 'vocals' or 'accompaniment'")
@@ -6193,7 +6933,9 @@ WAVEFORM_BUCKETS = 8000
 
 
 @router.get("/media/{job_id}/waveform/{audio_type}", dependencies=[Depends(_dep_media_access)])
-async def get_waveform_peaks(job_id: str, audio_type: str):
+async def get_waveform_peaks(job_id: str, audio_type: str, request: Request):
+    if _vendor_limited(request):
+        raise HTTPException(status_code=403, detail="Media token is scoped to vendor inputs only")
     """Amplitude peaks for a separated stem, for drawing a waveform.
 
     The editor used to fetch the stem itself and decode it in the browser. A stem
@@ -6269,13 +7011,25 @@ async def get_waveform_peaks(job_id: str, audio_type: str):
 
     return JSONResponse(data, headers={"Cache-Control": "public, max-age=3600"})
 
-@router.get("/media/{job_id}/{filename}", dependencies=[Depends(_dep_media_access)])
-async def serve_job_audio_legacy(job_id: str, filename: str):
+@router.api_route("/media/{job_id}/{filename}", methods=["GET", "HEAD"], dependencies=[Depends(_dep_media_access)])
+async def serve_job_audio_legacy(job_id: str, filename: str, request: Request):
     """Backwards-compat: serve segment audio and scene previews from the job dir.
     Resolves stale URLs persisted in client localStorage before the /audio/
     sub-path was introduced to the getAudioFileUrl helper."""
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
+    if _vendor_limited(request) and not filename.startswith("lip_in_"):
+        # Vendors fetch exactly the input clips they were given (lip_in_*).
+        # The same directory holds the finished paid film — a scoped media
+        # token must never reach it.
+        raise HTTPException(status_code=403, detail="Media token is scoped to vendor inputs only")
+    if filename.startswith("dubbed_") and filename.endswith(".mp4"):
+        job = await _get_or_rehydrate_job(job_id)
+        if job and not await _job_share_unlocked(job_id, _caller(request), job):
+            raise HTTPException(
+                status_code=402,
+                detail="Download unlocks when this job is paid in full.",
+            )
     file_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -6569,8 +7323,9 @@ async def get_available_voices(
 
 
 @router.get("/voice-preview/{voice_id:path}", dependencies=[Depends(_dep_auth)])
-async def get_voice_preview(voice_id: str):
+async def get_voice_preview(voice_id: str, request: Request):
     """Generate and serve a voice preview sample using the active TTS provider."""
+    _custom_voice_gate(voice_id, _caller(request))
     preview_dir = Path("data/voice_previews")
     preview_dir.mkdir(parents=True, exist_ok=True)
 
@@ -6623,10 +7378,11 @@ async def get_voice_preview(voice_id: str):
 
 
 @router.get("/voices/by-id/{voice_id:path}", dependencies=[Depends(_dep_auth)])
-async def get_voice_by_id(voice_id: str):
+async def get_voice_by_id(voice_id: str, request: Request):
     """Resolve a Fish voice ID to its name + tags for display in UI components
     like the Character Profile popover. Returns 404 for unknown IDs (e.g.
     canonical keys like 'male-3' that aren't Fish IDs)."""
+    _custom_voice_gate(voice_id, _caller(request))
     if not fish_audio_tts.enabled:
         raise HTTPException(status_code=503, detail="Fish Audio not configured")
     try:
@@ -6698,14 +7454,22 @@ class CustomVoiceRequest(BaseModel):
 
 
 def _voice_visible_to(entry: dict, user_id: str) -> bool:
-    """Ownership gate for custom voices.
-
-    Entries with no user_id predate ownership and stay visible to any
-    authenticated caller — the same accommodation _require_job makes for
-    legacy jobs. Tighten to a hard deny once every entry has an owner.
-    """
+    """Ownership gate for custom voices — an entry is visible only to its
+    owner. Ownerless rows are hard-denied: a legacy entry with no user_id
+    would otherwise leak to every authenticated account."""
     owner = entry.get("user_id")
-    return not owner or owner == user_id
+    return bool(owner) and owner == user_id
+
+
+def _custom_voice_gate(voice_id: str, user_id: str) -> None:
+    """404 a voice_id that is a registered custom voice owned by someone else.
+    Catalog/preset ids are never in the custom file and pass straight through."""
+    entry = next(
+        (v for v in _load_custom_voices() if v.get("voice_id") == voice_id),
+        None,
+    )
+    if entry is not None and not _voice_visible_to(entry, user_id):
+        raise HTTPException(status_code=404, detail="Voice not found")
 
 
 @router.get("/voices/custom", dependencies=[Depends(_dep_auth)])
@@ -6723,6 +7487,17 @@ async def add_custom_voice(body: CustomVoiceRequest, request: Request):
         raise HTTPException(status_code=422, detail="provider must be 'fish-audio' or 'elevenlabs'")
     if not voice_id:
         raise HTTPException(status_code=422, detail="voice_id is required")
+
+    # A cloned model is a private asset: registering another account's clone id
+    # under your own entry would grant synthesis access to it. 404 rather than
+    # 403 so the caller can't tell a foreign clone from a nonexistent voice.
+    if next(
+        (v for v in _load_custom_voices()
+         if v.get("voice_id") == voice_id and v.get("cloned")
+         and not _voice_visible_to(v, user_id)),
+        None,
+    ):
+        raise HTTPException(status_code=404, detail="Voice not found")
 
     # Best-effort validation + name/tag lookup. Never hard-fail on lookup — the
     # id may be valid even if the metadata call errors; store what we can.
@@ -6916,49 +7691,176 @@ async def clone_voice(
 # Quality Analysis endpoints
 # ---------------------------------------------------------------------------
 
-# A sentinel older than this with no result file means the analysis task died
-# or wedged (observed: first-run emotion2vec model download) — without age
-# expiry the QC monitor sits on 202 "running" forever.
-_ANALYSIS_SENTINEL_MAX_AGE_S = 20 * 60
+
+# Time this process booted. A BackgroundTasks analysis dies with the process
+# that spawned it, so a .running sentinel created before this boot is stale —
+# left in place it wedges QC forever: GET keeps answering 202 "running" and
+# POST refuses to start a new run.
+_PROCESS_STARTED_AT = time.time()
 
 
-def _clear_stale_analysis_sentinel(sentinel: Path) -> bool:
-    """Delete the sentinel if it is older than _ANALYSIS_SENTINEL_MAX_AGE_S."""
+def _pid_is_alive(pid: int) -> bool:
+    """True if a process with this PID currently exists."""
+    if os.name == "nt":
+        # os.kill(pid, 0) on Windows invokes TerminateProcess — it would kill
+        # the process being probed. OpenProcess is the safe existence check.
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
     try:
-        if time.time() - sentinel.stat().st_mtime <= _ANALYSIS_SENTINEL_MAX_AGE_S:
-            return False
-        sentinel.unlink(missing_ok=True)
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
         return True
     except OSError:
         return False
+    return True
+
+
+def _process_token(pid: int) -> Optional[str]:
+    """Opaque identity for a live process, or None if `pid` is dead.
+
+    A bare PID liveness check lies after a crash: the OS recycles PIDs, so a
+    dead run's recorded PID can now belong to an unrelated process and QC
+    would wedge again. The token pairs the PID with that process's start
+    time — 'alive' then means 'alive AND the same process that wrote it'.
+    """
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            create = wintypes.FILETIME()
+            exit_ = wintypes.FILETIME()
+            kern = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            ok = kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(create), ctypes.byref(exit_),
+                ctypes.byref(kern), ctypes.byref(user),
+            )
+            if not ok:
+                return None
+            return str((create.dwHighDateTime << 32) | create.dwLowDateTime)
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            # starttime (field 22): clock ticks since boot — used as an
+            # equality token, so no unit conversion is needed.
+            return f.read().rsplit(b")", 1)[1].split()[19].decode()
+    except FileNotFoundError:
+        return None
+    except Exception:
+        pass
+    if _pid_is_alive(pid):
+        return "?"  # alive but identity unverifiable (no /proc, e.g. macOS)
+    return None
+
+
+def _clear_stale_analysis_sentinel(sentinel: Path) -> bool:
+    """Remove a .running sentinel whose owning run can no longer finish.
+
+    Sentinels record `pid:token` — the PID plus the process's start time, so
+    a run is live only when a process still owns that exact identity. A dead
+    or recycled PID means the run is gone; a live sentinel owned by a
+    different uvicorn worker is never touched. Older pid-only sentinels and
+    platforms without process start times fall back to a liveness check.
+    Returns True when the sentinel is gone and the caller may proceed.
+    """
+    try:
+        pid_text, _, token = sentinel.read_text(encoding="utf-8").strip().partition(":")
+        pid = int(pid_text) if pid_text else None
+        token = token or None
+    except FileNotFoundError:
+        return True
+    except Exception:
+        pid, token = None, None
+
+    try:
+        if pid is not None:
+            current = _process_token(pid)
+            if token:
+                # Identity check: equal tokens mean the same live process;
+                # anything else (dead PID, recycled PID) means the run died.
+                # The third field (when present) is the run's unique nonce —
+                # process identity lives in the first two.
+                if current == token.split(":")[0]:
+                    return False
+                sentinel.unlink(missing_ok=True)
+                return True
+            if current is None:
+                sentinel.unlink(missing_ok=True)
+                return True
+            # Identity unverifiable (legacy format or no /proc): fall back to
+            # plain liveness — accepting the rare recycled-PID false-live is
+            # safer than deleting a live worker's sentinel on mtime alone.
+            return False
+        if sentinel.stat().st_mtime < _PROCESS_STARTED_AT:
+            sentinel.unlink(missing_ok=True)
+            return True
+    except FileNotFoundError:
+        return True
+    return False
+
+
+def _claim_analysis_sentinel(sentinel: Path) -> bool:
+    """Atomically create the .running sentinel for this process.
+
+    O_EXCL fails if the file exists at all — unlike check-then-write, two
+    POSTs racing on different workers cannot both claim the run.
+    """
+    try:
+        fd = os.open(str(sentinel), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(f"{os.getpid()}:{_process_token(os.getpid()) or ''}")
+    return True
 
 
 def _qc_gpu_available() -> bool:
-    """QC runs heavy models; on a CPU-only backend it piles up and starves the API."""
+    """QC needs GPU capacity — either local CUDA or the RunPod worker.
+
+    The backend container has no CUDA device; RunPod is the GPU provider for
+    QC re-transcription in production. QC_ALLOW_CPU=1 opts a deployment back
+    into local CPU QC (frame scans + CPU Whisper — fine for short clips or
+    low-traffic hosts, too slow for feature-length dubs in production).
+    """
+    if os.getenv("QC_ALLOW_CPU", "").strip().lower() in ("1", "true", "yes"):
+        return True
     try:
         import torch
-        return bool(torch.cuda.is_available())
+        if torch.cuda.is_available():
+            return True
     except Exception:
-        return False
+        pass
+    # The RunPod path hands the dubbed audio to the worker through R2 — without
+    # the bucket the retranscription can't run at all, so don't admit the job.
+    runpod_ok = bool(os.getenv("RUNPOD_API_KEY") and os.getenv("RUNPOD_ENDPOINT_ID"))
+    r2_ok = all(
+        os.getenv(k)
+        for k in ("R2_BUCKET_NAME", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ACCOUNT_ID")
+    )
+    return runpod_ok and r2_ok
 
 
 _QC_NO_GPU_MESSAGE = (
-    "QC requires a GPU. This backend has none, so quality analysis is disabled "
-    "until it runs on the GPU worker."
+    "QC needs GPU capacity: this backend has no CUDA device and the RunPod "
+    "worker path is not fully configured (RUNPOD_API_KEY / RUNPOD_ENDPOINT_ID "
+    "plus R2_BUCKET_NAME / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / "
+    "R2_ACCOUNT_ID for the audio handoff). Set the RunPod worker for this "
+    "deployment, or set QC_ALLOW_CPU=1 to run QC on the backend CPU "
+    "(acceptable for short clips on low-traffic hosts)."
 )
-
-
-def _auto_trigger_qc(job_id: str, target_lang: str, video_path) -> None:
-    """Fire-and-forget QC after a dub; skipped (logged) when there is no GPU."""
-    if not _qc_gpu_available():
-        logger.info(f"Job {job_id}: QC auto-trigger skipped: no GPU on this backend")
-        return
-    try:
-        from app.pipeline.analyze_dub import analyze_dub as _analyze_dub
-        asyncio.create_task(asyncio.to_thread(_analyze_dub, job_id, target_lang, video_path))
-        logger.info(f"Job {job_id}: QC analysis auto-triggered")
-    except Exception as _qc_err:
-        logger.warning(f"Job {job_id}: QC auto-trigger skipped: {_qc_err}")
 
 
 @router.post("/analyze/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
@@ -6968,6 +7870,7 @@ async def trigger_analysis(job_id: str, language: str, background_tasks: Backgro
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    # Nothing compute-heavy runs on the backend CPU. Refuse rather than run.
     if not _qc_gpu_available():
         raise HTTPException(status_code=503, detail=_QC_NO_GPU_MESSAGE)
 
@@ -6980,32 +7883,47 @@ async def trigger_analysis(job_id: str, language: str, background_tasks: Backgro
             detail=f"No dubbed video found for language '{lang_norm}'"
         )
 
-    # Check if already running — but a wedged/crashed task leaves the
-    # sentinel behind; clear it and allow a fresh run instead of 202'ing forever.
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
-    if sentinel.exists():
-        if _clear_stale_analysis_sentinel(sentinel):
-            logger.warning(f"Job {job_id}: cleared stale analysis sentinel for {lang_norm}")
-        else:
-            return JSONResponse(
-                status_code=202,
-                content={"status": "running", "message": "Analysis already in progress"}
-            )
+    error_file = dubbed_dir / f"analysis_{lang_norm}.error"
 
     from app.pipeline.analyze_dub import analyze_dub
 
-    background_tasks.add_task(
-        asyncio.to_thread,
-        analyze_dub,
-        job_id,
-        lang_norm,
-        job.video_path,
-    )
+    # Claim the run atomically before scheduling: the O_EXCL write fails if
+    # any worker already holds the sentinel, so racing POSTs can't both pass
+    # a check-then-write and duplicate the analysis. When the claim loses to
+    # an existing sentinel it may still be stale — recheck once, then either
+    # take it over or report the live run. Clearing the recorded failure up
+    # front also stops a retry from reading the old error before the new
+    # task even starts.
+    claimed = _claim_analysis_sentinel(sentinel)
+    if not claimed and _clear_stale_analysis_sentinel(sentinel):
+        claimed = _claim_analysis_sentinel(sentinel)
+    if not claimed:
+        return JSONResponse(
+            status_code=202,
+            content={"status": "running", "message": "Analysis already in progress"}
+        )
+
+    # Server-side claim timestamp: the new run's failure can only be stamped
+    # after this, so clients can tell it apart from a stale GET response that
+    # was already in flight carrying the previous run's error.
+    claimed_at = time.time()
+
+    try:
+        error_file.unlink(missing_ok=True)
+        background_tasks.add_task(
+            asyncio.to_thread, analyze_dub, job_id, lang_norm, job.video_path
+        )
+    except Exception:
+        sentinel.unlink(missing_ok=True)
+        raise
+
     logger.info(f"Job {job_id}: quality analysis triggered for {lang_norm}")
 
     return JSONResponse(
         status_code=202,
-        content={"status": "started", "message": "Quality analysis started"}
+        content={"status": "started", "message": "Quality analysis started",
+                 "claimed_at": claimed_at}
     )
 
 
@@ -7171,23 +8089,53 @@ async def get_analysis(job_id: str, language: str):
     lang_norm = language.lower().strip()
     dubbed_dir = Path(settings.DUBBED_DIR) / job_id
 
-    # Check sentinel first — but also detect stale sentinels. Two stale
-    # flavours: the result file already exists (analysis finished but cleanup
-    # didn't fire), or the sentinel is older than any legitimate run (task
-    # died/wedged) — fall through so the caller re-triggers.
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
     result_file = dubbed_dir / f"analysis_{lang_norm}.json"
     if sentinel.exists():
-        if result_file.exists() or _clear_stale_analysis_sentinel(sentinel):
-            try:
-                sentinel.unlink(missing_ok=True)
-            except Exception:
-                pass
+        if _clear_stale_analysis_sentinel(sentinel):
+            pass  # dead owner — fall through and serve whatever is on disk
         else:
-            return JSONResponse(
-                status_code=202,
-                content={"status": "running", "message": "Analysis in progress"}
-            )
+            # Live owner: the run holds the slot until its OWN cleanup finishes.
+            # A report already on disk does NOT free the slot — deleting the
+            # sentinel on "report looks newer" races the worker's finally, and
+            # the freed slot admitted a second run whose sentinel the first
+            # then unlinked. Escape hatch: a live-owned sentinel whose report
+            # has been strictly newer for >60s means the worker's cleanup
+            # genuinely failed (unlink lost) — release it rather than wedge.
+            try:
+                leftover = (
+                    result_file.exists()
+                    and result_file.stat().st_mtime > sentinel.stat().st_mtime + 60
+                )
+            except FileNotFoundError:
+                leftover = False
+            if leftover:
+                sentinel.unlink(missing_ok=True)
+            else:
+                return JSONResponse(
+                    status_code=202,
+                    content={"status": "running", "message": "Analysis in progress"}
+                )
+
+    # A failed run leaves its reason behind — surface it instead of 404 so
+    # the editor can stop polling and show the failure. When a previous
+    # result exists, the error only wins if it is NEWER than that result:
+    # an error from a retry that just failed must beat the stale success,
+    # while an error left over from before the last success is stale.
+    error_file = dubbed_dir / f"analysis_{lang_norm}.error"
+    if error_file.exists():
+        stale_error = (
+            result_file.exists()
+            and result_file.stat().st_mtime >= error_file.stat().st_mtime
+        )
+        if not stale_error:
+            try:
+                err = _json.loads(error_file.read_text(encoding="utf-8"))
+            except Exception:
+                err = {}
+            return {"status": "failed",
+                    "reason": err.get("reason") or "Analysis failed",
+                    "failed_at": err.get("failed_at_ts")}
 
     if not result_file.exists():
         raise HTTPException(
@@ -7197,6 +8145,17 @@ async def get_analysis(job_id: str, language: str):
 
     with open(result_file, "r", encoding="utf-8") as f:
         analysis = _json.load(f)
+
+    # analyze_dub persists its failures (status=error) so a dead run is
+    # distinguishable from "not started" — without this the editor's poller
+    # saw a bare 404 and kept re-triggering an analysis that had already
+    # failed, looping GET 404 → POST forever.
+    if analysis.get("status") == "error":
+        return {
+            "status": "failed",
+            "error": analysis.get("reason") or "Analysis failed",
+            "analysis": analysis,
+        }
 
     return {"status": "complete", "analysis": analysis}
 
@@ -7776,6 +8735,7 @@ async def _meter_render(job_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         # must NOT refund a debit it didn't make.
         return None
     await job_manager.set_billed_seconds(job_id, need)
+    await asyncio.to_thread(_stamp_project_paid, job_id, True)
     return split
 
 
@@ -7796,6 +8756,7 @@ async def _unmeter_render(job_id: str, user_id: str) -> None:
         )
         return
     await job_manager.set_billed_seconds(job_id, None)
+    await asyncio.to_thread(_stamp_project_paid, job_id, False)
 
 
 @router.post("/dub/remix/{job_id}", dependencies=[Depends(_dep_job_access)])
@@ -8540,17 +9501,107 @@ async def cancel_export(export_id: str):
 
 
 @router.get("/dub/export/download/{job_id}/{filename}", dependencies=[Depends(_dep_job_access)])
-async def download_export(job_id: str, filename: str):
+async def download_export(job_id: str, filename: str, request: Request):
     """Serve the exported file as a download attachment."""
     safe = os.path.basename(filename)
     file_path = os.path.join(settings.DUBBED_DIR, job_id, safe)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Export file not found")
+    # Everything this route serves is a finished paid artifact — exports are
+    # named export_*.{mp4,mov,avi,mkv}, so a filename pattern misses them all.
+    job = await _get_or_rehydrate_job(job_id)
+    if job and not await _job_share_unlocked(job_id, _caller(request), job):
+        raise HTTPException(
+            status_code=402,
+            detail="Download unlocks when this job is paid in full.",
+        )
     return FileResponse(
         file_path,
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{safe}"'},
     )
+
+
+def _heal_segment_audio_paths(job_id: str, segments_path: str, data: Dict[str, Any]) -> Dict[Any, str]:
+    """Restore a segment's `path` when it is empty but audio still exists.
+
+    The editor preview builds each block's audio from `path` alone, while the
+    render mixer already falls back to committed_audio_url/audio_url — a
+    segment that lost its path (a re-dub's duplicate skip, or a sync payload
+    echoing stale client state) therefore plays SILENT in the editor even
+    though its take is on disk and would still mix into the film.
+
+    Candidate order matters: the committed/audio URLs name the take the user
+    approved. edit_history new_path comes LAST and only when the entry's
+    new_text still matches the segment's current text — a take rendered for a
+    line the user has since replaced must not resurrect (e.g. after
+    retranslation stripped the audio but left history intact).
+
+    Returns {transcript_index: healed_path} so the caller can persist only the
+    healed fields into a freshly re-read file — writing the whole `data`
+    snapshot back could overwrite a save that raced this GET.
+    """
+    from app.services import path_safety
+
+    job_dir = os.path.join(settings.DUBBED_DIR, job_id)
+    healed: Dict[Any, str] = {}
+    for seg in data.get("segments", []):
+        if seg.get("path"):
+            continue
+        candidates = [seg.get("committed_audio_url"), seg.get("audio_url")]
+        current_text = seg.get("committed_adapted_text") or seg.get("text")
+        for h in reversed(seg.get("edit_history") or []):
+            if not h.get("new_path"):
+                continue
+            h_text = h.get("new_text")
+            if h_text is None or h_text == current_text:
+                candidates.append(h["new_path"])
+                break
+        for cand in candidates:
+            if not cand:
+                continue
+            try:
+                real = path_safety.resolve_job_file(job_dir, cand)
+            except Exception:
+                continue
+            if os.path.exists(real):
+                healed_path = os.path.join(
+                    settings.DUBBED_DIR, job_id, os.path.basename(real)
+                ).replace("\\", "/")
+                seg["path"] = healed_path
+                healed[seg.get("transcript_index")] = healed_path
+                logger.info(
+                    f"[SEGMENTS] healed audio path for segment "
+                    f"{seg.get('transcript_index')} (job {job_id}): "
+                    f"{os.path.basename(real)}"
+                )
+                break
+    return healed
+
+
+def _persist_healed_paths(segments_path: str, healed: Dict[Any, str]) -> None:
+    """Write healed paths into a FRESHLY re-read segments.json.
+
+    The GET handler's copy may be stale by the time it is served — a PATCH or
+    regen can land between its read and this write. Re-reading and touching
+    only the `path` of segments that are STILL missing one keeps a concurrent
+    save from being overwritten by the older snapshot.
+    """
+    if not healed:
+        return
+    try:
+        with open(segments_path, "r", encoding="utf-8") as f:
+            fresh = _json.load(f)
+    except Exception:
+        return
+    applied = False
+    for seg in fresh.get("segments", []):
+        ti = seg.get("transcript_index")
+        if not seg.get("path") and ti in healed:
+            seg["path"] = healed[ti]
+            applied = True
+    if applied:
+        atomic_write_json(segments_path, fresh)
 
 
 @router.get("/segments/{job_id}", dependencies=[Depends(_dep_job_access)])
@@ -8589,6 +9640,11 @@ async def get_segments(job_id: str):
         raise HTTPException(status_code=404, detail=f"segments.json not found for job {job_id}")
     with open(segments_path, "r", encoding="utf-8") as f:
         data = _json.load(f)
+    # Restore audio paths lost to earlier syncs/re-dubs before serving — the
+    # preview plays `path`, and silence here regenerates user trust issues.
+    _persist_healed_paths(
+        segments_path, _heal_segment_audio_paths(job_id, segments_path, data)
+    )
     # Retention state travels with the segments the editor already loads, so the
     # countdown card needs no extra request and cannot show a stale deadline.
     data["retention"] = _retention_state(job_id)
@@ -8737,6 +9793,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     committed_start_time = body.get("committed_start_time")
     committed_end_time = body.get("committed_end_time")
     committed_audio_url = body.get("committed_audio_url")
+    if isinstance(committed_audio_url, str):
+        # The editor cache-busts served takes with ?ts=… — never persist the
+        # query as part of the filename (it resolved to nothing on disk).
+        committed_audio_url = committed_audio_url.split("?", 1)[0].split("#", 1)[0] or None
     committed_adapted_text = body.get("committed_adapted_text")
     committed_voice_id = body.get("committed_voice_id")
     committed_speed = body.get("committed_speed")
@@ -8765,6 +9825,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     # save from playback), or every unrelated save would silently release a
     # low-confidence segment to TTS without anyone having looked at it.
     clear_translation_flag = body.get("clear_translation_flag") is True
+    # Inverse of clear_translation_flag: a failed "Clear & dub" re-arms the
+    # gate so the segment stays in the review queue instead of going silent
+    # and disappearing. Explicit-only, same rule as the clear.
+    set_translation_flag = body.get("set_translation_flag") is True
     # Chunk-lens staged-take promotion: the path of an auditioned-but-uncommitted
     # take (segment_NNNN_staged*.mp3) the user has chosen to keep. Sets BOTH
     # `path` (which remix_dub merges from) and `committed_audio_url` — a staged
@@ -8788,14 +9852,21 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
             path_safety.resolve_job_file(_job_dir, committed_audio_url)
         except path_safety.UnsafePath:
             raise HTTPException(status_code=400, detail="Invalid committed_audio_url")
+    # Custom voices are account-scoped: a voice_id registered to another user
+    # 404s here, so a committed foreign clone id can never reach synthesis.
+    if committed_voice_id:
+        _custom_voice_gate(committed_voice_id, _caller(request))
     # Update Supabase — sequence stores transcript_index (see upsert_segments docstring)
     update_data = {"sequence": index}
     if locked is not None:
         update_data["locked"] = locked
     if text is not None:
         update_data["text"] = text
-    if text_locked is not None:
-        update_data["text_locked"] = text_locked
+    # text_locked is deliberately kept out of update_data — same rule as
+    # text_edit_locked below: the Supabase column doesn't exist, and an unknown
+    # key fails the WHOLE update (PGRST204), silently dropping every other field
+    # in the payload. segments.json below carries it.
+    _ = text_locked
     if paired_with_next is not None:
         update_data["paired_with_next"] = paired_with_next
     if committed_start_time is not None:
@@ -8829,6 +9900,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     if clear_translation_flag:
         update_data["translation_flagged"] = False
         update_data["flag_reason"] = None
+    elif set_translation_flag:
+        update_data["translation_flagged"] = True
+        if body.get("flag_reason") is not None:
+            update_data["flag_reason"] = body["flag_reason"]
     try:
         supabase_writer.table("segments").update(update_data).eq("job_id", job_id).eq("sequence", index).execute()
     except Exception as e:
@@ -8886,6 +9961,10 @@ async def commit_segment_timing(job_id: str, index: int, body: dict, request: Re
     if clear_translation_flag:
         seg["translation_flagged"] = False
         seg["flag_reason"] = None
+    elif set_translation_flag:
+        seg["translation_flagged"] = True
+        if body.get("flag_reason") is not None:
+            seg["flag_reason"] = body["flag_reason"]
     data["segments"] = segs
     stamp_job_edited(data)  # film is now out of date — see export staleness guard
     atomic_write_json(segments_path, data)
@@ -8965,7 +10044,7 @@ class SyncSegmentsRequest(BaseModel):
 
 
 @router.post("/segment/sync/{job_id}", dependencies=[Depends(_dep_job_access)])
-async def sync_segments(job_id: str, body: SyncSegmentsRequest):
+async def sync_segments(job_id: str, body: SyncSegmentsRequest, request: Request):
     """Persist the frontend's current segment layout to segments.json.
 
     Called after structural changes (split, add, delete). Assigns
@@ -9007,6 +10086,12 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest):
         )
 
     existing_by_ti = {s["transcript_index"]: s for s in existing_segs if "transcript_index" in s}
+
+    # committed_voice_id is a client-writable field: any id that is a custom
+    # voice owned by another account must be rejected before it reaches the
+    # merged payload (and eventually synthesis).
+    for _vid in {s.get("committed_voice_id") for s in body.segments if s.get("committed_voice_id")}:
+        _custom_voice_gate(_vid, _caller(request))
 
     # Voice per speaker, from the existing segments — used to give a new
     # split/added segment the same voice as its speaker (it arrives with no
@@ -9077,9 +10162,51 @@ async def sync_segments(job_id: str, body: SyncSegmentsRequest):
                     if new_text is not None:
                         merged["text"] = new_text
                         merged["committed_adapted_text"] = new_text
-                    merged["path"] = None
-                    merged["committed_audio_url"] = None
-                    merged.pop("audio_url", None)
+                    # A stale payload (missing URLs with the text untouched)
+                    # must not delete audio the server can still resolve —
+                    # regen/commit writes path server-side, and an older
+                    # client object echoing cleared URLs then wipes a take
+                    # the user just made. Structural edits change the text,
+                    # and that still strips.
+                    #
+                    # A SPLIT left-half can arrive with its text unchanged but
+                    # its span shortened — the inherited take was rendered for
+                    # the parent's full span and must not survive. A timing DRAG
+                    # moves the block whole, so a shorter duration (not any
+                    # timing change) is the structural signature.
+                    old_seg = existing_by_ti[ti]
+                    try:
+                        old_dur = float(old_seg.get("end", 0)) - float(old_seg.get("start", 0))
+                        new_dur = (
+                            float(incoming["end_time"]) - float(incoming["start_time"])
+                            if incoming.get("end_time") is not None
+                            and incoming.get("start_time") is not None
+                            else old_dur
+                        )
+                    except (TypeError, ValueError):
+                        new_dur = old_dur
+                    span_shrunk = new_dur < old_dur - 0.05
+                    keep = False
+                    if audio_cleared and not text_changed and not span_shrunk:
+                        try:
+                            from app.services import path_safety
+                            keep = path_safety.resolve_segment_audio(
+                                merged,
+                                os.path.join(settings.DUBBED_DIR, job_id),
+                                label="[SYNC]",
+                            ) is not None
+                        except Exception:
+                            keep = False
+                    if not keep:
+                        merged["path"] = None
+                        merged["committed_audio_url"] = None
+                        merged.pop("audio_url", None)
+                        # Purge audio pointers from edit_history too — the GET
+                        # heal restores missing paths from history, and a take
+                        # invalidated here would otherwise resurrect.
+                        for h in merged.get("edit_history") or []:
+                            h["new_path"] = None
+                            h["previous_path"] = None
             result.append(merged)
         else:
             max_ti += 1
@@ -9288,6 +10415,11 @@ async def regenerate_segment(job_id: str, index: int, body: RegenerateRequest, r
             target_duration = body.voice_params.target_duration
             sync_offset_ms = body.voice_params.sync_offset_ms
 
+        # Custom voices are account-scoped: a foreign clone id must never
+        # reach synthesis, even guessed.
+        if voice_id:
+            _custom_voice_gate(voice_id, _regen_user_id or _caller(request))
+
         seg = await dubbing_service.regenerate_segment(
             job_id=job_id,
             segment_index=index,
@@ -9399,6 +10531,8 @@ async def perform_segment(
     if not audio:
         raise HTTPException(status_code=422, detail="Empty audio upload")
 
+    _custom_voice_gate(voice_id, _caller(request))
+
     os.makedirs(dubbed_dir, exist_ok=True)
     ext = os.path.splitext(file.filename or "")[1].lower() or ".mp3"
     perf_path = os.path.join(dubbed_dir, f"segment_{index:04d}_perf{ext}")
@@ -9461,6 +10595,8 @@ async def elevenlabs_sts_preview(
     audio = await file.read()
     if not audio:
         raise HTTPException(status_code=422, detail="Empty audio upload")
+
+    _custom_voice_gate(voice_id, _caller(request))
 
     result = await elevenlabs_tts.speech_to_speech(
         audio_bytes=audio,
@@ -9579,7 +10715,7 @@ class ApplyVoiceRequest(BaseModel):
 
 
 @router.post("/segments/apply-voice/{job_id}", dependencies=[Depends(_dep_job_access)])
-async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
+async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest, request: Request):
     """Set ONE voice across every segment of a speaker, server-side and atomically.
 
     The old client-side per-segment regen loop was unreliable (skipped locked
@@ -9595,6 +10731,7 @@ async def apply_voice_to_speaker(job_id: str, body: ApplyVoiceRequest):
         voice_id = resolved or body.voice_key
     if not voice_id:
         raise HTTPException(status_code=422, detail="voice_id or voice_key is required")
+    _custom_voice_gate(voice_id, _caller(request))
 
     segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
     if not os.path.exists(segments_path):
@@ -10342,6 +11479,38 @@ async def quota_credit(body: QuotaCreditRequest):
         raise HTTPException(status_code=503, detail=str(e))
 
 
+@router.post("/webhooks/stripe")
+async def stripe_webhook_relay(request: Request):
+    """Stripe can't reach the Next.js frontend — ngrok exposes only this
+    backend, so Stripe posts to <public>/api/webhooks/stripe and we relay the
+    request verbatim to the frontend's verifier. The raw body is forwarded
+    untouched: the stripe-signature HMAC covers it byte-for-byte, so any
+    parsing would break verification. No auth dep here — the frontend's
+    signature check IS the auth."""
+    import httpx
+    body = await request.body()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "http://frontend:3001/api/webhooks/stripe",
+                content=body,
+                headers={
+                    "content-type": request.headers.get(
+                        "content-type", "application/json"),
+                    "stripe-signature": request.headers.get(
+                        "stripe-signature", ""),
+                },
+            )
+    except Exception as e:
+        # 502 so Stripe retries — the frontend may be mid-restart.
+        raise HTTPException(status_code=502, detail=f"webhook relay failed: {e}")
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type="application/json",
+    )
+
+
 @router.post("/jobs/{job_id}/scene-summary", dependencies=[Depends(_dep_job_access)])
 async def get_scene_summary(job_id: str, request: Request):
     """Generate (or return cached) Scene Summary for one segment.
@@ -10455,6 +11624,20 @@ async def get_scene_summary(job_id: str, request: Request):
 _VIDEO_NOTES_PRESETS = {"smart", "summary", "core_points", "chapters", "study_notes"}
 
 
+def _vendor_source_url(job_id: str, token: str) -> str:
+    """Public URL handed to a vendor's fetcher (VT, Deepgram).
+
+    ngrok's free tier answers browser-headed fetchers with an ERR_NGROK_6024
+    interstitial HTML page instead of our bytes — exactly what VT's fetcher
+    sends — which produced 'source_url_unreachable' task failures. R2
+    presigned URLs don't help either (SigV4 binds the method, so their HEAD
+    preflight 403s). VENDOR_BASE_URL points at a tunnel without the
+    interstitial (e.g. a cloudflared quick tunnel); falls back to
+    PUBLIC_BASE_URL when unset."""
+    base = (os.getenv("VENDOR_BASE_URL", "") or settings.PUBLIC_BASE_URL).rstrip("/")
+    return f"{base}/api/media/{job_id}/video{_vendor_media_qs(job_id, token)}"
+
+
 def _vt_video_notes(job_id: str, token: str, preset: str, duration_sec: float = 0) -> Optional[dict]:
     """VideoTranscriber.ai path for the video-notes feed.
 
@@ -10475,45 +11658,47 @@ def _vt_video_notes(job_id: str, token: str, preset: str, duration_sec: float = 
         logger.info(f"[VIDEO-NOTES] job={job_id} {duration_sec/60:.1f}min exceeds VT_MAX_MINUTES={max_min}")
         return {"status": "error", "provider": "videotranscriber",
                 "reason": "exceeds_max_minutes"}
-@router.post("/webhooks/stripe")
-async def stripe_webhook_relay(request: Request):
-    """Stripe can't reach the Next.js frontend — ngrok exposes only this
-    backend, so Stripe posts to <public>/api/webhooks/stripe and we relay the
-    request verbatim to the frontend's verifier. The raw body is forwarded
-    untouched: the stripe-signature HMAC covers it byte-for-byte, so any
-    parsing would break verification. No auth dep here — the frontend's
-    signature check IS the auth."""
-    import httpx
-    body = await request.body()
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                "http://frontend:3001/api/webhooks/stripe",
-                content=body,
-                headers={
-                    "content-type": request.headers.get(
-                        "content-type", "application/json"),
-                    "stripe-signature": request.headers.get(
-                        "stripe-signature", ""),
-                },
-            )
-    except Exception as e:
-        # 502 so Stripe retries — the frontend may be mid-restart.
-        raise HTTPException(status_code=502, detail=f"webhook relay failed: {e}")
-    return Response(
-        content=resp.content,
-        status_code=resp.status_code,
-        media_type="application/json",
-    )
 
+    source_url = _vendor_source_url(job_id, token)
 
+    def _resubmit(state_entry) -> Optional[dict]:
+        """Create a replacement task after a vendor-side failure — ONCE per
+        task chain (guarded by auto_retried) so a persistently-failing job
+        can't loop the panel into re-billing a doomed transcription."""
+        if state_entry and state_entry.get("auto_retried"):
+            return None
+        created = vt.create_task(job_id, source_url)
+        if created.get("status") != "ok":
+            return None
+        st2 = vt.load_task_state(job_id) or {}
+        st2["auto_retried"] = True
+        # create_task rewrites the state file — carry the failed-chain count
+        # forward or the NEXT request restarts the billing cap from zero.
+        st2["chains"] = int((state_entry or {}).get("chains", 0))
+        vt._save_task_state(job_id, st2)
+        return {"status": "processing", "provider": "videotranscriber",
+                "stage": "resubmitted", "retry_after": created.get("retry_after", 5)}
 
     state = vt.load_task_state(job_id)
+    # A terminally-failed task is not resumable — drop it so the next click
+    # creates a fresh one instead of polling a corpse forever. But the
+    # one-retry limit must survive ACROSS requests too: count completed
+    # failed chains (each already burned its in-request auto-retry) in the
+    # persisted state and stop submitting once the cap is reached — a
+    # persistently-doomed source otherwise bills a fresh transcription on
+    # every click.
+    _chains_done = 0
+    if state and state.get("status") in ("failed", "cancelled"):
+        _chains_done = int(state.get("chains", 0)) + 1
+        if _chains_done >= int(os.environ.get("VT_MAX_FAILED_CHAINS", "3") or 3):
+            logger.warning(
+                f"[VIDEO-NOTES] job={job_id} VT failed {_chains_done} chains — "
+                f"refusing to submit another billed transcription"
+            )
+            return {"status": "error", "provider": "videotranscriber",
+                    "reason": state.get("reason") or "provider_error"}
+        state = None
     if not state:
-        source_url = (
-            f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/media/{job_id}/video"
-            f"{_vendor_media_qs(job_id, token)}"
-        )
         created = vt.create_task(job_id, source_url)
         if created.get("status") != "ok":
             logger.warning(f"[VIDEO-NOTES] job={job_id} VT create failed: {created.get('reason')}")
@@ -10521,6 +11706,10 @@ async def stripe_webhook_relay(request: Request):
             # than silently substituting Claude's summary.
             return {"status": "error", "provider": "videotranscriber",
                     "reason": created.get("reason") or "provider_error"}
+        if _chains_done:
+            st3 = vt.load_task_state(job_id) or {}
+            st3["chains"] = _chains_done
+            vt._save_task_state(job_id, st3)
         return {"status": "processing", "provider": "videotranscriber",
                 "stage": "submitted", "retry_after": created.get("retry_after", 5)}
 
@@ -10529,8 +11718,13 @@ async def stripe_webhook_relay(request: Request):
     if st.get("status") != "ok":
         if st.get("terminal"):
             # Task is gone or quota ran out mid-flight — report, don't
-            # silently substitute Claude's summary.
+            # silently substitute Claude's summary. Mark it dead so the next
+            # attempt creates a fresh task rather than polling this id again.
             logger.warning(f"[VIDEO-NOTES] job={job_id} VT poll terminal: {st.get('reason')}")
+            vt.mark_task_failed(job_id, st.get("reason") or "")
+            retried = _resubmit(state)
+            if retried:
+                return retried
             return {"status": "error", "provider": "videotranscriber",
                     "reason": st.get("reason") or "provider_error"}
         # Transient poll failure — don't fall back yet, the task may be fine.
@@ -10543,6 +11737,10 @@ async def stripe_webhook_relay(request: Request):
                 "stage": task_status, "retry_after": st["task"].get("retry_after", 5)}
     if task_status not in ("succeeded", "partial_succeeded", "completed", "success"):
         logger.warning(f"[VIDEO-NOTES] job={job_id} VT task {request_id} ended: {task_status}")
+        vt.mark_task_failed(job_id, task_status)
+        retried = _resubmit(state)
+        if retried:
+            return retried
         return {"status": "error", "provider": "videotranscriber",
                 "reason": f"task_{task_status}"}
 
@@ -10596,11 +11794,7 @@ def _dg_video_notes(job_id: str, token: str, preset: str) -> Optional[dict]:
     if not _get_api_key():
         return None
 
-    source_url = (
-        f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/media/{job_id}/video"
-        f"{_vendor_media_qs(job_id, token)}"
-    )
-    res = summarize_media_url(source_url, job_id=job_id)
+    res = summarize_media_url(_vendor_source_url(job_id, token), job_id=job_id)
     if res.get("status") != "ok":
         logger.warning(f"[VIDEO-NOTES] job={job_id} Deepgram summary failed: {res.get('reason')}")
         return {"status": "error", "provider": "deepgram",
@@ -10646,14 +11840,32 @@ def _dg_video_notes(job_id: str, token: str, preset: str) -> Optional[dict]:
     }
 
 
+def _claude_video_notes(all_segments: list, preset: str, job_id: str) -> Optional[dict]:
+    """Whole-video notes + chapters from the job's own transcript via Claude.
+
+    Cheapest provider — the dubbing pipeline already produced the transcript,
+    so this is one LLM call, no vendor transcription and no public URL needed.
+    Returns None when ANTHROPIC_API_KEY is unset so the caller can fall
+    through to a configured vendor provider."""
+    if not os.getenv("ANTHROPIC_API_KEY", "").strip():
+        return None
+    from app.services.scene_summary import generate_video_notes
+    return generate_video_notes(all_segments, preset=preset, job_id=job_id)
+
+
 @router.post("/jobs/{job_id}/video-notes", dependencies=[Depends(_dep_job_access)])
 async def get_video_notes(job_id: str, request: Request):
     """Generate (or return cached) whole-video AI Notes + chapter cards.
 
-    Primary provider: VideoTranscriber.ai (their transcription + chapters over
-    the job's own video). Fallback: Deepgram summarize+topics over the same
-    media URL — deterministic, transcript-bound output. Async for VT only —
-    returns {status:"processing"} while the vendor task runs; the panel polls.
+    Provider order via VIDEO_NOTES_PROVIDER env (default "claude"):
+      claude   — job's own transcript + Claude: cheapest, no vendor billing,
+                 no public URL needed
+      vt       — VideoTranscriber.ai (~2 quota/min billed); returns
+                 {status:"processing"} while their task runs, panel polls
+      deepgram — summarize+topics over the media URL, transcript-bound,
+                 no generative model
+    Whichever provider is selected returning an error surfaces honestly —
+    providers are never silently swapped mid-task.
 
     Cached per job per preset in video_notes.json.
     """
@@ -10686,38 +11898,75 @@ async def get_video_notes(job_id: str, request: Request):
     # cheap fingerprint of the segment list (count + first/last boundary).
     fp = f"{len(all_segments)}:{all_segments[0].get('start')}:{all_segments[-1].get('end')}"
     cache_key = f"{preset}:{fp}"
-    if cache_key in cache:
+    # regenerate=true bypasses the cache (panel's refresh button) — the fresh
+    # result still replaces the cached entry below. Regenerations are billed
+    # work, so they're capped per job with the count persisted in
+    # video_notes.json's _meta (survives restarts and cache-entry deletion).
+    # Successful refreshes count toward VIDEO_NOTES_REGEN_LIMIT; failures get
+    # their own smaller allowance (VIDEO_NOTES_REGEN_FAIL_LIMIT) — a transient
+    # provider error must not strand a user with stale notes, but a doomed
+    # source still can't burn unlimited billed calls. The lock serializes
+    # regens per job on this worker so racing requests can't both pass the
+    # cap check (uvicorn runs a single process — see Dockerfile).
+    _regen = bool(body.get("regenerate"))
+    if not _regen and cache_key in cache:
         return cache[cache_key]
+    _meta = cache.setdefault("_meta", {})
+    _regens = _failures = 0
+    _cap = int(os.environ.get("VIDEO_NOTES_REGEN_LIMIT", "10") or 10)
+    _fcap = int(os.environ.get("VIDEO_NOTES_REGEN_FAIL_LIMIT", "5") or 5)
+    if _regen:
+        async with _video_notes_regen_locks.setdefault(job_id, asyncio.Lock()):
+            _regens = int(_meta.get("regens", 0) or 0)
+            _failures = int(_meta.get("regen_failures", 0) or 0)
+            if _regens >= _cap or _failures >= _fcap:
+                if cache_key in cache:
+                    return cache[cache_key]
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"video notes regeneration limit reached")
 
-    # Primary provider: VideoTranscriber.ai. Only "ok" results are cached —
-    # "processing" returns straight through so the next poll re-enters here.
-    vt_result = _vt_video_notes(job_id, token, preset,
-                                duration_sec=all_segments[-1].get("end", 0))
-    if vt_result is not None:
-        if vt_result.get("status") == "ok":
-            cache[cache_key] = vt_result
+    provider = (os.getenv("VIDEO_NOTES_PROVIDER") or "claude").strip().lower()
+
+    def _run(name: str) -> Optional[dict]:
+        if name == "claude":
+            return _claude_video_notes(all_segments, preset, job_id)
+        if name == "vt":
+            return _vt_video_notes(job_id, token, preset,
+                                   duration_sec=all_segments[-1].get("end", 0))
+        if name == "deepgram":
+            return _dg_video_notes(job_id, token, preset)
+        return None
+
+    # Selected provider first; fall through to the others only when it isn't
+    # configured at all (returns None). An error/None-producing provider that
+    # IS configured returns its status unchanged — never a silent swap.
+    for name in [provider] + [p for p in ("claude", "vt", "deepgram") if p != provider]:
+        # Provider calls are synchronous HTTP (90s+ each, retried once) — keep
+        # them off the event loop or every other request stalls behind a retry.
+        result = await asyncio.to_thread(_run, name)
+        if result is None:
+            continue
+        if result.get("status") == "ok":
+            result["provider"] = name
+            cache[cache_key] = result
+            if _regen:
+                _meta["regens"] = _regens + 1
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
             with open(cache_path, "w", encoding="utf-8") as f:
                 _json.dump(cache, f, ensure_ascii=False, indent=2)
-        return vt_result
-
-    # Fallback: Deepgram summarize+topics over the job's public media URL.
-    # All output is measured from the audio (transcript, summary blurb, topic
-    # segmentation) — no generative model in this path, so nothing can be
-    # invented. Fires when VT is not configured; VT failures surface as
-    # honest errors rather than silently swapping providers mid-task.
-    dg_result = _dg_video_notes(job_id, token, preset)
-    if dg_result is not None:
-        if dg_result.get("status") == "ok":
-            cache[cache_key] = dg_result
+        elif _regen and result.get("status") == "error":
+            # A failed refresh still billed the provider call — count it
+            # toward the failure allowance and persist it immediately.
+            _meta["regen_failures"] = _failures + 1
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
             with open(cache_path, "w", encoding="utf-8") as f:
                 _json.dump(cache, f, ensure_ascii=False, indent=2)
-        return dg_result
+        return result
 
     return {
         "status": "error",
         "provider": "none",
         "reason": "no_summary_provider",
-        "error_message": "No summary provider is configured (set VT_API_KEY or DEEPGRAM_API_KEY).",
+        "error_message": "No summary provider is configured (set ANTHROPIC_API_KEY, VT_API_KEY, or DEEPGRAM_API_KEY).",
     }

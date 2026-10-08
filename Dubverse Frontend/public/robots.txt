@@ -1,0 +1,32 @@
+User-agent: *
+Allow: /
+
+Disallow: /api/
+Disallow: /account
+Disallow: /checkout
+Disallow: /dashboard
+Disallow: /editor
+Disallow: /profile
+Disallow: /projects
+Disallow: /studio
+Disallow: /subscribe
+Disallow: /success
+Disallow: /reset-password
+Disallow: /collaborate
+
+# Localized variants (/<locale>/<path>) — without these, pages like
+# /es/profile and /fr/reset-password stay crawlable.
+Disallow: /*/api/
+Disallow: /*/account
+Disallow: /*/checkout
+Disallow: /*/dashboard
+Disallow: /*/editor
+Disallow: /*/profile
+Disallow: /*/projects
+Disallow: /*/studio
+Disallow: /*/subscribe
+Disallow: /*/success
+Disallow: /*/reset-password
+Disallow: /*/collaborate
+
+Sitemap: https://dubmasterai.com/sitemap.xml

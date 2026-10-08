@@ -19,10 +19,10 @@ import {
 // modeled on videotranscriber.ai's panel: a title, prose chapter sections
 // whose [MM:SS] markers link into the timeline, and a key-moments table.
 //
-// Provider: VideoTranscriber.ai (their transcription + chapters pipeline —
-// no Claude in that path). While their task runs the endpoint returns
-// {status:"processing"} and we poll it. If VT is unavailable or fails, the
-// backend falls back to the built-in summarizer over our own transcript.
+// Provider: Claude over the job's own transcript (scene_summary.py) —
+// synchronous, no vendor billing. The VideoTranscriber.ai path still
+// exists behind VIDEO_NOTES_PROVIDER=vt; while a vendor task runs the
+// endpoint returns {status:"processing"} and we poll it.
 // ---------------------------------------------------------------------------
 
 const PRESETS: { id: VideoNotesPreset; label: string; hint: string }[] = [
@@ -129,11 +129,11 @@ export function SceneSummaryPanel() {
     if (idx >= 0) selectSegment(idx)
   }, [segments, selectSegment, setCurrentTime, setIsPlaying])
 
-  async function loadNotes(p: VideoNotesPreset) {
+  async function loadNotes(p: VideoNotesPreset, regenerate = false) {
     if (!jobId) return
     setNotesLoading(true)
     try {
-      const result = await apiClient.getVideoNotes(jobId, p)
+      const result = await apiClient.getVideoNotes(jobId, p, regenerate)
       setNotes(result)
       if (result.status === 'processing') {
         const wait = Math.min(Math.max(result.retry_after ?? 4, 2), 15) * 1000
@@ -165,10 +165,8 @@ export function SceneSummaryPanel() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!jobId) return
-    if (notesJobRef.current !== jobId) {
-      notesJobRef.current = jobId
-      setNotes(null)
-    }
+    if (notesJobRef.current !== jobId) notesJobRef.current = jobId
+    setNotes(null)
     if (pollTimer.current) clearTimeout(pollTimer.current)
     loadNotes(preset)
     return () => { if (pollTimer.current) clearTimeout(pollTimer.current) }
@@ -185,7 +183,7 @@ export function SceneSummaryPanel() {
   const chapters = notes?.chapters ?? []
 
   return (
-    <div className="flex flex-col min-h-0 h-full bg-neutral-950">
+    <div className="flex flex-col min-h-0 h-full bg-neutral-950 ring-2 ring-inset ring-amber-400/70">
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-neutral-800 shrink-0">
         <ListVideo className="h-3.5 w-3.5 text-sky-400 shrink-0" />
@@ -193,12 +191,17 @@ export function SceneSummaryPanel() {
         <ProviderChip provider={notes?.provider} />
         <div className="flex-1" />
         <Select value={preset} onValueChange={(v) => setPreset(v as VideoNotesPreset)}>
-          <SelectTrigger className="h-7 w-36 bg-neutral-900 border-neutral-700 text-[11px] text-slate-300">
+          <SelectTrigger className="h-7 w-36 bg-neutral-900 border-amber-400/80 text-[11px] font-medium text-slate-100 shadow-[0_0_10px_rgba(251,191,36,0.35)] focus-visible:ring-2 focus-visible:ring-amber-400/60 focus-visible:border-amber-400">
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className="bg-neutral-900 border-neutral-600">
             {PRESETS.map(p => (
-              <SelectItem key={p.id} value={p.id} title={t(p.hint)}>
+              <SelectItem
+                key={p.id}
+                value={p.id}
+                title={t(p.hint)}
+                className="text-slate-100 text-[11px] focus:bg-amber-400/15 focus:text-amber-100 data-[highlighted]:bg-amber-400/15 data-[highlighted]:text-amber-100"
+              >
                 {t(p.label)}
               </SelectItem>
             ))}
@@ -206,7 +209,7 @@ export function SceneSummaryPanel() {
         </Select>
         <button
           type="button"
-          onClick={() => loadNotes(preset)}
+          onClick={() => loadNotes(preset, true)}
           disabled={notesLoading || processing}
           title={t('Regenerate')}
           className="p-1.5 rounded-md border border-neutral-700 text-slate-400 hover:text-white hover:border-neutral-500 transition-colors disabled:opacity-50"
@@ -290,7 +293,7 @@ export function SceneSummaryPanel() {
                   <section key={i}>
                     <div className="flex items-baseline gap-2 flex-wrap">
                       <h3
-                        className="text-sm font-semibold text-sky-300 leading-snug"
+                        className="text-[15px] font-bold text-amber-400 leading-snug"
                         style={{ WebkitTextStroke: '0.6px rgba(0,0,0,0.9)' }}
                       >
                         {c.title}
@@ -299,13 +302,13 @@ export function SceneSummaryPanel() {
                         <button
                           type="button"
                           onClick={() => seekTo(c.start!)}
-                          className="text-[10px] font-mono text-sky-400/80 hover:text-sky-300 transition-colors"
+                          className="text-[11px] font-mono font-semibold text-sky-300 hover:text-sky-200 transition-colors"
                         >
                           [{mmss(c.start)}{c.end !== null ? `–${mmss(c.end)}` : ''}]
                         </button>
                       )}
                     </div>
-                    <p className="text-[13px] text-slate-300 leading-[1.75] mt-1.5">
+                    <p className="text-[13px] font-medium text-white leading-[1.75] mt-1.5">
                       <LinkedSummary text={c.summary} onSeek={seekTo} />
                     </p>
                   </section>
@@ -317,7 +320,7 @@ export function SceneSummaryPanel() {
                     <section key={i + 3}>
                       <div className="flex items-baseline gap-2 flex-wrap">
                         <h3
-                          className="text-sm font-semibold text-sky-300 leading-snug"
+                          className="text-[15px] font-bold text-amber-400 leading-snug"
                           style={{ WebkitTextStroke: '0.6px rgba(0,0,0,0.9)' }}
                         >
                           {c.title}
@@ -326,13 +329,13 @@ export function SceneSummaryPanel() {
                           <button
                             type="button"
                             onClick={() => seekTo(c.start!)}
-                            className="text-[10px] font-mono text-sky-400/80 hover:text-sky-300 transition-colors"
+                            className="text-[11px] font-mono font-semibold text-sky-300 hover:text-sky-200 transition-colors"
                           >
                             [{mmss(c.start)}{c.end !== null ? `–${mmss(c.end)}` : ''}]
                           </button>
                         )}
                       </div>
-                      <p className="text-[13px] text-slate-300 leading-[1.75] mt-1.5">
+                      <p className="text-[13px] font-medium text-white leading-[1.75] mt-1.5">
                         <LinkedSummary text={c.summary} onSeek={seekTo} />
                       </p>
                     </section>
@@ -343,7 +346,7 @@ export function SceneSummaryPanel() {
               {/* Key moments table — brass plate with rivets */}
               {chapters.length > 0 && (
                 <section>
-                  <h3 className="text-sm font-semibold text-sky-300 mb-2">{t('Key Moments')}</h3>
+                  <h3 className="text-sm font-semibold text-amber-400 mb-2">{t('Key Moments')}</h3>
                   <div className="relative rounded-lg border-2 border-[#8a6d3b] bg-gradient-to-b from-[#4a3a1c] via-[#352a12] to-[#2a2110] overflow-hidden shadow-[inset_0_1px_0_rgba(255,220,150,0.25),0_2px_8px_rgba(0,0,0,0.5)]">
                     {/* corner rivets */}
                     {['top-1.5 left-1.5', 'top-1.5 right-1.5', 'bottom-1.5 left-1.5', 'bottom-1.5 right-1.5'].map(pos => (
@@ -387,7 +390,7 @@ export function SceneSummaryPanel() {
                       >
                         [{mmss(n.start)}]
                       </button>
-                      <p className="text-[13px] text-slate-300 leading-relaxed">{n.text}</p>
+                      <p className="text-[13px] font-medium text-white leading-relaxed">{n.text}</p>
                     </div>
                   ))}
                 </div>

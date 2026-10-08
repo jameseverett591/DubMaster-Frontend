@@ -17,9 +17,11 @@ Never raises into the route — every failure degrades to a status dict so the
 caller can fall back to the Claude path.
 """
 
+import hashlib
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -36,11 +38,13 @@ def is_configured() -> bool:
     return bool(s.VT_API_KEY.strip() and s.PUBLIC_BASE_URL.strip())
 
 
-def _headers() -> Dict[str, str]:
-    return {
-        "Authorization": f"Bearer {get_settings().VT_API_KEY.strip()}",
-        "Content-Type": "application/json",
-    }
+def _headers(json_body: bool = True) -> Dict[str, str]:
+    h = {"Authorization": f"Bearer {get_settings().VT_API_KEY.strip()}"}
+    # Their API 400s ("request body is not valid JSON") when a bodyless GET
+    # carries Content-Type: application/json — only send it on the POST.
+    if json_body:
+        h["Content-Type"] = "application/json"
+    return h
 
 
 def _base() -> str:
@@ -88,11 +92,17 @@ def create_task(job_id: str, source_url: str) -> Dict[str, Any]:
         "speaker_diarization": True,
         "features": {"chapters": True},
     }
+    # The key must be content-bound: source_url carries the caller's JWT, so a
+    # fixed per-job key made every new session a "same key, different body"
+    # 409 idempotency_conflict. Hashing the URL means identical bodies dedupe
+    # (the real purpose — a double-submit before vt_task.json is written) while
+    # a different body simply gets a different key and never conflicts.
+    idem_key = f"dubmaster-{job_id}-{hashlib.sha256(source_url.encode()).hexdigest()[:12]}"
     try:
         resp = httpx.post(
             f"{_base()}/transcriptions",
             json=payload,
-            headers={**_headers(), "Idempotency-Key": f"dubmaster-{job_id}"},
+            headers={**_headers(), "Idempotency-Key": idem_key},
             timeout=30,
         )
     except Exception as e:
@@ -109,11 +119,26 @@ def create_task(job_id: str, source_url: str) -> Dict[str, Any]:
         return {"status": "error", "reason": reason}
 
     data = resp.json()
-    request_id = data.get("request_id")
+    # Field-name tolerance: docs name it request_id, but a 2xx without one once
+    # burned the idempotency key AND left no vt_task.json — the job could never
+    # retry. Accept the common variants and log the raw body when still absent
+    # so the real shape shows up in the log instead of a bare "no_request_id".
+    request_id = (
+        data.get("request_id")
+        or data.get("id")
+        or data.get("task_id")
+        or (data.get("data") or {}).get("request_id")
+        or (data.get("data") or {}).get("id")
+    )
     if not request_id:
+        logger.warning(f"[VT] job={job_id} create 2xx but no request_id; body={resp.text[:400]}")
         return {"status": "error", "reason": "no_request_id"}
 
-    _save_task_state(job_id, {"request_id": request_id, "status": data.get("status", "queued")})
+    _save_task_state(job_id, {
+        "request_id": request_id,
+        "status": data.get("status", "queued"),
+        "created_ts": time.time(),
+    })
     return {"status": "ok", "request_id": request_id, "retry_after": data.get("retry_after", 5)}
 
 
@@ -121,7 +146,7 @@ def get_task_status(job_id: str, request_id: str) -> Dict[str, Any]:
     try:
         resp = httpx.get(
             f"{_base()}/transcriptions/{request_id}",
-            headers=_headers(),
+            headers=_headers(json_body=False),
             timeout=20,
         )
     except Exception as e:
@@ -134,6 +159,13 @@ def get_task_status(job_id: str, request_id: str) -> Dict[str, Any]:
             reason = resp.json().get("error", {}).get("code") or reason
         except Exception:
             pass
+        # Propagation lag: a task can 400/404 for ~a minute after create
+        # returns 202. Marking that terminal killed every notes flow on the
+        # first poll — within the grace window, report it as still queued.
+        state = load_task_state(job_id) or {}
+        age = time.time() - float(state.get("created_ts") or 0)
+        if resp.status_code in (400, 404) and state.get("created_ts") and age < 90:
+            return {"status": "ok", "task": {"status": "queued"}}
         return {"status": "error", "reason": reason,
                 "terminal": resp.status_code in (400, 401, 402, 403, 404, 409)}
 
@@ -148,7 +180,7 @@ def get_task_result(job_id: str, request_id: str) -> Dict[str, Any]:
     try:
         resp = httpx.get(
             f"{_base()}/transcriptions/{request_id}/result",
-            headers=_headers(),
+            headers=_headers(json_body=False),
             timeout=30,
         )
     except Exception as e:
@@ -158,6 +190,20 @@ def get_task_result(job_id: str, request_id: str) -> Dict[str, Any]:
     if resp.status_code != 200:
         return {"status": "error", "reason": f"http_{resp.status_code}"}
     return {"status": "ok", "result": resp.json()}
+
+
+def mark_task_failed(job_id: str, reason: str = "") -> None:
+    """Record a dead task so the next call creates a fresh one.
+
+    Without this, a terminally-failed request_id sits in vt_task.json and
+    every retry polls the same corpse — the summary panel could never
+    recover once a task failed upstream."""
+    state = load_task_state(job_id) or {}
+    if state.get("request_id"):
+        state["status"] = "failed"
+        if reason:
+            state["reason"] = reason
+        _save_task_state(job_id, state)
 
 
 def map_result(result: Dict[str, Any]) -> Dict[str, Any]:

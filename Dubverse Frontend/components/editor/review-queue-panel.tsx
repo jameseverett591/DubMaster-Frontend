@@ -1,7 +1,7 @@
 'use client'
 
-import { useMemo } from 'react'
-import { X, ArrowRight, CheckCircle, AlertTriangle } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { X, ArrowRight, CheckCircle, AlertTriangle, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { Segment } from '@/lib/editor-types'
 import { useT } from '@/lib/use-t'
@@ -11,6 +11,9 @@ interface ReviewQueuePanelProps {
   onClose: () => void
   onJumpToSegment: (index: number) => void
   onMarkOk: (index: number) => void
+  // Clears the TTS gate on every withheld segment and regenerates its audio.
+  // Receives editor-array indices of the currently flagged segments.
+  onClearAll?: (indices: number[]) => Promise<void> | void
 }
 
 function formatTime(secs: number): string {
@@ -26,6 +29,12 @@ const FLAG_LABELS: Record<string, string> = {
   untranslated_source: 'untranslated source',
   empty_source: 'empty source',
   translation_flagged: 'translation flagged',
+  // Pre-translation confidence gate reasons (translation_service.py) — these
+  // segments have no `flags` entries; the flag lives on translation_flagged.
+  low_asr_confidence: 'low ASR confidence',
+  unknown_asr_provenance: 'unverified ASR',
+  empty_source_text: 'empty source',
+  gap_filled_fallback_asr: 'fallback ASR fill',
 }
 
 function confidenceColor(score: number | null | undefined): string {
@@ -40,14 +49,25 @@ export function ReviewQueuePanel({
   onClose,
   onJumpToSegment,
   onMarkOk,
+  onClearAll,
 }: ReviewQueuePanelProps) {
   const t = useT()
+  // Bulk clear is two-step: first click arms a confirm (it fires N TTS
+  // generations — expensive and not casually undoable), second click runs it.
+  const [clearAllArmed, setClearAllArmed] = useState(false)
+  const [clearAllBusy, setClearAllBusy] = useState(false)
+  // Actions take the segment's CURRENT array position — seg.index is a stored
+  // field that drifts after splits/inserts and would jump/mark/clear the wrong
+  // block.
   const flagged = useMemo(
     () =>
-      segments.filter(
-        (s) =>
-          s.flags && s.flags.length > 0 && s.flag_status === 'unreviewed'
-      ),
+      segments
+        .map((seg, arrayIndex) => ({ seg, arrayIndex }))
+        .filter(
+          ({ seg }) =>
+            (seg.flags && seg.flags.length > 0 || seg.translation_flagged) &&
+            seg.flag_status === 'unreviewed'
+        ),
     [segments]
   )
 
@@ -81,6 +101,55 @@ export function ReviewQueuePanel({
           </button>
         </div>
 
+        {/* Bulk release: every withheld segment at once. Two-click arm so N
+            TTS generations can't fire on a stray click. Rows drop out of the
+            queue as each clears — the shrinking count IS the progress bar. */}
+        {(() => {
+          const withheld = flagged.filter(({ seg }) => seg.translation_flagged)
+          if (!withheld.length || !onClearAll) return null
+          return (
+            <div className="px-3 py-2 border-b border-neutral-700 shrink-0 flex items-center gap-2">
+              <button
+                disabled={clearAllBusy}
+                onClick={async () => {
+                  if (!clearAllArmed) { setClearAllArmed(true); return }
+                  setClearAllBusy(true)
+                  try {
+                    await onClearAll(withheld.map(({ arrayIndex }) => arrayIndex))
+                  } finally {
+                    setClearAllBusy(false)
+                    setClearAllArmed(false)
+                  }
+                }}
+                className={cn(
+                  'flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded border transition-colors',
+                  clearAllArmed
+                    ? 'bg-emerald-900/40 border-emerald-600 text-emerald-300 hover:bg-emerald-900/60'
+                    : 'bg-neutral-800 border-neutral-700 text-neutral-300 hover:text-emerald-300 hover:border-emerald-700',
+                  clearAllBusy && 'opacity-60 cursor-wait'
+                )}
+              >
+                {clearAllBusy
+                  ? <RefreshCw className="h-3 w-3 animate-spin" />
+                  : <CheckCircle className="h-3 w-3" />}
+                {clearAllBusy
+                  ? t('Clearing & dubbing…')
+                  : clearAllArmed
+                    ? `${t('Sure?')} ${withheld.length} ${t('segments will be dubbed')}`
+                    : `${t('Clear all')} ${withheld.length} & ${t('dub')}`}
+              </button>
+              {clearAllArmed && !clearAllBusy && (
+                <button
+                  onClick={() => setClearAllArmed(false)}
+                  className="text-xs text-neutral-500 hover:text-neutral-300"
+                >
+                  {t('Cancel')}
+                </button>
+              )}
+            </div>
+          )
+        })()}
+
         {/* Body */}
         <div className="overflow-y-auto flex-1 p-3 space-y-2">
           {flagged.length === 0 && reviewed.length === 0 && (
@@ -96,7 +165,12 @@ export function ReviewQueuePanel({
             </div>
           )}
 
-          {flagged.map((seg) => {
+          {flagged.map(({ seg, arrayIndex }) => {
+            // The confidence-gate flag carries no `flags` entries — synthesize
+            // one from flag_reason so badges/details render uniformly.
+            const effFlags = (seg.flags && seg.flags.length > 0)
+              ? seg.flags
+              : [{ code: seg.flag_reason || 'translation_flagged', reason: null as string | null }]
             return (
               <div
                 key={seg.index}
@@ -108,7 +182,7 @@ export function ReviewQueuePanel({
                     {formatTime(seg.start_time)} — {seg.speaker_label || seg.speaker_id}
                   </span>
                   <div className="flex gap-1 flex-wrap justify-end">
-                    {seg.flags!.map((flag, fi) => (
+                    {effFlags.map((flag, fi) => (
                       <span key={fi} className="text-[10px] font-medium px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 uppercase tracking-wide whitespace-nowrap">
                         {FLAG_LABELS[flag.code] ?? flag.code.replace(/_/g, ' ')}
                       </span>
@@ -116,13 +190,24 @@ export function ReviewQueuePanel({
                   </div>
                 </div>
 
-                {/* Segment text */}
+                {/* Segment text — reviewers of withheld dubs need BOTH lines:
+                    the source they heard and the translation they're approving. */}
                 <p className="text-sm text-neutral-200 leading-snug">
                   {seg.target_text || seg.source_text}
                 </p>
+                {seg.translation_flagged && seg.source_text && seg.target_text !== seg.source_text && (
+                  <p className="text-xs text-neutral-500 leading-snug">
+                    {t('Source')}: {seg.source_text}
+                  </p>
+                )}
+                {seg.translation_flagged && (
+                  <p className="text-xs text-amber-300/80 italic">
+                    {t('Dub audio withheld until this segment is reviewed.')}
+                  </p>
+                )}
 
                 {/* Per-flag details */}
-                {seg.flags!.map((flag, fi) => (
+                {effFlags.map((flag, fi) => (
                   <div key={fi}>
                     {flag.reason && (
                       <p className="text-xs text-amber-300/80 italic">{flag.reason}</p>
@@ -141,18 +226,18 @@ export function ReviewQueuePanel({
                 {/* Actions */}
                 <div className="flex gap-2 pt-1">
                   <button
-                    onClick={() => onJumpToSegment(seg.index)}
+                    onClick={() => onJumpToSegment(arrayIndex)}
                     className="flex items-center gap-1 text-xs px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white transition-colors border border-neutral-700"
                   >
                     <ArrowRight className="h-3 w-3" />
                     {t('Jump')}
                   </button>
                   <button
-                    onClick={() => onMarkOk(seg.index)}
+                    onClick={() => onMarkOk(arrayIndex)}
                     className="flex items-center gap-1 text-xs px-2.5 py-1 rounded bg-neutral-800 hover:bg-emerald-900/50 text-neutral-300 hover:text-emerald-300 transition-colors border border-neutral-700 hover:border-emerald-700"
                   >
                     <CheckCircle className="h-3 w-3" />
-                    {t('Mark OK')}
+                    {seg.translation_flagged ? t('Clear & dub') : t('Mark OK')}
                   </button>
                 </div>
               </div>

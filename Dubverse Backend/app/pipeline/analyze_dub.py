@@ -22,13 +22,14 @@ import json
 import logging
 import os
 import subprocess
+import uuid
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
-
 
 def analyze_dub(
     job_id: str,
@@ -68,12 +69,37 @@ def analyze_dub(
     transcript_file = Path("data/transcripts") / f"{job_id}.json"
     output_file = dubbed_dir / f"analysis_{lang_norm}.json"
     sentinel = dubbed_dir / f"analysis_{lang_norm}.running"
+    error_file = dubbed_dir / f"analysis_{lang_norm}.error"
 
-    # Create sentinel to indicate analysis in progress
+    # Create sentinel to indicate analysis in progress, and clear any failure
+    # recorded by a previous run — this run supersedes it. The sentinel holds
+    # the owning `pid:token` (PID + process start time) so the API can tell a
+    # crashed run from a live one without trusting timestamps across restarts
+    # or tripping on recycled PIDs.
+    sentinel_id: Optional[str] = None
     try:
-        sentinel.touch()
+        from app.api.routes import _process_token
+        sentinel_id = (f"{os.getpid()}:{_process_token(os.getpid()) or ''}:"
+                       f"{uuid.uuid4().hex}")
+        sentinel.write_text(sentinel_id, encoding="utf-8")
+        error_file.unlink(missing_ok=True)
     except Exception:
         pass
+
+    def _fail(reason: str) -> Dict[str, Any]:
+        """Persist a failure reason for the GET endpoint, then return error."""
+        try:
+            error_file.write_text(
+                json.dumps({
+                    "reason": reason,
+                    "failed_at": datetime.utcnow().isoformat() + "Z",
+                    "failed_at_ts": time.time(),
+                }),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+        return {"status": "error", "reason": reason}
 
     try:
         has_export = dubbed_video.exists()
@@ -88,7 +114,7 @@ def analyze_dub(
             # its qc_preview_ prefix keeps it unambiguous against the real
             # export artifacts (dubbed_{lang}.mp4, dubbed_audio.wav).
             if not segments_file.exists():
-                return {"status": "error", "reason": "No segments available yet"}
+                return _fail("No segments available yet")
             with open(segments_file, "r", encoding="utf-8") as f:
                 seg_data = json.load(f)
             segs = seg_data.get("segments", [])
@@ -106,7 +132,7 @@ def analyze_dub(
                 if safe:
                     merge_segments.append({"path": safe, "start": s["start"], "end": s["end"]})
             if not merge_segments:
-                return {"status": "error", "reason": "No generated audio yet"}
+                return _fail("No generated audio yet")
 
             from app.services.dubbing_service import dubbing_service
             video_duration = seg_data.get("video_duration") or 0.0
@@ -118,7 +144,7 @@ def analyze_dub(
                 merge_segments, str(stitched_audio), video_duration
             )
             if not ok:
-                return {"status": "error", "reason": "Could not build preview audio for QC"}
+                return _fail("Could not build preview audio for QC")
             audio_source = stitched_audio
 
         analysis: Dict[str, Any] = {
@@ -145,11 +171,32 @@ def analyze_dub(
 
         # --- 5 local analyses -- work identically whether audio_source is the
         # exported mp4 or the internal audio-only stitch; none read video frames. ---
-        analysis["retranscription"] = _retranscribe_dubbed_audio(audio_source, lang_norm)
-        analysis["timing"] = _compare_timing(timing_data, original_transcript)
-        analysis["silences"] = _detect_silences(audio_source, original_transcript)
-        analysis["speed"] = _detect_speed_anomalies(timing_data)
-        analysis["loudness"] = _analyze_loudness(audio_source)
+        # These are advisory probes (each internally bounded) but SEQUENTIAL
+        # they stacked ~15min of ffmpeg on top of the RunPod round-trip.
+        # They are independent — overlap them so the report's wall time is
+        # the slowest scan, not their sum.
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _fut(fut, name):
+            try:
+                return fut.result()
+            except Exception as e:
+                logger.warning(f"[ANALYSIS] {name} failed: {e}")
+                return {"status": "error", "reason": str(e)}
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            f_retr = pool.submit(_retranscribe_dubbed_audio, audio_source, lang_norm)
+            f_sil = pool.submit(_detect_silences, audio_source, original_transcript)
+            f_loud = pool.submit(_analyze_loudness, audio_source)
+            f_sq = pool.submit(_probe_source_quality, original_video_path)
+            # Cheap in-process analyses run inline while the ffmpeg/RunPod
+            # work is in flight.
+            analysis["timing"] = _compare_timing(timing_data, original_transcript)
+            analysis["speed"] = _detect_speed_anomalies(timing_data)
+            analysis["retranscription"] = _fut(f_retr, "retranscription")
+            analysis["silences"] = _fut(f_sil, "silence detection")
+            analysis["loudness"] = _fut(f_loud, "loudness")
+            analysis["source_quality"] = _fut(f_sq, "source-quality probe")
 
         # --- New AI-powered analyses (optional — graceful skip) ---
         # Get original segments and dubbed transcript for the new analyses
@@ -214,7 +261,9 @@ def analyze_dub(
         # skipped until export exists, same as pronunciation above.
         analysis["emotion_preservation"] = (
             _analyze_emotion_preservation(original_video_path, str(dubbed_video), timing_data)
-            if has_export else {"status": "skipped", "reason": "video not yet exported"}
+            if has_export and _has_local_gpu()
+            else {"status": "skipped", "reason": "video not yet exported" if not has_export
+                  else "no local GPU — emotion2vec skipped (retranscription runs via RunPod)"}
         )
         # Gemini 2.5 Pro holistic review (optional, ~$0.12/video) -- needs real
         # video frames; skipped until export exists.
@@ -246,11 +295,21 @@ def analyze_dub(
 
     except Exception as e:
         logger.error(f"[ANALYSIS] Failed for job {job_id}: {e}", exc_info=True)
-        return {"status": "error", "reason": str(e)}
+        # Persist the failure — the GET endpoint surfaces it as status "failed"
+        # so the QC monitor shows a real error instead of polling forever.
+        return _fail(str(e))
     finally:
-        # Remove sentinel
+        # Only remove OUR sentinel. If the slot was reclaimed while this run
+        # was still executing (stale-sweep or the GET escape hatch), the file
+        # on disk belongs to a NEWER run — unlinking it unconditionally would
+        # free the slot mid-run and admit a third.
         try:
-            sentinel.unlink(missing_ok=True)
+            if (sentinel_id is not None
+                    and sentinel.read_text(encoding="utf-8").strip()
+                        == sentinel_id.strip()):
+                sentinel.unlink(missing_ok=True)
+        except FileNotFoundError:
+            pass
         except Exception:
             pass
 
@@ -258,6 +317,159 @@ def analyze_dub(
 # ---------------------------------------------------------------------------
 # Sub-analyses
 # ---------------------------------------------------------------------------
+
+
+def _has_local_gpu() -> bool:
+    try:
+        import torch as _t
+        return bool(_t.cuda.is_available())
+    except Exception:
+        return False
+
+
+def _runpod_handoff_configured() -> bool:
+    """The QC offload needs RunPod to run the job AND R2 to hand it the audio.
+    Checking RunPod keys alone admitted hosts that then errored in the upload
+    step instead of falling back to their own GPU."""
+    if not (os.getenv("RUNPOD_API_KEY") and os.getenv("RUNPOD_ENDPOINT_ID")):
+        return False
+    return all(
+        os.getenv(v)
+        for v in ("R2_BUCKET_NAME", "R2_ACCESS_KEY_ID",
+                  "R2_SECRET_ACCESS_KEY", "R2_ACCOUNT_ID")
+    )
+
+
+def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> Dict[str, Any]:
+    """Offload the QC re-transcription to the RunPod GPU worker.
+
+    The backend has no GPU, and the local CPU Whisper pass this replaces took
+    45+ minutes on a feature film while starving every other request. The
+    worker already transcribes on GPU for source ASR — QC just sends it the
+    DUBBED audio with a transcribe-only step and maps its segments back into
+    the QC schema (start/end/text/confidence).
+    """
+    audio_path: Optional[Path] = None
+    s3 = None
+    r2_bucket = ""
+    object_key = ""
+    rp_id: Optional[str] = None
+    finished = False
+    try:
+        import asyncio as _asyncio
+
+        from app.services.runpod_service import runpod_service
+
+        # 16kHz mono opus — Whisper needs nothing more, and at 96kbps a
+        # feature film is ~55MB instead of ~150MB of PCM.
+        audio_path = dubbed_video.with_suffix(".qc.opus")
+        cmd = [
+            "ffmpeg", "-y", "-i", str(dubbed_video),
+            "-vn", "-acodec", "libopus", "-b:a", "96k", "-ar", "16000", "-ac", "1",
+            str(audio_path),
+        ]
+        subprocess.run(cmd, capture_output=True, timeout=600)
+        if not audio_path.exists() or audio_path.stat().st_size < 1000:
+            return {"status": "error", "reason": "audio extraction failed"}
+
+        # Upload to R2 so the worker can pull it (same handoff pattern the
+        # dub pipeline uses — presigned GET).
+        r2_bucket = os.getenv("R2_BUCKET_NAME", "")
+        r2_key_id = os.getenv("R2_ACCESS_KEY_ID", "")
+        r2_secret = os.getenv("R2_SECRET_ACCESS_KEY", "")
+        r2_account = os.getenv("R2_ACCOUNT_ID", "")
+        if not (r2_bucket and r2_key_id and r2_secret and r2_account):
+            return {"status": "error",
+                    "reason": "RunPod offload needs R2 configured (R2_BUCKET_NAME etc.)"}
+
+        import boto3
+        from botocore.config import Config
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=f"https://{r2_account}.r2.cloudflarestorage.com",
+            aws_access_key_id=r2_key_id,
+            aws_secret_access_key=r2_secret,
+            config=Config(signature_version="s3v4"),
+            region_name="auto",
+        )
+        job_id = dubbed_video.parent.name
+        object_key = f"{job_id}/qc_{audio_path.name}"
+        s3.upload_file(str(audio_path), r2_bucket, object_key,
+                       ExtraArgs={"ContentType": "audio/ogg"})
+        file_url = s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": r2_bucket, "Key": object_key},
+            ExpiresIn=7200,
+        )
+
+        async def _submit_and_poll() -> Dict[str, Any]:
+            nonlocal rp_id, finished
+            submitted = await runpod_service.submit_job(
+                file_url=file_url,
+                job_id=f"{job_id}_qc",
+                language=target_language,
+                steps=["transcribe"],
+            )
+            rp_id = submitted.get("id")
+            if not rp_id:
+                raise RuntimeError(f"RunPod returned no job id: {submitted}")
+            out = await runpod_service.poll_until_complete(
+                rp_id,
+                timeout=int(os.getenv("QC_RUNPOD_TIMEOUT_SEC", "1800")),
+                interval=5,
+            )
+            finished = True
+            return out
+
+        try:
+            output = _asyncio.run(_submit_and_poll())
+        finally:
+            # A timed-out submit can leave the job still queued — cancel it
+            # BEFORE deleting its R2 input or the worker wakes to a missing
+            # file and burns a paid job for nothing.
+            if rp_id and not finished:
+                try:
+                    _asyncio.run(runpod_service.cancel_job(rp_id))
+                except Exception:
+                    pass
+        if output.get("error"):
+            return {"status": "error", "reason": f"RunPod: {output['error']}"}
+        raw_segments = output.get("segments") or []
+        segments = [
+            {
+                "start": round(float(s.get("start", 0.0)), 3),
+                "end": round(float(s.get("end", 0.0)), 3),
+                "text": (s.get("text") or "").strip(),
+                "confidence": s.get("confidence"),
+            }
+            for s in raw_segments
+            if (s.get("text") or "").strip()
+        ]
+
+        return {
+            "status": "ok",
+            "language": target_language,
+            "segment_count": len(segments),
+            "segments": segments,
+            "engine": "runpod",
+        }
+    except Exception as e:
+        logger.warning(f"[ANALYSIS] RunPod retranscription failed: {e}")
+        return {"status": "error", "reason": str(e)}
+    finally:
+        # The R2 handoff copy and the local opus are single-use — clean both
+        # on EVERY exit path (extraction failure, R2 misconfig, upload or
+        # presign failure, poll timeout), not only after a successful poll.
+        if s3 is not None and object_key:
+            try:
+                s3.delete_object(Bucket=r2_bucket, Key=object_key)
+            except Exception as e:
+                logger.warning(f"[ANALYSIS] R2 QC cleanup failed for {object_key}: {e}")
+        if audio_path is not None:
+            try:
+                audio_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def _retranscribe_dubbed_audio(dubbed_video: Path, target_language: str = "") -> Dict[str, Any]:
@@ -270,6 +482,13 @@ def _retranscribe_dubbed_audio(dubbed_video: Path, target_language: str = "") ->
     meaningless near-zero pronunciation_clarity score that has nothing to do
     with actual pronunciation quality.
     """
+    # GPU offload first — the local CPU Whisper pass below took 45+ minutes on
+    # a feature film and starved the backend. RunPod is the same worker pool
+    # the dub's own ASR already uses. Only dispatch when the whole handoff
+    # (RunPod AND R2) is configured — a GPU host without R2 must fall through
+    # to its own Whisper instead of erroring in the upload step.
+    if _runpod_handoff_configured():
+        return _retranscribe_via_runpod(dubbed_video, target_language)
     try:
         # Extract audio from dubbed video
         audio_path = dubbed_video.with_suffix(".wav")
@@ -613,6 +832,124 @@ def _analyze_loudness(dubbed_video: Path) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"[ANALYSIS] Loudness analysis failed: {e}")
         return {"status": "error", "reason": str(e)}
+
+
+def _probe_source_quality(video_path: str) -> Dict[str, Any]:
+    """Probe the SOURCE video for capture-quality defects the pipeline cannot
+    fix — frame stalls, long black/fade-out spans, and very low audio level.
+    These are the signature of screen re-recordings and other OOD sources;
+    surfacing them early explains otherwise mysterious QC fallout (frozen
+    picture, hallucination-prone ASR, clone timbre artifacts).
+    """
+    result: Dict[str, Any] = {"status": "ok", "warnings": [], "flags": []}
+    if not video_path or not os.path.exists(video_path):
+        return {"status": "skipped", "reason": "source video not found"}
+
+    # The frame scans below are full-video decodes (300s timeouts each) — on a
+    # CPU-only backend they starve the request workers, so they only run where
+    # a local GPU host would be doing the QC anyway. The audio-level probe
+    # further down is cheap enough to keep everywhere.
+    video_scans = _has_local_gpu()
+    if not video_scans:
+        result["flags"].append("video_scans_skipped")
+        result["warnings"].append(
+            "Source frame scans skipped — no local GPU (full-video decode "
+            "would starve this backend)"
+        )
+
+    if video_scans:
+        # --- Frame stalls (held/frozen picture) ---
+        stalls: List[Dict[str, float]] = []
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-i", video_path,
+                 "-vf", "freezedetect=n=0.001:d=0.6",
+                 "-an", "-f", "null", "-"],
+                capture_output=True, text=True, timeout=300,
+            )
+            start = None
+            for m in re.finditer(
+                r"lavfi\.freezedetect\.(freeze_start|freeze_duration|freeze_end):\s*([\d.]+)",
+                proc.stderr,
+            ):
+                kind, val = m.group(1), float(m.group(2))
+                if kind == "freeze_start":
+                    start = val
+                elif kind == "freeze_end" and start is not None:
+                    stalls.append({"start": round(start, 2), "end": round(val, 2)})
+                    start = None
+            result["frame_stalls"] = stalls
+            if stalls:
+                span = ", ".join(f"{s['start']}-{s['end']}s" for s in stalls[:5])
+                result["flags"].append("frame_stall")
+                result["warnings"].append(
+                    f"Source video freezes {len(stalls)}x ({span}) — held frames "
+                    "baked into the recording; cannot be repaired"
+                )
+        except Exception as e:
+            logger.warning(f"[ANALYSIS] freezedetect probe failed: {e}")
+
+        # --- Long black spans (fade-out tail / dead picture) ---
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-i", video_path,
+                 "-vf", "blackdetect=d=2.0:pix_th=0.10",
+                 "-an", "-f", "null", "-"],
+                capture_output=True, text=True, timeout=300,
+            )
+            blacks = [
+                {"start": round(float(m.group(1)), 2),
+                 "end": round(float(m.group(2)), 2)}
+                for m in re.finditer(
+                    r"black_start:([\d.]+)\s+black_end:([\d.]+)", proc.stderr
+                )
+            ]
+            result["black_spans"] = blacks
+            if blacks:
+                span = ", ".join(f"{s['start']}-{s['end']}s" for s in blacks[:5])
+                result["flags"].append("black_span")
+                result["warnings"].append(
+                    f"Source has {len(blacks)} black/fade span(s) ({span}) — "
+                    "lines inside these windows have no visible speaker"
+                )
+        except Exception as e:
+            logger.warning(f"[ANALYSIS] blackdetect probe failed: {e}")
+
+    # --- Audio level (re-recordings run far below normal mix level) ---
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-i", video_path, "-af", "volumedetect",
+             "-vn", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=300,
+        )
+        mean_m = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", proc.stderr)
+        max_m = re.search(r"max_volume:\s*([-\d.]+)\s*dB", proc.stderr)
+        mean_db = float(mean_m.group(1)) if mean_m else None
+        max_db = float(max_m.group(1)) if max_m else None
+        result["mean_volume_db"] = mean_db
+        result["max_volume_db"] = max_db
+        if mean_db is not None and mean_db < -40:
+            result["flags"].append("low_audio_level")
+            result["warnings"].append(
+                f"Source audio is very quiet ({mean_db:.1f} dB mean) — "
+                "typical of camera/screen re-recordings; expect degraded "
+                "transcription confidence and clone fidelity"
+            )
+    except Exception as e:
+        logger.warning(f"[ANALYSIS] volumedetect probe failed: {e}")
+
+    if {"frame_stall", "low_audio_level"} & set(result["flags"]):
+        result["re_recording_suspected"] = True
+        result["warnings"].append(
+            "Capture-quality signature suggests a re-recording — treat "
+            "low-confidence ASR and edge-case QC findings accordingly"
+        )
+    else:
+        result["re_recording_suspected"] = False
+
+    for w in result["warnings"]:
+        logger.warning(f"[SOURCE-QC] {w}")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -994,7 +1331,8 @@ def _gemini_review(
         if not is_enabled():
             return {"status": "skipped", "reason": "GEMINI_API_KEY not configured"}
 
-        logger.info("[ANALYSIS] Running Gemini 2.5 Pro holistic review")
+        from app.services.gemini_service import GEMINI_MODEL
+        logger.info(f"[ANALYSIS] Running {GEMINI_MODEL} holistic review")
 
         context = {}
         if timing_data:

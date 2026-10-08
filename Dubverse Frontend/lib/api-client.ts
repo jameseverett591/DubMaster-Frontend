@@ -556,6 +556,17 @@ export interface QualityAnalysis {
     reason?: string
   }
   loudness: LoudnessAnalysis
+  source_quality?: {
+    status: string
+    warnings?: string[]
+    flags?: string[]
+    frame_stalls?: Array<{ start: number; end: number }>
+    black_spans?: Array<{ start: number; end: number }>
+    mean_volume_db?: number
+    max_volume_db?: number
+    re_recording_suspected?: boolean
+    reason?: string
+  }
   emotion?: EmotionAnalysis
   pronunciation?: PronunciationAssessment
   translation?: TranslationQuality
@@ -591,8 +602,9 @@ export interface LipSyncWindowResult {
 export type AnalysisStatus = 'idle' | 'running' | 'complete' | 'error'
 
 export interface AnalysisResponse {
-  status: 'started' | 'running' | 'complete'
+  status: 'started' | 'running' | 'complete' | 'failed'
   message?: string
+  error?: string
   analysis?: QualityAnalysis
 }
 
@@ -660,7 +672,17 @@ class DubVerseAPIClient {
     // is near expiry, so this is cheap to call per request.
     try {
       const { createClient } = await import('@/lib/supabase/client')
-      const { data } = await createClient().auth.getSession()
+      // getSession() takes the GoTrue auth-token lock; when that lock wedges
+      // ("auth-token lock was not released within 5000ms") the promise never
+      // resolves — and every API call behind _fetch hung with it, which is how
+      // the Save button spun forever. Cap it: on timeout keep whatever token
+      // we already hold and let the request 401 if it's stale.
+      const { data } = await Promise.race([
+        createClient().auth.getSession(),
+        new Promise<{ data: { session: null }; error: null }>((resolve) =>
+          setTimeout(() => resolve({ data: { session: null }, error: null }), 8000)
+        ),
+      ])
       if (data.session?.access_token) {
         this._token = data.session.access_token
       }
@@ -722,6 +744,15 @@ class DubVerseAPIClient {
     } catch {
       return url
     }
+  }
+
+  /** refreshMediaUrl with the token guaranteed loaded. Stored URLs carry the
+   *  access_token they were minted with; after rotation the stale token 401s.
+   *  Click handlers on persisted URLs (result card download/share) need the
+   *  async form — _ensureToken may not have run yet on a fresh page load. */
+  async refreshMediaUrlAsync(url: string): Promise<string> {
+    await this._ensureToken()
+    return this.refreshMediaUrl(url)
   }
 
   private _mediaUrl(path: string): string {
@@ -1143,6 +1174,28 @@ class DubVerseAPIClient {
   }
 
   /**
+   * Create (or reuse) the public share link for a finished, paid dub.
+   * Returns null when the backend refuses (unpaid, no export) — callers
+   * must NOT fall back to the authenticated media URL, which carries the
+   * owner's access token.
+   */
+  /** Returns {url,status} rather than bare url — a 402 (unpaid) and a 500 or
+   *  network failure are different problems and must not render the same
+   *  "payment required" message. status 0 = request never completed. */
+  async createShareLink(jobId: string): Promise<{ url: string | null; status: number }> {
+    try {
+      const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/share`, {
+        method: 'POST',
+      })
+      if (!response.ok) return { url: null, status: response.status }
+      const data = await response.json().catch(() => null)
+      return { url: data?.share_url ?? null, status: response.status }
+    } catch {
+      return { url: null, status: 0 }
+    }
+  }
+
+  /**
    * Trigger quality analysis for a dubbed video
    */
   async triggerAnalysis(jobId: string, language: string): Promise<AnalysisResponse> {
@@ -1263,11 +1316,11 @@ class DubVerseAPIClient {
     return response.json()
   }
 
-  async getVideoNotes(jobId: string, preset: VideoNotesPreset = 'smart'): Promise<VideoNotes> {
+  async getVideoNotes(jobId: string, preset: VideoNotesPreset = 'smart', regenerate = false): Promise<VideoNotes> {
     const response = await this._fetch(`${this.baseURL}/api/jobs/${jobId}/video-notes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
-      body: JSON.stringify({ preset }),
+      body: JSON.stringify({ preset, ...(regenerate ? { regenerate: true } : {}) }),
     })
     if (!response.ok) throw new Error('Failed to load video notes')
     return response.json()
@@ -1724,6 +1777,7 @@ class DubVerseAPIClient {
     sourceLanguage?: string,
     targetLanguage?: string,
     numSpeakers?: number,
+    transcript?: Array<{ text: string; start: number; end: number; speaker?: string }>,
   ): Promise<UploadResponse> {
     const response = await this._fetch(`${this.baseURL}/api/youtube/import`, {
       method: 'POST',
@@ -1733,6 +1787,7 @@ class DubVerseAPIClient {
         source_language: sourceLanguage,
         target_language: targetLanguage,
         num_speakers: numSpeakers,
+        transcript,
       }),
     })
     if (!response.ok) {
@@ -1933,6 +1988,13 @@ class DubVerseAPIClient {
       // Promote a staged take: backend sets BOTH path and committed_audio_url
       // so the next rebuild merges the auditioned audio.
       staged_path?: string
+      // Explicit human-review signal: releases a translation_flagged segment
+      // to TTS. Never inferred from other fields — see routes.py commit notes.
+      clear_translation_flag?: boolean
+      // Re-arms the TTS gate after a failed "Clear & dub" so the segment
+      // stays in the review queue instead of going silent.
+      set_translation_flag?: boolean
+      flag_reason?: string | null
     }
   ): Promise<void> {
     // Edits commit as they are made, so this call IS the save — a failure here
@@ -1943,6 +2005,10 @@ class DubVerseAPIClient {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
       body: JSON.stringify(data),
+      // A small JSON PATCH has no business taking 30s; without a ceiling a hung
+      // connection held handleSaveStaged's sequential await open forever and
+      // the Save spinner with it.
+      signal: AbortSignal.timeout(30000),
     })
     if (!res.ok) {
       const detail = await this._detail(res).catch(() => res.statusText)

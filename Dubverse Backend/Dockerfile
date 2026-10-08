@@ -59,6 +59,12 @@ COPY ./app /app/app
 # Create necessary directories
 RUN mkdir -p /app/data /app/uploads /app/outputs /app/logs
 
+# Deno JS runtime — yt-dlp needs it to solve YouTube's signature/n
+# challenges. Logged-in (cookie) sessions always get challenged
+# responses: without deno they fail with "No video formats found".
+# Kept near the end so pip/apt layers stay cached on rebuilds.
+COPY --from=denoland/deno:bin-2.5.6 /deno /usr/local/bin/deno
+
 # ============================================
 # HEALTHCHECK
 # ============================================

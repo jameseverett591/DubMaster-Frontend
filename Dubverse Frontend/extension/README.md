@@ -8,31 +8,41 @@ Adds **Import** buttons to YouTube in two places:
 
 The toolbar button also works everywhere: on a video it deep-links the
 import, on any other YouTube page it just opens the DubMaster YouTube tab.
-All of them land on `/dashboard?tab=youtube&yt_url=...` and start the
+All of them land on `/studio?tab=youtube&yt_url=...` and start the
 import automatically.
 
-## Install (Chrome / Edge — developer mode)
+## Install (development)
 
-1. Open `chrome://extensions` (or `edge://extensions`)
-2. Enable **Developer mode** (top right)
-3. Click **Load unpacked**
-4. Select this folder: `Dubverse Frontend/extension`
+Chrome / Edge: open `chrome://extensions` (or `edge://extensions`), enable
+**Developer mode**, click **Load unpacked**, select this folder.
+Firefox: build first (below), then `about:debugging` → **Load Temporary
+Add-on** → `dist/firefox/manifest.json` (removed when Firefox restarts).
+
+## Build for the stores
+
+```
+node build.mjs
+```
+
+Writes `dist/dubmaster-import-chrome-edge.zip` (Chrome Web Store + Edge
+Add-ons) and `dist/dubmaster-import-firefox.zip` (Firefox Add-ons). The
+Firefox build swaps `background.service_worker` for `background.scripts` and
+adds the add-on id + data-collection declaration. Bump `version` in
+`manifest.json` for every store upload. Icons in `icons/` are generated
+placeholders — replace with final brand art.
 
 ## Configure
 
-`DUBMASTER_URL` is set at the top of `content.js` and `background.js`:
+`DUBMASTER_URL` is set at the top of `content.js` and `background.js`
+(production: `https://dubmasterai.com`). For local development temporarily
+set it to `http://localhost:3001`.
 
-- Development: `http://localhost:3000`
-- Production: change to the deployed origin (e.g. `https://app.dubmaster.example`)
-
-The deep link is `/studio?tab=youtube&yt_url=<video-url>` (`/dashboard` is
-the account/history page — the tabbed Studio UI lives at `/studio`).
-Middleware adds the locale prefix automatically; the YouTube tab consumes
-`yt_url`, runs the import, and strips the param so a refresh doesn't
-re-import.
+The deep link is `/studio?tab=youtube&yt_url=<video-url>`. Middleware adds the
+locale prefix; the YouTube tab consumes `yt_url`, runs the import, and strips
+the param so a refresh doesn't re-import.
 
 ## Notes
 
 - You must be signed in to DubMaster — the import runs against your account.
 - Only import videos you own, have permission for, or that are public domain.
-- Private and age-restricted videos are not supported.
+- Private and DRM-protected videos can't be imported from a link. Age-restricted videos can be imported when the backend has a signed-in YouTube session (cookies) configured — otherwise upload the file instead.
