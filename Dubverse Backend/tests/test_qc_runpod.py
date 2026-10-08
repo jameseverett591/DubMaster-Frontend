@@ -117,6 +117,10 @@ class RetranscribeTests(unittest.TestCase):
         rp_service = mock.MagicMock()
         rp_service.submit_job = mock.AsyncMock(return_value={"id": "rp-1"})
         rp_service.poll_until_complete = poll
+        # AsyncMock, not plain MagicMock — the real cancel_job is async, and a
+        # sync mock makes asyncio.run() raise inside the production finally,
+        # silently skipping the cancellation the tests are meant to prove.
+        rp_service.cancel_job = mock.AsyncMock()
 
         def fake_ffmpeg(cmd, **kw):
             self.opus.write_bytes(b"o" * 5000)
@@ -192,9 +196,12 @@ class RetranscribeTests(unittest.TestCase):
 
     def test_r2_copy_cleaned_up_when_worker_fails(self):
         poll = mock.AsyncMock(side_effect=RuntimeError("worker died"))
-        out, s3, _ = self._run_via_runpod(poll)
+        out, s3, rp = self._run_via_runpod(poll)
         self.assertEqual(out["status"], "error")
         self.assertIn("worker died", out["reason"])
+        # The paid worker job must be cancelled before its input is deleted —
+        # cancel order matters (delete happens in the same finally after this).
+        rp.cancel_job.assert_awaited_once_with("rp-1")
         s3.delete_object.assert_called_once()
         self.assertFalse(self.opus.exists())
 
