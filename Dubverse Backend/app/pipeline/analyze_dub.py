@@ -270,6 +270,16 @@ def _has_local_gpu() -> bool:
         return False
 
 
+def _runpod_configured() -> bool:
+    """True only when QC can really run on RunPod: worker + R2 audio hand-off."""
+    return bool(
+        os.getenv("RUNPOD_API_KEY") and os.getenv("RUNPOD_ENDPOINT_ID")
+        and all(os.getenv(k) for k in (
+            "R2_BUCKET_NAME", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ACCOUNT_ID"
+        ))
+    )
+
+
 def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> Dict[str, Any]:
     """Offload the QC re-transcription to the RunPod GPU worker.
 
@@ -279,14 +289,23 @@ def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> D
     DUBBED audio with a transcribe-only step and maps its segments back into
     the QC schema (start/end/text/confidence).
     """
-    try:
-        import asyncio as _asyncio
+    import asyncio as _asyncio
 
+    # Everything this run creates is tracked up here so the single `finally`
+    # below can remove it wherever the run stops — a failed extraction, a failed
+    # upload, a failed URL, a worker error or a timeout.
+    audio_path = dubbed_video.with_suffix(".qc.opus")
+    s3 = None
+    r2_bucket = ""
+    object_key: Optional[str] = None   # set just before the upload starts
+    rp_id: Optional[str] = None
+    finished = False
+    runpod_service = None
+    try:
         from app.services.runpod_service import runpod_service
 
         # 16kHz mono opus — Whisper needs nothing more, and at 96kbps a
         # feature film is ~55MB instead of ~150MB of PCM.
-        audio_path = dubbed_video.with_suffix(".qc.opus")
         cmd = [
             "ffmpeg", "-y", "-i", str(dubbed_video),
             "-vn", "-acodec", "libopus", "-b:a", "96k", "-ar", "16000", "-ac", "1",
@@ -326,9 +345,6 @@ def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> D
             ExpiresIn=7200,
         )
 
-        rp_id: Optional[str] = None
-        finished = False
-
         async def _submit_and_poll() -> Dict[str, Any]:
             nonlocal rp_id, finished
             submitted = await runpod_service.submit_job(
@@ -348,28 +364,7 @@ def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> D
             finished = True
             return out
 
-        try:
-            output = _asyncio.run(_submit_and_poll())
-        finally:
-            # A timed-out submit can leave the job still queued — cancel it
-            # BEFORE deleting its R2 input or the worker wakes to a missing
-            # file and burns a paid job for nothing.
-            if rp_id and not finished:
-                try:
-                    _asyncio.run(runpod_service.cancel_job(rp_id))
-                except Exception:
-                    pass
-            # The R2 handoff copy and the local opus are single-use — clean
-            # both whether the worker succeeded, failed, or timed out,
-            # otherwise a billed byte accumulates per QC run.
-            try:
-                s3.delete_object(Bucket=r2_bucket, Key=object_key)
-            except Exception as e:
-                logger.warning(f"[ANALYSIS] R2 QC cleanup failed for {object_key}: {e}")
-            try:
-                audio_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+        output = _asyncio.run(_submit_and_poll())
         if output.get("error"):
             return {"status": "error", "reason": f"RunPod: {output['error']}"}
         raw_segments = output.get("segments") or []
@@ -394,6 +389,26 @@ def _retranscribe_via_runpod(dubbed_video: Path, target_language: str = "") -> D
     except Exception as e:
         logger.warning(f"[ANALYSIS] RunPod retranscription failed: {e}")
         return {"status": "error", "reason": str(e)}
+    finally:
+        # A timed-out submit can leave the job still queued — cancel it BEFORE
+        # deleting its R2 input or the worker wakes to a missing file and burns
+        # a paid job for nothing.
+        if rp_id and not finished and runpod_service is not None:
+            try:
+                _asyncio.run(runpod_service.cancel_job(rp_id))
+            except Exception:
+                pass
+        # The R2 handoff copy and the local opus are single-use — remove both
+        # however the run ended, otherwise a billed byte accumulates per run.
+        if s3 is not None and object_key:
+            try:
+                s3.delete_object(Bucket=r2_bucket, Key=object_key)
+            except Exception as e:
+                logger.warning(f"[ANALYSIS] R2 QC cleanup failed for {object_key}: {e}")
+        try:
+            audio_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _retranscribe_dubbed_audio(dubbed_video: Path, target_language: str = "") -> Dict[str, Any]:
@@ -409,7 +424,10 @@ def _retranscribe_dubbed_audio(dubbed_video: Path, target_language: str = "") ->
     # GPU offload first — the local CPU Whisper pass below took 45+ minutes on
     # a feature film and starved the backend. RunPod is the same worker pool
     # the dub's own ASR already uses.
-    if os.getenv("RUNPOD_API_KEY") and os.getenv("RUNPOD_ENDPOINT_ID"):
+    # Only when the WHOLE RunPod path is configured (key, endpoint and the R2
+    # bucket the audio travels through); a CUDA host with partial config keeps
+    # using its own GPU instead of failing on a half-set RunPod path.
+    if _runpod_configured():
         return _retranscribe_via_runpod(dubbed_video, target_language)
     try:
         # Extract audio from dubbed video

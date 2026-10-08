@@ -89,10 +89,23 @@ class RetranscribeTests(unittest.TestCase):
         rp.assert_called_once()
         sp.assert_not_called()  # the local path would start ffmpeg + CPU Whisper
 
-    def _run_via_runpod(self, poll):
+    def test_runpod_not_chosen_without_r2(self):
+        # RunPod keys but no R2 bucket: the RunPod path cannot work, so it must
+        # not be picked (a local-GPU host would otherwise fail instead of using
+        # its own GPU). The local path is stubbed out to fail fast.
+        with _env(**RUNPOD_ENV), \
+             mock.patch.object(self.mod, "_retranscribe_via_runpod") as rp, \
+             mock.patch.object(self.mod.subprocess, "run", side_effect=RuntimeError("local")):
+            out = self.mod._retranscribe_dubbed_audio(self.video, "en")
+        rp.assert_not_called()
+        self.assertEqual(out["status"], "error")
+
+    def _run_via_runpod(self, poll, ffmpeg=None, s3_setup=None):
         """Run the RunPod path with every external service faked."""
         s3 = mock.MagicMock()
         s3.generate_presigned_url.return_value = "https://r2.example/get"
+        if s3_setup:
+            s3_setup(s3)
         boto3 = ModuleType("boto3")
         boto3.client = mock.MagicMock(return_value=s3)
         botocore = ModuleType("botocore")
@@ -113,9 +126,40 @@ class RetranscribeTests(unittest.TestCase):
              mock.patch.dict(sys.modules, {"boto3": boto3, "botocore": botocore,
                                            "botocore.config": botocore_config,
                                            "app.services.runpod_service": rp_mod}), \
-             mock.patch.object(self.mod.subprocess, "run", side_effect=fake_ffmpeg):
+             mock.patch.object(self.mod.subprocess, "run", side_effect=ffmpeg or fake_ffmpeg):
             out = self.mod._retranscribe_via_runpod(self.video, "en")
         return out, s3, rp_service
+
+    # ---- a failure at ANY stage must leave no audio behind ----------------------
+    def test_extraction_timeout_leaves_no_local_audio(self):
+        import subprocess as _sp
+
+        def ffmpeg_dies_midway(cmd, **kw):
+            self.opus.write_bytes(b"o" * 5000)   # partial output already on disk
+            raise _sp.TimeoutExpired(cmd, 600)
+
+        out, s3, _ = self._run_via_runpod(mock.AsyncMock(), ffmpeg=ffmpeg_dies_midway)
+        self.assertEqual(out["status"], "error")
+        self.assertFalse(self.opus.exists())
+        s3.upload_file.assert_not_called()
+        s3.delete_object.assert_not_called()   # nothing was uploaded
+
+    def test_failed_upload_cleans_local_audio_and_partial_object(self):
+        def boom(s3):
+            s3.upload_file.side_effect = RuntimeError("upload broke")
+        out, s3, _ = self._run_via_runpod(mock.AsyncMock(), s3_setup=boom)
+        self.assertEqual(out["status"], "error")
+        self.assertFalse(self.opus.exists())
+        s3.delete_object.assert_called_once()   # a partial upload may exist
+
+    def test_failed_url_creation_removes_uploaded_copy(self):
+        def boom(s3):
+            s3.generate_presigned_url.side_effect = RuntimeError("sign broke")
+        out, s3, _ = self._run_via_runpod(mock.AsyncMock(), s3_setup=boom)
+        self.assertEqual(out["status"], "error")
+        self.assertFalse(self.opus.exists())
+        s3.upload_file.assert_called_once()
+        s3.delete_object.assert_called_once()
 
     def test_runpod_result_maps_into_qc_schema(self):
         poll = mock.AsyncMock(return_value={"segments": [
