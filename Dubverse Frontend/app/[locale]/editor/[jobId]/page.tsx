@@ -321,8 +321,26 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
     const REQUEST_TIMEOUT_MS = 15000
     // How long after a trigger a 404 is read as "still queued" not "finished".
     const TRIGGER_GRACE_MS = 120000
+    // A trigger-POST that 404s (video still rendering) is re-asked at most
+    // this often — not once per poll tick.
+    const TRIGGER_RETRY_MS = 30000
     let failures = 0
     let inFlight = false
+    let lastTriggerAttemptAt = 0
+
+    /** fetch with the timeout covering the AUTH wait too — AbortSignal alone
+     *  only bounds the request; a stalled session refresh in
+     *  ensureAuthHeaders() would otherwise leave inFlight set forever. */
+    function qcFetch(url: string, init: RequestInit = {}): Promise<Response> {
+      return Promise.race([
+        (async () => fetch(url, {
+          ...init,
+          headers: await apiClient.ensureAuthHeaders(),
+        }))(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new DOMException('timed out', 'TimeoutError')), REQUEST_TIMEOUT_MS)),
+      ])
+    }
 
     setQcError(null)
 
@@ -366,10 +384,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
         return
       }
       try {
-        const res = await fetch(`${API_BASE}/api/analysis/${jobId}/${lang}`, {
-          headers: await apiClient.ensureAuthHeaders(),
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-        })
+        const res = await qcFetch(`${API_BASE}/api/analysis/${jobId}/${lang}`)
         if (res.ok || res.status === 202) {
           failures = 0
         } else if (res.status === 404) {
@@ -421,14 +436,26 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             return
           }
           // No report and no run yet — ask for one, once.
+          // Rate-limit trigger retries: a still-rendering video answers 404,
+          // and re-asking every poll tick would spam POSTs for the whole
+          // render. Every TRIGGER_RETRY_MS is plenty — the outer attempt cap
+          // (~2h) still bounds the total wait.
+          if (Date.now() - lastTriggerAttemptAt < TRIGGER_RETRY_MS) {
+            if (!cancelled) setQcLoading(true)
+            return
+          }
+          lastTriggerAttemptAt = Date.now()
           let trigger: Response | null = null
           try {
-            trigger = await fetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, {
-              method: 'POST',
-              headers: await apiClient.ensureAuthHeaders(),
-              signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-            })
+            trigger = await qcFetch(`${API_BASE}/api/analyze/${jobId}/${lang}`, { method: 'POST' })
           } catch {}
+          if (trigger && trigger.status === 404) {
+            // Video still rendering — nothing was queued, so DON'T latch the
+            // trigger and DON'T stop: the next window re-asks, and once the
+            // film lands the POST answers 202 and QC proceeds normally.
+            if (!cancelled) setQcLoading(true)
+            return
+          }
           if (trigger) {
             // Only latch once the backend actually answered; a dropped request
             // may be retried on the next tick (bounded by the failure cap).
@@ -436,7 +463,7 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             qcTriggeredAtRef.current = Date.now()
             failures = 0
             if (!trigger.ok) {
-              // Refused: 503 (backend has no GPU) or 404 (no dubbed video yet).
+              // Refused (e.g. 503 — backend has no GPU capacity).
               const body = await trigger.json().catch(() => null)
               stopQc(body?.detail || `QC could not start (backend returned ${trigger.status}).`)
               return
