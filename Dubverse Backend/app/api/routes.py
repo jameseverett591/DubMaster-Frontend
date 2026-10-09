@@ -5948,7 +5948,7 @@ async def _run_dubbing_pipeline(
             try:
                 _wm_src = Path(settings.DUBBED_DIR) / job_id / f"dubbed_{target_lang.lower().strip()}.mp4"
                 _wm_job = await _get_or_rehydrate_job(job_id)
-                if _wm_src.exists() and not await _job_share_unlocked(job_id, user_id, _wm_job):
+                if _wm_src.exists() and not await _clean_dub_allowed(user_id, _wm_job):
                     asyncio.create_task(_prewarm_watermark(str(_wm_src)))
             except Exception as _wm_err:
                 logger.warning(f"Job {job_id}: watermark pre-build skipped: {_wm_err}")
@@ -6472,6 +6472,23 @@ async def _job_share_unlocked(job_id: str, caller: str, job) -> bool:
 # the clean file stays paid-only. Built once per language and cached next
 # to the clean file; the per-path lock keeps concurrent downloads from
 # racing the same encode.
+async def _clean_dub_allowed(caller: str, job) -> bool:
+    """True when the caller may receive the CLEAN (unbranded) video.
+
+    Tier-based, not payment-based: a free-tier render is still "billed" —
+    it debits the included minutes — so _job_share_unlocked's billed_seconds
+    check would hand every completed free job the clean file and the
+    watermark path would be dead code. Rule: a Pro subscription or a
+    billing-bypassed owner account gets clean bytes; everyone else gets the
+    branded copy. Ownerless legacy jobs stay clean (mirrors _require_job's
+    accommodation)."""
+    if not getattr(job, "user_id", None):
+        return True
+    from app.services import quota_service
+    if quota_service.is_billing_bypassed(caller):
+        return True
+    return await asyncio.to_thread(quota_service.tier_for, caller) == quota_service.TIER_PRO
+
 _WATERMARK_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 _watermark_locks: Dict[str, asyncio.Lock] = {}
 # One encode at a time across ALL jobs — several films finishing together
@@ -6592,7 +6609,7 @@ async def download_dubbed_video(job_id: str, language: str, request: Request, at
         raise HTTPException(status_code=404, detail="Dubbed video not found")
 
     job = await _get_or_rehydrate_job(job_id)
-    if job and not await _job_share_unlocked(job_id, _caller(request), job):
+    if job and not await _clean_dub_allowed(_caller(request), job):
         try:
             dubbed_path = await _watermarked_dub(dubbed_path)
         except Exception as e:
@@ -6740,6 +6757,12 @@ async def serve_share_video(token: str, exp: int, sig: str, dl: bool = False):
     path = _share_video_path(link["job_id"], job.target_language if job else None)
     if not path:
         raise HTTPException(status_code=404, detail="Dubbed video not found")
+    if job and not await _clean_dub_allowed(link.get("user_id", ""), job):
+        try:
+            path = await _watermarked_dub(path)
+        except Exception as e:
+            logger.error(f"Share {token}: watermark render failed: {e}")
+            raise HTTPException(status_code=503, detail="Watermarked video unavailable right now — try again shortly.")
     if dl:
         return FileResponse(path, media_type="video/mp4", filename=os.path.basename(path))
     return FileResponse(path, media_type="video/mp4", headers={"Content-Disposition": "inline"})
@@ -6993,20 +7016,17 @@ async def serve_job_audio(job_id: str, filename: str, request: Request):
         raise HTTPException(status_code=400, detail="Invalid filename")
     if _vendor_limited(request) and Path(filename).suffix.lower() not in (".mp3", ".wav", ".m4a"):
         raise HTTPException(status_code=403, detail="Media token is scoped to audio inputs only")
-    if not _vendor_limited(request) and filename.startswith("dubbed_") and filename.endswith(".mp4"):
-        # Same film gate as the other finished-film routes — /audio/ resolves
-        # the same job directory.
-        job = await _get_or_rehydrate_job(job_id)
-        if job and not await _job_share_unlocked(job_id, _caller(request), job):
-            raise HTTPException(
-                status_code=402,
-                detail="Download unlocks when this job is paid in full.",
-            )
     audio_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
     if not os.path.exists(audio_path):
         raise HTTPException(status_code=404, detail="Audio file not found")
+    if not _vendor_limited(request) and filename.startswith("dubbed_") and filename.endswith(".mp4"):
+        # Same film gate as the other finished-film routes — /audio/ resolves
+        # the same job directory. Free tier gets the branded copy, not a 402.
+        job = await _get_or_rehydrate_job(job_id)
+        if job and not await _clean_dub_allowed(_caller(request), job):
+            audio_path = await _watermarked_dub(audio_path)
     ext = Path(filename).suffix.lower()
-    media_types = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4"}
+    media_types = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".mp4": "video/mp4"}
     return FileResponse(audio_path, media_type=media_types.get(ext, "audio/mpeg"),
         headers=_NO_STORE_HEADERS)
 
@@ -7123,16 +7143,14 @@ async def serve_job_audio_legacy(job_id: str, filename: str, request: Request):
         # The same directory holds the finished paid film — a scoped media
         # token must never reach it.
         raise HTTPException(status_code=403, detail="Media token is scoped to vendor inputs only")
-    if filename.startswith("dubbed_") and filename.endswith(".mp4"):
-        job = await _get_or_rehydrate_job(job_id)
-        if job and not await _job_share_unlocked(job_id, _caller(request), job):
-            raise HTTPException(
-                status_code=402,
-                detail="Download unlocks when this job is paid in full.",
-            )
     file_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
+    if filename.startswith("dubbed_") and filename.endswith(".mp4"):
+        # Free tier gets the branded copy — never the clean bytes, never a 402.
+        job = await _get_or_rehydrate_job(job_id)
+        if job and not await _clean_dub_allowed(_caller(request), job):
+            file_path = await _watermarked_dub(file_path)
     ext = Path(filename).suffix.lower()
     media_types = {
         ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
@@ -9632,14 +9650,18 @@ async def download_export(job_id: str, filename: str, request: Request):
     file_path = os.path.join(settings.DUBBED_DIR, job_id, safe)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Export file not found")
-    # Everything this route serves is a finished paid artifact — exports are
+    # Everything this route serves is a finished artifact — exports are
     # named export_*.{mp4,mov,avi,mkv}, so a filename pattern misses them all.
+    # Free tier gets the branded copy (encoded as mp4, so the served filename
+    # is normalised to .mp4 whatever container was requested).
     job = await _get_or_rehydrate_job(job_id)
-    if job and not await _job_share_unlocked(job_id, _caller(request), job):
-        raise HTTPException(
-            status_code=402,
-            detail="Download unlocks when this job is paid in full.",
-        )
+    if job and not await _clean_dub_allowed(_caller(request), job):
+        try:
+            file_path = await _watermarked_dub(file_path)
+        except Exception as e:
+            logger.error(f"Job {job_id}: watermark render failed: {e}")
+            raise HTTPException(status_code=503, detail="Watermarked download unavailable right now — try again shortly.")
+        safe = f"wm_{os.path.splitext(safe)[0]}.mp4"
     return FileResponse(
         file_path,
         media_type="application/octet-stream",
