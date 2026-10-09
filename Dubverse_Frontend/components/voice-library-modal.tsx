@@ -8,6 +8,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Slider } from '@/components/ui/slider'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Mic2, Star, Search, Play, Square, Check, Loader2, ChevronLeft, ChevronRight, SlidersHorizontal, X } from 'lucide-react'
 import { apiClient, API_BASE_URL, type Voice } from '@/lib/api-client'
 import { useEditorStore } from '@/lib/editor-store'
@@ -1348,11 +1349,11 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
       {tuningVoice && (() => {
         const tv = tuningVoice
         const val = (k: string) => tuning[k] ?? tuningDefaults[k] ?? 0
-        const rows: Array<{ key: string; label: string; min: number; max: number; step: number; fmt: (v: number) => string }> = [
-          { key: 'speed', label: 'Speed', min: 0.5, max: 2, step: 0.05, fmt: v => `${v.toFixed(2)}×` },
-          { key: 'stability', label: 'Stability', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
-          { key: 'similarity_boost', label: 'Similarity', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
-          { key: 'style', label: 'Style exaggeration', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
+        const rows: Array<{ key: string; label: string; tip: string; min: number; max: number; step: number; fmt: (v: number) => string }> = [
+          { key: 'speed', label: 'Speed', tip: 'How fast the voice talks. 1.0× is the natural pace — lower for a slower, heavier delivery; higher for quicker speech.', min: 0.5, max: 2, step: 0.05, fmt: v => `${v.toFixed(2)}×` },
+          { key: 'stability', label: 'Stability', tip: 'Higher keeps the voice calm and even take after take; lower allows more emotion and variation.', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
+          { key: 'similarity_boost', label: 'Similarity', tip: 'How closely the output stays true to the original voice\u2019s tone and character. Higher = closer match.', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
+          { key: 'style', label: 'Style exaggeration', tip: 'Amplifies the voice\u2019s personality and emotion — higher is more dramatic, lower is more neutral.', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
         ]
         return (
           <div className="absolute inset-0 z-30 flex items-stretch justify-stretch bg-slate-950/80 backdrop-blur-sm rounded-xl">
@@ -1390,19 +1391,26 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
               {/* Sliders */}
               <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-5">
                 {rows.map(r => (
-                  <div key={r.key}>
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-xs text-slate-400">{t(r.label)}</span>
-                      <span className="text-xs font-mono text-amber-200">{r.fmt(val(r.key))}</span>
-                    </div>
-                    <Slider
-                      value={[val(r.key)]}
-                      min={r.min}
-                      max={r.max}
-                      step={r.step}
-                      onValueChange={([v]) => setTuningKey(r.key, v)}
-                    />
-                  </div>
+                  <Tooltip key={r.key}>
+                    <TooltipTrigger asChild>
+                      <div className="cursor-help">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-xs text-slate-400">{t(r.label)}</span>
+                          <span className="text-xs font-mono text-amber-200">{r.fmt(val(r.key))}</span>
+                        </div>
+                        <Slider
+                          value={[val(r.key)]}
+                          min={r.min}
+                          max={r.max}
+                          step={r.step}
+                          onValueChange={([v]) => setTuningKey(r.key, v)}
+                        />
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent side="left" className="max-w-[220px] text-xs">
+                      {t(r.tip)}
+                    </TooltipContent>
+                  </Tooltip>
                 ))}
                 <p className="text-[10px] text-slate-600 leading-relaxed">
                   {t('Saved to this voice — it applies wherever the voice is assigned.')}
