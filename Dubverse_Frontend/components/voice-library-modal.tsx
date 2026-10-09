@@ -932,6 +932,13 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                         : 'opacity-40 cursor-not-allowed'}`}>
                     <Square className="h-3.5 w-3.5 fill-current" />
                   </Button>
+                  <Button size="sm" variant="outline"
+                    onClick={() => openTuning(selected)}
+                    aria-label="Audio settings"
+                    title="Audio settings — speed, stability, similarity, style"
+                    className="h-8 w-8 p-0 border border-amber-500/30 text-amber-200 bg-slate-950/60 hover:bg-amber-500/10">
+                    <SlidersHorizontal className="h-3.5 w-3.5" />
+                  </Button>
                   {isJobAware && (
                     <select
                       aria-label={t('Assign to speaker')}
