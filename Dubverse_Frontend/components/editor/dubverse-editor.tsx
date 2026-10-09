@@ -8605,6 +8605,19 @@ export function DubVerseEditor({
               </>
             )}
           </Button>
+          {/* Free accounts: the alternate plan lives one click away here too,
+              mirroring the Upgrade button in the main app header. */}
+          {!isPro && (
+            <Link href="/subscribe?upgrade=true">
+              <Button
+                size="sm"
+                className="h-8 px-3 text-xs font-bold tracking-wide uppercase bg-gradient-to-r from-[#A855F7] to-[#7C3AED] text-white hover:opacity-90"
+              >
+                <Sparkles className="h-3.5 w-3.5 mr-1" />
+                {t('Upgrade')}
+              </Button>
+            </Link>
+          )}
           {/* Language selector */}
           <LanguageSwitcher />
           <Bell className="h-5 w-5 text-slate-400" />
