@@ -720,10 +720,11 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
             onClick={() => openTuning(v)}
             aria-label="Audio settings"
             title="Audio settings — speed, stability, similarity, style"
-            className={`border border-amber-500/30 text-amber-200 bg-slate-950/60 hover:bg-amber-500/10 shrink-0 p-0 ${
-              isHero ? 'h-12 w-12' : 'h-8 w-8'
+            className={`border border-amber-500/50 text-amber-300 bg-slate-950/60 hover:bg-amber-500/15 shrink-0 gap-1.5 px-2.5 ${
+              isHero ? 'h-12 text-sm' : 'h-8 text-xs'
             }`}>
             <SlidersHorizontal className="h-3.5 w-3.5" />
+            {t('Tune')}
           </Button>
           {isJobAware && (
             assignedTo ? (
@@ -936,8 +937,9 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                     onClick={() => openTuning(selected)}
                     aria-label="Audio settings"
                     title="Audio settings — speed, stability, similarity, style"
-                    className="h-8 w-8 p-0 border border-amber-500/30 text-amber-200 bg-slate-950/60 hover:bg-amber-500/10">
+                    className="h-8 gap-1.5 px-2.5 text-xs border border-amber-500/50 text-amber-300 bg-slate-950/60 hover:bg-amber-500/15">
                     <SlidersHorizontal className="h-3.5 w-3.5" />
+                    {t('Tune')}
                   </Button>
                   {isJobAware && (
                     <select
