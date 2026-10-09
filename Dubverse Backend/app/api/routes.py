@@ -6521,15 +6521,14 @@ def _build_watermarked_dub(dubbed_path: str, wm_path: str) -> None:
             f"watermark encode failed (rc={proc.returncode}): "
             f"{proc.stderr.decode(errors='replace')[-400:]}")
     os.replace(tmp, wm_path)
-    # The stat→replace gap is tiny, but check once more after publish: a
-    # source that moved in that window leaves a stale watermark cached
-    # with the newest mtime. Roll it back rather than serve an old cut.
-    if not _source_unchanged():
-        try:
-            os.unlink(wm_path)
-        except OSError:
-            pass
-        raise RuntimeError("watermark source changed during publish")
+    # Pin the cache entry's mtime to the source fingerprint it was built
+    # from. _fresh() then means "built from a source no older than the
+    # current one" EXACTLY: a re-render landing after publish bumps the
+    # source past the pinned stamp and the next download re-encodes.
+    # (Replacing publish-then-rollback: a reader between replace and
+    # unlink could grab a path that then vanished. A pinned mtime never
+    # unpublishes a file a reader may already hold.)
+    os.utime(wm_path, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
 
 
 async def _watermarked_dub(dubbed_path: str) -> str:
