@@ -1940,10 +1940,14 @@ class DubVerseAPIClient {
   }
 
   /** Render cost quote for the cost counter — needed_seconds is 0 when the
-   *  job was already billed (re-renders are free). */
+   *  job was already billed (re-renders are free). from_credit_cents is the
+   *  amount that would actually bill to paid balance (needed minus included
+   *  free minutes) — the counter displays that, not the gross needed figure. */
   async getQuotaEstimate(jobId: string): Promise<{
     already_billed: boolean; needed_seconds: number; ok: boolean
     shortfall_cents: number; bypassed?: boolean
+    from_included_seconds?: number; from_credit_seconds?: number
+    from_credit_cents?: number
   } | null> {
     const res = await this._fetch(`${this.baseURL}/api/quota/estimate/${jobId}`)
     if (!res.ok) return null
