@@ -26,6 +26,7 @@ except ImportError:
 
 from app.services.elevenlabs_tts import elevenlabs_tts
 from app.services.fish_audio_tts import fish_audio_tts
+from app.services import voice_settings_store
 from app.services.respeecher_service import respeecher_tts, SEED_HISTORY_MAX
 from app.services import tts_usage
 from app.services import path_safety
@@ -1781,7 +1782,16 @@ class DubbingService:
                 audio_path = os.path.join(output_dir, f"segment_{i:04d}.mp3")
 
                 emotion_defaults = analyze_emotion(text)
-                override = (voice_settings or {}).get(speaker, {})
+                override = dict((voice_settings or {}).get(speaker, {}))
+                # Saved per-voice Audio Settings (Voice Library sliders) fill
+                # keys the render request didn't set — per-speaker values win.
+                try:
+                    _voice_tuned = voice_settings_store.get(
+                        user_id, (voice_mapping or {}).get(speaker) or "")
+                except Exception:
+                    _voice_tuned = {}
+                for _k, _v in _voice_tuned.items():
+                    override.setdefault(_k, _v)
                 stability        = override.get("stability",        emotion_defaults["stability"])
                 similarity_boost = override.get("similarity_boost", emotion_defaults["similarity_boost"])
                 style            = override.get("style",            emotion_defaults["style"])
@@ -1919,6 +1929,17 @@ class DubbingService:
                         MIN_SPEED_RATIO,
                         min(self._FIT_MAX_SPEED, _pred_dur / max(0.2, _gen_window)),
                     )
+                    # Saved per-voice Audio Settings (the card sliders): speed
+                    # multiplies the fit-computed pace; stability maps inversely
+                    # onto temperature; style onto top_p. Only keys the user
+                    # actually tuned apply — pipeline defaults stay untouched.
+                    _fish_over = voice_settings_store.fish_tts_overrides(_voice_tuned)
+                    if "speed_mult" in _fish_over:
+                        _gen_speed = max(0.5, min(2.0, _gen_speed * _fish_over["speed_mult"]))
+                    if "temperature" in _fish_over:
+                        tts_kwargs["temperature"] = _fish_over["temperature"]
+                    if "top_p" in _fish_over:
+                        tts_kwargs["top_p"] = _fish_over["top_p"]
                     tts_kwargs["speed"] = round(_gen_speed, 3)
                     fish_speed_applied = abs(_gen_speed - 1.0) > 0.01
 

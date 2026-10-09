@@ -1029,6 +1029,38 @@ class DubVerseAPIClient {
     return (data.voices || []) as CustomVoice[]
   }
 
+  /** Per-voice Audio Settings — the tuning sliders on a library card
+   *  (Speed / Stability / Similarity / Style). Empty object = never tuned. */
+  async getVoiceSettings(voiceId: string): Promise<{
+    settings: Record<string, number>
+    defaults: { speed: number; stability: number; similarity_boost: number; style: number }
+  }> {
+    const res = await this._fetch(
+      `${this.baseURL}/api/voice-settings/${encodeURIComponent(voiceId)}`)
+    if (!res.ok) throw new Error(`Voice settings failed (${res.status})`)
+    return res.json()
+  }
+
+  async saveVoiceSettings(voiceId: string, settings: Record<string, number>): Promise<void> {
+    const res = await this._fetch(
+      `${this.baseURL}/api/voice-settings/${encodeURIComponent(voiceId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ settings }),
+    })
+    if (!res.ok) throw new Error(`Voice settings save failed (${res.status})`)
+  }
+
+  /** Preview path with tuning params — the backend keys its preview cache on
+   *  the values, so each slider position gets its own synthesized clip. */
+  voicePreviewPath(voiceId: string, settings?: Record<string, number>): string {
+    const qs = settings && Object.keys(settings).length
+      ? '?' + new URLSearchParams(
+          Object.entries(settings).map(([k, v]) => [k, String(v)])).toString()
+      : ''
+    return `/api/voice-preview/${encodeURIComponent(voiceId)}${qs}`
+  }
+
   async addCustomVoice(provider: 'fish-audio' | 'elevenlabs', voiceId: string, name?: string): Promise<CustomVoice> {
     const res = await this._fetch(`${this.baseURL}/api/voices/custom`, {
       method: 'POST',

@@ -7,7 +7,8 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Mic2, Star, Search, Play, Square, Check, Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Slider } from '@/components/ui/slider'
+import { Mic2, Star, Search, Play, Square, Check, Loader2, ChevronLeft, ChevronRight, SlidersHorizontal, X } from 'lucide-react'
 import { apiClient, API_BASE_URL, type Voice } from '@/lib/api-client'
 import { useEditorStore } from '@/lib/editor-store'
 import { useT } from '@/lib/use-t'
@@ -317,6 +318,46 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   const blobUrlRef = useRef<string | null>(null)
   // Generation counter guards the async handlePreview against click races:
   // each call bumps it; after every await we bail if a newer call started.
+  // ── Audio Settings (floating tuning panel) ──────────────────────────────
+  // The voice card's sliders button lands a floating panel over the side
+  // panel: Speed / Stability / Similarity / Style, persisted per user+voice
+  // on the backend so the tuning follows the voice into every render.
+  const [tuningVoice, setTuningVoice] = useState<Voice | null>(null)
+  const [tuning, setTuning] = useState<Record<string, number>>({})
+  const [tuningDefaults, setTuningDefaults] = useState<Record<string, number>>({
+    speed: 1, stability: 0.5, similarity_boost: 0.75, style: 0.3,
+  })
+  const tuningSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const openTuning = useCallback((v: Voice) => {
+    setTuningVoice(v)
+    setTuning({})
+    apiClient.getVoiceSettings(v.voice_id).then(r => {
+      setTuningDefaults(r.defaults)
+      setTuning(r.settings)
+    }).catch(() => {})
+  }, [])
+
+  const closeTuning = useCallback(() => {
+    if (tuningSaveTimer.current) clearTimeout(tuningSaveTimer.current)
+    setTuningVoice(null)
+  }, [])
+
+  const setTuningKey = useCallback((key: string, value: number) => {
+    setTuning(prev => {
+      const next = { ...prev, [key]: value }
+      if (tuningVoice) {
+        if (tuningSaveTimer.current) clearTimeout(tuningSaveTimer.current)
+        const vid = tuningVoice.voice_id
+        tuningSaveTimer.current = setTimeout(() => {
+          apiClient.saveVoiceSettings(vid, next)
+            .catch(err => console.warn('[VOICE-TUNING]', err))
+        }, 500)
+      }
+      return next
+    })
+  }, [tuningVoice])
+
   const previewGenRef = useRef(0)
   const [previewingId, setPreviewingId] = useState<string | null>(null)
 
@@ -338,7 +379,9 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     setPreviewingId(null)
   }, [])
 
-  const handlePreview = useCallback(async (voiceId: string, previewUrl?: string) => {
+  const handlePreview = useCallback(async (
+    voiceId: string, previewUrl?: string, settings?: Record<string, number>,
+  ) => {
     const wasPlayingThis = previewingId === voiceId
     stopPreview()
     if (wasPlayingThis) return  // clicking the playing voice = toggle off
@@ -351,10 +394,12 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     // access_token in the query string instead. Building this URL by hand is why
     // preview 401'd on both the direct play and the blob fallback below.
     // An absolute URL is a third-party preview (ElevenLabs et al) and needs no token.
-    const rawPath = previewUrl
+    // Tuned previews bypass the canned clip — a stored mp3 can't reflect sliders.
+    const tuned = settings && Object.keys(settings).length > 0
+    const rawPath = (previewUrl && !tuned)
       ? (previewUrl.startsWith('/') ? previewUrl : `/${previewUrl}`)
-      : `/api/voice-preview/${encodeURIComponent(voiceId)}`
-    const src = previewUrl?.startsWith('http')
+      : apiClient.voicePreviewPath(voiceId, settings)
+    const src = (!tuned && previewUrl?.startsWith('http'))
       ? previewUrl
       : await apiClient.mediaUrl(rawPath)
     if (gen !== previewGenRef.current) return  // a newer preview won the race
@@ -671,6 +716,15 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
               : 'opacity-40 cursor-not-allowed'}`}>
             <Square className="h-3.5 w-3.5 fill-current" />
           </Button>
+          <Button size="sm" variant="outline"
+            onClick={() => openTuning(v)}
+            aria-label="Audio settings"
+            title="Audio settings — speed, stability, similarity, style"
+            className={`border border-amber-500/30 text-amber-200 bg-slate-950/60 hover:bg-amber-500/10 shrink-0 p-0 ${
+              isHero ? 'h-12 w-12' : 'h-8 w-8'
+            }`}>
+            <SlidersHorizontal className="h-3.5 w-3.5" />
+          </Button>
           {isJobAware && (
             assignedTo ? (
               <span className="text-[10px] text-emerald-400 font-medium flex items-center gap-1 px-2">
@@ -930,7 +984,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   }, [showOnlyFavorites, pageCache, favorites])
 
   return (
-    <div className="flex flex-col h-full min-h-0 gap-3 overflow-hidden">
+    <div className="relative flex flex-col h-full min-h-0 gap-3 overflow-hidden">
       {/* Speakers strip. Was grid-only, which meant the list layout — the only
           one where voices could be dragged — had no way to assign a voice to a
           speaker at all. Both layouts get both routes. */}
@@ -1278,6 +1332,77 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
           </div>
         </>
       )}
+
+      {/* Floating Audio Settings panel — lands over the side panel when a
+          card's sliders button is pressed. X in the upper right is the only
+          close control; changes save debounced to the backend. */}
+      {tuningVoice && (() => {
+        const tv = tuningVoice
+        const val = (k: string) => tuning[k] ?? tuningDefaults[k] ?? 0
+        const rows: Array<{ key: string; label: string; min: number; max: number; step: number; fmt: (v: number) => string }> = [
+          { key: 'speed', label: 'Speed', min: 0.5, max: 2, step: 0.05, fmt: v => `${v.toFixed(2)}×` },
+          { key: 'stability', label: 'Stability', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
+          { key: 'similarity_boost', label: 'Similarity', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
+          { key: 'style', label: 'Style exaggeration', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
+        ]
+        return (
+          <div className="absolute inset-0 z-30 flex items-stretch justify-stretch bg-slate-950/80 backdrop-blur-sm rounded-xl">
+            <div className="relative flex-1 m-1 rounded-xl border border-amber-500/30 bg-[#0a1220] shadow-2xl flex flex-col min-h-0">
+              {/* X close — upper right corner */}
+              <button
+                type="button"
+                onClick={closeTuning}
+                aria-label={t('Close audio settings')}
+                className="absolute top-2 right-2 z-10 rounded-full p-1.5 text-slate-400 hover:text-white hover:bg-slate-700/60 transition-colors"
+              >
+                <X className="h-4 w-4" />
+              </button>
+
+              {/* Header: voice identity + audition button */}
+              <div className="flex items-center gap-3 px-4 pt-4 pb-3 pr-10 border-b border-slate-800 shrink-0">
+                <div className="h-10 w-10 rounded-full bg-amber-500/15 border border-amber-500/40 flex items-center justify-center shrink-0">
+                  <Mic2 className="h-5 w-5 text-amber-300" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="font-semibold text-amber-200 truncate">{tv.name}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-slate-500">{t('Audio Settings')}</div>
+                </div>
+                <Button size="sm" variant="outline"
+                  onClick={() => handlePreview(tv.voice_id, undefined, tuning)}
+                  title={t('Preview with these settings')}
+                  className="border border-amber-500/40 text-amber-200 bg-slate-950/60 hover:bg-amber-500/10 h-8 shrink-0">
+                  {previewingId === tv.voice_id
+                    ? <Square className="h-3.5 w-3.5 mr-1.5 fill-current" />
+                    : <Play className="h-3.5 w-3.5 mr-1.5" />}
+                  {previewingId === tv.voice_id ? t('Stop') : t('Preview')}
+                </Button>
+              </div>
+
+              {/* Sliders */}
+              <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-5">
+                {rows.map(r => (
+                  <div key={r.key}>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-xs text-slate-400">{t(r.label)}</span>
+                      <span className="text-xs font-mono text-amber-200">{r.fmt(val(r.key))}</span>
+                    </div>
+                    <Slider
+                      value={[val(r.key)]}
+                      min={r.min}
+                      max={r.max}
+                      step={r.step}
+                      onValueChange={([v]) => setTuningKey(r.key, v)}
+                    />
+                  </div>
+                ))}
+                <p className="text-[10px] text-slate-600 leading-relaxed">
+                  {t('Saved to this voice — it applies wherever the voice is assigned.')}
+                </p>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
     </div>
   )
 }
