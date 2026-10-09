@@ -27,7 +27,8 @@ import {
   Loader2,
   LogIn,
   LogOut,
-  Import
+  Import,
+  Facebook
 } from "lucide-react"
 import type { VideoSource } from "@/components/dashboard"
 import { apiClient } from "@/lib/api-client"
@@ -37,6 +38,10 @@ interface YouTubeIntegrationProps {
   onVideoSelect: (video: VideoSource) => void
   /** Deep-linked YouTube URL (extension/bookmarklet: ?yt_url=...). Imported once on mount. */
   initialImportUrl?: string
+  /** "facebook" renders only the URL import card under Facebook branding —
+   *  no YouTube sign-in/captions tabs. The field auto-detects the host
+   *  either way, so both providers share the same import logic. */
+  provider?: "youtube" | "facebook"
 }
 
 type ChannelVideo = {
@@ -114,7 +119,7 @@ function loadGis(): Promise<void> {
   })
 }
 
-export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeIntegrationProps) {
+export function YouTubeIntegration({ onVideoSelect, initialImportUrl, provider = "youtube" }: YouTubeIntegrationProps) {
   const t = useT()
   // Import URL (sticky bar / extension deep-link) and caption-extract URL
   // are separate fields — sharing one input confused the deep-link flow.
@@ -441,9 +446,73 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
     }
   }
 
+  // Shared URL-import card — pinned (sticky) at the bottom of the YouTube
+  // view, a plain card in the Facebook view. Host detection inside
+  // handleImportVideo routes to the right importer either way.
+  const importCard = (
+    <Card className="backdrop-blur-xl bg-card/90 border-border/50 shadow-lg">
+      <CardContent className="pt-4 pb-4">
+        <p className="mb-2 text-xs text-muted-foreground">
+          {provider === "facebook"
+            ? t('Paste a public Facebook video or Reel URL — your own, public domain, or one you have permission to use')
+            : t('Paste a YouTube or Facebook video URL — your own, public domain, or one you have permission to use')}
+        </p>
+        <div className="flex gap-3">
+          <Input
+            placeholder={provider === "facebook"
+              ? "https://www.facebook.com/.../videos/... or https://fb.watch/..."
+              : "https://www.youtube.com/watch?v=... or https://www.facebook.com/.../videos/..."}
+            value={youtubeUrl}
+            onChange={(e) => setYoutubeUrl(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && youtubeUrl.trim() && !isImporting && handleImportVideo(youtubeUrl)}
+            className="flex-1"
+          />
+          <Button
+            variant="outline"
+            disabled={isImporting || !youtubeUrl.trim()}
+            onClick={() => handleImportVideo(youtubeUrl)}
+          >
+            {isImporting
+              ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              : <Import className="mr-2 h-4 w-4" />}
+            {t('Import')}
+          </Button>
+        </div>
+        {importError && (
+          <div className="mt-3 flex items-start gap-2 text-sm text-red-500">
+            <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+            {importError}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+
   return (
     <div className="space-y-8">
       {/* Important Notice */}
+      {provider === "facebook" ? (
+        <Card className="backdrop-blur-md bg-blue-600/10 border-blue-600/30">
+          <CardContent className="p-4">
+            <div className="flex items-start gap-3">
+              <Facebook className="h-5 w-5 text-blue-500 mt-0.5 shrink-0" />
+              <div className="space-y-2">
+                <p className="font-medium text-blue-400">{t('About Facebook Import')}</p>
+                <p className="text-sm text-blue-300/80">
+                  {t('Paste a link to a public Facebook video or Reel to import it for dubbing.')}
+                </p>
+                <ul className="text-sm text-blue-300/80 list-disc list-inside space-y-1 ml-2">
+                  <li>{t('Public videos and Reels')}</li>
+                  <li>{t('Videos you have permission to download and dub')}</li>
+                </ul>
+                <p className="text-sm text-blue-300/80 mt-2">
+                  <strong>{t('Note:')}</strong> {t("Only public videos can be imported — Facebook doesn't offer a sign-in integration here. If a video needs a Facebook login (private, group, or friends-only), download it and upload the file directly. You're responsible for having the rights to any video you import.")}
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      ) : (
       <Card className="backdrop-blur-md bg-blue-500/10 border-blue-500/30">
         <CardContent className="p-4">
           <div className="flex items-start gap-3">
@@ -468,8 +537,11 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
           </div>
         </CardContent>
       </Card>
+      )}
 
-      {/* Main Tabs */}
+      {/* Main Tabs — YouTube only; captions extraction and channel browse
+          are YouTube features, so the Facebook view is just the URL card. */}
+      {provider === "youtube" && (
       <Tabs value={activeMode} onValueChange={setActiveMode} className="w-full">
         <TabsList className="grid w-full grid-cols-3 bg-background/50 backdrop-blur-md">
           <TabsTrigger value="captions" className="flex items-center gap-2">
@@ -915,44 +987,15 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
           )}
         </TabsContent>
       </Tabs>
+      )}
 
       {/* Direct URL import — pinned to the bottom of the YouTube tab on
           every sub-tab and whether signed in or not, so it stays reachable
-          while scrolling the channel grid or after a deep-link import. */}
-      <div className="sticky bottom-4 z-10 mt-6">
-        <Card className="backdrop-blur-xl bg-card/90 border-border/50 shadow-lg">
-          <CardContent className="pt-4 pb-4">
-            <p className="mb-2 text-xs text-muted-foreground">
-              {t('Paste a YouTube or Facebook video URL — your own, public domain, or one you have permission to use')}
-            </p>
-            <div className="flex gap-3">
-              <Input
-                placeholder="https://www.youtube.com/watch?v=... or https://www.facebook.com/.../videos/..."
-                value={youtubeUrl}
-                onChange={(e) => setYoutubeUrl(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && youtubeUrl.trim() && !isImporting && handleImportVideo(youtubeUrl)}
-                className="flex-1"
-              />
-              <Button
-                variant="outline"
-                disabled={isImporting || !youtubeUrl.trim()}
-                onClick={() => handleImportVideo(youtubeUrl)}
-              >
-                {isImporting
-                  ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  : <Import className="mr-2 h-4 w-4" />}
-                {t('Import')}
-              </Button>
-            </div>
-            {importError && (
-              <div className="mt-3 flex items-start gap-2 text-sm text-red-500">
-                <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
-                {importError}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+          while scrolling the channel grid or after a deep-link import. The
+          Facebook view renders the same card unpinned. */}
+      {provider === "youtube"
+        ? <div className="sticky bottom-4 z-10 mt-6">{importCard}</div>
+        : importCard}
     </div>
   )
 }
