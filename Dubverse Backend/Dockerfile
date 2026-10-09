@@ -18,6 +18,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     # FFmpeg for audio/video processing
     ffmpeg \
+    # Watermark drawtext needs a real font file — not guaranteed transitively
+    fonts-dejavu-core \
     librubberband2 \
     rubberband-cli \
     # Build tools for Python packages

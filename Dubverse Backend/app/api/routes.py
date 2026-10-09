@@ -5940,6 +5940,18 @@ async def _run_dubbing_pipeline(
             # The atomic sentinel claim (same as POST /api/analyze) keeps a
             # dub-complete hook and an editor open from starting two runs at once.
             _auto_trigger_qc(job_id, target_lang, video_path)
+
+            # Free-tier downloads are watermarked — pre-build the branded copy
+            # in the background so an unpaid user's first download isn't a
+            # feature-length encode wait. Paid jobs never serve it, so skip
+            # the encode for them.
+            try:
+                _wm_src = Path(settings.DUBBED_DIR) / job_id / f"dubbed_{target_lang.lower().strip()}.mp4"
+                _wm_job = await _get_or_rehydrate_job(job_id)
+                if _wm_src.exists() and not await _job_share_unlocked(job_id, user_id, _wm_job):
+                    asyncio.create_task(_prewarm_watermark(str(_wm_src)))
+            except Exception as _wm_err:
+                logger.warning(f"Job {job_id}: watermark pre-build skipped: {_wm_err}")
         else:
             if render_charge and user_id:
                 await _unmeter_render(job_id, user_id)
@@ -6456,6 +6468,111 @@ async def _job_share_unlocked(job_id: str, caller: str, job) -> bool:
     return True
 
 
+# Free-tier downloads carry a branded watermark over the whole video —
+# the clean file stays paid-only. Built once per language and cached next
+# to the clean file; the per-path lock keeps concurrent downloads from
+# racing the same encode.
+_WATERMARK_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+_watermark_locks: Dict[str, asyncio.Lock] = {}
+# One encode at a time across ALL jobs — several films finishing together
+# would otherwise pile libx264 onto the backend CPU (the same starvation
+# that broke QC before it moved to RunPod). Encoder threads are also capped.
+_watermark_sem = asyncio.Semaphore(1)
+
+
+def _build_watermarked_dub(dubbed_path: str, wm_path: str) -> None:
+    """Burn a dim 'DubMaster' trademark across the full video (drawtext runs
+    the whole duration — this is a brand overlay, not a corner stamp).
+    Writes via a temp + rename so a request mid-encode never gets a
+    half-written file. The source fingerprint is re-checked after the
+    encode so a re-render mid-flight can never publish a stale cut."""
+    tmp = wm_path + ".tmp.mp4"
+    try:
+        src_stat = os.stat(dubbed_path)
+    except OSError as e:
+        raise RuntimeError(f"watermark source missing: {e}")
+
+    def _source_unchanged() -> bool:
+        now = os.stat(dubbed_path)
+        return now.st_mtime_ns == src_stat.st_mtime_ns and now.st_size == src_stat.st_size
+    cmd = [
+        "ffmpeg", "-y", "-i", dubbed_path,
+        "-vf",
+        f"drawtext=fontfile={_WATERMARK_FONT}:text='DubMaster':"
+        "fontcolor=white@0.32:fontsize=h/10:borderw=2:bordercolor=black@0.4:"
+        "x=(w-text_w)/2:y=h-text_h-(h/14)",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+        "-threads", "2",
+        "-c:a", "copy",
+        tmp,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, timeout=3600)
+    ok = proc.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 1000
+    # A re-render overwriting the source mid-encode must not publish —
+    # its fresher mtime would let _fresh() accept the old cut forever.
+    if ok and not _source_unchanged():
+        ok = False
+    if not ok:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"watermark encode failed (rc={proc.returncode}): "
+            f"{proc.stderr.decode(errors='replace')[-400:]}")
+    os.replace(tmp, wm_path)
+    # Pin the cache entry's mtime to the source fingerprint it was built
+    # from. _fresh() then means "built from a source no older than the
+    # current one" EXACTLY: a re-render landing after publish bumps the
+    # source past the pinned stamp and the next download re-encodes.
+    # (Replacing publish-then-rollback: a reader between replace and
+    # unlink could grab a path that then vanished. A pinned mtime never
+    # unpublishes a file a reader may already hold.)
+    os.utime(wm_path, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
+
+
+async def _watermarked_dub(dubbed_path: str) -> str:
+    """Return the watermarked copy of a finished dub, building it on first
+    request. Feature-film encode can take minutes — the per-path lock
+    serialises concurrent downloads of the same language onto one encode,
+    and the global semaphore caps encode CPU. A mid-encode re-render is
+    detected by the source fingerprint in _build_watermarked_dub rather
+    than by holding _render_locks: nesting the encode sem under/over the
+    render lock either blocks re-renders behind foreign encodes or
+    reserves the single encode slot while a render runs."""
+    def _fresh() -> bool:
+        # A re-rendered dub must re-encode — never serve a watermark burned
+        # from an older cut of the film.
+        return os.path.exists(wm_path) and \
+            os.path.getmtime(wm_path) >= os.path.getmtime(dubbed_path)
+
+    # Name it wm_dubbed_*.mp4, NOT dubbed_*.wm.mp4: the dubbed_*.mp4 globs
+    # (job rehydration, render-candidate scan) must never pick the watermark
+    # copy up as if it were a finished clean dub.
+    wm_path = os.path.join(os.path.dirname(dubbed_path),
+                           f"wm_{os.path.basename(dubbed_path)}")
+    if _fresh():
+        return wm_path
+    lock = _watermark_locks.setdefault(wm_path, asyncio.Lock())
+    async with lock:
+        if _fresh():
+            return wm_path
+        async with _watermark_sem:
+            if _fresh():
+                return wm_path
+            await asyncio.to_thread(_build_watermarked_dub, dubbed_path, wm_path)
+    return wm_path
+
+
+async def _prewarm_watermark(dubbed_path: str) -> None:
+    """Background watermark build — failures are logged, never raised into a
+    fire-and-forget task."""
+    try:
+        await _watermarked_dub(dubbed_path)
+    except Exception as e:
+        logger.warning(f"Watermark pre-build failed for {dubbed_path}: {e}")
+
+
 @router.get("/download/{job_id}/{language}", dependencies=[Depends(_dep_job_access)])
 async def download_dubbed_video(job_id: str, language: str, request: Request, attachment: bool = False):
     """Serve the finished dub.
@@ -6467,8 +6584,8 @@ async def download_dubbed_video(job_id: str, language: str, request: Request, at
     the only thing that actually makes the browser save it.
 
     The paywall covers BOTH responses, not just attachment=1 — inline bytes
-    save to disk exactly as well, so gating only the attachment left the
-    whole film one header short of free (see _job_share_unlocked)."""
+    save to disk exactly as well. Unpaid jobs get the watermarked copy
+    (free tier) — never the clean file (see _job_share_unlocked)."""
     dubbed_path = os.path.join(settings.DUBBED_DIR, job_id, f"dubbed_{language}.mp4")
 
     if not os.path.exists(dubbed_path):
@@ -6476,10 +6593,11 @@ async def download_dubbed_video(job_id: str, language: str, request: Request, at
 
     job = await _get_or_rehydrate_job(job_id)
     if job and not await _job_share_unlocked(job_id, _caller(request), job):
-        raise HTTPException(
-            status_code=402,
-            detail="Download unlocks when this job is paid in full.",
-        )
+        try:
+            dubbed_path = await _watermarked_dub(dubbed_path)
+        except Exception as e:
+            logger.error(f"Job {job_id}: watermark render failed: {e}")
+            raise HTTPException(status_code=503, detail="Watermarked download unavailable right now — try again shortly.")
 
     if attachment:
         filename = f"dubbed_{language}_{job_id[:8]}.mp4"
