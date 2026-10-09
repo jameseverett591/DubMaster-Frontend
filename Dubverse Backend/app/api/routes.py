@@ -34,6 +34,7 @@ from app.models import (
     RegenerateRequest,
     YouTubeImportRequest,
     YouTubeCaptionsRequest,
+    FacebookImportRequest,
 )
 from app.config import get_settings, upload_size_cap
 from app.storage.manager import StorageManager
@@ -57,6 +58,7 @@ from app.services.fish_audio_tts import fish_audio_tts
 from app.services.respeecher_service import respeecher_tts
 from app.services.scene_summary import generate_scene_summary
 from app.services import youtube_service
+from app.services import facebook_service
 from app.utils.language import normalize_language_code
 
 logger = logging.getLogger(__name__)
@@ -3495,7 +3497,8 @@ async def youtube_import(body: YouTubeImportRequest,
         # several minutes and holding the HTTP request open for it invites
         # proxy timeouts. Status polling carries the progress instead.
         background_tasks.add_task(
-            _youtube_download_then_pipeline, job_id, body.url, dest_stem,
+            _url_download_then_pipeline, job_id, body.url, dest_stem,
+            youtube_service.download_video, "YouTube",
             body.transcript, src_lang)
 
         return UploadResponse(
@@ -3514,24 +3517,26 @@ async def youtube_import(body: YouTubeImportRequest,
         raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
 
 
-async def _youtube_download_then_pipeline(job_id: str, url: str,
-                                          dest_stem: str,
-                                          transcript: Optional[list] = None,
-                                          src_lang: Optional[str] = None):
-    """Background leg of /youtube/import: download, enforce the same caps as
-    /upload on the real bytes, then hand off to the normal pipeline. When the
-    caller supplied reviewed captions they become the transcript instead —
-    the pipeline would only spend GPU re-deriving words the user already
-    checked."""
+async def _url_download_then_pipeline(job_id: str, url: str,
+                                      dest_stem: str,
+                                      download_fn,
+                                      provider: str,
+                                      transcript: Optional[list] = None,
+                                      src_lang: Optional[str] = None):
+    """Background leg of the URL-import routes: download, enforce the same
+    caps as /upload on the real bytes, then hand off to the normal pipeline.
+    When the caller supplied reviewed captions they become the transcript
+    instead — the pipeline would only spend GPU re-deriving words the user
+    already checked."""
     try:
         video_path, yt_info = await asyncio.to_thread(
-            youtube_service.download_video,
+            download_fn,
             url, dest_stem,
             settings.MAX_UPLOAD_SIZE,
             float(MAX_VIDEO_DURATION_SECONDS),
         )
     except Exception as e:
-        logger.error(f"Job {job_id}: YouTube download failed: {e}")
+        logger.error(f"Job {job_id}: {provider} download failed: {e}")
         await job_manager.update_job_status(
             job_id, JobStatus.FAILED, error_message=str(e))
         return
@@ -3566,7 +3571,7 @@ async def _youtube_download_then_pipeline(job_id: str, url: str,
         job.video_duration = _dur
 
     logger.info(
-        f"YouTube import: {yt_info.get('title')!r} "
+        f"{provider} import: {yt_info.get('title')!r} "
         f"({file_size} bytes, {_dur:.1f}s) -> Job {job_id}")
 
     provided = None
@@ -3610,6 +3615,110 @@ async def _youtube_download_then_pipeline(job_id: str, url: str,
         )
     else:
         await process_video_pipeline(job_id, video_path)
+
+
+# --- Facebook import --------------------------------------------------------
+# Same shape as the YouTube routes minus captions — Facebook exposes no
+# fetchable caption tracks, so imports always run the ASR pipeline. URLs are
+# validated to be Facebook before yt-dlp sees them, anonymous access only
+# (public videos), and the same duration/size caps apply.
+
+
+@router.get("/facebook/info", dependencies=[Depends(_dep_auth)])
+async def facebook_info(url: str):
+    """Probe a Facebook video URL — title, duration, thumbnail."""
+    try:
+        info = await asyncio.to_thread(facebook_service.get_video_info, url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Facebook info failed: {e}")
+        raise HTTPException(status_code=502, detail="Could not reach Facebook")
+    return info
+
+
+@router.post("/facebook/import", response_model=UploadResponse,
+             dependencies=[Depends(_dep_auth)])
+async def facebook_import(body: FacebookImportRequest,
+                          request: Request,
+                          background_tasks: BackgroundTasks):
+    """Download a public Facebook video into a new job, then run the normal
+    pipeline. Mirrors /youtube/import — the transcript field is honored the
+    same way (reviewed captions skip ASR) even though Facebook itself offers
+    no caption source to pre-fill it from."""
+    user_id = _caller(request)
+
+    src_lang: Optional[str] = None
+    if body.source_language:
+        normalized = normalize_language_code(body.source_language, allow_auto=True)
+        if normalized and normalized != "auto":
+            src_lang = normalized
+
+    if body.transcript and not src_lang:
+        raise HTTPException(
+            status_code=422,
+            detail="source_language is required when supplying captions",
+        )
+
+    tgt_lang: Optional[str] = None
+    if body.target_language:
+        try:
+            _tgt_norm = normalize_language_code(body.target_language, strict=True)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if _tgt_norm and _tgt_norm != "auto":
+            tgt_lang = _tgt_norm
+
+    try:
+        facebook_service.parse_facebook_url(body.url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    job_id = str(uuid.uuid4())
+
+    try:
+        dest_stem = storage.get_upload_path(job_id, "facebook_source")
+
+        await job_manager.create_job(
+            job_id=job_id,
+            video_filename="facebook_source",
+            video_path=dest_stem,  # replaced with the real path after download
+            video_size=0,
+            user_id=user_id,
+        )
+
+        job_for_lang = await job_manager.get_job(job_id)
+        if job_for_lang:
+            if src_lang:
+                job_for_lang.source_language = src_lang
+            if tgt_lang:
+                job_for_lang.target_language = tgt_lang
+            if body.num_speakers is not None and 1 <= body.num_speakers <= 10:
+                job_for_lang.expected_speakers = body.num_speakers
+
+        await job_manager.update_job_status(
+            job_id, JobStatus.UPLOADING, progress=2,
+            current_stage="Downloading from Facebook")
+
+        background_tasks.add_task(
+            _url_download_then_pipeline, job_id, body.url, dest_stem,
+            facebook_service.download_video, "Facebook",
+            body.transcript, src_lang)
+
+        return UploadResponse(
+            job_id=job_id,
+            status="accepted",
+            message="Facebook download started",
+            video_filename="facebook_source",
+            video_size=0,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Facebook import failed: {e}")
+        await job_manager.delete_job(job_id)
+        raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
 
 
 def _build_ref_segments(raw_segments: list, ref_id: str, lang: str) -> list:

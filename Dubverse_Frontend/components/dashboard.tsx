@@ -27,7 +27,7 @@ export type VideoSource = {
   url: string
   thumbnail: string
   duration: string
-  source: "upload" | "youtube" | "public-domain"
+  source: "upload" | "youtube" | "facebook" | "public-domain"
   jobId?: string
 }
 

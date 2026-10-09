@@ -154,6 +154,11 @@ class YouTubeCaptionsRequest(BaseModel):
     languages: Optional[List[str]] = None
 
 
+class FacebookImportRequest(YouTubeImportRequest):
+    """Same fields as a YouTube import; a separate name keeps the OpenAPI
+    schema readable and leaves room for Facebook-only options later."""
+
+
 class StatusResponse(BaseModel):
     job_id: str
     status: JobStatus

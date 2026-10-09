@@ -290,11 +290,20 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
       // Pass the reviewed captions through so the job uses THEM as the
       // transcript — a fresh ASR pass would discard the text the user just
       // checked and can produce different words/timings.
-      const res = await apiClient.importYouTube(
-        url, lang || undefined, undefined, undefined,
-        transcript?.map(l => ({
-          text: l.text, start: l.start, end: l.end, speaker: l.speaker,
-        })))
+      const captionPayload = transcript?.map(l => ({
+        text: l.text, start: l.start, end: l.end, speaker: l.speaker,
+      }))
+      // Facebook URLs route to the Facebook importer — same job pipeline,
+      // different host whitelist. Unparseable input falls through to
+      // YouTube, whose own validation returns the friendlier error.
+      let isFacebook = false
+      try {
+        isFacebook = /(?:^|\.)(?:facebook\.com|fb\.watch)$/i.test(
+          new URL(url.startsWith('http') ? url : `https://${url}`).hostname)
+      } catch { /* not a URL — YouTube's validator will report it */ }
+      const res = isFacebook
+        ? await apiClient.importFacebook(url, lang || undefined, undefined, undefined, captionPayload)
+        : await apiClient.importYouTube(url, lang || undefined, undefined, undefined, captionPayload)
       // The import returns 'accepted' while yt-dlp downloads server-side —
       // the media URL and segment manifest 404 until it lands, and the
       // workspace loads data once. Poll until the download finishes (status
@@ -313,11 +322,11 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
       onVideoSelect({
         id: res.job_id,
         jobId: res.job_id,
-        title: title || res.video_filename || "YouTube video",
+        title: title || res.video_filename || "Imported video",
         url: videoUrl,
         thumbnail: thumbnail || "",
         duration: duration || "Unknown",
-        source: "youtube",
+        source: isFacebook ? "facebook" : "youtube",
       })
     } catch (e: any) {
       setImportError(e.message || "Import failed")
@@ -914,11 +923,11 @@ export function YouTubeIntegration({ onVideoSelect, initialImportUrl }: YouTubeI
         <Card className="backdrop-blur-xl bg-card/90 border-border/50 shadow-lg">
           <CardContent className="pt-4 pb-4">
             <p className="mb-2 text-xs text-muted-foreground">
-              {t('Paste a video URL — your own, public domain, or one you have permission to use')}
+              {t('Paste a YouTube or Facebook video URL — your own, public domain, or one you have permission to use')}
             </p>
             <div className="flex gap-3">
               <Input
-                placeholder="https://www.youtube.com/watch?v=..."
+                placeholder="https://www.youtube.com/watch?v=... or https://www.facebook.com/.../videos/..."
                 value={youtubeUrl}
                 onChange={(e) => setYoutubeUrl(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && youtubeUrl.trim() && !isImporting && handleImportVideo(youtubeUrl)}

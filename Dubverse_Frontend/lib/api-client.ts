@@ -1797,6 +1797,51 @@ class DubVerseAPIClient {
     return response.json()
   }
 
+  /** Probe a Facebook video URL — title, duration, thumbnail. */
+  async getFacebookInfo(url: string): Promise<{
+    video_id: string
+    title: string
+    duration: number
+    thumbnail: string
+    uploader: string
+    subtitle_languages: string[]
+    auto_caption_languages: string[]
+  }> {
+    const response = await this._fetch(
+      `${this.baseURL}/api/facebook/info?url=${encodeURIComponent(url)}`)
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Facebook lookup failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  /** Download a public Facebook video into a new job and start the pipeline. */
+  async importFacebook(
+    url: string,
+    sourceLanguage?: string,
+    targetLanguage?: string,
+    numSpeakers?: number,
+    transcript?: Array<{ text: string; start: number; end: number; speaker?: string }>,
+  ): Promise<UploadResponse> {
+    const response = await this._fetch(`${this.baseURL}/api/facebook/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url,
+        source_language: sourceLanguage,
+        target_language: targetLanguage,
+        num_speakers: numSpeakers,
+        transcript,
+      }),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Import failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
 
   /** FastAPI puts the message in `detail`, which may be a string or an object. */
   private async _detail(res: Response): Promise<string> {
