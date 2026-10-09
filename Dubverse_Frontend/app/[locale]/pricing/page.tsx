@@ -23,7 +23,7 @@ export default function PricingPage() {
     {
       name: L('pricingFreeTier', 'Free'),
       price: L('pricingFreePrice', '$0'),
-      renders: L('pricingFreeRenders', '3 min/month'),
+      renders: L('pricingFreeRenders', '5 min/month'),
       accent: "text-[#22D3EE]",
       border: "border-[#22D3EE]/30",
       cta: { label: tUi('Start free'), intent: "free" as const },
@@ -50,7 +50,7 @@ export default function PricingPage() {
     { feature: L('pricingStudioAccess', 'Studio access'), dm: L('pricingFull', 'Full'), dv: L('pricingFull', 'Full'), hg: L('pricingFull', 'Full') },
     { feature: L('pricingSceneSummaries', 'Scene summaries'), dm: true, dv: true, hg: true },
     { feature: L('pricingRulebook', 'Rulebook'), dm: true, dv: true, hg: true },
-    { feature: L('pricingRenderMinutes', 'Render minutes'), dm: L('pricingFreeRenders', '3 min/month'), dv: L('pricingProRenders', '30 min/month'), hg: L('pricingPaygRenders', 'Your pace') },
+    { feature: L('pricingRenderMinutes', 'Render minutes'), dm: L('pricingFreeRenders', '5 min/month'), dv: L('pricingProRenders', '30 min/month'), hg: L('pricingPaygRenders', 'Your pace') },
     { feature: L('pricingPrice', 'Price'), dm: L('pricingFreePrice', '$0'), dv: L('pricingProPrice', '$49/month'), hg: L('pricingPaygPrice', '$2.50/min') },
   ]
 

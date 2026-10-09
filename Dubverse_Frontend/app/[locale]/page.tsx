@@ -341,7 +341,7 @@ export default function LandingPage() {
           {/* Stats bar - glassmorphism */}
           <div className="inline-flex flex-wrap items-center justify-center gap-8 md:gap-12 mb-16 px-8 py-5 rounded-2xl bg-gradient-to-r from-[#A855F7]/10 via-[#22D3EE]/5 to-[#A855F7]/10 backdrop-blur-md border border-[#A855F7]/20 shadow-[0_0_30px_rgba(168,85,247,0.1)]">
             {[
-              { value: "3 min", label: "statEmotion" },
+              { value: "5 min", label: "statEmotion" },
               { value: "$49/mo", label: "statVoiceCloning" },
               { value: "$2.50/min", label: "statTurnaround" },
               { value: "120 min", label: "statPerFilm" },

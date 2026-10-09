@@ -22,9 +22,9 @@ export default function SubscribePage() {
 
 // One subscription + a prepaid wallet. Upload, transcribe, edit — all free.
 // Only Make Movie renders are metered: Pro gets 30 min/month included, free
-// gets 3; beyond that, wallet credit at $2.50/min.
+// gets 5; beyond that, wallet credit at $2.50/min.
 const FREE_FEATURES = [
-  "3 minutes of renders every month",
+  "5 minutes of renders every month",
   "Full studio — every feature unlocked",
   "No card required",
 ]
@@ -216,7 +216,7 @@ function SubscribeContent() {
                 )}
               </CardContent>
             </Card>
-            <p className="text-center text-xs text-[#94A3B8] mt-3">3 min/month included, forever.</p>
+            <p className="text-center text-xs text-[#94A3B8] mt-3">5 min/month included, forever.</p>
           </div>
 
           {/* Pro */}
