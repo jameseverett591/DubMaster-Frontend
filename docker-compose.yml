@@ -60,7 +60,7 @@ services:
   # ============================================
   frontend:
     build:
-      context: "./Dubverse Frontend"
+      context: "./Dubverse_Frontend"
       dockerfile: Dockerfile
       target: development
       args:
@@ -70,18 +70,18 @@ services:
       - "3001:3001"
     volumes:
       # Mount source code for hot reload (no :ro — Turbopack needs write access for cache)
-      - "./Dubverse Frontend/components:/app/components"
-      - "./Dubverse Frontend/app:/app/app"
-      - "./Dubverse Frontend/hooks:/app/hooks"
-      - "./Dubverse Frontend/lib:/app/lib"
-      - "./Dubverse Frontend/styles:/app/styles"
-      - "./Dubverse Frontend/public:/app/public"
-      - "./Dubverse Frontend/messages:/app/messages"
-      - "./Dubverse Frontend/postcss.config.mjs:/app/postcss.config.mjs"
-      - "./Dubverse Frontend/next.config.mjs:/app/next.config.mjs:ro"
-      - "./Dubverse Frontend/.env.local:/app/.env.local:ro"
-      - "./Dubverse Frontend/middleware.ts:/app/middleware.ts"
-      - "./Dubverse Frontend/i18n.ts:/app/i18n.ts"
+      - "./Dubverse_Frontend/components:/app/components"
+      - "./Dubverse_Frontend/app:/app/app"
+      - "./Dubverse_Frontend/hooks:/app/hooks"
+      - "./Dubverse_Frontend/lib:/app/lib"
+      - "./Dubverse_Frontend/styles:/app/styles"
+      - "./Dubverse_Frontend/public:/app/public"
+      - "./Dubverse_Frontend/messages:/app/messages"
+      - "./Dubverse_Frontend/postcss.config.mjs:/app/postcss.config.mjs"
+      - "./Dubverse_Frontend/next.config.mjs:/app/next.config.mjs:ro"
+      - "./Dubverse_Frontend/.env.local:/app/.env.local:ro"
+      - "./Dubverse_Frontend/middleware.ts:/app/middleware.ts"
+      - "./Dubverse_Frontend/i18n.ts:/app/i18n.ts"
       # Exclude node_modules from mount
       - /app/node_modules
       - /app/.next
