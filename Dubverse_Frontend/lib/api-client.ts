@@ -1053,12 +1053,12 @@ class DubVerseAPIClient {
 
   /** Preview path with tuning params — the backend keys its preview cache on
    *  the values, so each slider position gets its own synthesized clip. */
-  voicePreviewPath(voiceId: string, settings?: Record<string, number>): string {
-    const qs = settings && Object.keys(settings).length
-      ? '?' + new URLSearchParams(
-          Object.entries(settings).map(([k, v]) => [k, String(v)])).toString()
-      : ''
-    return `/api/voice-preview/${encodeURIComponent(voiceId)}${qs}`
+  voicePreviewPath(voiceId: string, settings?: Record<string, number>, text?: string): string {
+    const params = new URLSearchParams(
+      Object.entries(settings ?? {}).map(([k, v]) => [k, String(v)]))
+    if (text) params.set('text', text)
+    const qs = params.toString()
+    return `/api/voice-preview/${encodeURIComponent(voiceId)}${qs ? '?' + qs : ''}`
   }
 
   async addCustomVoice(provider: 'fish-audio' | 'elevenlabs', voiceId: string, name?: string): Promise<CustomVoice> {

@@ -7555,11 +7555,14 @@ async def get_voice_preview(voice_id: str, request: Request,
                             speed: Optional[float] = None,
                             stability: Optional[float] = None,
                             similarity_boost: Optional[float] = None,
-                            style: Optional[float] = None):
+                            style: Optional[float] = None,
+                            text: Optional[str] = None):
     """Generate and serve a voice preview sample using the active TTS provider.
 
     Optional tuning params (the voice card's Audio Settings sliders) fold into
-    the cache key so auditioning a setting never replays the default clip."""
+    the cache key so auditioning a setting never replays the default clip.
+    An optional text param lets the tuning panel audition an arbitrary sentence;
+    it is sanitised, capped, and included in the cache key only when given."""
     _custom_voice_gate(voice_id, _caller(request))
     preview_dir = Path("data/voice_previews")
     preview_dir.mkdir(parents=True, exist_ok=True)
@@ -7572,8 +7575,16 @@ async def get_voice_preview(voice_id: str, request: Request,
 
     # Use a filesystem-safe hashed filename for previews to avoid issues when
     # voice IDs contain slashes or other reserved/path characters.
+    # Sanitise a caller-supplied audition sentence: trimmed, whitespace-
+    # normalised, capped at 300 chars so a preview stays a preview.
+    custom_text = None
+    if text:
+        custom_text = ' '.join(text.split())[:300] or None
+    cache_key = dict(tuned)
+    if custom_text:
+        cache_key['text'] = custom_text
     safe_name = hashlib.sha256(
-        (voice_id + _json.dumps(tuned, sort_keys=True)).encode('utf-8')
+        (voice_id + _json.dumps(cache_key, sort_keys=True)).encode('utf-8')
     ).hexdigest()
     preview_path = preview_dir / f"{safe_name}.mp3"
 
@@ -7593,7 +7604,7 @@ async def get_voice_preview(voice_id: str, request: Request,
     # Attempt to generate a preview directly for the requested voice_id.
     # Do not rely on a prior listing of voices which may be paginated or cached
     # differently between list endpoints and real-time preview generation.
-    preview_text = f"Hello, I'm a preview voice. This is a short sample for voice id {voice_id}."
+    preview_text = custom_text or f"Hello, I'm a preview voice. This is a short sample for voice id {voice_id}."
     try:
         result = await tts.text_to_speech(
             text=preview_text,

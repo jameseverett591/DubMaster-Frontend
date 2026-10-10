@@ -7,6 +7,7 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { Slider } from '@/components/ui/slider'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Mic2, Star, Search, Play, Square, Check, Loader2, ChevronLeft, ChevronRight, SlidersHorizontal, X } from 'lucide-react'
@@ -325,6 +326,9 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   // on the backend so the tuning follows the voice into every render.
   const [tuningVoice, setTuningVoice] = useState<Voice | null>(null)
   const [tuning, setTuning] = useState<Record<string, number>>({})
+  // Custom audition sentence — persists across voices so the same line can be
+  // compared voice to voice; cleared only when the user edits it.
+  const [tuningText, setTuningText] = useState('')
   const [tuningDefaults, setTuningDefaults] = useState<Record<string, number>>({
     speed: 1, stability: 0.5, similarity_boost: 0.75, style: 0.3,
   })
@@ -382,6 +386,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
 
   const handlePreview = useCallback(async (
     voiceId: string, previewUrl?: string, settings?: Record<string, number>,
+    text?: string,
   ) => {
     const wasPlayingThis = previewingId === voiceId
     stopPreview()
@@ -396,10 +401,10 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     // preview 401'd on both the direct play and the blob fallback below.
     // An absolute URL is a third-party preview (ElevenLabs et al) and needs no token.
     // Tuned previews bypass the canned clip — a stored mp3 can't reflect sliders.
-    const tuned = settings && Object.keys(settings).length > 0
+    const tuned = (settings && Object.keys(settings).length > 0) || !!text
     const rawPath = (previewUrl && !tuned)
       ? (previewUrl.startsWith('/') ? previewUrl : `/${previewUrl}`)
-      : apiClient.voicePreviewPath(voiceId, settings)
+      : apiClient.voicePreviewPath(voiceId, settings, text)
     const src = (!tuned && previewUrl?.startsWith('http'))
       ? previewUrl
       : await apiClient.mediaUrl(rawPath)
@@ -1412,6 +1417,29 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                     </TooltipContent>
                   </Tooltip>
                 ))}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs text-slate-400">{t('Try your own words')}</span>
+                    <span className="text-[10px] text-slate-600">{tuningText.length}/300</span>
+                  </div>
+                  <Textarea
+                    value={tuningText}
+                    onChange={e => setTuningText(e.target.value)}
+                    placeholder={t('Type a sentence for this voice to read…')}
+                    maxLength={300}
+                    rows={3}
+                    className="resize-none bg-slate-950/60 border-slate-700/60 text-sm text-slate-200 placeholder:text-slate-600 focus-visible:ring-amber-500/40"
+                  />
+                  <Button size="sm" variant="outline"
+                    onClick={() => handlePreview(tv.voice_id, undefined, tuning, tuningText.trim() || undefined)}
+                    title={t('Read it with these settings')}
+                    className="mt-2 w-full border border-amber-500/50 text-amber-300 bg-slate-950/60 hover:bg-amber-500/15 h-8">
+                    {previewingId === tv.voice_id
+                      ? <Square className="h-3.5 w-3.5 mr-1.5 fill-current" />
+                      : <Play className="h-3.5 w-3.5 mr-1.5" />}
+                    {previewingId === tv.voice_id ? t('Stop') : t('Read it')}
+                  </Button>
+                </div>
                 <p className="text-[10px] text-slate-600 leading-relaxed">
                   {t('Saved to this voice — it applies wherever the voice is assigned.')}
                 </p>
