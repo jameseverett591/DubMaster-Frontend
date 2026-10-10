@@ -1560,32 +1560,24 @@ export function DubVerseEditor({
       : url
   // The media URL serves Content-Disposition: inline so it can also back the
   // <video> player; ?attachment=1 is what actually triggers a browser save.
-  const downloadDubbedVideo = async () => {
-    if (!activeDubbedVideoUrl) throw new Error('No dubbed video URL')
+  const downloadDubbedVideo = () => {
+    if (!activeDubbedVideoUrl) return
     // Stored media URLs carry the token they were minted with — after a
-    // rotation that token 401s, so re-mint before the browser follows it.
-    // A refresh failure still tries the stored URL rather than dead-ending.
-    const fresh = await apiClient.refreshMediaUrlAsync(activeDubbedVideoUrl)
-      .catch(() => activeDubbedVideoUrl)
+    // rotation that token 401s. refreshMediaUrl is synchronous when the token
+    // is already in memory; awaiting it would break the user gesture and the
+    // browser would block the download.
+    const fresh = apiClient.refreshMediaUrl(activeDubbedVideoUrl)
     const url = withAttachment(fresh)
-    // Fetch the file as a blob so a server error does not navigate the
-    // SPA away from the editor and the dialog can stay open on failure.
-    const resp = await fetch(url)
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => 'Download failed')
-      throw new Error(text)
-    }
-    const blob = await resp.blob()
-    const obj = URL.createObjectURL(blob)
     const a = document.createElement('a')
-    a.href = obj
+    a.href = url
     a.download = `${title || 'dubbed_video'}.mp4`
+    // target=_blank keeps the editor open; on failure the error shows in the
+    // new tab, not this page.
+    a.target = '_blank'
+    a.rel = 'noopener'
     document.body.appendChild(a)
     a.click()
-    setTimeout(() => {
-      document.body.removeChild(a)
-      URL.revokeObjectURL(obj)
-    }, 0)
+    setTimeout(() => document.body.removeChild(a), 0)
   }
   const [askAiOpen, setAskAiOpen] = useState(false)
   const [askAiModel, setAskAiModel] = useState<'haiku' | 'sonnet' | 'opus'>('sonnet')
@@ -15543,7 +15535,7 @@ export function DubVerseEditor({
           title={title}
           jobId={jobId}
           videoUrl={apiClient.refreshMediaUrl(activeDubbedVideoUrl)}
-          onDownload={downloadDubbedVideo}
+          downloadUrl={withAttachment(apiClient.refreshMediaUrl(activeDubbedVideoUrl))}
         />
       )}
       {showExportModal && jobId && (

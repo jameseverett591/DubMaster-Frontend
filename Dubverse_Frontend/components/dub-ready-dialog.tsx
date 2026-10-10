@@ -16,11 +16,11 @@ interface DubReadyDialogProps {
   jobId: string
   /** Authenticated URL of the rendered dub. */
   videoUrl: string
-  /** Callback that downloads the file and resolves once it starts. */
-  onDownload: () => Promise<void>
+  /** Same attachment-forcing URL the editor's Download uses. */
+  downloadUrl: string
 }
 
-export function DubReadyDialog({ open, onClose, title, jobId, videoUrl, onDownload }: DubReadyDialogProps) {
+export function DubReadyDialog({ open, onClose, title, jobId, videoUrl, downloadUrl }: DubReadyDialogProps) {
   const t = useT()
   const [sharing, setSharing] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -67,8 +67,11 @@ export function DubReadyDialog({ open, onClose, title, jobId, videoUrl, onDownlo
           <DialogDescription>{title}</DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-2">
-          <Button className="gap-2" onClick={async () => { await onDownload(); onClose() }}>
-            <Download className="h-4 w-4" /> {t("Download")}
+          <Button asChild className="gap-2">
+            {/* target=_blank keeps the editor open; on failure the error shows in the new tab, not this page. */}
+            <a href={downloadUrl} download={`${title || 'dubbed_video'}.mp4`} target="_blank" rel="noopener">
+              <Download className="h-4 w-4" /> {t("Download")}
+            </a>
           </Button>
           <Button variant="outline" className="gap-2" onClick={handleShare} disabled={sharing}>
             {sharing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Share2 className="h-4 w-4" />}
