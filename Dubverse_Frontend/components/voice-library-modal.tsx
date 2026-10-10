@@ -378,6 +378,22 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     return () => { cancelled = true }
   }, [jobId, ckSpeaker])
 
+  // Reload the selected speaker's pins after a failed save — restoring a
+  // composed copy would resurrect pins a later successful edit already
+  // removed, and the next save would push them back to the server.
+  const reloadCheckpoints = useCallback((speaker: string) => {
+    if (!jobId || !speaker) return
+    setCkLoaded(false)
+    apiClient.getSpeakerCheckpoints(jobId, speaker)
+      .then(r => {
+        if (ckSpeakerRef.current === speaker) {
+          setCkList(r.checkpoints)
+          setCkLoaded(true)
+        }
+      })
+      .catch(() => {})
+  }, [jobId])
+
   const pinCheckpoint = useCallback(async () => {
     if (!jobId || !ckSpeaker || !ckLoaded || ckIndex === '') return
     const idx = Number(ckIndex)
@@ -401,22 +417,23 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
       }
     } catch (e) {
       console.warn('[VOICE-CK] save failed:', e)
+      reloadCheckpoints(ckSpeaker)
     } finally {
       setCkBusy(false)
     }
-  }, [jobId, ckSpeaker, ckIndex, ckList, ckLoaded, tuning, tuningDefaults])
+  }, [jobId, ckSpeaker, ckIndex, ckList, ckLoaded, tuning, tuningDefaults, reloadCheckpoints])
 
   const removeCheckpoint = useCallback(async (idx: number) => {
     if (!jobId || !ckSpeaker || !ckLoaded) return
+    const speaker = ckSpeaker
     const next = ckList.filter(c => c.index !== idx)
     setCkList(next)
-    apiClient.saveSpeakerCheckpoints(jobId, ckSpeaker, next)
+    apiClient.saveSpeakerCheckpoints(jobId, speaker, next)
       .catch(e => {
         console.warn('[VOICE-CK] remove failed:', e)
-        // Revert the optimistic removal so the list matches the server.
-        if (ckSpeakerRef.current === ckSpeaker) setCkList(ckList)
+        reloadCheckpoints(speaker)
       })
-  }, [jobId, ckSpeaker, ckList, ckLoaded])
+  }, [jobId, ckSpeaker, ckList, ckLoaded, reloadCheckpoints])
 
   const openTuning = useCallback((v: Voice) => {
     tuningVoiceIdRef.current = v.voice_id
@@ -454,10 +471,14 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
 
   const saveTuning = useCallback(async () => {
     if (!tuningVoice) return
+    const vid = tuningVoice.voice_id
     setTuningSaving(true)
     try {
-      await apiClient.saveVoiceSettings(tuningVoice.voice_id, tuning)
-      setTuningSaved({ ...tuning })
+      await apiClient.saveVoiceSettings(vid, tuning)
+      // Only mark saved if the panel still shows this voice — a save that
+      // lands after switching voices must not stamp the new voice's staged
+      // values as persisted (they were never written).
+      if (tuningVoiceIdRef.current === vid) setTuningSaved({ ...tuning })
     } catch (e) {
       console.warn('[VOICE-TUNING]', e)
     } finally {

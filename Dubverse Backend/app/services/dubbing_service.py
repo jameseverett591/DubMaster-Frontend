@@ -5068,9 +5068,12 @@ class DubbingService:
             except Exception as _rtune_err:
                 logger.warning(
                     f"[TUNING] regen seg {segment_index} tuning skipped: {_rtune_err}")
-            _speed_mult = _rfo.pop("speed_mult", None)
-            if _speed_mult is not None and speed is None and speed_ratio is None:
-                use_speed = max(0.5, min(2.0, use_speed * _speed_mult))
+            # speed_mult is never re-applied here: every use_speed source is
+            # already tuned (seg["speed"] is the effective speed the render
+            # produced, multiplier included) or a raw caller intent (explicit
+            # speed/ratio/duration). Multiplying again compounds the pace on
+            # each regen — a 1.5x line drifting toward the 2.0 clamp.
+            _rfo.pop("speed_mult", None)
             result = await fish_audio_tts.text_to_speech(
                 text=speak_text,
                 voice_id=use_voice_id,
