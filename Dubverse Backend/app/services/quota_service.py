@@ -280,13 +280,14 @@ def deduct_quota(user_id: str, actual_seconds: int, job_id: str, kind: str = "re
     return {**row, "tier": tier, "billed_seconds": need}
 
 
-def job_render_seconds(user_id: str, job_id: str) -> int:
+def job_render_seconds(user_id: str, job_id: str) -> Optional[int]:
     """Net render seconds the ledger holds for this job — the durable answer
     when the in-memory billed_seconds stamp is gone (restart, unrehydrated
     job record). Render rows are negative, refund rows positive, so a net
     negative sum means the charge stands; 0 means never debited or fully
-    refunded. Read-only — never bills. Any failure answers 0 (not billed):
-    a wrong True would unlock a paid render for free."""
+    refunded. Read-only — never bills. A FAILED read returns None, not 0:
+    callers that clear paid state on <=0 must only do so on a confirmed
+    read — an unreachable ledger is not proof of a refund."""
     if not user_id or not job_id:
         return 0
     try:
@@ -306,7 +307,7 @@ def job_render_seconds(user_id: str, job_id: str) -> int:
         return -net if net < 0 else 0
     except Exception as e:
         logger.warning(f"[QUOTA] ledger render check failed for {user_id} job={job_id}: {e}")
-        return 0
+        return None
 
 
 def refund_quota(user_id: str, job_id: str) -> Dict[str, Any]:

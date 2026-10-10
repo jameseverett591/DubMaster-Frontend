@@ -9131,7 +9131,7 @@ async def _meter_render(job_id: str, user_id: str, _depth: int = 0) -> Optional[
         # durable. A lost stamp must not debit the customer again.
         _ledger_secs = await asyncio.to_thread(
             quota_service.job_render_seconds, user_id, job_id)
-        if _ledger_secs > 0:
+        if _ledger_secs and _ledger_secs > 0:
             _billed_secs = _ledger_secs
     if _billed_secs:
         if job and not getattr(job, "billed_seconds", None):
@@ -9144,7 +9144,7 @@ async def _meter_render(job_id: str, user_id: str, _depth: int = 0) -> Optional[
             # the read and the stamp — re-verify before calling it free.
             _still = await asyncio.to_thread(
                 quota_service.job_render_seconds, user_id, job_id)
-            if _still <= 0:
+            if _still is not None and _still <= 0:
                 await job_manager.set_billed_seconds(job_id, None)
                 await asyncio.to_thread(_stamp_project_paid, job_id, False)
                 _billed_secs = None
@@ -9195,7 +9195,7 @@ async def _meter_render(job_id: str, user_id: str, _depth: int = 0) -> Optional[
         # rather than keep a paid stamp it never paid for.
         _still = await asyncio.to_thread(
             quota_service.job_render_seconds, user_id, job_id)
-        if _still <= 0:
+        if _still is not None and _still <= 0:
             await job_manager.set_billed_seconds(job_id, None)
             await asyncio.to_thread(_stamp_project_paid, job_id, False)
             if _depth < 2:
@@ -11863,7 +11863,7 @@ async def quota_estimate(job_id: str, request: Request):
         # editor's download card stays locked on a paid job.
         _ledger_secs = await asyncio.to_thread(
             quota_service.job_render_seconds, user_id, job_id)
-        if _ledger_secs > 0:
+        if _ledger_secs and _ledger_secs > 0:
             _billed_secs = _ledger_secs
             if job:
                 # Heal the lost stamp so the next upsert persists it.
@@ -11874,7 +11874,7 @@ async def quota_estimate(job_id: str, request: Request):
                 # un-stamp if the net charge is already gone.
                 _still = await asyncio.to_thread(
                     quota_service.job_render_seconds, user_id, job_id)
-                if _still <= 0:
+                if _still is not None and _still <= 0:
                     await job_manager.set_billed_seconds(job_id, None)
                     await asyncio.to_thread(
                         _stamp_project_paid, job_id, False)
