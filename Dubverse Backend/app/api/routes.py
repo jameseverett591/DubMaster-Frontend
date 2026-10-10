@@ -6678,8 +6678,9 @@ async def _watermarked_dub(dubbed_path: str) -> str:
     # Name it wm_dubbed_*.mp4, NOT dubbed_*.wm.mp4: the dubbed_*.mp4 globs
     # (job rehydration, render-candidate scan) must never pick the watermark
     # copy up as if it were a finished clean dub.
-    wm_path = os.path.join(os.path.dirname(dubbed_path),
-                           f"wm_{os.path.basename(dubbed_path)}")
+    wm_path = os.path.join(
+        os.path.dirname(dubbed_path),
+        f"wm_{os.path.splitext(os.path.basename(dubbed_path))[0]}.mp4")
     if _fresh():
         return wm_path
     lock = _watermark_locks.setdefault(wm_path, asyncio.Lock())
@@ -7573,12 +7574,13 @@ _VOICE_PREVIEW_MAX_FILES = 500
 def _evict_voice_previews(preview_dir: Path, keep: int = _VOICE_PREVIEW_MAX_FILES) -> None:
     try:
         files = sorted(
-            preview_dir.glob("*.mp3"),
-            key=lambda _p: _p.stat().st_mtime,
+            ((_p, _p.stat().st_mtime) for _p in preview_dir.glob("*.mp3")),
+            key=lambda _t: _t[1],
         )
-        for _p in files[: max(0, len(files) - keep)]:
+        for _p, _mt in files[: max(0, len(files) - keep)]:
             try:
-                _p.unlink(missing_ok=True)
+                if _p.stat().st_mtime == _mt:
+                    _p.unlink(missing_ok=True)
             except OSError:
                 pass
     except Exception as _ev_err:
