@@ -7744,6 +7744,44 @@ async def put_voice_settings(voice_id: str, request: Request):
     return {"voice_id": voice_id, "settings": stored}
 
 
+# ---------------------------------------------------------------------------
+# Speaker tuning checkpoints — per (user, job, speaker) Audio Settings pinned
+# to a transcript index. Each checkpoint applies from its segment onward until
+# the next one, so a voice's delivery can change mid-film without affecting
+# earlier scenes or the voice's saved defaults.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/jobs/{job_id}/speaker-tuning/{speaker_id}",
+            dependencies=[Depends(_dep_job_access)])
+async def get_speaker_tuning(job_id: str, speaker_id: str, request: Request):
+    """The speaker's scene checkpoints for this job — ordered list of
+    {index, settings}. Empty when none have been pinned."""
+    return {"speaker": speaker_id,
+            "checkpoints": voice_settings_store.get_checkpoints(
+                _caller(request), job_id, speaker_id)}
+
+
+@router.put("/jobs/{job_id}/speaker-tuning/{speaker_id}",
+            dependencies=[Depends(_dep_job_access)])
+async def put_speaker_tuning(job_id: str, speaker_id: str, request: Request):
+    """Replace the speaker's checkpoint list. Body: {"checkpoints":
+    [{index, settings}, ...]} — an empty list clears all checkpoints."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON body required")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    try:
+        stored = voice_settings_store.set_checkpoints(
+            _caller(request), job_id, speaker_id,
+            body.get("checkpoints", []))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"speaker": speaker_id, "checkpoints": stored}
+
+
 class CustomVoiceRequest(BaseModel):
     provider: str  # "fish-audio" | "elevenlabs"
     voice_id: str

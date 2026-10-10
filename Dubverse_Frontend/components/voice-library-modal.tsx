@@ -10,7 +10,7 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Slider } from '@/components/ui/slider'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { Mic2, Star, Search, Play, Square, Check, Loader2, ChevronLeft, ChevronRight, SlidersHorizontal, X } from 'lucide-react'
+import { Mic2, Star, Search, Play, Square, Check, Loader2, ChevronLeft, ChevronRight, SlidersHorizontal, Pin, X } from 'lucide-react'
 import { apiClient, API_BASE_URL, type Voice } from '@/lib/api-client'
 import { useEditorStore } from '@/lib/editor-store'
 import { useT } from '@/lib/use-t'
@@ -334,9 +334,75 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   })
   const tuningSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // Scene checkpoints — pin the panel's current sliders to a transcript line;
+  // the voice holds them from that line onward until the next checkpoint.
+  const [ckSpeaker, setCkSpeaker] = useState('')
+  const [ckIndex, setCkIndex] = useState('')
+  const [ckList, setCkList] = useState<Array<{ index: number; settings: Record<string, number> }>>([])
+  const [ckBusy, setCkBusy] = useState(false)
+
+  // Speakers this voice is assigned to — checkpoints pin per speaker.
+  const ckSpeakers = useMemo(() => (
+    tuningVoice && isJobAware
+      ? speakers.filter(s => s.current_voice_id === tuningVoice.voice_id)
+      : []
+  ), [tuningVoice, speakers, isJobAware])
+
+  // Default the checkpoint target to the first assigned speaker; reset when
+  // the panel opens on a different voice.
+  useEffect(() => {
+    if (ckSpeakers.length && !ckSpeakers.some(s => s.speaker_id === ckSpeaker)) {
+      setCkSpeaker(ckSpeakers[0].speaker_id)
+    }
+  }, [ckSpeakers, ckSpeaker])
+
+  useEffect(() => {
+    if (!jobId || !ckSpeaker) { setCkList([]); return }
+    let cancelled = false
+    apiClient.getSpeakerCheckpoints(jobId, ckSpeaker)
+      .then(r => { if (!cancelled) setCkList(r.checkpoints) })
+      .catch(() => { if (!cancelled) setCkList([]) })
+    return () => { cancelled = true }
+  }, [jobId, ckSpeaker])
+
+  const pinCheckpoint = useCallback(async () => {
+    if (!jobId || !ckSpeaker || ckIndex === '') return
+    const idx = Number(ckIndex)
+    if (!Number.isFinite(idx)) return
+    const settings = {
+      speed: tuning.speed ?? tuningDefaults.speed,
+      stability: tuning.stability ?? tuningDefaults.stability,
+      similarity_boost: tuning.similarity_boost ?? tuningDefaults.similarity_boost,
+      style: tuning.style ?? tuningDefaults.style,
+    }
+    setCkBusy(true)
+    try {
+      const next = [...ckList.filter(c => c.index !== idx), { index: idx, settings }]
+        .sort((a, b) => a.index - b.index)
+      await apiClient.saveSpeakerCheckpoints(jobId, ckSpeaker, next)
+      setCkList(next)
+      setCkIndex('')
+    } catch (e) {
+      console.warn('[VOICE-CK] save failed:', e)
+    } finally {
+      setCkBusy(false)
+    }
+  }, [jobId, ckSpeaker, ckIndex, ckList, tuning, tuningDefaults])
+
+  const removeCheckpoint = useCallback(async (idx: number) => {
+    if (!jobId || !ckSpeaker) return
+    const next = ckList.filter(c => c.index !== idx)
+    setCkList(next)
+    apiClient.saveSpeakerCheckpoints(jobId, ckSpeaker, next)
+      .catch(e => console.warn('[VOICE-CK] remove failed:', e))
+  }, [jobId, ckSpeaker, ckList])
+
   const openTuning = useCallback((v: Voice) => {
     setTuningVoice(v)
     setTuning({})
+    setCkSpeaker('')
+    setCkIndex('')
+    setCkList([])
     apiClient.getVoiceSettings(v.voice_id).then(r => {
       setTuningDefaults(r.defaults)
       setTuning(r.settings)
@@ -1440,6 +1506,92 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                     {previewingId === tv.voice_id ? t('Stop') : t('Read it')}
                   </Button>
                 </div>
+                {ckSpeakers.length > 0 && (() => {
+                  const ckSegs = ckSpeaker
+                    ? segments
+                        .filter(s => s.speaker_id === ckSpeaker)
+                        .map(s => ({
+                          index: s.transcript_index ?? s.index,
+                          start: s.start_time,
+                          label: (s.active_text || s.target_text || s.source_text || '').slice(0, 34),
+                        }))
+                        .filter(o => Number.isFinite(o.index))
+                        .sort((a, b) => a.index - b.index)
+                    : []
+                  const fmtT = (sec?: number) => {
+                    if (!Number.isFinite(sec ?? NaN)) return ''
+                    const m = Math.floor((sec ?? 0) / 60)
+                    const ss = Math.floor((sec ?? 0) % 60)
+                    return `${m}:${String(ss).padStart(2, '0')}`
+                  }
+                  return (
+                    <div className="border-t border-slate-800 pt-4">
+                      <div className="mb-1">
+                        <span className="text-xs text-slate-400">{t('Changes over time')}</span>
+                      </div>
+                      <p className="text-[10px] text-slate-600 leading-relaxed mb-2">
+                        {t('Pin the sliders to a line — the voice holds them from that line onward until your next pin. Earlier lines stay as they are.')}
+                      </p>
+                      {ckSpeakers.length > 1 && (
+                        <select
+                          value={ckSpeaker}
+                          onChange={e => { setCkSpeaker(e.target.value); setCkIndex('') }}
+                          className="w-full mb-2 h-8 text-xs rounded-md bg-slate-950/60 border border-slate-700/60 text-slate-200 px-2"
+                        >
+                          {ckSpeakers.map(s => (
+                            <option key={s.speaker_id} value={s.speaker_id}>{s.display_name}</option>
+                          ))}
+                        </select>
+                      )}
+                      <div className="flex gap-2">
+                        <select
+                          value={ckIndex}
+                          onChange={e => setCkIndex(e.target.value)}
+                          className="flex-1 min-w-0 h-8 text-xs rounded-md bg-slate-950/60 border border-slate-700/60 text-slate-200 px-2"
+                        >
+                          <option value="">{t('Pick a line…')}</option>
+                          {ckSegs.map(o => (
+                            <option key={o.index} value={o.index}>
+                              #{o.index + 1} · {fmtT(o.start)} · {o.label}
+                            </option>
+                          ))}
+                        </select>
+                        <Button size="sm" variant="outline"
+                          onClick={pinCheckpoint}
+                          disabled={ckIndex === '' || ckBusy}
+                          title={t('Hold these settings from that line onward')}
+                          className="h-8 gap-1.5 px-2.5 text-xs shrink-0 border border-amber-500/50 text-amber-300 bg-slate-950/60 hover:bg-amber-500/15">
+                          <Pin className="h-3.5 w-3.5" />
+                          {t('Pin')}
+                        </Button>
+                      </div>
+                      {ckList.length > 0 && (
+                        <div className="mt-2 space-y-1">
+                          {ckList.map(ck => (
+                            <div key={ck.index}
+                              className="flex items-center justify-between gap-2 text-[10px] text-slate-400 bg-slate-950/40 border border-slate-800 rounded px-2 py-1">
+                              <span className="min-w-0 truncate">
+                                <span className="text-amber-300 font-medium">#{ck.index + 1}</span>
+                                <span className="ml-1.5">
+                                  {ck.settings.speed != null && `${ck.settings.speed.toFixed(2)}×`}
+                                  {ck.settings.stability != null && ` · st ${ck.settings.stability.toFixed(2)}`}
+                                  {ck.settings.similarity_boost != null && ` · sim ${ck.settings.similarity_boost.toFixed(2)}`}
+                                  {ck.settings.style != null && ` · sty ${ck.settings.style.toFixed(2)}`}
+                                </span>
+                              </span>
+                              <button type="button"
+                                onClick={() => removeCheckpoint(ck.index)}
+                                aria-label={t('Remove change point')}
+                                className="shrink-0 text-slate-500 hover:text-white transition-colors">
+                                <X className="h-3 w-3" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })()}
                 <p className="text-[10px] text-slate-600 leading-relaxed">
                   {t('Saved to this voice — it applies wherever the voice is assigned.')}
                 </p>

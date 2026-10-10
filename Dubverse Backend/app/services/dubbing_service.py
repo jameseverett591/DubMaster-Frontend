@@ -1790,8 +1790,20 @@ class DubbingService:
                         user_id, (voice_mapping or {}).get(speaker) or "")
                 except Exception:
                     _voice_tuned = {}
+                # Scene checkpoints (per job+speaker, pinned to a transcript
+                # index) are the most specific scope: the latest one at or
+                # before this segment wins over both request settings and the
+                # saved voice-level tuning, holding until the next checkpoint.
+                try:
+                    _ck = voice_settings_store.active_checkpoint(
+                        user_id, job_id, speaker, i)
+                except Exception:
+                    _ck = {}
                 for _k, _v in _voice_tuned.items():
                     override.setdefault(_k, _v)
+                if _ck:
+                    override.update(_ck)
+                    _voice_tuned.update(_ck)
                 stability        = override.get("stability",        emotion_defaults["stability"])
                 similarity_boost = override.get("similarity_boost", emotion_defaults["similarity_boost"])
                 style            = override.get("style",            emotion_defaults["style"])

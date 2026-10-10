@@ -1051,6 +1051,28 @@ class DubVerseAPIClient {
     if (!res.ok) throw new Error(`Voice settings save failed (${res.status})`)
   }
 
+  /** Scene checkpoints — per (job, speaker) tuning pinned to a transcript
+   *  index; each applies from its line onward until the next checkpoint. */
+  async getSpeakerCheckpoints(jobId: string, speakerId: string): Promise<{
+    checkpoints: Array<{ index: number; settings: Record<string, number> }>
+  }> {
+    const res = await this._fetch(
+      `${this.baseURL}/api/jobs/${encodeURIComponent(jobId)}/speaker-tuning/${encodeURIComponent(speakerId)}`)
+    if (!res.ok) throw new Error(`Speaker tuning failed (${res.status})`)
+    return res.json()
+  }
+
+  async saveSpeakerCheckpoints(jobId: string, speakerId: string,
+                               checkpoints: Array<{ index: number; settings: Record<string, number> }>): Promise<void> {
+    const res = await this._fetch(
+      `${this.baseURL}/api/jobs/${encodeURIComponent(jobId)}/speaker-tuning/${encodeURIComponent(speakerId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      body: JSON.stringify({ checkpoints }),
+    })
+    if (!res.ok) throw new Error(`Speaker tuning save failed (${res.status})`)
+  }
+
   /** Preview path with tuning params — the backend keys its preview cache on
    *  the values, so each slider position gets its own synthesized clip. */
   voicePreviewPath(voiceId: string, settings?: Record<string, number>, text?: string): string {
