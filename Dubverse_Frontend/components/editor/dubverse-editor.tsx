@@ -7176,9 +7176,11 @@ export function DubVerseEditor({
       // The share/download card's settlement checks read these states, and a
       // stale already_billed=false locks the card on a paid render. Likewise
       // synced_selection only refreshes via getLipsyncQuote.
-      try { setRenderQuote(await apiClient.getQuotaEstimate(jobId)) } catch {}
+      // A transient error must not null out a valid paid quote — a null
+      // renderQuote hides the download card on a render the user paid for.
+      try { const q = await apiClient.getQuotaEstimate(jobId); if (q) setRenderQuote(q) } catch {}
       if (lipsyncOptIn || lipSel.size > 0) {
-        try { setLipQuote(await apiClient.getLipsyncQuote(jobId)) } catch {}
+        try { const lq = await apiClient.getLipsyncQuote(jobId); if (lq) setLipQuote(lq) } catch {}
       }
       const lip = (response as any).lipsync
       // Lip sync was requested but never ran. A vendor rejection (suspended
