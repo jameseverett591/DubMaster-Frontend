@@ -7170,6 +7170,16 @@ export function DubVerseEditor({
       setRebuildProgress(100)
       const absUrl = apiClient.toAbsoluteUrl(response.dubbed_video_url)
       setActiveDubbedVideoUrl(absUrl)
+      // Refresh the billing quotes BEFORE declaring complete — the estimates
+      // were fetched at mount, when nothing may have been billed yet (first
+      // render this session) or while a billed_seconds stamp was missing.
+      // The share/download card's settlement checks read these states, and a
+      // stale already_billed=false locks the card on a paid render. Likewise
+      // synced_selection only refreshes via getLipsyncQuote.
+      try { setRenderQuote(await apiClient.getQuotaEstimate(jobId)) } catch {}
+      if (lipsyncOptIn || lipSel.size > 0) {
+        try { setLipQuote(await apiClient.getLipsyncQuote(jobId)) } catch {}
+      }
       const lip = (response as any).lipsync
       // Lip sync was requested but never ran. A vendor rejection (suspended
       // account, refused job) is NOT a footnote — it's a hard banner that

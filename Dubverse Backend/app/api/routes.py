@@ -9098,8 +9098,23 @@ async def _meter_render(job_id: str, user_id: str) -> Optional[Dict[str, Any]]:
     """
     from app.services import quota_service
     job = await job_manager.get_job(job_id)
-    if job and getattr(job, "billed_seconds", None):
-        logger.info(f"Job {job_id}: re-render, already billed {job.billed_seconds}s — free")
+    _billed_secs = getattr(job, "billed_seconds", None) if job else None
+    if not _billed_secs:
+        # billed_seconds lives on the job record — lost on restart or
+        # when the job row cannot be rehydrated — but the ledger debit is
+        # durable. A lost stamp must not debit the customer again.
+        _ledger_secs = await asyncio.to_thread(
+            quota_service.job_render_seconds, user_id, job_id)
+        if _ledger_secs > 0:
+            _billed_secs = _ledger_secs
+    if _billed_secs:
+        logger.info(f"Job {job_id}: re-render, already billed {_billed_secs}s — free")
+        if job and not getattr(job, "billed_seconds", None):
+            # Stamp was lost (restart, unrehydrated row) while the ledger
+            # debit stood — heal it so later reads take the fast path and
+            # project.json reports paid again.
+            await job_manager.set_billed_seconds(job_id, _billed_secs)
+            await asyncio.to_thread(_stamp_project_paid, job_id, True)
         return None
     need = await _billable_seconds_for_job(job_id)
     if need <= 0:
@@ -9134,7 +9149,12 @@ async def _meter_render(job_id: str, user_id: str) -> Optional[Dict[str, Any]]:
     if split.get("already_billed"):
         # A racing request created the debit first — it owns it, including
         # the refund if its render fails. This call is a free re-render and
-        # must NOT refund a debit it didn't make.
+        # must NOT refund a debit it didn't make. The stamp may also simply
+        # be lost (restart): re-stamping here is idempotent and heals
+        # billed_seconds so quota_estimate and the share gate see the paid
+        # state again.
+        await job_manager.set_billed_seconds(job_id, need)
+        await asyncio.to_thread(_stamp_project_paid, job_id, True)
         return None
     await job_manager.set_billed_seconds(job_id, need)
     await asyncio.to_thread(_stamp_project_paid, job_id, True)
@@ -11788,10 +11808,21 @@ async def quota_estimate(job_id: str, request: Request):
     from app.services import quota_service
     user_id = _caller(request)
     job = await job_manager.get_job(job_id)
-    if job and getattr(job, "billed_seconds", None):
+    _billed_secs = getattr(job, "billed_seconds", None) if job else None
+    if not _billed_secs:
+        # billed_seconds lives on the job record — lost on restart or when
+        # the job row cannot be rehydrated — but the ledger debit is
+        # durable. A render the customer already paid for (or spent
+        # included minutes on) must still report already_billed, or the
+        # editor's download card stays locked on a paid job.
+        _ledger_secs = await asyncio.to_thread(
+            quota_service.job_render_seconds, user_id, job_id)
+        if _ledger_secs > 0:
+            _billed_secs = _ledger_secs
+    if _billed_secs:
         bal = await asyncio.to_thread(quota_service.get_balance, user_id)
         return {
-            "already_billed": True, "billed_seconds": job.billed_seconds,
+            "already_billed": True, "billed_seconds": _billed_secs,
             "ok": True, "needed_seconds": 0, "from_included_seconds": 0,
             "from_credit_seconds": 0, "from_credit_cents": 0,
             "shortfall_seconds": 0, "shortfall_cents": 0, "balance": bal,
