@@ -6642,16 +6642,23 @@ def _build_watermarked_dub(dubbed_path: str, wm_path: str) -> None:
     half-written file. The source fingerprint is re-checked after the
     encode so a re-render mid-flight can never publish a stale cut."""
     tmp = wm_path + ".tmp.mp4"
+    src_copy = tmp + ".src.mp4"
     try:
         src_stat = os.stat(dubbed_path)
     except OSError as e:
         raise RuntimeError(f"watermark source missing: {e}")
+    # Copy the source before encoding. A concurrent remix can overwrite the
+    # live dubbed_*.mp4 mid-encode; ffmpeg then reads a torn file and fails
+    # with "Invalid data found when processing input". A stable snapshot
+    # prevents that, and the post-encode fingerprint check still rejects a
+    # stale copy if a remix finished while we worked.
+    shutil.copyfile(dubbed_path, src_copy)
 
     def _source_unchanged() -> bool:
         now = os.stat(dubbed_path)
         return now.st_mtime_ns == src_stat.st_mtime_ns and now.st_size == src_stat.st_size
     cmd = [
-        "ffmpeg", "-y", "-i", dubbed_path,
+        "ffmpeg", "-y", "-i", src_copy,
         "-vf",
         f"drawtext=fontfile={_WATERMARK_FONT}:text='DubMaster':"
         "fontcolor=white@0.32:fontsize=h/10:borderw=2:bordercolor=black@0.4:"
@@ -6672,10 +6679,18 @@ def _build_watermarked_dub(dubbed_path: str, wm_path: str) -> None:
             os.unlink(tmp)
         except OSError:
             pass
+        try:
+            os.unlink(src_copy)
+        except OSError:
+            pass
         raise RuntimeError(
             f"watermark encode failed (rc={proc.returncode}): "
             f"{proc.stderr.decode(errors='replace')[-400:]}")
     os.replace(tmp, wm_path)
+    try:
+        os.unlink(src_copy)
+    except OSError:
+        pass
     # Pin the cache entry's mtime to the source fingerprint it was built
     # from. _fresh() then means "built from a source no older than the
     # current one" EXACTLY: a re-render landing after publish bumps the
@@ -9241,82 +9256,87 @@ async def remix_dub(job_id: str, request: Request, lipsync: bool = False):
     # render before any work — see _meter_render.
     _charge = await _meter_render(job_id, user_id)
 
-    # Sync committed segment manifest from Supabase to disk
-    # before remix pipeline reads segments.json
-    try:
-        from app.services.supabase_client import sync_committed_segments_to_disk
-        from app.config import get_settings as _get_settings
-        _settings = _get_settings()
-        segments_path = os.path.join(
-            _settings.DUBBED_DIR, job_id, "segments.json"
-        )
-        await sync_committed_segments_to_disk(
-            job_id=job_id,
-            segments_path=segments_path,
-            dubbed_dir=_settings.DUBBED_DIR,
-        )
-    except Exception as _exc:
-        logger.warning(f"Job {job_id}: pre-remix sync failed: {_exc}")
+    # Serialize remixes for the same job. Two concurrent Make Movie requests
+    # otherwise both write dubbed_*.mp4 and corrupt each other.
+    _remix_lock = _render_locks.setdefault(job_id, asyncio.Lock())
+    async with _remix_lock:
 
-    try:
-        result = await dubbing_service.remix_dub(job_id)
-    except FileNotFoundError as e:
-        if _charge:
-            await _unmeter_render(job_id, user_id)
-        raise HTTPException(status_code=404, detail=str(e))
-    except RuntimeError as e:
-        if _charge:
-            await _unmeter_render(job_id, user_id)
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception:
-        if _charge:
-            await _unmeter_render(job_id, user_id)
-        raise
-
-    # --- Lip sync post-pass on the remix output (optional, non-fatal) ---
-    # Same vendor dispatch as the initial dub; Make Movie is the render path
-    # the editor actually uses, so lip sync must live here, not only upstream.
-    # Opt-in only (?lipsync=true) — it's a paid generative pass, not a default.
-    if lipsync and isinstance(result, dict) and result.get("status") == "ok":
+        # Sync committed segment manifest from Supabase to disk
+        # before remix pipeline reads segments.json
         try:
-            _lang = str(result.get("dubbed_video_url") or "").rstrip("/").split("/")[-1]
-            _out = os.path.join(settings.DUBBED_DIR, job_id, f"dubbed_{_lang}.mp4")
-            _job = await job_manager.get_job(job_id)
-            # Per-segment selection scopes the pass; no selection = whole film.
-            # A selection that resolves to zero ranges is NOT whole film — the
-            # user scoped the sync to ids that no longer exist; bill nothing.
-            _lip_ranges = None
-            if _load_lipsync_selection(job_id):
-                _lip_ranges = []
-                _segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
-                if os.path.exists(_segments_path):
-                    with open(_segments_path, "r", encoding="utf-8") as _sf:
-                        _lip_ranges = _lipsync_selected_ranges(
-                            job_id, (_json.load(_sf) or {}).get("segments", [])
-                        )
-            _lip = await _run_lipsync_postpass(
-                job_id,
-                _out if os.path.exists(_out) else None,
-                getattr(_job, "video_path", "") if _job else "",
-                token,
-                user_id,
-                ranges=_lip_ranges,
+            from app.services.supabase_client import sync_committed_segments_to_disk
+            from app.config import get_settings as _get_settings
+            _settings = _get_settings()
+            segments_path = os.path.join(
+                _settings.DUBBED_DIR, job_id, "segments.json"
             )
-            if _lip is not None:
-                result["lipsync"] = _lip
-        except Exception as _le:
-            logger.warning(f"Job {job_id}: lip sync post-pass skipped: {_le}")
+            await sync_committed_segments_to_disk(
+                job_id=job_id,
+                segments_path=segments_path,
+                dubbed_dir=_settings.DUBBED_DIR,
+            )
+        except Exception as _exc:
+            logger.warning(f"Job {job_id}: pre-remix sync failed: {_exc}")
 
-    if isinstance(result, dict) and _charge:
-        result["billing"] = _charge
+        try:
+            result = await dubbing_service.remix_dub(job_id)
+        except FileNotFoundError as e:
+            if _charge:
+                await _unmeter_render(job_id, user_id)
+            raise HTTPException(status_code=404, detail=str(e))
+        except RuntimeError as e:
+            if _charge:
+                await _unmeter_render(job_id, user_id)
+            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            if _charge:
+                await _unmeter_render(job_id, user_id)
+            raise
 
-    # The retention clock starts HERE — at render completion, not at upload and
-    # not at save. Once the film exists, the customer has what they came for and
-    # we hold their source material, dialogue and audio for a bounded window and
-    # no longer. Nothing is exempt: no plan tier, no "saved project" status.
-    # Re-rendering restamps it, so a film the user is still working on does not
-    # expire underneath them.
-    _stamp_purge_deadline(job_id)
+        # --- Lip sync post-pass on the remix output (optional, non-fatal) ---
+        # Same vendor dispatch as the initial dub; Make Movie is the render path
+        # the editor actually uses, so lip sync must live here, not only upstream.
+        # Opt-in only (?lipsync=true) — it's a paid generative pass, not a default.
+        if lipsync and isinstance(result, dict) and result.get("status") == "ok":
+            try:
+                _lang = str(result.get("dubbed_video_url") or "").rstrip("/").split("/")[-1]
+                _out = os.path.join(settings.DUBBED_DIR, job_id, f"dubbed_{_lang}.mp4")
+                _job = await job_manager.get_job(job_id)
+                # Per-segment selection scopes the pass; no selection = whole film.
+                # A selection that resolves to zero ranges is NOT whole film — the
+                # user scoped the sync to ids that no longer exist; bill nothing.
+                _lip_ranges = None
+                if _load_lipsync_selection(job_id):
+                    _lip_ranges = []
+                    _segments_path = os.path.join(settings.DUBBED_DIR, job_id, "segments.json")
+                    if os.path.exists(_segments_path):
+                        with open(_segments_path, "r", encoding="utf-8") as _sf:
+                            _lip_ranges = _lipsync_selected_ranges(
+                                job_id, (_json.load(_sf) or {}).get("segments", [])
+                            )
+                _lip = await _run_lipsync_postpass(
+                    job_id,
+                    _out if os.path.exists(_out) else None,
+                    getattr(_job, "video_path", "") if _job else "",
+                    token,
+                    user_id,
+                    ranges=_lip_ranges,
+                )
+                if _lip is not None:
+                    result["lipsync"] = _lip
+            except Exception as _le:
+                logger.warning(f"Job {job_id}: lip sync post-pass skipped: {_le}")
+
+        if isinstance(result, dict) and _charge:
+            result["billing"] = _charge
+
+        # The retention clock starts HERE — at render completion, not at upload and
+        # not at save. Once the film exists, the customer has what they came for and
+        # we hold their source material, dialogue and audio for a bounded window and
+        # no longer. Nothing is exempt: no plan tier, no "saved project" status.
+        # Re-rendering restamps it, so a film the user is still working on does not
+        # expire underneath them.
+        _stamp_purge_deadline(job_id)
 
     # Free-tier downloads are watermarked — pre-build the branded copy in the
     # background after a remix so the user's first click saves immediately,
