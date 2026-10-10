@@ -19,7 +19,18 @@ const KEY = 'pendingPlan'
 
 export function setPlanIntent(planKey: PlanIntentKey, isYearly = false) {
   if (typeof window === 'undefined') return
-  sessionStorage.setItem(KEY, JSON.stringify({ planKey, isYearly }))
+  // sessionStorage throws in some private-mode / storage-disabled contexts —
+  // the intent is a convenience, not worth killing the CTA click over.
+  try {
+    sessionStorage.setItem(KEY, JSON.stringify({ planKey, isYearly }))
+  } catch {}
+}
+
+export function clearPlanIntent() {
+  if (typeof window === 'undefined') return
+  try {
+    sessionStorage.removeItem(KEY)
+  } catch {}
 }
 
 export function takePlanIntent(): { planKey: PlanIntentKey; isYearly: boolean } | null {

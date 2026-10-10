@@ -26,12 +26,36 @@ import json
 import logging
 import os
 import threading
+import uuid
+from contextlib import contextmanager
+
+try:
+    import fcntl
+except ImportError:  # Windows dev boxes — threading lock still applies
+    fcntl = None
 
 logger = logging.getLogger(__name__)
 
 STORE_PATH = os.path.join("data", "voice_settings.json")
 CHECKPOINTS_PATH = os.path.join("data", "voice_checkpoints.json")
 _lock = threading.Lock()
+
+
+@contextmanager
+def _file_lock(path: str):
+    """Serializes read-modify-write across worker processes on POSIX.
+    Without it two uvicorn workers can read the same JSON, each write,
+    and one's save is silently lost."""
+    if fcntl is None:
+        yield
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path + ".lock", "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 _KEYS = ("speed", "stability", "similarity_boost", "style")
 
@@ -57,11 +81,19 @@ def _load(path: str = STORE_PATH) -> dict:
 
 
 def _save(data: dict, path: str = STORE_PATH) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, path)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    # Unique tmp name — a shared ".tmp" path lets two workers overwrite each
+    # other's staging file mid-write.
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def _key(user_id: str, voice_id: str) -> str:
@@ -86,8 +118,10 @@ def set(user_id: str, voice_id: str, settings: dict) -> dict:
     known keys clamped to slider range. Returns the stored dict."""
     if not user_id or not voice_id:
         raise ValueError("user_id and voice_id are required")
+    if not isinstance(settings, dict):
+        raise ValueError("settings must be an object")
     clean = _clean_settings(settings)
-    with _lock:
+    with _lock, _file_lock(STORE_PATH):
         data = _load()
         if clean:
             data[_key(user_id, voice_id)] = clean
@@ -149,10 +183,11 @@ def set_checkpoints(user_id: str, job_id: str, speaker: str, checkpoints: list) 
     for ck in checkpoints:
         if not isinstance(ck, dict):
             raise ValueError("each checkpoint must be an object")
-        try:
-            idx = int(ck.get("index"))
-        except (TypeError, ValueError):
+        # Strict int — floats/strings/bools are client bugs, don't coerce.
+        if not isinstance(ck.get("index"), int) or isinstance(
+                ck.get("index"), bool):
             raise ValueError("checkpoint index must be an integer")
+        idx = ck["index"]
         if idx < 0:
             raise ValueError("checkpoint index must be >= 0")
         settings = _clean_settings(ck.get("settings") or {})
@@ -160,7 +195,7 @@ def set_checkpoints(user_id: str, job_id: str, speaker: str, checkpoints: list) 
             raise ValueError("each checkpoint needs at least one setting")
         by_index[idx] = {"index": idx, "settings": settings}
     ordered = [by_index[k] for k in sorted(by_index)]
-    with _lock:
+    with _lock, _file_lock(CHECKPOINTS_PATH):
         data = _load(CHECKPOINTS_PATH)
         if ordered:
             data[_ck_key(user_id, job_id, speaker)] = ordered
@@ -180,6 +215,46 @@ def active_checkpoint(user_id: str, job_id: str, speaker: str, seg_index: int) -
         else:
             break
     return dict(active) if isinstance(active, dict) else {}
+
+
+def snapshot(user_id: str, job_id: str):
+    """Load both stores once and return (voice_get, checkpoint_get) closures
+    for per-segment lookups — a render reads the JSON files a single time
+    instead of twice per synthesized line on the event loop.
+
+    voice_get(voice_id) -> saved tuning dict for this user+voice ({} if none)
+    checkpoint_get(speaker, seg_index) -> active checkpoint settings dict
+    """
+    with _lock:
+        vs_data = _load(STORE_PATH)
+        ck_data = _load(CHECKPOINTS_PATH)
+
+    def voice_get(voice_id: str) -> dict:
+        if not user_id or not voice_id:
+            return {}
+        entry = vs_data.get(_key(user_id, voice_id))
+        return dict(entry) if isinstance(entry, dict) else {}
+
+    def checkpoint_get(speaker: str, seg_index: int) -> dict:
+        if not (user_id and job_id and speaker):
+            return {}
+        entry = ck_data.get(_ck_key(user_id, job_id, speaker))
+        if not isinstance(entry, list):
+            return {}
+        active = {}
+        for ck in entry:
+            if not isinstance(ck, dict) or not isinstance(
+                    ck.get("index"), int):
+                continue
+            if ck["index"] <= seg_index:
+                settings = ck.get("settings")
+                if isinstance(settings, dict):
+                    active = settings
+            else:
+                break
+        return dict(active)
+
+    return voice_get, checkpoint_get
 
 
 def fish_tts_overrides(settings: dict) -> dict:

@@ -34,13 +34,18 @@ export async function POST() {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 })
     }
 
-    const { data: sub } = await supabase
+    const { data: sub, error: lookupError } = await supabase
       .from("subscriptions")
-      .select("stripe_subscription_id")
+      .select("id, stripe_subscription_id")
       .eq("user_id", user.id)
       .in("status", ["active", "trialing"])
       .limit(1)
       .maybeSingle()
+
+    if (lookupError) {
+      console.error("[DOWNGRADE] subscriptions lookup failed:", lookupError)
+      return NextResponse.json({ error: "Could not check subscription" }, { status: 500 })
+    }
 
     if (!sub) {
       return NextResponse.json({ ok: true, downgraded: false })
@@ -61,10 +66,13 @@ export async function POST() {
     }
 
     const service = await createServiceClient()
+    // Cancel only the row whose Stripe subscription was actually canceled (or
+    // confirmed gone) above — a blanket user update would mark other active
+    // subscriptions canceled while Stripe keeps billing them.
     const { error: updateError } = await service
       .from("subscriptions")
       .update({ status: "canceled", updated_at: new Date().toISOString() })
-      .eq("user_id", user.id)
+      .eq("id", sub.id)
       .in("status", ["active", "trialing"])
 
     if (updateError) {

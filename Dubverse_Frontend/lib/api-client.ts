@@ -703,9 +703,16 @@ class DubVerseAPIClient {
    */
   private async _fetch(input: string, init: RequestInit = {}): Promise<Response> {
     await this._ensureToken()
+    const initHeaders = { ...((init.headers as Record<string, string> | undefined) ?? {}) }
+    // An Authorization captured by a call site BEFORE _ensureToken() ran is a
+    // stale/empty token — and the spread order below would let it beat the
+    // freshly ensured one. Drop it; _fetch owns auth.
+    for (const k of Object.keys(initHeaders)) {
+      if (k.toLowerCase() === 'authorization') delete initHeaders[k]
+    }
     const headers = {
+      ...initHeaders,
       ...this._authHeaders(),
-      ...((init.headers as Record<string, string> | undefined) ?? {}),
     }
     return fetch(input, { ...init, headers })
   }
@@ -970,9 +977,7 @@ class DubVerseAPIClient {
    *  strip could only say "(voice set)". The backend knows them from env. */
   async getPresetVoiceLabels(): Promise<Record<string, string>> {
     try {
-      const res = await this._fetch(`${this.baseURL}/api/voices/presets`, {
-        headers: this._authHeaders(),
-      })
+      const res = await this._fetch(`${this.baseURL}/api/voices/presets`)
       if (!res.ok) return {}
       const data = await res.json()
       return (data?.presets ?? {}) as Record<string, string>
@@ -1045,7 +1050,9 @@ class DubVerseAPIClient {
     const res = await this._fetch(
       `${this.baseURL}/api/voice-settings/${encodeURIComponent(voiceId)}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      // _fetch attaches the fresh bearer — spreading _authHeaders() here would
+      // capture a stale token BEFORE _ensureToken() runs inside _fetch.
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ settings }),
     })
     if (!res.ok) throw new Error(`Voice settings save failed (${res.status})`)
@@ -1067,7 +1074,7 @@ class DubVerseAPIClient {
     const res = await this._fetch(
       `${this.baseURL}/api/jobs/${encodeURIComponent(jobId)}/speaker-tuning/${encodeURIComponent(speakerId)}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ checkpoints }),
     })
     if (!res.ok) throw new Error(`Speaker tuning save failed (${res.status})`)
@@ -1086,7 +1093,7 @@ class DubVerseAPIClient {
   async addCustomVoice(provider: 'fish-audio' | 'elevenlabs', voiceId: string, name?: string): Promise<CustomVoice> {
     const res = await this._fetch(`${this.baseURL}/api/voices/custom`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider, voice_id: voiceId, name: name ?? '' }),
     })
     if (!res.ok) {
@@ -1104,7 +1111,6 @@ class DubVerseAPIClient {
     form.append('name', name)
     const res = await this._fetch(`${this.baseURL}/api/voices/clone`, {
       method: 'POST',
-      headers: { ...this._authHeaders() },
       body: form,
     })
     if (!res.ok) {

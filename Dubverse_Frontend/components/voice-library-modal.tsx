@@ -326,13 +326,19 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   // on the backend so the tuning follows the voice into every render.
   const [tuningVoice, setTuningVoice] = useState<Voice | null>(null)
   const [tuning, setTuning] = useState<Record<string, number>>({})
+  // What the backend has stored — staged edits only persist via the explicit
+  // "Save as voice default" button, so preparing a scene pin can't leak into
+  // the voice's global tuning.
+  const [tuningSaved, setTuningSaved] = useState<Record<string, number>>({})
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
+  const [tuningSaving, setTuningSaving] = useState(false)
+  const tuningVoiceIdRef = useRef<string | null>(null)
   // Custom audition sentence — persists across voices so the same line can be
   // compared voice to voice; cleared only when the user edits it.
   const [tuningText, setTuningText] = useState('')
   const [tuningDefaults, setTuningDefaults] = useState<Record<string, number>>({
     speed: 1, stability: 0.5, similarity_boost: 0.75, style: 0.3,
   })
-  const tuningSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Scene checkpoints — pin the panel's current sliders to a transcript line;
   // the voice holds them from that line onward until the next checkpoint.
@@ -398,36 +404,50 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   }, [jobId, ckSpeaker, ckList])
 
   const openTuning = useCallback((v: Voice) => {
+    tuningVoiceIdRef.current = v.voice_id
     setTuningVoice(v)
     setTuning({})
+    setTuningSaved({})
+    setSettingsLoaded(false)
     setCkSpeaker('')
     setCkIndex('')
     setCkList([])
     apiClient.getVoiceSettings(v.voice_id).then(r => {
+      // A late response must not overwrite another voice's panel or edits the
+      // user already made on this one.
+      if (tuningVoiceIdRef.current !== v.voice_id) return
       setTuningDefaults(r.defaults)
       setTuning(r.settings)
-    }).catch(() => {})
+      setTuningSaved({ ...r.settings })
+      setSettingsLoaded(true)
+    }).catch(() => {
+      if (tuningVoiceIdRef.current === v.voice_id) setSettingsLoaded(true)
+    })
   }, [])
 
   const closeTuning = useCallback(() => {
-    if (tuningSaveTimer.current) clearTimeout(tuningSaveTimer.current)
+    tuningVoiceIdRef.current = null
     setTuningVoice(null)
   }, [])
 
+  // Sliders only stage locally — nothing persists until "Save as voice
+  // default" or a Pin writes it.
   const setTuningKey = useCallback((key: string, value: number) => {
-    setTuning(prev => {
-      const next = { ...prev, [key]: value }
-      if (tuningVoice) {
-        if (tuningSaveTimer.current) clearTimeout(tuningSaveTimer.current)
-        const vid = tuningVoice.voice_id
-        tuningSaveTimer.current = setTimeout(() => {
-          apiClient.saveVoiceSettings(vid, next)
-            .catch(err => console.warn('[VOICE-TUNING]', err))
-        }, 500)
-      }
-      return next
-    })
-  }, [tuningVoice])
+    setTuning(prev => ({ ...prev, [key]: value }))
+  }, [])
+
+  const saveTuning = useCallback(async () => {
+    if (!tuningVoice) return
+    setTuningSaving(true)
+    try {
+      await apiClient.saveVoiceSettings(tuningVoice.voice_id, tuning)
+      setTuningSaved({ ...tuning })
+    } catch (e) {
+      console.warn('[VOICE-TUNING]', e)
+    } finally {
+      setTuningSaving(false)
+    }
+  }, [tuningVoice, tuning])
 
   const previewGenRef = useRef(0)
   const [previewingId, setPreviewingId] = useState<string | null>(null)
@@ -1416,16 +1436,26 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
 
       {/* Floating Audio Settings panel — lands over the side panel when a
           card's sliders button is pressed. X in the upper right is the only
-          close control; changes save debounced to the backend. */}
+          close control; nothing persists until "Save as voice default" or a
+          scene Pin writes it. */}
       {tuningVoice && (() => {
         const tv = tuningVoice
         const val = (k: string) => tuning[k] ?? tuningDefaults[k] ?? 0
-        const rows: Array<{ key: string; label: string; tip: string; min: number; max: number; step: number; fmt: (v: number) => string }> = [
+        // ElevenLabs voices have no speed parameter — hide that slider rather
+        // than let a dead control pretend to work.
+        const isElevenLabs = tv.tags?.includes('elevenlabs')
+        const allRows: Array<{ key: string; label: string; tip: string; min: number; max: number; step: number; fmt: (v: number) => string }> = [
           { key: 'speed', label: 'Speed', tip: 'How fast the voice talks. 1.0× is the natural pace — lower for a slower, heavier delivery; higher for quicker speech.', min: 0.5, max: 2, step: 0.05, fmt: v => `${v.toFixed(2)}×` },
           { key: 'stability', label: 'Stability', tip: 'Higher keeps the voice calm and even take after take; lower allows more emotion and variation.', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
           { key: 'similarity_boost', label: 'Similarity', tip: 'How closely the output stays true to the original voice\u2019s tone and character. Higher = closer match.', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
           { key: 'style', label: 'Style exaggeration', tip: 'Amplifies the voice\u2019s personality and emotion — higher is more dramatic, lower is more neutral.', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
         ]
+        const rows = allRows.filter(r => !(isElevenLabs && r.key === 'speed'))
+        const tuningDirty = (() => {
+          const keys = new Set([...Object.keys(tuning), ...Object.keys(tuningSaved)])
+          for (const k of keys) if (tuning[k] !== tuningSaved[k]) return true
+          return false
+        })()
         return (
           <div className="absolute inset-0 z-30 flex items-stretch justify-stretch bg-slate-950/80 backdrop-blur-sm rounded-xl">
             <div className="relative flex-1 m-1 rounded-xl border border-amber-500/30 bg-[#0a1220] shadow-2xl flex flex-col min-h-0">
@@ -1474,6 +1504,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                           min={r.min}
                           max={r.max}
                           step={r.step}
+                          disabled={!settingsLoaded}
                           onValueChange={([v]) => setTuningKey(r.key, v)}
                         />
                       </div>
@@ -1483,6 +1514,23 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                     </TooltipContent>
                   </Tooltip>
                 ))}
+                {isElevenLabs && (
+                  <p className="text-[10px] text-slate-600 -mt-2">
+                    {t('Speed control isn\u2019t available for ElevenLabs voices.')}
+                  </p>
+                )}
+                <div className="flex items-center justify-between gap-2 border-t border-slate-800 pt-3">
+                  <span className="text-[10px] text-slate-500">
+                    {tuningDirty ? t('Unsaved — applies to previews; save to make it this voice\u2019s default') : t('This voice\u2019s saved defaults')}
+                  </span>
+                  <Button size="sm" variant="outline"
+                    onClick={saveTuning}
+                    disabled={!settingsLoaded || !tuningDirty || tuningSaving}
+                    title={t('Store these sliders as the voice\u2019s defaults for every render')}
+                    className="h-7 px-2.5 text-xs shrink-0 border border-amber-500/50 text-amber-300 bg-slate-950/60 hover:bg-amber-500/15">
+                    {tuningSaving ? t('Saving…') : t('Save as voice default')}
+                  </Button>
+                </div>
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="text-xs text-slate-400">{t('Try your own words')}</span>

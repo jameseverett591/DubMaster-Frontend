@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import Link from "next/link"
 import { CheckCircle2, Download, Loader2, Share2 } from "lucide-react"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -24,6 +24,12 @@ export function DubReadyDialog({ open, onClose, title, jobId, videoUrl, download
   const t = useT()
   const [sharing, setSharing] = useState(false)
   const [copied, setCopied] = useState(false)
+
+  // The dialog stays mounted between jobs — without this the Share button
+  // opens still showing "Link copied!" from a previous job.
+  useEffect(() => {
+    if (open) setCopied(false)
+  }, [open, jobId])
 
   const handleShare = async () => {
     setSharing(true)

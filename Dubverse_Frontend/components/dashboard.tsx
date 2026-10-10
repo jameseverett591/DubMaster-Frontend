@@ -73,7 +73,7 @@ export function Dashboard() {
   const loadingUsage = usage.loading
   const minutesUsed = usage.minutesUsed
   const bonusBalance = usage.bonusBalance
-  // Included allowance from the quota row — 30 pro / 3 free. Always > 0 for a
+  // Included allowance from the quota row — 30 pro / 5 free. Always > 0 for a
   // signed-in user, which is the only state this page renders in.
   const planLimit = usage.planLimit
 
@@ -190,7 +190,7 @@ export function Dashboard() {
                               <p className="text-[#94A3B8] text-xs">{t('Monthly Usage')}</p>
                               <p className="text-white text-sm font-bold">
                                 <span className={isExhausted ? "text-red-400" : isLowUsage ? "text-[#FDB022]" : "text-[#22D3EE]"}>
-                                  {minutesUsed}
+                                  {Math.round(minutesUsed * 10) / 10}
                                 </span>
                                 <span className="text-[#64748B]"> / </span>
                                 <span className="text-[#94A3B8]">{planLimit} min</span>

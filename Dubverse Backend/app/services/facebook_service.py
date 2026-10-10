@@ -75,6 +75,12 @@ def get_video_info(url: str) -> dict:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
         raise ValueError(_friendly_error(e))
+    # fb.watch is opaque — the whitelist can't see where it lands until
+    # yt-dlp resolves it. Confirm the extractor actually claimed Facebook;
+    # a short link that resolves elsewhere must not ride this import path.
+    extractor = str(info.get("extractor_key") or info.get("extractor") or "").lower()
+    if not extractor.startswith("facebook"):
+        raise ValueError("That link doesn't point at a Facebook video")
     if info.get("is_live"):
         raise ValueError("Live streams can't be imported")
     return {
@@ -155,7 +161,8 @@ def _friendly_error(e: Exception) -> str:
         return "That video is private — only public Facebook videos can be imported"
     if "unsupported url" in low or "unable to extract" in low:
         return "That Facebook URL doesn't point at a playable video"
-    if "rate" in low and "limit" in low or "429" in low:
+    if ("rate" in low and "limit" in low) or "http error 429" in low \
+            or ("429" in low and "too many" in low):
         return "Facebook rate-limited the request — try again in a few minutes"
     if "unavailable" in low or "removed" in low or "not found" in low \
             or "does not exist" in low:

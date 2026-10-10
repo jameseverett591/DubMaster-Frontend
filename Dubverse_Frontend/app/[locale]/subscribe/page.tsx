@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge"
 import { Check, Mic2, Loader2, Wallet } from "lucide-react"
 import Link from "next/link"
 import { usePlan } from "@/lib/use-plan"
-import { setPlanIntent, takePlanIntent } from "@/lib/plan-intent"
+import { setPlanIntent, takePlanIntent, clearPlanIntent } from "@/lib/plan-intent"
 
 export default function SubscribePage() {
   return (
@@ -87,6 +87,9 @@ function SubscribeContent() {
       return
     }
 
+    // Signed-in checkout doesn't need the stash — drop any leftover intent so
+    // Stripe's return redirect can't fire a second checkout.
+    clearPlanIntent()
     setLoadingPlan(planKey)
 
     try {
@@ -122,9 +125,12 @@ function SubscribeContent() {
       router.push("/signin?redirect=/subscribe")
       return
     }
+    // Same as checkout: a lingering stash from an earlier click must not fire
+    // later in this tab.
+    clearPlanIntent()
     if (plan === 'pro') {
       if (!window.confirm(
-        "Switch to Free cancels your Pro subscription immediately — 30 min/month drops to 3. Continue?"
+        "Switch to Free cancels your Pro subscription immediately — 30 min/month drops to 5. Continue?"
       )) return
       setDowngrading(true)
       setDowngradeError(null)

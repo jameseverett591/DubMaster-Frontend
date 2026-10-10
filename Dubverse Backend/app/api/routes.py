@@ -3600,7 +3600,9 @@ async def _url_download_then_pipeline(job_id: str, url: str,
                         start=s["start"],
                         end=s["end"],
                         speaker=s["speaker"],
-                        source="youtube_captions",
+                        # Provider-accurate — this path serves both YouTube
+                        # and Facebook imports.
+                        source=f"{provider.lower()}_captions",
                     )
                     for s in provided
                 ],

@@ -1657,6 +1657,10 @@ class DubbingService:
             # done in Phase B after all audio is on disk.
             # ------------------------------------------------------------------
 
+            # Settings snapshot — both JSON files are read once here instead of
+            # twice per synthesized segment on the event loop.
+            _vs_get, _ck_get = voice_settings_store.snapshot(user_id or "", job_id)
+
             async def _synthesise_one(i: int, segment: Dict) -> Optional[Dict]:
                 # Resolve adapted variant text, falling back to raw translated text.
                 seg_id = segment.get("segment_id", str(i))
@@ -1786,8 +1790,11 @@ class DubbingService:
                 # Saved per-voice Audio Settings (Voice Library sliders) fill
                 # keys the render request didn't set — per-speaker values win.
                 try:
-                    _voice_tuned = voice_settings_store.get(
-                        user_id, (voice_mapping or {}).get(speaker) or "")
+                    # Look settings up under the voice actually being
+                    # synthesized — a committed/regenerated voice can differ
+                    # from voice_mapping[speaker], and it must keep ITS tuning.
+                    _voice_tuned = _vs_get(_voice_key) or _vs_get(
+                        (voice_mapping or {}).get(speaker) or "")
                 except Exception:
                     _voice_tuned = {}
                 # Scene checkpoints (per job+speaker, pinned to a transcript
@@ -1795,8 +1802,7 @@ class DubbingService:
                 # before this segment wins over both request settings and the
                 # saved voice-level tuning, holding until the next checkpoint.
                 try:
-                    _ck = voice_settings_store.active_checkpoint(
-                        user_id, job_id, speaker, i)
+                    _ck = _ck_get(speaker, i)
                 except Exception:
                     _ck = {}
                 for _k, _v in _voice_tuned.items():
@@ -1945,7 +1951,10 @@ class DubbingService:
                     # multiplies the fit-computed pace; stability maps inversely
                     # onto temperature; style onto top_p. Only keys the user
                     # actually tuned apply — pipeline defaults stay untouched.
-                    _fish_over = voice_settings_store.fish_tts_overrides(_voice_tuned)
+                    # Translate the FULLY merged settings — request per-speaker
+                    # values and active checkpoint are in `override` too, so
+                    # Fish sees the same effective tuning as the EL path.
+                    _fish_over = voice_settings_store.fish_tts_overrides(override)
                     if "speed_mult" in _fish_over:
                         _gen_speed = max(0.5, min(2.0, _gen_speed * _fish_over["speed_mult"]))
                     if "temperature" in _fish_over:
@@ -5040,6 +5049,28 @@ class DubbingService:
             )
             result = {"path": audio_path, "engine": "elevenlabs-sts"} if _payload else None
         else:
+            # Saved Audio Settings + scene checkpoints — a regen must keep the
+            # tuned delivery of the render it replaces, not revert to provider
+            # defaults. Mirrors the dub_video merge: resolved-voice tuning,
+            # active checkpoint at this index, explicit speed args still win.
+            _rfo = {}
+            try:
+                _rspeaker = seg.get("speaker", "speaker-1")
+                _rvoice = use_voice_id or (
+                    (data.get("voice_mapping") or {}).get(_rspeaker) or "")
+                _rtuned = voice_settings_store.get(user_id or "", _rvoice) or \
+                    voice_settings_store.get(
+                        user_id or "",
+                        (data.get("voice_mapping") or {}).get(_rspeaker) or "")
+                _rtuned.update(voice_settings_store.active_checkpoint(
+                    user_id or "", job_id, _rspeaker, segment_index))
+                _rfo = voice_settings_store.fish_tts_overrides(_rtuned)
+            except Exception as _rtune_err:
+                logger.warning(
+                    f"[TUNING] regen seg {segment_index} tuning skipped: {_rtune_err}")
+            _speed_mult = _rfo.pop("speed_mult", None)
+            if _speed_mult is not None and speed is None and speed_ratio is None:
+                use_speed = max(0.5, min(2.0, use_speed * _speed_mult))
             result = await fish_audio_tts.text_to_speech(
                 text=speak_text,
                 voice_id=use_voice_id,
@@ -5047,6 +5078,7 @@ class DubbingService:
                 speed=use_speed,
                 emotion_tags=directive,
                 traits_tag="",  # folded into the composed directive above
+                **_rfo,
             )
         if not result:
             raise RuntimeError(
