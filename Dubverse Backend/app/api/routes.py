@@ -6636,6 +6636,7 @@ _watermark_sem = asyncio.Semaphore(1)
 
 
 def _build_watermarked_dub(dubbed_path: str, wm_path: str) -> None:
+    import shutil
     """Burn a dim 'DubMaster' trademark across the full video (drawtext runs
     the whole duration — this is a brand overlay, not a corner stamp).
     Writes via a temp + rename so a request mid-encode never gets a
@@ -6656,7 +6657,13 @@ def _build_watermarked_dub(dubbed_path: str, wm_path: str) -> None:
 
     def _source_unchanged() -> bool:
         now = os.stat(dubbed_path)
-        return now.st_mtime_ns == src_stat.st_mtime_ns and now.st_size == src_stat.st_size
+        # Bind mounts (Docker Desktop on Windows) round mtimes to whole
+        # seconds, so a nanosecond equality check always looks stale. Compare
+        # size + second-precision mtime instead.
+        return (
+            int(now.st_mtime_ns / 1_000_000_000) == int(src_stat.st_mtime_ns / 1_000_000_000)
+            and now.st_size == src_stat.st_size
+        )
     cmd = [
         "ffmpeg", "-y", "-i", src_copy,
         "-vf",
@@ -6712,9 +6719,15 @@ async def _watermarked_dub(dubbed_path: str) -> str:
     reserves the single encode slot while a render runs."""
     def _fresh() -> bool:
         # A re-rendered dub must re-encode — never serve a watermark burned
-        # from an older cut of the film.
-        return os.path.exists(wm_path) and \
-            os.path.getmtime(wm_path) >= os.path.getmtime(dubbed_path)
+        # from an older cut of the film. Use second-precision mtimes because
+        # some filesystems (Docker Desktop bind mounts) do not preserve
+        # sub-second timestamps, which would otherwise make every request look
+        # stale and re-encode indefinitely.
+        return (
+            os.path.exists(wm_path)
+            and os.path.getsize(wm_path) > 1000
+            and int(os.path.getmtime(wm_path)) >= int(os.path.getmtime(dubbed_path))
+        )
 
     # Name it wm_dubbed_*.mp4, NOT dubbed_*.wm.mp4: the dubbed_*.mp4 globs
     # (job rehydration, render-candidate scan) must never pick the watermark
