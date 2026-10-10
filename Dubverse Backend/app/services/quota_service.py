@@ -1,6 +1,6 @@
 """Render metering: included monthly minutes + prepaid credit wallet.
 
-One paid plan (Pro, 30 min/month included) and a free tier (3 min/month).
+One paid plan (Pro, 30 min/month included) and a free tier (5 min/month).
 Pro REPLACES free — it does not stack. Anyone may deposit into the wallet
 ($10 minimum) and render at $2.50/min once included minutes are gone. Wallet
 credit never expires. Only the Make Movie render is metered; every other
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # --- Pricing constants -------------------------------------------------------
 CENTS_PER_MINUTE = 250          # $2.50 / min
 MIN_DEPOSIT_CENTS = 1000        # $10
-FREE_INCLUDED_SECONDS = 180     # 3 min / month
+FREE_INCLUDED_SECONDS = 300     # 5 min / month
 PRO_INCLUDED_SECONDS = 1800     # 30 min / month
 LOW_BALANCE_SECONDS = 300       # UI warns under 5 min total
 

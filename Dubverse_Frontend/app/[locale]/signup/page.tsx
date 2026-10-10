@@ -114,7 +114,7 @@ export default function SignUpPage() {
             {t('createAccount')}
           </h1>
           <p className="text-[#94A3B8] text-lg">
-            Every feature unlocked — you only pay to render. 3 free minutes every month.
+            Every feature unlocked — you only pay to render. 5 free minutes every month.
           </p>
         </div>
 
@@ -125,7 +125,7 @@ export default function SignUpPage() {
           <CardHeader className="text-center pb-4">
             <CardTitle className="text-2xl text-white">{t('createAccount')}</CardTitle>
             <CardDescription className="text-[#94A3B8]">
-              Free tier — 3 render minutes/month, no card required.
+              Free tier — 5 render minutes/month, no card required.
             </CardDescription>
           </CardHeader>
 

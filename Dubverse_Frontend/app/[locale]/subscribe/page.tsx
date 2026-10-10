@@ -9,6 +9,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import { Check, Mic2, Loader2, Wallet } from "lucide-react"
 import Link from "next/link"
+import { usePlan } from "@/lib/use-plan"
+import { setPlanIntent, takePlanIntent, clearPlanIntent } from "@/lib/plan-intent"
 
 export default function SubscribePage() {
   return (
@@ -20,9 +22,9 @@ export default function SubscribePage() {
 
 // One subscription + a prepaid wallet. Upload, transcribe, edit — all free.
 // Only Make Movie renders are metered: Pro gets 30 min/month included, free
-// gets 3; beyond that, wallet credit at $2.50/min.
+// gets 5; beyond that, wallet credit at $2.50/min.
 const FREE_FEATURES = [
-  "3 minutes of renders every month",
+  "5 minutes of renders every month",
   "Full studio — every feature unlocked",
   "No card required",
 ]
@@ -37,6 +39,9 @@ function SubscribeContent() {
   const [loadingPlan, setLoadingPlan] = useState<string | null>(null)
   const [user, setUser] = useState<{ id: string; email: string } | null>(null)
   const [layoutReady, setLayoutReady] = useState(false)
+  const [downgrading, setDowngrading] = useState(false)
+  const [downgradeError, setDowngradeError] = useState<string | null>(null)
+  const { plan, loading: planLoading } = usePlan()
 
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -59,28 +64,32 @@ function SubscribeContent() {
   }, [])
 
   useEffect(() => {
-    if (user && typeof window !== 'undefined') {
-      const pendingPlan = sessionStorage.getItem('pendingPlan')
-      if (pendingPlan) {
-        try {
-          const { planKey, isYearly } = JSON.parse(pendingPlan)
-          sessionStorage.removeItem('pendingPlan')
-          handleCheckout(planKey, isYearly)
-        } catch (err) {
-          console.error('Failed to parse pending plan:', err)
-          sessionStorage.removeItem('pendingPlan')
-        }
-      }
+    if (!user || planLoading || typeof window === 'undefined') return
+    const intent = takePlanIntent()
+    if (!intent) return
+    if (intent.planKey === 'free') {
+      // Chose Free before signing in. No checkout — a free account goes
+      // straight to the studio. A still-subscribed account stays on this
+      // page where the Free card offers the Switch-to-Free downgrade.
+      if (plan !== 'pro') router.push('/studio')
+      return
     }
-  }, [user])
+    // A stashed 'pro' intent from before sign-in must not re-bill an account
+    // that already has a subscription.
+    if (intent.planKey === 'pro' && plan === 'pro') return
+    handleCheckout(intent.planKey, intent.isYearly)
+  }, [user, planLoading])
 
   const handleCheckout = async (planKey: 'pro' | 'wallet', isYearly: boolean) => {
     if (!user) {
-      sessionStorage.setItem('pendingPlan', JSON.stringify({ planKey, isYearly }))
+      setPlanIntent(planKey, isYearly)
       router.push("/signin?redirect=/subscribe")
       return
     }
 
+    // Signed-in checkout doesn't need the stash — drop any leftover intent so
+    // Stripe's return redirect can't fire a second checkout.
+    clearPlanIntent()
     setLoadingPlan(planKey)
 
     try {
@@ -107,8 +116,39 @@ function SubscribeContent() {
     }
   }
 
-  const startFree = () => {
-    router.push(user ? "/studio" : "/signin?redirect=/studio")
+  // Free card: signed-out visitors stash a 'free' intent so post-sign-in
+  // routes here and resolves; signed-in users either enter the studio or —
+  // if they still carry an active subscription — downgrade for real.
+  const startFree = async () => {
+    if (!user) {
+      setPlanIntent('free')
+      router.push("/signin?redirect=/subscribe")
+      return
+    }
+    // Same as checkout: a lingering stash from an earlier click must not fire
+    // later in this tab.
+    clearPlanIntent()
+    if (plan === 'pro') {
+      if (!window.confirm(
+        "Switch to Free cancels your Pro subscription immediately — 30 min/month drops to 5. Continue?"
+      )) return
+      setDowngrading(true)
+      setDowngradeError(null)
+      try {
+        const res = await fetch('/api/downgrade', { method: 'POST' })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(data.error || `downgrade failed (${res.status})`)
+        // Full navigation — PlanProvider only re-reads the tier on auth
+        // changes, so a client-side push would leave it showing Pro.
+        localStorage.setItem('dubverse.plan', 'free')
+        window.location.href = '/studio'
+      } catch (err) {
+        setDowngradeError(err instanceof Error ? err.message : 'Downgrade failed')
+        setDowngrading(false)
+      }
+      return
+    }
+    router.push("/studio")
   }
 
   return (
@@ -164,13 +204,25 @@ function SubscribeContent() {
                 </div>
                 <Button
                   onClick={startFree}
-                  className="w-full mt-6 font-semibold cursor-pointer bg-gradient-to-r from-[#22D3EE] to-[#06B6D4] text-black"
+                  disabled={downgrading || planLoading}
+                  className="w-full mt-6 font-semibold cursor-pointer bg-gradient-to-r from-[#22D3EE] to-[#06B6D4] text-black disabled:opacity-50"
                 >
-                  Start dubbing
+                  {downgrading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+                  {downgrading
+                    ? "Switching…"
+                    : plan === 'pro'
+                      ? "Switch to Free"
+                      : "Start dubbing"}
                 </Button>
+                {downgradeError && (
+                  <p className="text-xs text-red-400">{downgradeError}</p>
+                )}
+                {plan === 'pro' && (
+                  <p className="text-xs text-[#64748B]">Cancels your Pro subscription.</p>
+                )}
               </CardContent>
             </Card>
-            <p className="text-center text-xs text-[#94A3B8] mt-3">3 min/month included, forever.</p>
+            <p className="text-center text-xs text-[#94A3B8] mt-3">5 min/month included, forever.</p>
           </div>
 
           {/* Pro */}
@@ -228,11 +280,15 @@ function SubscribeContent() {
                 </div>
                 <Button
                   onClick={() => handleCheckout('pro', yearly)}
-                  disabled={loadingPlan !== null}
+                  disabled={loadingPlan !== null || plan === 'pro'}
                   className="w-full mt-6 font-semibold cursor-pointer transition-all duration-300 bg-gradient-to-r from-[#A855F7] to-[#7C3AED] text-white shadow-[0_0_20px_rgba(168,85,247,0.3)] disabled:opacity-50"
                 >
                   {loadingPlan === 'pro' ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                  {loadingPlan === 'pro' ? "Redirecting…" : "Get Pro"}
+                  {plan === 'pro'
+                    ? "Current plan"
+                    : loadingPlan === 'pro'
+                      ? "Redirecting…"
+                      : "Get Pro"}
                 </Button>
               </CardContent>
             </Card>

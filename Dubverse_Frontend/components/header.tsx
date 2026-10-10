@@ -14,10 +14,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Bell, Settings, User, Menu, X, Mic2, Check, Users, LogOut, Clapperboard } from "lucide-react"
+import { Bell, Settings, User, Menu, X, Mic2, Check, Users, LogOut, Clapperboard, Sparkles, ArrowDownCircle } from "lucide-react"
 import Link from "next/link"
 import { LanguageSwitcher } from "@/components/language-switcher"
 import { VoiceLibraryModal } from "@/components/voice-library-modal"
+import { usePlan } from "@/lib/use-plan"
+import { setPlanIntent, clearPlanIntent } from "@/lib/plan-intent"
 
 import type { EditorMode } from "@/components/dashboard"
 import { useT } from '@/lib/use-t'
@@ -34,6 +36,7 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [voiceLibraryOpen, setVoiceLibraryOpen] = useState(false)
   const [userEmail, setUserEmail] = useState<string | null>(null)
+  const { plan } = usePlan()
   const router = useRouter()
   const supabase = createClient()
   const t = useTranslations('nav')
@@ -123,6 +126,24 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
           </nav>
 
           <div className="flex items-center gap-2">
+            {/* Plan flip-flop: free accounts get Upgrade here (this header is
+                on studio/dashboard/account/profile/collaborate); pro accounts
+                get Switch to Free in the account menu below. */}
+            {plan === 'free' && (
+              <Button
+                onClick={() => { clearPlanIntent(); router.push("/subscribe?upgrade=true") }}
+                size="sm"
+                className="bg-gradient-to-r from-[#A855F7] to-[#7C3AED] text-white font-semibold cursor-pointer hover:opacity-90"
+              >
+                <Sparkles className="h-4 w-4 mr-1.5" />
+                {tUi('Upgrade')}
+              </Button>
+            )}
+            {plan === 'pro' && (
+              <span className="text-xs font-bold uppercase tracking-wide px-2.5 py-1 rounded-full bg-[#A855F7]/15 border border-[#A855F7]/40 text-[#C084FC]">
+                Pro
+              </span>
+            )}
             <LanguageSwitcher />
             <Button variant="ghost" size="icon" className="hidden md:flex text-[#94A3B8] hover:text-[#C084FC] hover:bg-[#A855F7]/10">
               <Bell className="h-5 w-5" />
@@ -150,6 +171,21 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
                   <Settings className="mr-2 h-4 w-4" />
                   {t('settings')}
                 </DropdownMenuItem>
+                {plan === 'free' && (
+                  <DropdownMenuItem onClick={() => { clearPlanIntent(); router.push("/subscribe?upgrade=true") }} className="cursor-pointer text-[#C084FC] hover:text-[#C084FC] hover:bg-[#A855F7]/10">
+                    <Sparkles className="mr-2 h-4 w-4" />
+                    {tUi('Upgrade to Pro')}
+                  </DropdownMenuItem>
+                )}
+                {plan === 'pro' && (
+                  <DropdownMenuItem
+                    onClick={() => { setPlanIntent('free'); router.push("/subscribe") }}
+                    className="cursor-pointer text-[#94A3B8] hover:text-[#22D3EE] hover:bg-[#22D3EE]/10"
+                  >
+                    <ArrowDownCircle className="mr-2 h-4 w-4" />
+                    {tUi('Switch to Free')}
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuSeparator className="bg-[#A855F7]/20" />
                 <DropdownMenuItem onClick={handleSignOut} className="cursor-pointer text-red-400 hover:text-red-300 hover:bg-red-500/10">
                   <LogOut className="mr-2 h-4 w-4" />

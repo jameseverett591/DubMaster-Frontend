@@ -596,7 +596,7 @@ progress.
 
 DubMaster has two plans: **Free** and **Pro**.
 
-- **Free** includes 3 minutes of rendering per month.
+- **Free** includes 5 minutes of rendering per month.
 - **Pro** includes 30 minutes per month and unlocks the advanced panels.
 - Either plan can top up the **wallet** — prepaid credit that pays for anything the
   included minutes don't cover.

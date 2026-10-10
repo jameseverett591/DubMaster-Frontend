@@ -94,7 +94,7 @@ export async function middleware(request: NextRequest) {
   // Redirect authenticated users away from auth pages
   if (user && AUTH_ROUTES.some((route) => currentPath.startsWith(route))) {
     const url = request.nextUrl.clone()
-    // Every signed-in user owns the studio — free tier renders 3 min/month
+    // Every signed-in user owns the studio — free tier renders 5 min/month
     // plus the wallet, so there is no "subscribed or not" fork anymore.
     url.pathname = "/studio"
     return NextResponse.redirect(url)

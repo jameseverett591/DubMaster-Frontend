@@ -38,6 +38,7 @@ import {
 import Link from "next/link"
 import { LanguageSwitcher } from "@/components/language-switcher"
 import { useT } from '@/lib/use-t'
+import { setPlanIntent, clearPlanIntent } from '@/lib/plan-intent'
 
 /* ─── Floating particles component ─── */
 
@@ -103,6 +104,7 @@ export default function LandingPage() {
   const [featureDetail, setFeatureDetail] = useState<{ title: string; body: string; anchor?: string } | null>(null)
   const [videoMode, setVideoMode] = useState<"original" | "dubbed" | "split">("split")
   const [scrollY, setScrollY] = useState(0)
+  const [signedIn, setSignedIn] = useState(false)
   const router = useRouter()
   const t = useTranslations('landing')
   const locale = useLocale()
@@ -114,6 +116,7 @@ export default function LandingPage() {
         const supabase = createClient()
         const { data: { session } } = await supabase.auth.getSession()
         if (!session) return
+        setSignedIn(true)
         const { data: subscription } = await supabase
           .from("subscriptions")
           .select("status")
@@ -130,6 +133,22 @@ export default function LandingPage() {
     }
     checkAuth()
   }, [router])
+
+  // "Start dubbing free" — stash the pick so /subscribe resolves it after
+  // sign-in (free account → studio; still-subscribed account → the
+  // Switch-to-Free downgrade). Signed-in visitors resolve on /subscribe now.
+  const goFree = () => {
+    setPlanIntent('free')
+    router.push(signedIn ? "/subscribe" : "/signin?redirect=/subscribe")
+  }
+  // "Go Pro" needs no intent — a stashed 'pro' would auto-fire Stripe
+  // checkout on /subscribe before the user sees the monthly/yearly toggle.
+  // A leftover choice from an earlier click (e.g. a Free CTA abandoned at
+  // sign-in) must not survive to fire on this visit either.
+  const goPro = () => {
+    clearPlanIntent()
+    router.push("/subscribe")
+  }
 
   useEffect(() => {
     const handleScroll = () => setScrollY(window.scrollY)
@@ -304,13 +323,15 @@ export default function LandingPage() {
             {t('heroSub')}
           </p>
 
-          {/* CTAs */}
+          {/* CTAs — the plan choice up front: dub free, or go Pro */}
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
-            <Button asChild size="lg" className="bg-gradient-to-r from-[#A855F7] to-[#7C3AED] hover:opacity-90 text-lg px-8 py-6 btn-glow font-semibold shadow-[0_0_20px_rgba(168,85,247,0.3)]">
-              <Link href="/signup">
-                <Upload className="mr-2 h-5 w-5" />
-                {t('heroCta1')}
-              </Link>
+            <Button size="lg" onClick={goFree} className="bg-gradient-to-r from-[#22D3EE] to-[#06B6D4] text-black hover:opacity-90 text-lg px-8 py-6 btn-glow font-semibold shadow-[0_0_20px_rgba(34,211,238,0.3)] cursor-pointer">
+              <Upload className="mr-2 h-5 w-5" />
+              {t('heroCta1')}
+            </Button>
+            <Button size="lg" onClick={goPro} className="bg-gradient-to-r from-[#A855F7] to-[#7C3AED] hover:opacity-90 text-lg px-8 py-6 btn-glow font-semibold text-white shadow-[0_0_20px_rgba(168,85,247,0.3)] cursor-pointer">
+              <Sparkles className="mr-2 h-5 w-5" />
+              {tUi('Go Pro')}
             </Button>
             <Button asChild size="lg" variant="outline" className="border-[#22D3EE]/40 text-[#22D3EE] hover:bg-[#22D3EE]/10 text-lg px-8 py-6 btn-glow shadow-[0_0_15px_rgba(34,211,238,0.1)]">
               <a href="#how-it-works">
@@ -323,7 +344,7 @@ export default function LandingPage() {
           {/* Stats bar - glassmorphism */}
           <div className="inline-flex flex-wrap items-center justify-center gap-8 md:gap-12 mb-16 px-8 py-5 rounded-2xl bg-gradient-to-r from-[#A855F7]/10 via-[#22D3EE]/5 to-[#A855F7]/10 backdrop-blur-md border border-[#A855F7]/20 shadow-[0_0_30px_rgba(168,85,247,0.1)]">
             {[
-              { value: "3 min", label: "statEmotion" },
+              { value: "5 min", label: "statEmotion" },
               { value: "$49/mo", label: "statVoiceCloning" },
               { value: "$2.50/min", label: "statTurnaround" },
               { value: "120 min", label: "statPerFilm" },
@@ -833,11 +854,11 @@ export default function LandingPage() {
           <p className="text-xl text-[#94A3B8] mb-10">{t('ctaSub')}</p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-8">
-            <Button asChild size="lg" className="bg-gradient-to-r from-[#A855F7] to-[#22D3EE] text-white hover:opacity-90 text-lg px-8 py-6 font-semibold btn-glow shadow-[0_0_25px_rgba(168,85,247,0.3)] cursor-pointer">
-              <Link href="/signup">{t('ctaPrimary')}</Link>
+            <Button size="lg" onClick={goFree} className="bg-gradient-to-r from-[#22D3EE] to-[#06B6D4] text-black hover:opacity-90 text-lg px-8 py-6 font-semibold btn-glow shadow-[0_0_25px_rgba(34,211,238,0.3)] cursor-pointer">
+              {t('ctaPrimary')}
             </Button>
-            <Button asChild size="lg" variant="outline" className="border-[#A855F7]/30 text-[#C084FC] hover:bg-[#A855F7]/10 text-lg px-8 py-6 btn-glow cursor-pointer">
-              <Link href="/subscribe">{t('ctaSecondary')}</Link>
+            <Button size="lg" onClick={goPro} className="bg-gradient-to-r from-[#A855F7] to-[#7C3AED] text-white hover:opacity-90 text-lg px-8 py-6 btn-glow cursor-pointer">
+              {tUi('Go Pro')}
             </Button>
           </div>
 

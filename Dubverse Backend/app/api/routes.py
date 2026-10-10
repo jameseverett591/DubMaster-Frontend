@@ -34,6 +34,7 @@ from app.models import (
     RegenerateRequest,
     YouTubeImportRequest,
     YouTubeCaptionsRequest,
+    FacebookImportRequest,
 )
 from app.config import get_settings, upload_size_cap
 from app.storage.manager import StorageManager
@@ -57,6 +58,8 @@ from app.services.fish_audio_tts import fish_audio_tts
 from app.services.respeecher_service import respeecher_tts
 from app.services.scene_summary import generate_scene_summary
 from app.services import youtube_service
+from app.services import facebook_service
+from app.services import voice_settings_store
 from app.utils.language import normalize_language_code
 
 logger = logging.getLogger(__name__)
@@ -3495,7 +3498,8 @@ async def youtube_import(body: YouTubeImportRequest,
         # several minutes and holding the HTTP request open for it invites
         # proxy timeouts. Status polling carries the progress instead.
         background_tasks.add_task(
-            _youtube_download_then_pipeline, job_id, body.url, dest_stem,
+            _url_download_then_pipeline, job_id, body.url, dest_stem,
+            youtube_service.download_video, "YouTube",
             body.transcript, src_lang)
 
         return UploadResponse(
@@ -3514,24 +3518,26 @@ async def youtube_import(body: YouTubeImportRequest,
         raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
 
 
-async def _youtube_download_then_pipeline(job_id: str, url: str,
-                                          dest_stem: str,
-                                          transcript: Optional[list] = None,
-                                          src_lang: Optional[str] = None):
-    """Background leg of /youtube/import: download, enforce the same caps as
-    /upload on the real bytes, then hand off to the normal pipeline. When the
-    caller supplied reviewed captions they become the transcript instead —
-    the pipeline would only spend GPU re-deriving words the user already
-    checked."""
+async def _url_download_then_pipeline(job_id: str, url: str,
+                                      dest_stem: str,
+                                      download_fn,
+                                      provider: str,
+                                      transcript: Optional[list] = None,
+                                      src_lang: Optional[str] = None):
+    """Background leg of the URL-import routes: download, enforce the same
+    caps as /upload on the real bytes, then hand off to the normal pipeline.
+    When the caller supplied reviewed captions they become the transcript
+    instead — the pipeline would only spend GPU re-deriving words the user
+    already checked."""
     try:
         video_path, yt_info = await asyncio.to_thread(
-            youtube_service.download_video,
+            download_fn,
             url, dest_stem,
             settings.MAX_UPLOAD_SIZE,
             float(MAX_VIDEO_DURATION_SECONDS),
         )
     except Exception as e:
-        logger.error(f"Job {job_id}: YouTube download failed: {e}")
+        logger.error(f"Job {job_id}: {provider} download failed: {e}")
         await job_manager.update_job_status(
             job_id, JobStatus.FAILED, error_message=str(e))
         return
@@ -3566,7 +3572,7 @@ async def _youtube_download_then_pipeline(job_id: str, url: str,
         job.video_duration = _dur
 
     logger.info(
-        f"YouTube import: {yt_info.get('title')!r} "
+        f"{provider} import: {yt_info.get('title')!r} "
         f"({file_size} bytes, {_dur:.1f}s) -> Job {job_id}")
 
     provided = None
@@ -3594,7 +3600,9 @@ async def _youtube_download_then_pipeline(job_id: str, url: str,
                         start=s["start"],
                         end=s["end"],
                         speaker=s["speaker"],
-                        source="youtube_captions",
+                        # Provider-accurate — this path serves both YouTube
+                        # and Facebook imports.
+                        source=f"{provider.lower()}_captions",
                     )
                     for s in provided
                 ],
@@ -3610,6 +3618,110 @@ async def _youtube_download_then_pipeline(job_id: str, url: str,
         )
     else:
         await process_video_pipeline(job_id, video_path)
+
+
+# --- Facebook import --------------------------------------------------------
+# Same shape as the YouTube routes minus captions — Facebook exposes no
+# fetchable caption tracks, so imports always run the ASR pipeline. URLs are
+# validated to be Facebook before yt-dlp sees them, anonymous access only
+# (public videos), and the same duration/size caps apply.
+
+
+@router.get("/facebook/info", dependencies=[Depends(_dep_auth)])
+async def facebook_info(url: str):
+    """Probe a Facebook video URL — title, duration, thumbnail."""
+    try:
+        info = await asyncio.to_thread(facebook_service.get_video_info, url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Facebook info failed: {e}")
+        raise HTTPException(status_code=502, detail="Could not reach Facebook")
+    return info
+
+
+@router.post("/facebook/import", response_model=UploadResponse,
+             dependencies=[Depends(_dep_auth)])
+async def facebook_import(body: FacebookImportRequest,
+                          request: Request,
+                          background_tasks: BackgroundTasks):
+    """Download a public Facebook video into a new job, then run the normal
+    pipeline. Mirrors /youtube/import — the transcript field is honored the
+    same way (reviewed captions skip ASR) even though Facebook itself offers
+    no caption source to pre-fill it from."""
+    user_id = _caller(request)
+
+    src_lang: Optional[str] = None
+    if body.source_language:
+        normalized = normalize_language_code(body.source_language, allow_auto=True)
+        if normalized and normalized != "auto":
+            src_lang = normalized
+
+    if body.transcript and not src_lang:
+        raise HTTPException(
+            status_code=422,
+            detail="source_language is required when supplying captions",
+        )
+
+    tgt_lang: Optional[str] = None
+    if body.target_language:
+        try:
+            _tgt_norm = normalize_language_code(body.target_language, strict=True)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if _tgt_norm and _tgt_norm != "auto":
+            tgt_lang = _tgt_norm
+
+    try:
+        facebook_service.parse_facebook_url(body.url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    job_id = str(uuid.uuid4())
+
+    try:
+        dest_stem = storage.get_upload_path(job_id, "facebook_source")
+
+        await job_manager.create_job(
+            job_id=job_id,
+            video_filename="facebook_source",
+            video_path=dest_stem,  # replaced with the real path after download
+            video_size=0,
+            user_id=user_id,
+        )
+
+        job_for_lang = await job_manager.get_job(job_id)
+        if job_for_lang:
+            if src_lang:
+                job_for_lang.source_language = src_lang
+            if tgt_lang:
+                job_for_lang.target_language = tgt_lang
+            if body.num_speakers is not None and 1 <= body.num_speakers <= 10:
+                job_for_lang.expected_speakers = body.num_speakers
+
+        await job_manager.update_job_status(
+            job_id, JobStatus.UPLOADING, progress=2,
+            current_stage="Downloading from Facebook")
+
+        background_tasks.add_task(
+            _url_download_then_pipeline, job_id, body.url, dest_stem,
+            facebook_service.download_video, "Facebook",
+            body.transcript, src_lang)
+
+        return UploadResponse(
+            job_id=job_id,
+            status="accepted",
+            message="Facebook download started",
+            video_filename="facebook_source",
+            video_size=0,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Facebook import failed: {e}")
+        await job_manager.delete_job(job_id)
+        raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
 
 
 def _build_ref_segments(raw_segments: list, ref_id: str, lang: str) -> list:
@@ -5948,7 +6060,7 @@ async def _run_dubbing_pipeline(
             try:
                 _wm_src = Path(settings.DUBBED_DIR) / job_id / f"dubbed_{target_lang.lower().strip()}.mp4"
                 _wm_job = await _get_or_rehydrate_job(job_id)
-                if _wm_src.exists() and not await _job_share_unlocked(job_id, user_id, _wm_job):
+                if _wm_src.exists() and not await _clean_dub_allowed(user_id, _wm_job):
                     asyncio.create_task(_prewarm_watermark(str(_wm_src)))
             except Exception as _wm_err:
                 logger.warning(f"Job {job_id}: watermark pre-build skipped: {_wm_err}")
@@ -6472,6 +6584,23 @@ async def _job_share_unlocked(job_id: str, caller: str, job) -> bool:
 # the clean file stays paid-only. Built once per language and cached next
 # to the clean file; the per-path lock keeps concurrent downloads from
 # racing the same encode.
+async def _clean_dub_allowed(caller: str, job) -> bool:
+    """True when the caller may receive the CLEAN (unbranded) video.
+
+    Tier-based, not payment-based: a free-tier render is still "billed" —
+    it debits the included minutes — so _job_share_unlocked's billed_seconds
+    check would hand every completed free job the clean file and the
+    watermark path would be dead code. Rule: a Pro subscription or a
+    billing-bypassed owner account gets clean bytes; everyone else gets the
+    branded copy. Ownerless legacy jobs stay clean (mirrors _require_job's
+    accommodation)."""
+    if not getattr(job, "user_id", None):
+        return True
+    from app.services import quota_service
+    if quota_service.is_billing_bypassed(caller):
+        return True
+    return await asyncio.to_thread(quota_service.tier_for, caller) == quota_service.TIER_PRO
+
 _WATERMARK_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 _watermark_locks: Dict[str, asyncio.Lock] = {}
 # One encode at a time across ALL jobs — several films finishing together
@@ -6592,7 +6721,7 @@ async def download_dubbed_video(job_id: str, language: str, request: Request, at
         raise HTTPException(status_code=404, detail="Dubbed video not found")
 
     job = await _get_or_rehydrate_job(job_id)
-    if job and not await _job_share_unlocked(job_id, _caller(request), job):
+    if job and not await _clean_dub_allowed(_caller(request), job):
         try:
             dubbed_path = await _watermarked_dub(dubbed_path)
         except Exception as e:
@@ -6740,6 +6869,12 @@ async def serve_share_video(token: str, exp: int, sig: str, dl: bool = False):
     path = _share_video_path(link["job_id"], job.target_language if job else None)
     if not path:
         raise HTTPException(status_code=404, detail="Dubbed video not found")
+    if job and not await _clean_dub_allowed(link.get("user_id", ""), job):
+        try:
+            path = await _watermarked_dub(path)
+        except Exception as e:
+            logger.error(f"Share {token}: watermark render failed: {e}")
+            raise HTTPException(status_code=503, detail="Watermarked video unavailable right now — try again shortly.")
     if dl:
         return FileResponse(path, media_type="video/mp4", filename=os.path.basename(path))
     return FileResponse(path, media_type="video/mp4", headers={"Content-Disposition": "inline"})
@@ -6993,20 +7128,17 @@ async def serve_job_audio(job_id: str, filename: str, request: Request):
         raise HTTPException(status_code=400, detail="Invalid filename")
     if _vendor_limited(request) and Path(filename).suffix.lower() not in (".mp3", ".wav", ".m4a"):
         raise HTTPException(status_code=403, detail="Media token is scoped to audio inputs only")
-    if not _vendor_limited(request) and filename.startswith("dubbed_") and filename.endswith(".mp4"):
-        # Same film gate as the other finished-film routes — /audio/ resolves
-        # the same job directory.
-        job = await _get_or_rehydrate_job(job_id)
-        if job and not await _job_share_unlocked(job_id, _caller(request), job):
-            raise HTTPException(
-                status_code=402,
-                detail="Download unlocks when this job is paid in full.",
-            )
     audio_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
     if not os.path.exists(audio_path):
         raise HTTPException(status_code=404, detail="Audio file not found")
+    if not _vendor_limited(request) and filename.startswith("dubbed_") and filename.endswith(".mp4"):
+        # Same film gate as the other finished-film routes — /audio/ resolves
+        # the same job directory. Free tier gets the branded copy, not a 402.
+        job = await _get_or_rehydrate_job(job_id)
+        if job and not await _clean_dub_allowed(_caller(request), job):
+            audio_path = await _watermarked_dub(audio_path)
     ext = Path(filename).suffix.lower()
-    media_types = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4"}
+    media_types = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".mp4": "video/mp4"}
     return FileResponse(audio_path, media_type=media_types.get(ext, "audio/mpeg"),
         headers=_NO_STORE_HEADERS)
 
@@ -7123,16 +7255,14 @@ async def serve_job_audio_legacy(job_id: str, filename: str, request: Request):
         # The same directory holds the finished paid film — a scoped media
         # token must never reach it.
         raise HTTPException(status_code=403, detail="Media token is scoped to vendor inputs only")
-    if filename.startswith("dubbed_") and filename.endswith(".mp4"):
-        job = await _get_or_rehydrate_job(job_id)
-        if job and not await _job_share_unlocked(job_id, _caller(request), job):
-            raise HTTPException(
-                status_code=402,
-                detail="Download unlocks when this job is paid in full.",
-            )
     file_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
+    if filename.startswith("dubbed_") and filename.endswith(".mp4"):
+        # Free tier gets the branded copy — never the clean bytes, never a 402.
+        job = await _get_or_rehydrate_job(job_id)
+        if job and not await _clean_dub_allowed(_caller(request), job):
+            file_path = await _watermarked_dub(file_path)
     ext = Path(filename).suffix.lower()
     media_types = {
         ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
@@ -7423,15 +7553,41 @@ async def get_available_voices(
 
 
 @router.get("/voice-preview/{voice_id:path}", dependencies=[Depends(_dep_auth)])
-async def get_voice_preview(voice_id: str, request: Request):
-    """Generate and serve a voice preview sample using the active TTS provider."""
+async def get_voice_preview(voice_id: str, request: Request,
+                            speed: Optional[float] = None,
+                            stability: Optional[float] = None,
+                            similarity_boost: Optional[float] = None,
+                            style: Optional[float] = None,
+                            text: Optional[str] = None):
+    """Generate and serve a voice preview sample using the active TTS provider.
+
+    Optional tuning params (the voice card's Audio Settings sliders) fold into
+    the cache key so auditioning a setting never replays the default clip.
+    An optional text param lets the tuning panel audition an arbitrary sentence;
+    it is sanitised, capped, and included in the cache key only when given."""
     _custom_voice_gate(voice_id, _caller(request))
     preview_dir = Path("data/voice_previews")
     preview_dir.mkdir(parents=True, exist_ok=True)
 
+    tuned = {}
+    if speed is not None: tuned["speed"] = float(speed)
+    if stability is not None: tuned["stability"] = float(stability)
+    if similarity_boost is not None: tuned["similarity_boost"] = float(similarity_boost)
+    if style is not None: tuned["style"] = float(style)
+
     # Use a filesystem-safe hashed filename for previews to avoid issues when
     # voice IDs contain slashes or other reserved/path characters.
-    safe_name = hashlib.sha256(voice_id.encode('utf-8')).hexdigest()
+    # Sanitise a caller-supplied audition sentence: trimmed, whitespace-
+    # normalised, capped at 300 chars so a preview stays a preview.
+    custom_text = None
+    if text:
+        custom_text = ' '.join(text.split())[:300] or None
+    cache_key = dict(tuned)
+    if custom_text:
+        cache_key['text'] = custom_text
+    safe_name = hashlib.sha256(
+        (voice_id + _json.dumps(cache_key, sort_keys=True)).encode('utf-8')
+    ).hexdigest()
     preview_path = preview_dir / f"{safe_name}.mp3"
 
     if preview_path.exists():
@@ -7450,16 +7606,24 @@ async def get_voice_preview(voice_id: str, request: Request):
     # Attempt to generate a preview directly for the requested voice_id.
     # Do not rely on a prior listing of voices which may be paginated or cached
     # differently between list endpoints and real-time preview generation.
-    preview_text = f"Hello, I'm a preview voice. This is a short sample for voice id {voice_id}."
+    preview_text = custom_text or f"Hello, I'm a preview voice. This is a short sample for voice id {voice_id}."
     try:
         result = await tts.text_to_speech(
             text=preview_text,
             voice_id=voice_id,
             output_path=str(preview_path),
-            stability=0.3,
-            similarity_boost=0.9,
-            style=0.5,
+            stability=tuned.get("stability", 0.3),
+            similarity_boost=tuned.get("similarity_boost", 0.9),
+            style=tuned.get("style", 0.5),
             language="en",
+            # Fish-only kwargs — the EL signature doesn't take them, and the
+            # params stay out of tts_kwargs entirely on the EL path.
+            **({} if tts is not fish_audio_tts else {
+                "speed": tuned.get("speed", 1.0),
+                **{k: v for k, v in voice_settings_store
+                    .fish_tts_overrides(tuned).items()
+                    if k in ("temperature", "top_p")},
+            }),
         )
     except Exception as e:
         tb = traceback.format_exc()
@@ -7545,6 +7709,79 @@ def _probe_video_duration(path: str) -> Optional[float]:
     except Exception as e:
         logger.warning(f"[UPLOAD] ffprobe failed for {path}: {e}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Voice Audio Settings — the per-voice tuning sliders on Voice Library cards.
+# Stored per user+voice; merged into per-speaker overrides at dub time.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/voice-settings/{voice_id:path}", dependencies=[Depends(_dep_auth)])
+async def get_voice_settings(voice_id: str, request: Request):
+    """The caller's saved tuning for a voice — {} when never tuned."""
+    caller = _caller(request)
+    _custom_voice_gate(voice_id, caller)
+    return {"voice_id": voice_id,
+            "settings": voice_settings_store.get(caller, voice_id),
+            "defaults": voice_settings_store.DEFAULTS}
+
+
+@router.put("/voice-settings/{voice_id:path}", dependencies=[Depends(_dep_auth)])
+async def put_voice_settings(voice_id: str, request: Request):
+    """Save the caller's tuning for a voice. Keys outside the slider set are
+    dropped; values clamp to slider range."""
+    caller = _caller(request)
+    _custom_voice_gate(voice_id, caller)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON body required")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    try:
+        stored = voice_settings_store.set(caller, voice_id, body.get("settings", body))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"voice_id": voice_id, "settings": stored}
+
+
+# ---------------------------------------------------------------------------
+# Speaker tuning checkpoints — per (user, job, speaker) Audio Settings pinned
+# to a transcript index. Each checkpoint applies from its segment onward until
+# the next one, so a voice's delivery can change mid-film without affecting
+# earlier scenes or the voice's saved defaults.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/jobs/{job_id}/speaker-tuning/{speaker_id}",
+            dependencies=[Depends(_dep_job_access)])
+async def get_speaker_tuning(job_id: str, speaker_id: str, request: Request):
+    """The speaker's scene checkpoints for this job — ordered list of
+    {index, settings}. Empty when none have been pinned."""
+    return {"speaker": speaker_id,
+            "checkpoints": voice_settings_store.get_checkpoints(
+                _caller(request), job_id, speaker_id)}
+
+
+@router.put("/jobs/{job_id}/speaker-tuning/{speaker_id}",
+            dependencies=[Depends(_dep_job_access)])
+async def put_speaker_tuning(job_id: str, speaker_id: str, request: Request):
+    """Replace the speaker's checkpoint list. Body: {"checkpoints":
+    [{index, settings}, ...]} — an empty list clears all checkpoints."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON body required")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    try:
+        stored = voice_settings_store.set_checkpoints(
+            _caller(request), job_id, speaker_id,
+            body.get("checkpoints", []))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"speaker": speaker_id, "checkpoints": stored}
 
 
 class CustomVoiceRequest(BaseModel):
@@ -9632,14 +9869,18 @@ async def download_export(job_id: str, filename: str, request: Request):
     file_path = os.path.join(settings.DUBBED_DIR, job_id, safe)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Export file not found")
-    # Everything this route serves is a finished paid artifact — exports are
+    # Everything this route serves is a finished artifact — exports are
     # named export_*.{mp4,mov,avi,mkv}, so a filename pattern misses them all.
+    # Free tier gets the branded copy (encoded as mp4, so the served filename
+    # is normalised to .mp4 whatever container was requested).
     job = await _get_or_rehydrate_job(job_id)
-    if job and not await _job_share_unlocked(job_id, _caller(request), job):
-        raise HTTPException(
-            status_code=402,
-            detail="Download unlocks when this job is paid in full.",
-        )
+    if job and not await _clean_dub_allowed(_caller(request), job):
+        try:
+            file_path = await _watermarked_dub(file_path)
+        except Exception as e:
+            logger.error(f"Job {job_id}: watermark render failed: {e}")
+            raise HTTPException(status_code=503, detail="Watermarked download unavailable right now — try again shortly.")
+        safe = f"wm_{os.path.splitext(safe)[0]}.mp4"
     return FileResponse(
         file_path,
         media_type="application/octet-stream",

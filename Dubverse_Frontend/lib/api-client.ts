@@ -703,9 +703,16 @@ class DubVerseAPIClient {
    */
   private async _fetch(input: string, init: RequestInit = {}): Promise<Response> {
     await this._ensureToken()
+    const initHeaders = { ...((init.headers as Record<string, string> | undefined) ?? {}) }
+    // An Authorization captured by a call site BEFORE _ensureToken() ran is a
+    // stale/empty token — and the spread order below would let it beat the
+    // freshly ensured one. Drop it; _fetch owns auth.
+    for (const k of Object.keys(initHeaders)) {
+      if (k.toLowerCase() === 'authorization') delete initHeaders[k]
+    }
     const headers = {
+      ...initHeaders,
       ...this._authHeaders(),
-      ...((init.headers as Record<string, string> | undefined) ?? {}),
     }
     return fetch(input, { ...init, headers })
   }
@@ -970,9 +977,7 @@ class DubVerseAPIClient {
    *  strip could only say "(voice set)". The backend knows them from env. */
   async getPresetVoiceLabels(): Promise<Record<string, string>> {
     try {
-      const res = await this._fetch(`${this.baseURL}/api/voices/presets`, {
-        headers: this._authHeaders(),
-      })
+      const res = await this._fetch(`${this.baseURL}/api/voices/presets`)
       if (!res.ok) return {}
       const data = await res.json()
       return (data?.presets ?? {}) as Record<string, string>
@@ -1029,10 +1034,66 @@ class DubVerseAPIClient {
     return (data.voices || []) as CustomVoice[]
   }
 
+  /** Per-voice Audio Settings — the tuning sliders on a library card
+   *  (Speed / Stability / Similarity / Style). Empty object = never tuned. */
+  async getVoiceSettings(voiceId: string): Promise<{
+    settings: Record<string, number>
+    defaults: { speed: number; stability: number; similarity_boost: number; style: number }
+  }> {
+    const res = await this._fetch(
+      `${this.baseURL}/api/voice-settings/${encodeURIComponent(voiceId)}`)
+    if (!res.ok) throw new Error(`Voice settings failed (${res.status})`)
+    return res.json()
+  }
+
+  async saveVoiceSettings(voiceId: string, settings: Record<string, number>): Promise<void> {
+    const res = await this._fetch(
+      `${this.baseURL}/api/voice-settings/${encodeURIComponent(voiceId)}`, {
+      method: 'PUT',
+      // _fetch attaches the fresh bearer — spreading _authHeaders() here would
+      // capture a stale token BEFORE _ensureToken() runs inside _fetch.
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings }),
+    })
+    if (!res.ok) throw new Error(`Voice settings save failed (${res.status})`)
+  }
+
+  /** Scene checkpoints — per (job, speaker) tuning pinned to a transcript
+   *  index; each applies from its line onward until the next checkpoint. */
+  async getSpeakerCheckpoints(jobId: string, speakerId: string): Promise<{
+    checkpoints: Array<{ index: number; settings: Record<string, number> }>
+  }> {
+    const res = await this._fetch(
+      `${this.baseURL}/api/jobs/${encodeURIComponent(jobId)}/speaker-tuning/${encodeURIComponent(speakerId)}`)
+    if (!res.ok) throw new Error(`Speaker tuning failed (${res.status})`)
+    return res.json()
+  }
+
+  async saveSpeakerCheckpoints(jobId: string, speakerId: string,
+                               checkpoints: Array<{ index: number; settings: Record<string, number> }>): Promise<void> {
+    const res = await this._fetch(
+      `${this.baseURL}/api/jobs/${encodeURIComponent(jobId)}/speaker-tuning/${encodeURIComponent(speakerId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ checkpoints }),
+    })
+    if (!res.ok) throw new Error(`Speaker tuning save failed (${res.status})`)
+  }
+
+  /** Preview path with tuning params — the backend keys its preview cache on
+   *  the values, so each slider position gets its own synthesized clip. */
+  voicePreviewPath(voiceId: string, settings?: Record<string, number>, text?: string): string {
+    const params = new URLSearchParams(
+      Object.entries(settings ?? {}).map(([k, v]) => [k, String(v)]))
+    if (text) params.set('text', text)
+    const qs = params.toString()
+    return `/api/voice-preview/${encodeURIComponent(voiceId)}${qs ? '?' + qs : ''}`
+  }
+
   async addCustomVoice(provider: 'fish-audio' | 'elevenlabs', voiceId: string, name?: string): Promise<CustomVoice> {
     const res = await this._fetch(`${this.baseURL}/api/voices/custom`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider, voice_id: voiceId, name: name ?? '' }),
     })
     if (!res.ok) {
@@ -1050,7 +1111,6 @@ class DubVerseAPIClient {
     form.append('name', name)
     const res = await this._fetch(`${this.baseURL}/api/voices/clone`, {
       method: 'POST',
-      headers: { ...this._authHeaders() },
       body: form,
     })
     if (!res.ok) {
@@ -1797,6 +1857,51 @@ class DubVerseAPIClient {
     return response.json()
   }
 
+  /** Probe a Facebook video URL — title, duration, thumbnail. */
+  async getFacebookInfo(url: string): Promise<{
+    video_id: string
+    title: string
+    duration: number
+    thumbnail: string
+    uploader: string
+    subtitle_languages: string[]
+    auto_caption_languages: string[]
+  }> {
+    const response = await this._fetch(
+      `${this.baseURL}/api/facebook/info?url=${encodeURIComponent(url)}`)
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Facebook lookup failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
+  /** Download a public Facebook video into a new job and start the pipeline. */
+  async importFacebook(
+    url: string,
+    sourceLanguage?: string,
+    targetLanguage?: string,
+    numSpeakers?: number,
+    transcript?: Array<{ text: string; start: number; end: number; speaker?: string }>,
+  ): Promise<UploadResponse> {
+    const response = await this._fetch(`${this.baseURL}/api/facebook/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url,
+        source_language: sourceLanguage,
+        target_language: targetLanguage,
+        num_speakers: numSpeakers,
+        transcript,
+      }),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `Import failed: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
 
   /** FastAPI puts the message in `detail`, which may be a string or an object. */
   private async _detail(res: Response): Promise<string> {
@@ -1895,10 +2000,14 @@ class DubVerseAPIClient {
   }
 
   /** Render cost quote for the cost counter — needed_seconds is 0 when the
-   *  job was already billed (re-renders are free). */
+   *  job was already billed (re-renders are free). from_credit_cents is the
+   *  amount that would actually bill to paid balance (needed minus included
+   *  free minutes) — the counter displays that, not the gross needed figure. */
   async getQuotaEstimate(jobId: string): Promise<{
     already_billed: boolean; needed_seconds: number; ok: boolean
     shortfall_cents: number; bypassed?: boolean
+    from_included_seconds?: number; from_credit_seconds?: number
+    from_credit_cents?: number
   } | null> {
     const res = await this._fetch(`${this.baseURL}/api/quota/estimate/${jobId}`)
     if (!res.ok) return null

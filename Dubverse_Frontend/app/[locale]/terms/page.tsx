@@ -51,7 +51,7 @@ export default function TermsPage() {
         <p className="text-[#94A3B8] leading-relaxed mb-3">{"You keep ownership of your content. You grant DubMaster the limited permission needed to process it and deliver the service."}</p>
         <h2 className="text-2xl font-bold text-white mb-4 mt-10">{"4. Payments"}</h2>
         <ul className="list-disc pl-6 space-y-1.5 text-[#94A3B8] leading-relaxed mb-3">
-          <li>{"Free tier: 3 minutes of rendering per month."}</li>
+          <li>{"Free tier: 5 minutes of rendering per month."}</li>
           <li>{"Pro: $49 per month, which includes 30 minutes per month."}</li>
           <li>{"Pay As You Go: $2.50 per minute, charged from your prepaid wallet."}</li>
           <li>{"Wallet credits are non-refundable once used."}</li>

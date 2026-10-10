@@ -11,7 +11,7 @@ import { FaqPanel } from "@/components/faq-panel"
 import { DubbingWorkspace } from "@/components/dubbing-workspace"
 import { AdvancedDubbingEditor } from "@/components/advanced-dubbing-editor"
 import { Header } from "@/components/header"
-import { Upload, Youtube, Film, Mic2, AlertTriangle, HelpCircle } from "lucide-react"
+import { Upload, Youtube, Facebook, Film, Mic2, AlertTriangle, HelpCircle } from "lucide-react"
 import { RecentProjects } from "@/components/recent-projects"
 
 import { createClient } from "@/lib/supabase/client"
@@ -27,7 +27,7 @@ export type VideoSource = {
   url: string
   thumbnail: string
   duration: string
-  source: "upload" | "youtube" | "public-domain"
+  source: "upload" | "youtube" | "facebook" | "public-domain"
   jobId?: string
 }
 
@@ -73,7 +73,7 @@ export function Dashboard() {
   const loadingUsage = usage.loading
   const minutesUsed = usage.minutesUsed
   const bonusBalance = usage.bonusBalance
-  // Included allowance from the quota row — 30 pro / 3 free. Always > 0 for a
+  // Included allowance from the quota row — 30 pro / 5 free. Always > 0 for a
   // signed-in user, which is the only state this page renders in.
   const planLimit = usage.planLimit
 
@@ -190,7 +190,7 @@ export function Dashboard() {
                               <p className="text-[#94A3B8] text-xs">{t('Monthly Usage')}</p>
                               <p className="text-white text-sm font-bold">
                                 <span className={isExhausted ? "text-red-400" : isLowUsage ? "text-[#FDB022]" : "text-[#22D3EE]"}>
-                                  {minutesUsed}
+                                  {Math.round(minutesUsed * 10) / 10}
                                 </span>
                                 <span className="text-[#64748B]"> / </span>
                                 <span className="text-[#94A3B8]">{planLimit} min</span>
@@ -264,7 +264,7 @@ export function Dashboard() {
 
               {/* TABS - Above upload */}
               <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full mb-6">
-                <TabsList className="w-full grid grid-cols-5 bg-[#0F172A]/60 backdrop-blur-xl border border-[#A855F7]/20 shadow-[0_0_20px_rgba(168,85,247,0.15)] p-1 rounded-xl">
+                <TabsList className="w-full grid grid-cols-6 bg-[#0F172A]/60 backdrop-blur-xl border border-[#A855F7]/20 shadow-[0_0_20px_rgba(168,85,247,0.15)] p-1 rounded-xl">
                   <TabsTrigger
                     value="upload"
                     className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
@@ -278,6 +278,13 @@ export function Dashboard() {
                   >
                     <Youtube className="h-4 w-4" />
                     <span className="hidden sm:inline">{t('YouTube')}</span>
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="facebook"
+                    className="gap-2 cursor-pointer data-[state=active]:bg-gradient-to-r data-[state=active]:from-[#A855F7]/30 data-[state=active]:to-[#22D3EE]/30 data-[state=active]:text-white text-[#64748B] hover:text-[#A855F7] transition-all rounded-lg"
+                  >
+                    <Facebook className="h-4 w-4" />
+                    <span className="hidden sm:inline">{t('Facebook')}</span>
                   </TabsTrigger>
                   <TabsTrigger
                     value="library"
@@ -322,6 +329,12 @@ export function Dashboard() {
                     onVideoSelect={handleVideoSelect}
                     initialImportUrl={searchParams.get('yt_url') ?? undefined}
                   />
+                </TabsContent>
+                {/* Facebook shares the YouTube import logic — provider mode
+                    shows FB branding and just the URL card, which
+                    auto-detects the host and routes to the right importer. */}
+                <TabsContent value="facebook">
+                  <YouTubeIntegration provider="facebook" onVideoSelect={handleVideoSelect} />
                 </TabsContent>
                 <TabsContent value="library">
                   <PublicDomainLibrary onVideoSelect={handleVideoSelect} />

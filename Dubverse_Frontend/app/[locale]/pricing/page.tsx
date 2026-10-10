@@ -6,10 +6,13 @@ import { ArrowLeft, Mic2, Check, X } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { useT } from "@/lib/use-t"
+import { useRouter } from "next/navigation"
+import { setPlanIntent, clearPlanIntent } from "@/lib/plan-intent"
 
 export default function PricingPage() {
   const t = useTranslations('landing')
   const tUi = useT()
+  const router = useRouter()
 
   // landing.pricing* only exists in en.json for now — fall back to the
   // English literal instead of next-intl's missing-key output on other
@@ -20,10 +23,10 @@ export default function PricingPage() {
     {
       name: L('pricingFreeTier', 'Free'),
       price: L('pricingFreePrice', '$0'),
-      renders: L('pricingFreeRenders', '3 min/month'),
+      renders: L('pricingFreeRenders', '5 min/month'),
       accent: "text-[#22D3EE]",
       border: "border-[#22D3EE]/30",
-      cta: { label: tUi('Start free'), href: "/subscribe" },
+      cta: { label: tUi('Start free'), intent: "free" as const },
     },
     {
       name: L('pricingProTier', 'Pro'),
@@ -31,7 +34,7 @@ export default function PricingPage() {
       renders: L('pricingProRenders', '30 min/month'),
       accent: "text-[#C084FC]",
       border: "border-[#A855F7]/50",
-      cta: { label: tUi('Get Pro'), href: "/subscribe" },
+      cta: { label: tUi('Get Pro'), intent: "pro" as const },
     },
     {
       name: L('pricingPaygTier', 'Pay As You Go'),
@@ -39,7 +42,7 @@ export default function PricingPage() {
       renders: L('pricingPaygRenders', 'Your pace'),
       accent: "text-[#FDB022]",
       border: "border-[#FDB022]/30",
-      cta: { label: tUi('Top up'), href: "/subscribe" },
+      cta: { label: tUi('Top up'), intent: "wallet" as const },
     },
   ]
 
@@ -47,7 +50,7 @@ export default function PricingPage() {
     { feature: L('pricingStudioAccess', 'Studio access'), dm: L('pricingFull', 'Full'), dv: L('pricingFull', 'Full'), hg: L('pricingFull', 'Full') },
     { feature: L('pricingSceneSummaries', 'Scene summaries'), dm: true, dv: true, hg: true },
     { feature: L('pricingRulebook', 'Rulebook'), dm: true, dv: true, hg: true },
-    { feature: L('pricingRenderMinutes', 'Render minutes'), dm: L('pricingFreeRenders', '3 min/month'), dv: L('pricingProRenders', '30 min/month'), hg: L('pricingPaygRenders', 'Your pace') },
+    { feature: L('pricingRenderMinutes', 'Render minutes'), dm: L('pricingFreeRenders', '5 min/month'), dv: L('pricingProRenders', '30 min/month'), hg: L('pricingPaygRenders', 'Your pace') },
     { feature: L('pricingPrice', 'Price'), dm: L('pricingFreePrice', '$0'), dv: L('pricingProPrice', '$49/month'), hg: L('pricingPaygPrice', '$2.50/min') },
   ]
 
@@ -88,11 +91,21 @@ export default function PricingPage() {
                 <p className="text-sm text-[#94A3B8]">{p.renders}</p>
               </CardHeader>
               <CardContent>
-                <Link href={p.cta.href}>
-                  <Button className="w-full bg-gradient-to-r from-[#A855F7] to-[#22D3EE] hover:opacity-90 text-white cursor-pointer">
-                    {p.cta.label}
-                  </Button>
-                </Link>
+                {/* Free stashes the pick so post-sign-in lands on the free
+                    tier; pro/wallet go to /subscribe where the choice is made
+                    visible before checkout fires. */}
+                <Button
+                  onClick={() => {
+                    // Free stashes its pick; pro/wallet choose on /subscribe —
+                    // clear any leftover intent so it can't auto-fire instead.
+                    if (p.cta.intent === 'free') setPlanIntent('free')
+                    else clearPlanIntent()
+                    router.push("/subscribe")
+                  }}
+                  className="w-full bg-gradient-to-r from-[#A855F7] to-[#22D3EE] hover:opacity-90 text-white cursor-pointer"
+                >
+                  {p.cta.label}
+                </Button>
               </CardContent>
             </Card>
           ))}

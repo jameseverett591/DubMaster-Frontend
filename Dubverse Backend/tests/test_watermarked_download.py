@@ -58,8 +58,11 @@ class WatermarkedDownloadTests(unittest.TestCase):
         self.client = TestClient(app)
 
     def _unlocked(self, value):
+        # The download route's clean-file gate is _clean_dub_allowed —
+        # tier-based, not payment-based: free-tier renders debit the included
+        # minutes so a "billed" job must still get the branded copy.
         return mock.patch.object(
-            self.routes, "_job_share_unlocked", mock.AsyncMock(return_value=value))
+            self.routes, "_clean_dub_allowed", mock.AsyncMock(return_value=value))
 
     def test_paid_gets_clean_file(self):
         with self._unlocked(True), \

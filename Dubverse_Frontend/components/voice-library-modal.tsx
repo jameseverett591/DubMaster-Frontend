@@ -7,7 +7,10 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Mic2, Star, Search, Play, Square, Check, Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Textarea } from '@/components/ui/textarea'
+import { Slider } from '@/components/ui/slider'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Mic2, Star, Search, Play, Square, Check, Loader2, ChevronLeft, ChevronRight, SlidersHorizontal, Pin, X } from 'lucide-react'
 import { apiClient, API_BASE_URL, type Voice } from '@/lib/api-client'
 import { useEditorStore } from '@/lib/editor-store'
 import { useT } from '@/lib/use-t'
@@ -317,6 +320,175 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   const blobUrlRef = useRef<string | null>(null)
   // Generation counter guards the async handlePreview against click races:
   // each call bumps it; after every await we bail if a newer call started.
+  // ── Audio Settings (floating tuning panel) ──────────────────────────────
+  // The voice card's sliders button lands a floating panel over the side
+  // panel: Speed / Stability / Similarity / Style, persisted per user+voice
+  // on the backend so the tuning follows the voice into every render.
+  const [tuningVoice, setTuningVoice] = useState<Voice | null>(null)
+  const [tuning, setTuning] = useState<Record<string, number>>({})
+  // What the backend has stored — staged edits only persist via the explicit
+  // "Save as voice default" button, so preparing a scene pin can't leak into
+  // the voice's global tuning.
+  const [tuningSaved, setTuningSaved] = useState<Record<string, number>>({})
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
+  const [tuningSaving, setTuningSaving] = useState(false)
+  const tuningVoiceIdRef = useRef<string | null>(null)
+  // Custom audition sentence — persists across voices so the same line can be
+  // compared voice to voice; cleared only when the user edits it.
+  const [tuningText, setTuningText] = useState('')
+  const [tuningDefaults, setTuningDefaults] = useState<Record<string, number>>({
+    speed: 1, stability: 0.5, similarity_boost: 0.75, style: 0.3,
+  })
+
+  // Scene checkpoints — pin the panel's current sliders to a transcript line;
+  // the voice holds them from that line onward until the next checkpoint.
+  const [ckSpeaker, setCkSpeaker] = useState('')
+  const [ckIndex, setCkIndex] = useState('')
+  const [ckList, setCkList] = useState<Array<{ index: number; settings: Record<string, number> }>>([])
+  const [ckBusy, setCkBusy] = useState(false)
+  // True only after the selected speaker's pins have actually loaded — pinning
+  // before that would compose from the previous speaker's list (or an empty
+  // one) and overwrite their real checkpoints.
+  const [ckLoaded, setCkLoaded] = useState(false)
+  const ckSpeakerRef = useRef('')
+
+  // Speakers this voice is assigned to — checkpoints pin per speaker.
+  const ckSpeakers = useMemo(() => (
+    tuningVoice && isJobAware
+      ? speakers.filter(s => s.current_voice_id === tuningVoice.voice_id)
+      : []
+  ), [tuningVoice, speakers, isJobAware])
+
+  // Default the checkpoint target to the first assigned speaker; reset when
+  // the panel opens on a different voice.
+  useEffect(() => {
+    ckSpeakerRef.current = ckSpeaker
+    if (ckSpeakers.length && !ckSpeakers.some(s => s.speaker_id === ckSpeaker)) {
+      setCkSpeaker(ckSpeakers[0].speaker_id)
+    }
+  }, [ckSpeakers, ckSpeaker])
+
+  useEffect(() => {
+    if (!jobId || !ckSpeaker) { setCkList([]); setCkLoaded(false); return }
+    let cancelled = false
+    setCkLoaded(false)
+    apiClient.getSpeakerCheckpoints(jobId, ckSpeaker)
+      .then(r => { if (!cancelled) { setCkList(r.checkpoints); setCkLoaded(true) } })
+      .catch(() => { if (!cancelled) { setCkList([]); setCkLoaded(false) } })
+    return () => { cancelled = true }
+  }, [jobId, ckSpeaker])
+
+  // Reload the selected speaker's pins after a failed save — restoring a
+  // composed copy would resurrect pins a later successful edit already
+  // removed, and the next save would push them back to the server.
+  const reloadCheckpoints = useCallback((speaker: string) => {
+    if (!jobId || !speaker) return
+    // A stale save failing for speaker A must not clear ckLoaded under
+    // speaker B — A's response is discarded, leaving B's buttons dead.
+    if (ckSpeakerRef.current !== speaker) return
+    setCkLoaded(false)
+    apiClient.getSpeakerCheckpoints(jobId, speaker)
+      .then(r => {
+        if (ckSpeakerRef.current === speaker) {
+          setCkList(r.checkpoints)
+          setCkLoaded(true)
+        }
+      })
+      .catch(() => {})
+  }, [jobId])
+
+  const pinCheckpoint = useCallback(async () => {
+    if (!jobId || !ckSpeaker || !ckLoaded || ckIndex === '') return
+    const idx = Number(ckIndex)
+    if (!Number.isFinite(idx)) return
+    const settings = {
+      speed: tuning.speed ?? tuningDefaults.speed,
+      stability: tuning.stability ?? tuningDefaults.stability,
+      similarity_boost: tuning.similarity_boost ?? tuningDefaults.similarity_boost,
+      style: tuning.style ?? tuningDefaults.style,
+    }
+    setCkBusy(true)
+    try {
+      const next = [...ckList.filter(c => c.index !== idx), { index: idx, settings }]
+        .sort((a, b) => a.index - b.index)
+      await apiClient.saveSpeakerCheckpoints(jobId, ckSpeaker, next)
+      // The user may have switched speakers while the save was in flight —
+      // only reflect the result if it still matches the panel's speaker.
+      if (ckSpeakerRef.current === ckSpeaker) {
+        setCkList(next)
+        setCkIndex('')
+      }
+    } catch (e) {
+      console.warn('[VOICE-CK] save failed:', e)
+      reloadCheckpoints(ckSpeaker)
+    } finally {
+      setCkBusy(false)
+    }
+  }, [jobId, ckSpeaker, ckIndex, ckList, ckLoaded, tuning, tuningDefaults, reloadCheckpoints])
+
+  const removeCheckpoint = useCallback(async (idx: number) => {
+    if (!jobId || !ckSpeaker || !ckLoaded) return
+    const speaker = ckSpeaker
+    const next = ckList.filter(c => c.index !== idx)
+    setCkList(next)
+    apiClient.saveSpeakerCheckpoints(jobId, speaker, next)
+      .catch(e => {
+        console.warn('[VOICE-CK] remove failed:', e)
+        reloadCheckpoints(speaker)
+      })
+  }, [jobId, ckSpeaker, ckList, ckLoaded, reloadCheckpoints])
+
+  const openTuning = useCallback((v: Voice) => {
+    tuningVoiceIdRef.current = v.voice_id
+    setTuningVoice(v)
+    setTuning({})
+    setTuningSaved({})
+    setSettingsLoaded(false)
+    setCkSpeaker('')
+    setCkIndex('')
+    setCkList([])
+    setCkLoaded(false)
+    apiClient.getVoiceSettings(v.voice_id).then(r => {
+      // A late response must not overwrite another voice's panel or edits the
+      // user already made on this one.
+      if (tuningVoiceIdRef.current !== v.voice_id) return
+      setTuningDefaults(r.defaults)
+      setTuning(r.settings)
+      setTuningSaved({ ...r.settings })
+      setSettingsLoaded(true)
+    }).catch(() => {
+      if (tuningVoiceIdRef.current === v.voice_id) setSettingsLoaded(true)
+    })
+  }, [])
+
+  const closeTuning = useCallback(() => {
+    tuningVoiceIdRef.current = null
+    setTuningVoice(null)
+  }, [])
+
+  // Sliders only stage locally — nothing persists until "Save as voice
+  // default" or a Pin writes it.
+  const setTuningKey = useCallback((key: string, value: number) => {
+    setTuning(prev => ({ ...prev, [key]: value }))
+  }, [])
+
+  const saveTuning = useCallback(async () => {
+    if (!tuningVoice) return
+    const vid = tuningVoice.voice_id
+    setTuningSaving(true)
+    try {
+      await apiClient.saveVoiceSettings(vid, tuning)
+      // Only mark saved if the panel still shows this voice — a save that
+      // lands after switching voices must not stamp the new voice's staged
+      // values as persisted (they were never written).
+      if (tuningVoiceIdRef.current === vid) setTuningSaved({ ...tuning })
+    } catch (e) {
+      console.warn('[VOICE-TUNING]', e)
+    } finally {
+      setTuningSaving(false)
+    }
+  }, [tuningVoice, tuning])
+
   const previewGenRef = useRef(0)
   const [previewingId, setPreviewingId] = useState<string | null>(null)
 
@@ -338,7 +510,10 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     setPreviewingId(null)
   }, [])
 
-  const handlePreview = useCallback(async (voiceId: string, previewUrl?: string) => {
+  const handlePreview = useCallback(async (
+    voiceId: string, previewUrl?: string, settings?: Record<string, number>,
+    text?: string,
+  ) => {
     const wasPlayingThis = previewingId === voiceId
     stopPreview()
     if (wasPlayingThis) return  // clicking the playing voice = toggle off
@@ -351,10 +526,12 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     // access_token in the query string instead. Building this URL by hand is why
     // preview 401'd on both the direct play and the blob fallback below.
     // An absolute URL is a third-party preview (ElevenLabs et al) and needs no token.
-    const rawPath = previewUrl
+    // Tuned previews bypass the canned clip — a stored mp3 can't reflect sliders.
+    const tuned = (settings && Object.keys(settings).length > 0) || !!text
+    const rawPath = (previewUrl && !tuned)
       ? (previewUrl.startsWith('/') ? previewUrl : `/${previewUrl}`)
-      : `/api/voice-preview/${encodeURIComponent(voiceId)}`
-    const src = previewUrl?.startsWith('http')
+      : apiClient.voicePreviewPath(voiceId, settings, text)
+    const src = (!tuned && previewUrl?.startsWith('http'))
       ? previewUrl
       : await apiClient.mediaUrl(rawPath)
     if (gen !== previewGenRef.current) return  // a newer preview won the race
@@ -671,6 +848,16 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
               : 'opacity-40 cursor-not-allowed'}`}>
             <Square className="h-3.5 w-3.5 fill-current" />
           </Button>
+          <Button size="sm" variant="outline"
+            onClick={() => openTuning(v)}
+            aria-label="Audio settings"
+            title="Audio settings — speed, stability, similarity, style"
+            className={`border border-amber-500/50 text-amber-300 bg-slate-950/60 hover:bg-amber-500/15 shrink-0 gap-1.5 px-2.5 ${
+              isHero ? 'h-12 text-sm' : 'h-8 text-xs'
+            }`}>
+            <SlidersHorizontal className="h-3.5 w-3.5" />
+            {t('Tune')}
+          </Button>
           {isJobAware && (
             assignedTo ? (
               <span className="text-[10px] text-emerald-400 font-medium flex items-center gap-1 px-2">
@@ -878,6 +1065,14 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                         : 'opacity-40 cursor-not-allowed'}`}>
                     <Square className="h-3.5 w-3.5 fill-current" />
                   </Button>
+                  <Button size="sm" variant="outline"
+                    onClick={() => openTuning(selected)}
+                    aria-label="Audio settings"
+                    title="Audio settings — speed, stability, similarity, style"
+                    className="h-8 gap-1.5 px-2.5 text-xs border border-amber-500/50 text-amber-300 bg-slate-950/60 hover:bg-amber-500/15">
+                    <SlidersHorizontal className="h-3.5 w-3.5" />
+                    {t('Tune')}
+                  </Button>
                   {isJobAware && (
                     <select
                       aria-label={t('Assign to speaker')}
@@ -930,7 +1125,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   }, [showOnlyFavorites, pageCache, favorites])
 
   return (
-    <div className="flex flex-col h-full min-h-0 gap-3 overflow-hidden">
+    <div className="relative flex flex-col h-full min-h-0 gap-3 overflow-hidden">
       {/* Speakers strip. Was grid-only, which meant the list layout — the only
           one where voices could be dragged — had no way to assign a voice to a
           speaker at all. Both layouts get both routes. */}
@@ -1278,6 +1473,222 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
           </div>
         </>
       )}
+
+      {/* Floating Audio Settings panel — lands over the side panel when a
+          card's sliders button is pressed. X in the upper right is the only
+          close control; nothing persists until "Save as voice default" or a
+          scene Pin writes it. */}
+      {tuningVoice && (() => {
+        const tv = tuningVoice
+        const val = (k: string) => tuning[k] ?? tuningDefaults[k] ?? 0
+        // ElevenLabs voices have no speed parameter — hide that slider rather
+        // than let a dead control pretend to work.
+        const isElevenLabs = tv.tags?.includes('elevenlabs')
+        const allRows: Array<{ key: string; label: string; tip: string; min: number; max: number; step: number; fmt: (v: number) => string }> = [
+          { key: 'speed', label: 'Speed', tip: 'How fast the voice talks. 1.0× is the natural pace — lower for a slower, heavier delivery; higher for quicker speech.', min: 0.5, max: 2, step: 0.05, fmt: v => `${v.toFixed(2)}×` },
+          { key: 'stability', label: 'Stability', tip: 'Higher keeps the voice calm and even take after take; lower allows more emotion and variation.', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
+          { key: 'similarity_boost', label: 'Similarity', tip: 'How closely the output stays true to the original voice\u2019s tone and character. Higher = closer match.', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
+          { key: 'style', label: 'Style exaggeration', tip: 'Amplifies the voice\u2019s personality and emotion — higher is more dramatic, lower is more neutral.', min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2) },
+        ]
+        const rows = allRows.filter(r => !(isElevenLabs && r.key === 'speed'))
+        const tuningDirty = (() => {
+          const keys = new Set([...Object.keys(tuning), ...Object.keys(tuningSaved)])
+          for (const k of keys) if (tuning[k] !== tuningSaved[k]) return true
+          return false
+        })()
+        return (
+          <div className="absolute inset-0 z-30 flex items-stretch justify-stretch bg-slate-950/80 backdrop-blur-sm rounded-xl">
+            <div className="relative flex-1 m-1 rounded-xl border border-amber-500/30 bg-[#0a1220] shadow-2xl flex flex-col min-h-0">
+              {/* X close — upper right corner */}
+              <button
+                type="button"
+                onClick={closeTuning}
+                aria-label={t('Close audio settings')}
+                className="absolute top-2 right-2 z-10 rounded-full p-1.5 text-slate-400 hover:text-white hover:bg-slate-700/60 transition-colors"
+              >
+                <X className="h-4 w-4" />
+              </button>
+
+              {/* Header: voice identity + audition button */}
+              <div className="flex items-center gap-3 px-4 pt-4 pb-3 pr-10 border-b border-slate-800 shrink-0">
+                <div className="h-10 w-10 rounded-full bg-amber-500/15 border border-amber-500/40 flex items-center justify-center shrink-0">
+                  <Mic2 className="h-5 w-5 text-amber-300" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="font-semibold text-amber-200 truncate">{tv.name}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-slate-500">{t('Audio Settings')}</div>
+                </div>
+                <Button size="sm" variant="outline"
+                  onClick={() => handlePreview(tv.voice_id, undefined, tuning)}
+                  title={t('Preview with these settings')}
+                  className="border border-amber-500/40 text-amber-200 bg-slate-950/60 hover:bg-amber-500/10 h-8 shrink-0">
+                  {previewingId === tv.voice_id
+                    ? <Square className="h-3.5 w-3.5 mr-1.5 fill-current" />
+                    : <Play className="h-3.5 w-3.5 mr-1.5" />}
+                  {previewingId === tv.voice_id ? t('Stop') : t('Preview')}
+                </Button>
+              </div>
+
+              {/* Sliders */}
+              <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-5">
+                {rows.map(r => (
+                  <Tooltip key={r.key}>
+                    <TooltipTrigger asChild>
+                      <div className="cursor-help">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-xs text-slate-400">{t(r.label)}</span>
+                          <span className="text-xs font-mono text-amber-200">{r.fmt(val(r.key))}</span>
+                        </div>
+                        <Slider
+                          value={[val(r.key)]}
+                          min={r.min}
+                          max={r.max}
+                          step={r.step}
+                          disabled={!settingsLoaded}
+                          onValueChange={([v]) => setTuningKey(r.key, v)}
+                        />
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent side="left" className="max-w-[220px] text-xs">
+                      {t(r.tip)}
+                    </TooltipContent>
+                  </Tooltip>
+                ))}
+                {isElevenLabs && (
+                  <p className="text-[10px] text-slate-600 -mt-2">
+                    {t('Speed control isn\u2019t available for ElevenLabs voices.')}
+                  </p>
+                )}
+                <div className="flex items-center justify-between gap-2 border-t border-slate-800 pt-3">
+                  <span className="text-[10px] text-slate-500">
+                    {tuningDirty ? t('Unsaved — applies to previews; save to make it this voice\u2019s default') : t('This voice\u2019s saved defaults')}
+                  </span>
+                  <Button size="sm" variant="outline"
+                    onClick={saveTuning}
+                    disabled={!settingsLoaded || !tuningDirty || tuningSaving}
+                    title={t('Store these sliders as the voice\u2019s defaults for every render')}
+                    className="h-7 px-2.5 text-xs shrink-0 border border-amber-500/50 text-amber-300 bg-slate-950/60 hover:bg-amber-500/15">
+                    {tuningSaving ? t('Saving…') : t('Save as voice default')}
+                  </Button>
+                </div>
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs text-slate-400">{t('Try your own words')}</span>
+                    <span className="text-[10px] text-slate-600">{tuningText.length}/300</span>
+                  </div>
+                  <Textarea
+                    value={tuningText}
+                    onChange={e => setTuningText(e.target.value)}
+                    placeholder={t('Type a sentence for this voice to read…')}
+                    maxLength={300}
+                    rows={3}
+                    className="resize-none bg-slate-950/60 border-slate-700/60 text-sm text-slate-200 placeholder:text-slate-600 focus-visible:ring-amber-500/40"
+                  />
+                  <Button size="sm" variant="outline"
+                    onClick={() => handlePreview(tv.voice_id, undefined, tuning, tuningText.trim() || undefined)}
+                    title={t('Read it with these settings')}
+                    className="mt-2 w-full border border-amber-500/50 text-amber-300 bg-slate-950/60 hover:bg-amber-500/15 h-8">
+                    {previewingId === tv.voice_id
+                      ? <Square className="h-3.5 w-3.5 mr-1.5 fill-current" />
+                      : <Play className="h-3.5 w-3.5 mr-1.5" />}
+                    {previewingId === tv.voice_id ? t('Stop') : t('Read it')}
+                  </Button>
+                </div>
+                {ckSpeakers.length > 0 && (() => {
+                  const ckSegs = ckSpeaker
+                    ? segments
+                        .filter(s => s.speaker_id === ckSpeaker)
+                        .map(s => ({
+                          index: s.transcript_index ?? s.index,
+                          start: s.start_time,
+                          label: (s.active_text || s.target_text || s.source_text || '').slice(0, 34),
+                        }))
+                        .filter(o => Number.isFinite(o.index))
+                        .sort((a, b) => a.index - b.index)
+                    : []
+                  const fmtT = (sec?: number) => {
+                    if (!Number.isFinite(sec ?? NaN)) return ''
+                    const m = Math.floor((sec ?? 0) / 60)
+                    const ss = Math.floor((sec ?? 0) % 60)
+                    return `${m}:${String(ss).padStart(2, '0')}`
+                  }
+                  return (
+                    <div className="border-t border-slate-800 pt-4">
+                      <div className="mb-1">
+                        <span className="text-xs text-slate-400">{t('Changes over time')}</span>
+                      </div>
+                      <p className="text-[10px] text-slate-600 leading-relaxed mb-2">
+                        {t('Pin the sliders to a line — the voice holds them from that line onward until your next pin. Earlier lines stay as they are.')}
+                      </p>
+                      {ckSpeakers.length > 1 && (
+                        <select
+                          value={ckSpeaker}
+                          onChange={e => { setCkSpeaker(e.target.value); setCkIndex('') }}
+                          className="w-full mb-2 h-8 text-xs rounded-md bg-slate-950/60 border border-slate-700/60 text-slate-200 px-2"
+                        >
+                          {ckSpeakers.map(s => (
+                            <option key={s.speaker_id} value={s.speaker_id}>{s.display_name}</option>
+                          ))}
+                        </select>
+                      )}
+                      <div className="flex gap-2">
+                        <select
+                          value={ckIndex}
+                          onChange={e => setCkIndex(e.target.value)}
+                          className="flex-1 min-w-0 h-8 text-xs rounded-md bg-slate-950/60 border border-slate-700/60 text-slate-200 px-2"
+                        >
+                          <option value="">{t('Pick a line…')}</option>
+                          {ckSegs.map(o => (
+                            <option key={o.index} value={o.index}>
+                              #{o.index + 1} · {fmtT(o.start)} · {o.label}
+                            </option>
+                          ))}
+                        </select>
+                        <Button size="sm" variant="outline"
+                          onClick={pinCheckpoint}
+                          disabled={ckIndex === '' || ckBusy || !ckLoaded}
+                          title={t('Hold these settings from that line onward')}
+                          className="h-8 gap-1.5 px-2.5 text-xs shrink-0 border border-amber-500/50 text-amber-300 bg-slate-950/60 hover:bg-amber-500/15">
+                          <Pin className="h-3.5 w-3.5" />
+                          {t('Pin')}
+                        </Button>
+                      </div>
+                      {ckList.length > 0 && (
+                        <div className="mt-2 space-y-1">
+                          {ckList.map(ck => (
+                            <div key={ck.index}
+                              className="flex items-center justify-between gap-2 text-[10px] text-slate-400 bg-slate-950/40 border border-slate-800 rounded px-2 py-1">
+                              <span className="min-w-0 truncate">
+                                <span className="text-amber-300 font-medium">#{ck.index + 1}</span>
+                                <span className="ml-1.5">
+                                  {ck.settings.speed != null && `${ck.settings.speed.toFixed(2)}×`}
+                                  {ck.settings.stability != null && ` · st ${ck.settings.stability.toFixed(2)}`}
+                                  {ck.settings.similarity_boost != null && ` · sim ${ck.settings.similarity_boost.toFixed(2)}`}
+                                  {ck.settings.style != null && ` · sty ${ck.settings.style.toFixed(2)}`}
+                                </span>
+                              </span>
+                              <button type="button"
+                                onClick={() => removeCheckpoint(ck.index)}
+                                disabled={!ckLoaded}
+                                aria-label={t('Remove change point')}
+                                className="shrink-0 text-slate-500 hover:text-white transition-colors disabled:opacity-40">
+                                <X className="h-3 w-3" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })()}
+                <p className="text-[10px] text-slate-600 leading-relaxed">
+                  {t('Saved to this voice — it applies wherever the voice is assigned.')}
+                </p>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
     </div>
   )
 }

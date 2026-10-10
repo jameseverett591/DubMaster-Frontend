@@ -7045,7 +7045,7 @@ export function DubVerseEditor({
   const [userAccount, setUserAccount] = useState<{ id: string; email: string } | null>(null)
   const [lipSel, setLipSel] = useState<Set<string>>(new Set())
   const [lipQuote, setLipQuote] = useState<Awaited<ReturnType<typeof apiClient.getLipsyncQuote>>>(null)
-  const [renderQuote, setRenderQuote] = useState<{ needed_seconds: number; already_billed: boolean; bypassed?: boolean } | null>(null)
+  const [renderQuote, setRenderQuote] = useState<{ needed_seconds: number; already_billed: boolean; bypassed?: boolean; from_credit_cents?: number } | null>(null)
   const [lipCheckout, setLipCheckout] = useState<{
     shortfall_cents: number; cost_usd: number; selected_seconds: number
     range_count: number; scoped: boolean
@@ -7102,7 +7102,15 @@ export function DubVerseEditor({
   }, [])
 
   // The counter: unbilled render (re-renders are free) + current lip-sync scope.
-  const renderUsd = renderQuote && !renderQuote.already_billed ? renderQuote.needed_seconds * 2.5 / 60 : 0
+  // needed_seconds × $2.50/min is the GROSS render value — the user's actual
+  // cost is what bills to paid balance, from_credit_cents (backend already
+  // subtracts included minutes). Showing gross made a free-tier render look
+  // like a Stripe charge. Fall back to gross only if the field is absent.
+  const renderUsd = renderQuote && !renderQuote.already_billed
+    ? (renderQuote.from_credit_cents != null
+        ? renderQuote.from_credit_cents / 100
+        : renderQuote.needed_seconds * 2.5 / 60)
+    : 0
   const lipUsd = wantsLipSync ? (lipQuote?.cost_usd ?? 0) : 0
   const estCostUsd = renderUsd + lipUsd
   const budgetNum = parseFloat(budgetUsd)
@@ -8605,6 +8613,19 @@ export function DubVerseEditor({
               </>
             )}
           </Button>
+          {/* Free accounts: the alternate plan lives one click away here too,
+              mirroring the Upgrade button in the main app header. */}
+          {!isPro && (
+            <Link href="/subscribe?upgrade=true">
+              <Button
+                size="sm"
+                className="h-8 px-3 text-xs font-bold tracking-wide uppercase bg-gradient-to-r from-[#A855F7] to-[#7C3AED] text-white hover:opacity-90"
+              >
+                <Sparkles className="h-3.5 w-3.5 mr-1" />
+                {t('Upgrade')}
+              </Button>
+            </Link>
+          )}
           {/* Language selector */}
           <LanguageSwitcher />
           <Bell className="h-5 w-5 text-slate-400" />
