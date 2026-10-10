@@ -234,6 +234,24 @@ def _owner_from_project(job_id: str) -> str:
             return str(row["user_id"])
     except Exception:
         pass
+    # Last resort: the quota ledger. A render debit ties the job to the
+    # account it billed — durable, and it survives when project.json and the
+    # upload reservation are both gone.
+    try:
+        from app.services.supabase_client import supabase_writer
+        _lr = (
+            supabase_writer.table("quota_ledger")
+            .select("user_id")
+            .eq("job_id", job_id)
+            .eq("kind", "render")
+            .limit(1)
+            .execute()
+        )
+        _rows = _lr.data or []
+        if _rows and _rows[0].get("user_id"):
+            return str(_rows[0]["user_id"])
+    except Exception:
+        pass
     return ""
 
 
@@ -6594,9 +6612,17 @@ async def _clean_dub_allowed(caller: str, job) -> bool:
     billing-bypassed owner account gets clean bytes; everyone else gets the
     branded copy. Ownerless legacy jobs stay clean (mirrors _require_job's
     accommodation)."""
-    if not getattr(job, "user_id", None):
-        return True
     from app.services import quota_service
+    if job is None or not getattr(job, "user_id", None):
+        # No provable owner — a blank owner means a lost record as often as
+        # a true legacy job. Ownerless jobs stay READABLE (mirrors
+        # _require_job), but clean bytes are a purchase: gate them on the
+        # caller's own tier instead of handing the unbranded film to
+        # whoever reached it.
+        if quota_service.is_billing_bypassed(caller):
+            return True
+        return await asyncio.to_thread(
+            quota_service.tier_for, caller) == quota_service.TIER_PRO
     if quota_service.is_billing_bypassed(caller):
         return True
     return await asyncio.to_thread(quota_service.tier_for, caller) == quota_service.TIER_PRO
@@ -6722,7 +6748,7 @@ async def download_dubbed_video(job_id: str, language: str, request: Request, at
         raise HTTPException(status_code=404, detail="Dubbed video not found")
 
     job = await _get_or_rehydrate_job(job_id)
-    if job and not await _clean_dub_allowed(_caller(request), job):
+    if not await _clean_dub_allowed(_caller(request), job):
         try:
             dubbed_path = await _watermarked_dub(dubbed_path)
         except Exception as e:
@@ -6870,7 +6896,7 @@ async def serve_share_video(token: str, exp: int, sig: str, dl: bool = False):
     path = _share_video_path(link["job_id"], job.target_language if job else None)
     if not path:
         raise HTTPException(status_code=404, detail="Dubbed video not found")
-    if job and not await _clean_dub_allowed(link.get("user_id", ""), job):
+    if not await _clean_dub_allowed(link.get("user_id", ""), job):
         try:
             path = await _watermarked_dub(path)
         except Exception as e:
@@ -7142,7 +7168,7 @@ async def serve_job_audio(job_id: str, filename: str, request: Request):
         # Same film gate as the other finished-film routes — /audio/ resolves
         # the same job directory. Free tier gets the branded copy, not a 402.
         job = await _get_or_rehydrate_job(job_id)
-        if job and not await _clean_dub_allowed(_caller(request), job):
+        if not await _clean_dub_allowed(_caller(request), job):
             audio_path = await _watermarked_dub(audio_path)
     # Suffix from the RESOLVED path — a watermarked export_*.{mov,mkv}
     # comes back as mp4 and must be served as such.
@@ -7273,7 +7299,7 @@ async def serve_job_audio_legacy(job_id: str, filename: str, request: Request):
     ):
         # Free tier gets the branded copy — never the clean bytes, never a 402.
         job = await _get_or_rehydrate_job(job_id)
-        if job and not await _clean_dub_allowed(_caller(request), job):
+        if not await _clean_dub_allowed(_caller(request), job):
             file_path = await _watermarked_dub(file_path)
     # Suffix from the resolved path — a watermarked non-mp4 export is mp4.
     ext = Path(file_path).suffix.lower()
@@ -9934,7 +9960,7 @@ async def download_export(job_id: str, filename: str, request: Request):
     # Free tier gets the branded copy (encoded as mp4, so the served filename
     # is normalised to .mp4 whatever container was requested).
     job = await _get_or_rehydrate_job(job_id)
-    if job and not await _clean_dub_allowed(_caller(request), job):
+    if not await _clean_dub_allowed(_caller(request), job):
         try:
             file_path = await _watermarked_dub(file_path)
         except Exception as e:
@@ -11819,6 +11845,10 @@ async def quota_estimate(job_id: str, request: Request):
             quota_service.job_render_seconds, user_id, job_id)
         if _ledger_secs > 0:
             _billed_secs = _ledger_secs
+            if job:
+                # Heal the lost stamp so the next upsert persists it.
+                await job_manager.set_billed_seconds(job_id, _ledger_secs)
+                await asyncio.to_thread(_stamp_project_paid, job_id, True)
     if _billed_secs:
         bal = await asyncio.to_thread(quota_service.get_balance, user_id)
         return {

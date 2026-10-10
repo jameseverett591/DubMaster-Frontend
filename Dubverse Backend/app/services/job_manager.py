@@ -81,7 +81,18 @@ async def _upsert_job(job) -> None:
             "updated_at": job.updated_at.isoformat(),
             "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         }
-        supabase_writer.table("jobs").upsert(payload).execute()
+        try:
+            supabase_writer.table("jobs").upsert(payload).execute()
+        except Exception as _fk:
+            _msg = str(_fk)
+            if _uid and "23503" in _msg and "jobs_user_id_fkey" in _msg:
+                # Account predates a profiles row (signup-trigger gap): every
+                # jobs upsert FK-fails until one exists. Insert a bare row
+                # and retry once — self-heals permanently for this user.
+                supabase_writer.table("profiles").upsert({"id": str(_uid), "full_name": ""}).execute()
+                supabase_writer.table("jobs").upsert(payload).execute()
+            else:
+                raise
     except Exception as exc:
         # ERROR, not WARNING: a job that fails to persist is the failure this
         # whole chain was blind to for weeks. jobs.user_id is NOT NULL, so the
