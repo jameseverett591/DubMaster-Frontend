@@ -71,6 +71,9 @@ export interface Segment {
   id: string
   index: number
   transcript_index?: number
+  // Original transcript line this segment descends from — survives
+  // translation splits/drops. Scene checkpoints are pinned in this space.
+  orig_index?: number
   status: SegmentStatus
   start_time: number
   end_time: number

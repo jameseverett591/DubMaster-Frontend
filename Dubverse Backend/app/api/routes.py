@@ -7131,13 +7131,21 @@ async def serve_job_audio(job_id: str, filename: str, request: Request):
     audio_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
     if not os.path.exists(audio_path):
         raise HTTPException(status_code=404, detail="Audio file not found")
-    if not _vendor_limited(request) and filename.startswith("dubbed_") and filename.endswith(".mp4"):
+    _is_final_video = (
+        filename.startswith("dubbed_") and filename.endswith(".mp4")
+    ) or (
+        filename.startswith("export_")
+        and Path(filename).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi", ".webm")
+    )
+    if not _vendor_limited(request) and _is_final_video:
         # Same film gate as the other finished-film routes — /audio/ resolves
         # the same job directory. Free tier gets the branded copy, not a 402.
         job = await _get_or_rehydrate_job(job_id)
         if job and not await _clean_dub_allowed(_caller(request), job):
             audio_path = await _watermarked_dub(audio_path)
-    ext = Path(filename).suffix.lower()
+    # Suffix from the RESOLVED path — a watermarked export_*.{mov,mkv}
+    # comes back as mp4 and must be served as such.
+    ext = Path(audio_path).suffix.lower()
     media_types = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".mp4": "video/mp4"}
     return FileResponse(audio_path, media_type=media_types.get(ext, "audio/mpeg"),
         headers=_NO_STORE_HEADERS)
@@ -7258,12 +7266,16 @@ async def serve_job_audio_legacy(job_id: str, filename: str, request: Request):
     file_path = os.path.join(settings.DUBBED_DIR, job_id, filename)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
-    if filename.startswith("dubbed_") and filename.endswith(".mp4"):
+    if (filename.startswith("dubbed_") and filename.endswith(".mp4")) or (
+        filename.startswith("export_")
+        and Path(filename).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi", ".webm")
+    ):
         # Free tier gets the branded copy — never the clean bytes, never a 402.
         job = await _get_or_rehydrate_job(job_id)
         if job and not await _clean_dub_allowed(_caller(request), job):
             file_path = await _watermarked_dub(file_path)
-    ext = Path(filename).suffix.lower()
+    # Suffix from the resolved path — a watermarked non-mp4 export is mp4.
+    ext = Path(file_path).suffix.lower()
     media_types = {
         ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
         ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
@@ -7552,6 +7564,27 @@ async def get_available_voices(
         raise HTTPException(status_code=500, detail="Failed to fetch voices")
 
 
+# Bound the audition cache: every distinct voice+tuning+text combo
+# writes a permanent mp3 — routine auditioning would otherwise fill the
+# disk. Cache hits bump mtime so eviction below is least-recently-used.
+_VOICE_PREVIEW_MAX_FILES = 500
+
+
+def _evict_voice_previews(preview_dir: Path, keep: int = _VOICE_PREVIEW_MAX_FILES) -> None:
+    try:
+        files = sorted(
+            preview_dir.glob("*.mp3"),
+            key=lambda _p: _p.stat().st_mtime,
+        )
+        for _p in files[: max(0, len(files) - keep)]:
+            try:
+                _p.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except Exception as _ev_err:
+        logger.warning(f"voice preview eviction skipped: {_ev_err}")
+
+
 @router.get("/voice-preview/{voice_id:path}", dependencies=[Depends(_dep_auth)])
 async def get_voice_preview(voice_id: str, request: Request,
                             speed: Optional[float] = None,
@@ -7591,6 +7624,10 @@ async def get_voice_preview(voice_id: str, request: Request,
     preview_path = preview_dir / f"{safe_name}.mp3"
 
     if preview_path.exists():
+        try:
+            os.utime(preview_path, None)
+        except OSError:
+            pass
         return FileResponse(
             str(preview_path),
             media_type="audio/mpeg",
@@ -7632,6 +7669,7 @@ async def get_voice_preview(voice_id: str, request: Request,
         raise HTTPException(status_code=500, detail=f"Preview generation failed: {str(e)}")
 
     if result and preview_path.exists():
+        await asyncio.to_thread(_evict_voice_previews, preview_dir)
         return FileResponse(
             str(preview_path),
             media_type="audio/mpeg",

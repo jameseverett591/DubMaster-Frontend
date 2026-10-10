@@ -1599,7 +1599,10 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                     ? segments
                         .filter(s => s.speaker_id === ckSpeaker)
                         .map(s => ({
-                          index: s.transcript_index ?? s.index,
+                          // Pin in the original-transcript space — the backend
+                          // resolves checkpoints by orig_index, which survives
+                          // sentence splits that re-index transcript_index.
+                          index: s.orig_index ?? s.transcript_index ?? s.index,
                           start: s.start_time,
                           label: (s.active_text || s.target_text || s.source_text || '').slice(0, 34),
                         }))

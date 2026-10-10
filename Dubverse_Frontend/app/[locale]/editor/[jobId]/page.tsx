@@ -168,6 +168,9 @@ export default function EditorJobPage({ params }: { params: Promise<{ jobId: str
             id: seg.id ?? newSegmentId(),
             index: idx,
             transcript_index: seg.transcript_index ?? idx,
+            // Stable original-line identity for scene checkpoint pins —
+            // transcript_index re-indexes after sentence splits.
+            orig_index: seg.orig_index,
             status: seg.locked ? 'locked' : ((seg.committed_adapted_text && String(seg.committed_adapted_text).trim()) || seg.text_locked) ? 'edited' : 'auto',
             // Carried so the editor can restore persisted pairs on load.
             paired_with_next: seg.paired_with_next ?? false,

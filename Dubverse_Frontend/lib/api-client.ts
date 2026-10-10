@@ -208,6 +208,9 @@ export interface Transcript {
 
 export interface Segment {
   transcript_index: number
+  // Original transcript line — survives sentence splits/drops; scene
+  // checkpoints are pinned in this space.
+  orig_index?: number
   text: string
   speaker: string
   voice_id: string

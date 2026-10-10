@@ -1507,9 +1507,14 @@ class DubbingService:
                 )
 
             # Stamp stable segment IDs before translation so we can track each
-            # segment through drops and re-indexing.
+            # segment through drops and re-indexing. orig_index pins the
+            # segment to its original transcript position — the coordinate
+            # scene checkpoints are stored in. Split children inherit it via
+            # **seg, dropped segments simply don't appear, and the TTS loop's
+            # enumerate index i diverges from it as soon as either happens.
             for _i, _seg in enumerate(transcript):
                 _seg["segment_id"] = str(_i)
+                _seg["orig_index"] = _i
                 _seg["source_text"] = _seg.get("text", "")
 
             if source_norm != target_norm:
@@ -1793,16 +1798,21 @@ class DubbingService:
                     # Look settings up under the voice actually being
                     # synthesized — a committed/regenerated voice can differ
                     # from voice_mapping[speaker], and it must keep ITS tuning.
-                    _voice_tuned = _vs_get(_voice_key) or _vs_get(
-                        (voice_mapping or {}).get(speaker) or "")
+                    # No fallback to the mapped voice's settings: an
+                    # untuned chosen voice must not silently inherit a
+                    # DIFFERENT voice's tuning.
+                    _voice_tuned = _vs_get(_voice_key)
                 except Exception:
                     _voice_tuned = {}
                 # Scene checkpoints (per job+speaker, pinned to a transcript
                 # index) are the most specific scope: the latest one at or
                 # before this segment wins over both request settings and the
                 # saved voice-level tuning, holding until the next checkpoint.
+                # Look up by orig_index — the original transcript position the
+                # frontend pins against — not the loop index i, which drifts
+                # once translated sentences split or noise segments drop.
                 try:
-                    _ck = _ck_get(speaker, i)
+                    _ck = _ck_get(speaker, segment.get("orig_index", i))
                 except Exception:
                     _ck = {}
                 for _k, _v in _voice_tuned.items():
@@ -2146,6 +2156,9 @@ class DubbingService:
                         if raw.get("reason") == "translation_flagged":
                             flagged_placeholders.append({
                                 "transcript_index": i,
+                                # Original transcript position — the space
+                                # scene checkpoints are pinned in.
+                                "orig_index": segment.get("orig_index", i),
                                 "text": segment.get("text", ""),
                                 "source_text": segment.get("source_text", ""),
                                 "speaker": segment.get("speaker", "speaker-1"),
@@ -2424,6 +2437,10 @@ class DubbingService:
                 _audio_filename = os.path.basename(final_path)
                 audio_segments.append({
                     "transcript_index": i,
+                    # Original transcript position — survives sentence splits
+                    # and drops, so scene checkpoints pinned in this space hit
+                    # the same line on every re-render.
+                    "orig_index": segment.get("orig_index", i),
                     "text": text,
                     "source_text": segment.get("source_text", ""),
                     "speaker": speaker,
@@ -5058,12 +5075,16 @@ class DubbingService:
                 _rspeaker = seg.get("speaker", "speaker-1")
                 _rvoice = use_voice_id or (
                     (data.get("voice_mapping") or {}).get(_rspeaker) or "")
-                _rtuned = voice_settings_store.get(user_id or "", _rvoice) or \
-                    voice_settings_store.get(
-                        user_id or "",
-                        (data.get("voice_mapping") or {}).get(_rspeaker) or "")
+                # Tune ONLY under the voice being synthesized — falling back
+                # to the mapped voice's settings would make a deliberately
+                # chosen untuned voice inherit another voice's tuning.
+                _rtuned = dict(
+                    voice_settings_store.get(user_id or "", _rvoice) or {})
+                # Checkpoints are pinned in orig_index space (the original
+                # transcript line), not the stored transcript_index.
                 _rtuned.update(voice_settings_store.active_checkpoint(
-                    user_id or "", job_id, _rspeaker, segment_index))
+                    user_id or "", job_id, _rspeaker,
+                    seg.get("orig_index", segment_index)))
                 _rfo = voice_settings_store.fish_tts_overrides(_rtuned)
             except Exception as _rtune_err:
                 logger.warning(
