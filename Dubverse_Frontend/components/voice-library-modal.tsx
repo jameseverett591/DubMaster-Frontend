@@ -383,6 +383,9 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   // removed, and the next save would push them back to the server.
   const reloadCheckpoints = useCallback((speaker: string) => {
     if (!jobId || !speaker) return
+    // A stale save failing for speaker A must not clear ckLoaded under
+    // speaker B — A's response is discarded, leaving B's buttons dead.
+    if (ckSpeakerRef.current !== speaker) return
     setCkLoaded(false)
     apiClient.getSpeakerCheckpoints(jobId, speaker)
       .then(r => {
