@@ -16,11 +16,11 @@ interface DubReadyDialogProps {
   jobId: string
   /** Authenticated URL of the rendered dub. */
   videoUrl: string
-  /** Same attachment-forcing URL the editor's Download uses. */
-  downloadUrl: string
+  /** Callback that downloads the file and resolves once it starts. */
+  onDownload: () => Promise<void>
 }
 
-export function DubReadyDialog({ open, onClose, title, jobId, videoUrl, downloadUrl }: DubReadyDialogProps) {
+export function DubReadyDialog({ open, onClose, title, jobId, videoUrl, onDownload }: DubReadyDialogProps) {
   const t = useT()
   const [sharing, setSharing] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -67,10 +67,8 @@ export function DubReadyDialog({ open, onClose, title, jobId, videoUrl, download
           <DialogDescription>{title}</DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-2">
-          <Button asChild className="gap-2">
-            <a href={downloadUrl} onClick={onClose}>
-              <Download className="h-4 w-4" /> {t("Download")}
-            </a>
+          <Button className="gap-2" onClick={async () => { await onDownload(); onClose() }}>
+            <Download className="h-4 w-4" /> {t("Download")}
           </Button>
           <Button variant="outline" className="gap-2" onClick={handleShare} disabled={sharing}>
             {sharing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Share2 className="h-4 w-4" />}
