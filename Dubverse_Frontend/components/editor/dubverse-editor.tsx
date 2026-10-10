@@ -1570,7 +1570,9 @@ export function DubVerseEditor({
     const a = document.createElement('a')
     a.href = withAttachment(fresh)
     a.download = `${title || 'dubbed_video'}.mp4`
+    document.body.appendChild(a)
     a.click()
+    setTimeout(() => document.body.removeChild(a), 0)
   }
   const [askAiOpen, setAskAiOpen] = useState(false)
   const [askAiModel, setAskAiModel] = useState<'haiku' | 'sonnet' | 'opus'>('sonnet')
