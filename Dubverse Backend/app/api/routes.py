@@ -9317,6 +9317,18 @@ async def remix_dub(job_id: str, request: Request, lipsync: bool = False):
     # Re-rendering restamps it, so a film the user is still working on does not
     # expire underneath them.
     _stamp_purge_deadline(job_id)
+
+    # Free-tier downloads are watermarked — pre-build the branded copy in the
+    # background after a remix so the user's first click saves immediately,
+    # instead of synchronously encoding the whole film on request.
+    if isinstance(result, dict) and result.get("dubbed_video_url"):
+        _wm_lang = str(result["dubbed_video_url"]).rstrip("/").split("/")[-1]
+        _wm_src = os.path.join(settings.DUBBED_DIR, job_id, f"dubbed_{_wm_lang}.mp4")
+        if os.path.exists(_wm_src):
+            _wm_job = await job_manager.get_job(job_id)
+            if not await _clean_dub_allowed(user_id, _wm_job):
+                asyncio.create_task(_prewarm_watermark(_wm_src))
+
     return result
 
 
