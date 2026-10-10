@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { useT } from "@/lib/use-t"
 import { useRouter } from "next/navigation"
-import { setPlanIntent } from "@/lib/plan-intent"
+import { setPlanIntent, clearPlanIntent } from "@/lib/plan-intent"
 
 export default function PricingPage() {
   const t = useTranslations('landing')
@@ -96,7 +96,10 @@ export default function PricingPage() {
                     visible before checkout fires. */}
                 <Button
                   onClick={() => {
+                    // Free stashes its pick; pro/wallet choose on /subscribe —
+                    // clear any leftover intent so it can't auto-fire instead.
                     if (p.cta.intent === 'free') setPlanIntent('free')
+                    else clearPlanIntent()
                     router.push("/subscribe")
                   }}
                   className="w-full bg-gradient-to-r from-[#A855F7] to-[#22D3EE] hover:opacity-90 text-white cursor-pointer"

@@ -346,6 +346,11 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   const [ckIndex, setCkIndex] = useState('')
   const [ckList, setCkList] = useState<Array<{ index: number; settings: Record<string, number> }>>([])
   const [ckBusy, setCkBusy] = useState(false)
+  // True only after the selected speaker's pins have actually loaded — pinning
+  // before that would compose from the previous speaker's list (or an empty
+  // one) and overwrite their real checkpoints.
+  const [ckLoaded, setCkLoaded] = useState(false)
+  const ckSpeakerRef = useRef('')
 
   // Speakers this voice is assigned to — checkpoints pin per speaker.
   const ckSpeakers = useMemo(() => (
@@ -357,22 +362,24 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
   // Default the checkpoint target to the first assigned speaker; reset when
   // the panel opens on a different voice.
   useEffect(() => {
+    ckSpeakerRef.current = ckSpeaker
     if (ckSpeakers.length && !ckSpeakers.some(s => s.speaker_id === ckSpeaker)) {
       setCkSpeaker(ckSpeakers[0].speaker_id)
     }
   }, [ckSpeakers, ckSpeaker])
 
   useEffect(() => {
-    if (!jobId || !ckSpeaker) { setCkList([]); return }
+    if (!jobId || !ckSpeaker) { setCkList([]); setCkLoaded(false); return }
     let cancelled = false
+    setCkLoaded(false)
     apiClient.getSpeakerCheckpoints(jobId, ckSpeaker)
-      .then(r => { if (!cancelled) setCkList(r.checkpoints) })
-      .catch(() => { if (!cancelled) setCkList([]) })
+      .then(r => { if (!cancelled) { setCkList(r.checkpoints); setCkLoaded(true) } })
+      .catch(() => { if (!cancelled) { setCkList([]); setCkLoaded(false) } })
     return () => { cancelled = true }
   }, [jobId, ckSpeaker])
 
   const pinCheckpoint = useCallback(async () => {
-    if (!jobId || !ckSpeaker || ckIndex === '') return
+    if (!jobId || !ckSpeaker || !ckLoaded || ckIndex === '') return
     const idx = Number(ckIndex)
     if (!Number.isFinite(idx)) return
     const settings = {
@@ -386,22 +393,30 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
       const next = [...ckList.filter(c => c.index !== idx), { index: idx, settings }]
         .sort((a, b) => a.index - b.index)
       await apiClient.saveSpeakerCheckpoints(jobId, ckSpeaker, next)
-      setCkList(next)
-      setCkIndex('')
+      // The user may have switched speakers while the save was in flight —
+      // only reflect the result if it still matches the panel's speaker.
+      if (ckSpeakerRef.current === ckSpeaker) {
+        setCkList(next)
+        setCkIndex('')
+      }
     } catch (e) {
       console.warn('[VOICE-CK] save failed:', e)
     } finally {
       setCkBusy(false)
     }
-  }, [jobId, ckSpeaker, ckIndex, ckList, tuning, tuningDefaults])
+  }, [jobId, ckSpeaker, ckIndex, ckList, ckLoaded, tuning, tuningDefaults])
 
   const removeCheckpoint = useCallback(async (idx: number) => {
-    if (!jobId || !ckSpeaker) return
+    if (!jobId || !ckSpeaker || !ckLoaded) return
     const next = ckList.filter(c => c.index !== idx)
     setCkList(next)
     apiClient.saveSpeakerCheckpoints(jobId, ckSpeaker, next)
-      .catch(e => console.warn('[VOICE-CK] remove failed:', e))
-  }, [jobId, ckSpeaker, ckList])
+      .catch(e => {
+        console.warn('[VOICE-CK] remove failed:', e)
+        // Revert the optimistic removal so the list matches the server.
+        if (ckSpeakerRef.current === ckSpeaker) setCkList(ckList)
+      })
+  }, [jobId, ckSpeaker, ckList, ckLoaded])
 
   const openTuning = useCallback((v: Voice) => {
     tuningVoiceIdRef.current = v.voice_id
@@ -412,6 +427,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
     setCkSpeaker('')
     setCkIndex('')
     setCkList([])
+    setCkLoaded(false)
     apiClient.getVoiceSettings(v.voice_id).then(r => {
       // A late response must not overwrite another voice's panel or edits the
       // user already made on this one.
@@ -1606,7 +1622,7 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                         </select>
                         <Button size="sm" variant="outline"
                           onClick={pinCheckpoint}
-                          disabled={ckIndex === '' || ckBusy}
+                          disabled={ckIndex === '' || ckBusy || !ckLoaded}
                           title={t('Hold these settings from that line onward')}
                           className="h-8 gap-1.5 px-2.5 text-xs shrink-0 border border-amber-500/50 text-amber-300 bg-slate-950/60 hover:bg-amber-500/15">
                           <Pin className="h-3.5 w-3.5" />
@@ -1629,8 +1645,9 @@ export function VoiceLibraryContent({ layout = 'grid', onVoiceAssigned, customVo
                               </span>
                               <button type="button"
                                 onClick={() => removeCheckpoint(ck.index)}
+                                disabled={!ckLoaded}
                                 aria-label={t('Remove change point')}
-                                className="shrink-0 text-slate-500 hover:text-white transition-colors">
+                                className="shrink-0 text-slate-500 hover:text-white transition-colors disabled:opacity-40">
                                 <X className="h-3 w-3" />
                               </button>
                             </div>

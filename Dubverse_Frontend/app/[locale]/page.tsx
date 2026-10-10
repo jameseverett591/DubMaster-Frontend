@@ -38,7 +38,7 @@ import {
 import Link from "next/link"
 import { LanguageSwitcher } from "@/components/language-switcher"
 import { useT } from '@/lib/use-t'
-import { setPlanIntent } from '@/lib/plan-intent'
+import { setPlanIntent, clearPlanIntent } from '@/lib/plan-intent'
 
 /* ─── Floating particles component ─── */
 
@@ -143,7 +143,10 @@ export default function LandingPage() {
   }
   // "Go Pro" needs no intent — a stashed 'pro' would auto-fire Stripe
   // checkout on /subscribe before the user sees the monthly/yearly toggle.
+  // A leftover choice from an earlier click (e.g. a Free CTA abandoned at
+  // sign-in) must not survive to fire on this visit either.
   const goPro = () => {
+    clearPlanIntent()
     router.push("/subscribe")
   }
 

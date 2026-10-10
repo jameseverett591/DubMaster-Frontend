@@ -19,7 +19,7 @@ import Link from "next/link"
 import { LanguageSwitcher } from "@/components/language-switcher"
 import { VoiceLibraryModal } from "@/components/voice-library-modal"
 import { usePlan } from "@/lib/use-plan"
-import { setPlanIntent } from "@/lib/plan-intent"
+import { setPlanIntent, clearPlanIntent } from "@/lib/plan-intent"
 
 import type { EditorMode } from "@/components/dashboard"
 import { useT } from '@/lib/use-t'
@@ -131,7 +131,7 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
                 get Switch to Free in the account menu below. */}
             {plan === 'free' && (
               <Button
-                onClick={() => router.push("/subscribe?upgrade=true")}
+                onClick={() => { clearPlanIntent(); router.push("/subscribe?upgrade=true") }}
                 size="sm"
                 className="bg-gradient-to-r from-[#A855F7] to-[#7C3AED] text-white font-semibold cursor-pointer hover:opacity-90"
               >
@@ -172,7 +172,7 @@ export function Header({ activeTab = "upload", onNavigate, editorMode = "automat
                   {t('settings')}
                 </DropdownMenuItem>
                 {plan === 'free' && (
-                  <DropdownMenuItem onClick={() => router.push("/subscribe?upgrade=true")} className="cursor-pointer text-[#C084FC] hover:text-[#C084FC] hover:bg-[#A855F7]/10">
+                  <DropdownMenuItem onClick={() => { clearPlanIntent(); router.push("/subscribe?upgrade=true") }} className="cursor-pointer text-[#C084FC] hover:text-[#C084FC] hover:bg-[#A855F7]/10">
                     <Sparkles className="mr-2 h-4 w-4" />
                     {tUi('Upgrade to Pro')}
                   </DropdownMenuItem>
