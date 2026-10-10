@@ -6706,7 +6706,7 @@ async def _watermarked_dub(dubbed_path: str) -> str:
     # copy up as if it were a finished clean dub.
     wm_path = os.path.join(
         os.path.dirname(dubbed_path),
-        f"wm_{os.path.splitext(os.path.basename(dubbed_path))[0]}.mp4")
+        f"wm_{os.path.basename(dubbed_path).replace(chr(46), chr(95))}.mp4")
     if _fresh():
         return wm_path
     lock = _watermark_locks.setdefault(wm_path, asyncio.Lock())
@@ -9111,7 +9111,7 @@ async def _billable_seconds_for_job(job_id: str) -> int:
     return quota_service.seconds_for(dur)
 
 
-async def _meter_render(job_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+async def _meter_render(job_id: str, user_id: str, _depth: int = 0) -> Optional[Dict[str, Any]]:
     """The ONLY billing gate in the product: debit the Make Movie render.
 
     Returns the debit split (None when this job was already paid for —
@@ -9134,14 +9134,23 @@ async def _meter_render(job_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         if _ledger_secs > 0:
             _billed_secs = _ledger_secs
     if _billed_secs:
-        logger.info(f"Job {job_id}: re-render, already billed {_billed_secs}s — free")
         if job and not getattr(job, "billed_seconds", None):
             # Stamp was lost (restart, unrehydrated row) while the ledger
             # debit stood — heal it so later reads take the fast path and
             # project.json reports paid again.
             await job_manager.set_billed_seconds(job_id, _billed_secs)
             await asyncio.to_thread(_stamp_project_paid, job_id, True)
-        return None
+            # A refund for the debit we just read may have landed between
+            # the read and the stamp — re-verify before calling it free.
+            _still = await asyncio.to_thread(
+                quota_service.job_render_seconds, user_id, job_id)
+            if _still <= 0:
+                await job_manager.set_billed_seconds(job_id, None)
+                await asyncio.to_thread(_stamp_project_paid, job_id, False)
+                _billed_secs = None
+        if _billed_secs:
+            logger.info(f"Job {job_id}: re-render, already billed {_billed_secs}s — free")
+            return None
     need = await _billable_seconds_for_job(job_id)
     if need <= 0:
         logger.warning(f"Job {job_id}: could not determine duration — rendering unmetered")
@@ -9181,6 +9190,17 @@ async def _meter_render(job_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         # state again.
         await job_manager.set_billed_seconds(job_id, need)
         await asyncio.to_thread(_stamp_project_paid, job_id, True)
+        # The racer's debit may already have been refunded — if the net
+        # charge is gone, this render is unmetered and must debit fresh
+        # rather than keep a paid stamp it never paid for.
+        _still = await asyncio.to_thread(
+            quota_service.job_render_seconds, user_id, job_id)
+        if _still <= 0:
+            await job_manager.set_billed_seconds(job_id, None)
+            await asyncio.to_thread(_stamp_project_paid, job_id, False)
+            if _depth < 2:
+                return await _meter_render(job_id, user_id, _depth + 1)
+            raise HTTPException(status_code=503, detail={"code": "billing_unavailable", "message": "Billing is temporarily unavailable. Please try again in a moment."})
         return None
     await job_manager.set_billed_seconds(job_id, need)
     await asyncio.to_thread(_stamp_project_paid, job_id, True)
@@ -11849,6 +11869,16 @@ async def quota_estimate(job_id: str, request: Request):
                 # Heal the lost stamp so the next upsert persists it.
                 await job_manager.set_billed_seconds(job_id, _ledger_secs)
                 await asyncio.to_thread(_stamp_project_paid, job_id, True)
+                # A refund landing between our ledger read and the stamp
+                # would leave a refunded job marked paid — re-read and
+                # un-stamp if the net charge is already gone.
+                _still = await asyncio.to_thread(
+                    quota_service.job_render_seconds, user_id, job_id)
+                if _still <= 0:
+                    await job_manager.set_billed_seconds(job_id, None)
+                    await asyncio.to_thread(
+                        _stamp_project_paid, job_id, False)
+                    _billed_secs = None
     if _billed_secs:
         bal = await asyncio.to_thread(quota_service.get_balance, user_id)
         return {
